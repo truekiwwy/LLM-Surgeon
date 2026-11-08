@@ -46,6 +46,7 @@ mod index;
 mod mmap_file;
 mod selector;
 mod shift;
+pub mod stats;
 #[cfg(test)]
 mod test_support;
 

@@ -22,6 +22,18 @@ pub struct SeparationStats {
     pub d_prime: Option<f64>,
     /// Best accuracy of a single threshold on the projections (pos above, neg below).
     pub threshold_accuracy: f64,
+    /// That threshold: a prompt projecting above it is classified positive.
+    pub threshold: f64,
+}
+
+/// Everything the extraction computes: the stored direction, its diagnostics, and the
+/// projection of every prompt on it (written to the companion `.stats.json`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Separation {
+    pub direction: Vec<f32>,
+    pub stats: SeparationStats,
+    pub pos_projections: Vec<f64>,
+    pub neg_projections: Vec<f64>,
 }
 
 fn mean(vectors: &[Vec<f64>], dim: usize) -> Vec<f64> {
@@ -48,6 +60,11 @@ fn variance(values: &[f64], mean: f64) -> f64 {
 /// Unit direction (f32, as stored) and the diagnostics. Both sets must be non-empty and
 /// share one dimension.
 pub fn separation(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result<(Vec<f32>, SeparationStats)> {
+    separation_with_projections(pos, neg).map(|s| (s.direction, s.stats))
+}
+
+/// [`separation`] plus the per-prompt projections.
+pub fn separation_with_projections(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result<Separation> {
     let dim = pos.first().map(Vec::len).unwrap_or(0);
     if pos.is_empty() || neg.is_empty() || pos.iter().chain(neg).any(|v| v.len() != dim) || dim == 0
     {
@@ -79,19 +96,34 @@ pub fn separation(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result<(Vec<f32>, Separ
         ((variance(&proj_pos, pos_mean_proj) + variance(&proj_neg, neg_mean_proj)) / 2.0).sqrt();
     let d_prime = (pooled_sd > MIN_DIFF_NORM).then(|| (pos_mean_proj - neg_mean_proj) / pooled_sd);
 
+    let (threshold_accuracy, threshold) = best_threshold(&proj_pos, &proj_neg);
     let stats = SeparationStats {
         raw_diff_norm: norm,
         cosine_means,
         pos_mean_proj,
         neg_mean_proj,
         d_prime,
-        threshold_accuracy: threshold_accuracy(&proj_pos, &proj_neg),
+        threshold_accuracy,
+        threshold,
     };
-    Ok((unit.iter().map(|&u| u as f32).collect(), stats))
+    Ok(Separation {
+        direction: unit.iter().map(|&u| u as f32).collect(),
+        stats,
+        pos_projections: proj_pos,
+        neg_projections: proj_neg,
+    })
 }
 
 /// Sweeps every cut between sorted projections: classify `> cut` as positive.
+/// Accuracy only (kept for the prompt 8 unit tests).
+#[cfg(test)]
 fn threshold_accuracy(pos: &[f64], neg: &[f64]) -> f64 {
+    best_threshold(pos, neg).0
+}
+
+/// (best accuracy, its threshold). The threshold sits halfway between the two values the
+/// best cut separates; below every value when classifying all as positive is best.
+fn best_threshold(pos: &[f64], neg: &[f64]) -> (f64, f64) {
     let mut all: Vec<(f64, bool)> = pos
         .iter()
         .map(|&p| (p, true))
@@ -102,6 +134,7 @@ fn threshold_accuracy(pos: &[f64], neg: &[f64]) -> f64 {
     // Cut below everything: every positive right, every negative wrong.
     let mut correct = pos.len();
     let mut best = correct;
+    let mut threshold = all.first().map_or(0.0, |f| f.0 - 1.0);
     let mut i = 0;
     while i < total {
         // Move every element with the same value at once: a cut cannot split ties.
@@ -114,9 +147,12 @@ fn threshold_accuracy(pos: &[f64], neg: &[f64]) -> f64 {
             }
             i += 1;
         }
-        best = best.max(correct);
+        if correct > best {
+            best = correct;
+            threshold = all.get(i).map_or(value, |next| (value + next.0) / 2.0);
+        }
     }
-    best as f64 / total as f64
+    (best as f64 / total.max(1) as f64, threshold)
 }
 
 #[cfg(test)]

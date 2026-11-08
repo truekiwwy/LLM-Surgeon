@@ -6,4 +6,5 @@ pub mod extract;
 pub mod hardware;
 pub mod mcp;
 pub mod patch;
+pub mod tui;
 pub mod ui;

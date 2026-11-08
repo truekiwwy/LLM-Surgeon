@@ -61,11 +61,15 @@ pub use capture::{pool, Pooling};
 pub use config::{load_config, parse_config, Qwen2Config};
 pub use error::{ExtractError, Result};
 pub use hooked_qwen2::{HookedQwen2, Site};
-pub use output::{check_output, encode, write_atomic, TENSOR_NAME};
+pub use output::{
+    check_output, companion_path, encode, write_atomic, write_pair_atomic, TENSOR_NAME,
+};
 pub use prompts::{
     check_texts, load_prompt_texts, load_tokenizer, tokenize, ChatTemplate, Tokenized,
 };
-pub use stats::{separation, SeparationStats, MIN_DIFF_NORM};
+pub use stats::{
+    separation, separation_with_projections, Separation, SeparationStats, MIN_DIFF_NORM,
+};
 pub use weights::{
     check_tensors, load_tensors, required_tensors, RawTensor, SafetensorsDir, TensorSource,
     TensorTotals,
@@ -131,6 +135,8 @@ pub struct ExtractRequest {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ExtractReport {
     pub out_path: PathBuf,
+    /// Companion `<out>.stats.json` (per-prompt projections, for `surgeon tui`).
+    pub stats_path: PathBuf,
     pub hidden_size: usize,
     pub layer: usize,
     pub n_pos: usize,
@@ -371,7 +377,12 @@ pub fn run_extraction_with(
     let neg = activations(PromptSet::Neg, &neg_ids)?;
     drop(model);
 
-    let (direction, stats) = separation(&pos, &neg)?;
+    let Separation {
+        direction,
+        stats,
+        pos_projections,
+        neg_projections,
+    } = separation_with_projections(&pos, &neg)?;
     for (set, n) in [("positifs", pos.len()), ("négatifs", neg.len())] {
         if n < MIN_RECOMMENDED_PROMPTS {
             warnings.push(format!(
@@ -393,10 +404,33 @@ pub fn run_extraction_with(
         return Err(ExtractError::Cancelled);
     }
     let metadata = file_metadata(req, &cfg, &dtype_used, pos.len(), neg.len(), &stats);
-    write_atomic(&req.out, &encode(&direction, &metadata)?, req.overwrite)?;
+    let companion = Companion {
+        schema: COMPANION_SCHEMA,
+        pos_projections: &pos_projections,
+        neg_projections: &neg_projections,
+        threshold: stats.threshold,
+        d_prime: stats.d_prime,
+        threshold_accuracy: stats.threshold_accuracy,
+        cos_mean_pos_neg: stats.cosine_means,
+        raw_diff_norm: stats.raw_diff_norm,
+        layer: req.layer,
+        site: req.site.as_str(),
+        pooling: req.pooling.as_str(),
+        hidden_size: cfg.hidden_size,
+    };
+    let mut companion_bytes =
+        serde_json::to_vec_pretty(&companion).map_err(|e| ExtractError::Compute(e.to_string()))?;
+    companion_bytes.push(b'\n');
+    write_pair_atomic(
+        &req.out,
+        &encode(&direction, &metadata)?,
+        &companion_bytes,
+        req.overwrite,
+    )?;
 
     Ok(ExtractReport {
         out_path: req.out.clone(),
+        stats_path: companion_path(&req.out),
         hidden_size: cfg.hidden_size,
         layer: req.layer,
         n_pos: pos.len(),
@@ -427,12 +461,41 @@ fn file_metadata(
         ("n_pos", n_pos.to_string()),
         ("n_neg", n_neg.to_string()),
         ("raw_diff_norm", stats.raw_diff_norm.to_string()),
+        (
+            "d_prime",
+            stats.d_prime.map_or("inf".to_owned(), |d| d.to_string()),
+        ),
+        ("threshold_accuracy", stats.threshold_accuracy.to_string()),
+        ("pos_mean_proj", stats.pos_mean_proj.to_string()),
+        ("neg_mean_proj", stats.neg_mean_proj.to_string()),
+        ("cos_mean_pos_neg", stats.cosine_means.to_string()),
         ("dtype_used", dtype_used.into()),
         ("surgeon_version", env!("CARGO_PKG_VERSION").into()),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v))
     .collect()
+}
+
+/// Version of the `<out>.stats.json` layout read by `surgeon tui`.
+pub const COMPANION_SCHEMA: u32 = 1;
+
+/// `<out>.stats.json`. `d_prime` is `null` when both sets have zero spread (JSON has no
+/// infinity).
+#[derive(Serialize)]
+struct Companion<'a> {
+    schema: u32,
+    pos_projections: &'a [f64],
+    neg_projections: &'a [f64],
+    threshold: f64,
+    d_prime: Option<f64>,
+    threshold_accuracy: f64,
+    cos_mean_pos_neg: f64,
+    raw_diff_norm: f64,
+    layer: usize,
+    site: &'a str,
+    pooling: &'a str,
+    hidden_size: usize,
 }
 
 /// Name of the model directory (absolute form first, so `.` still gets a name).

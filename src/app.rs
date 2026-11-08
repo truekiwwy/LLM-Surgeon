@@ -58,9 +58,10 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::cli::{ApplyArgs, CheckArgs, Cli, Commands, EvalArgs, ExtractArgs, InspectArgs};
+use crate::engine::stats::TensorStats;
 use crate::engine::{
     self, BroadcastAxis, DType, EngineError, LayerSpec, MlpProj, ReadOnlyModel, ShiftOp,
-    ShiftStats, TensorView, WritableModel,
+    ShiftStats, WritableModel,
 };
 use crate::eval::{
     export_gguf, export_if_healthy, load_prompts, locate_binary, run_eval, CommandRunner,
@@ -273,6 +274,9 @@ pub fn run_with(cli: Cli, deps: &AppDeps, out: &mut dyn Write, err: &mut dyn Wri
     match &cli.command {
         Commands::Schema(args) => return crate::mcp::write_schema(args.kind, out),
         Commands::Mcp(args) => return crate::mcp::run_stdio(args, deps, out, err),
+        // The TUI owns the terminal and has no envelope; it restores the terminal and
+        // catches its own panics (code 70).
+        Commands::Tui(args) => return crate::tui::run_cli(args, cli.json, deps, out, err),
         _ => {}
     }
     let mut io = Io::new(out, err, &deps.ui, cli.json);
@@ -298,6 +302,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Eval(_) => "eval",
         Commands::Extract(_) => "extract",
         Commands::Schema(_) => "schema",
+        Commands::Tui(_) => "tui",
         Commands::Mcp(_) => "mcp",
     }
 }
@@ -313,7 +318,7 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
             core_extract(args, deps, &ui, &mut CliSink::new(io))
         }
         // Routed by run_with before dispatch: they have no envelope.
-        Commands::Schema(_) | Commands::Mcp(_) => Err(Outcome::fail(
+        Commands::Schema(_) | Commands::Mcp(_) | Commands::Tui(_) => Err(Outcome::fail(
             exit::INTERNAL,
             "commande sans enveloppe JSON",
         )),
@@ -590,17 +595,6 @@ struct InspectedTensor {
     stats: Option<TensorStats>,
 }
 
-/// Statistics over finite values; NaN/Inf are only counted.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct TensorStats {
-    pub count: u64,
-    pub non_finite: u64,
-    pub min: f64,
-    pub max: f64,
-    pub mean: f64,
-    pub l2: f64,
-}
-
 /// MLP tensor topology (and streamed statistics); human text only when `ui` is not `Off`.
 pub fn core_inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
     let shards = hardware::compute_model_size(&args.model)?.shard_files;
@@ -624,7 +618,13 @@ pub fn core_inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
                 return Err(Outcome::fail(exit::GENERAL, INTERRUPTED).with_kind("cancelled"));
             }
             let stats = match args.show_stats {
-                true => tensor_stats(&model.tensor(&info.name)?),
+                // Unsupported dtypes have no statistics (shown as "—").
+                true => {
+                    let view = model.tensor(&info.name)?;
+                    let never = AtomicBool::new(false);
+                    engine::stats::tensor_stats(view.bytes, &info.dtype, &info.shape, 0, &never)
+                        .ok()
+                }
                 false => None,
             };
             let mut row = vec![
@@ -717,42 +717,6 @@ fn stats_cells(ui: &Ui, stats: Option<&TensorStats>) -> Vec<String> {
         ui::metric(ui, format!("{:.4}", s.mean)),
         l2,
     ]
-}
-
-/// Streams the mapped bytes once: nothing is copied to the heap.
-fn tensor_stats(view: &TensorView<'_>) -> Option<TensorStats> {
-    let size = view.info.dtype.size_of()?;
-    let decode: fn(&[u8]) -> f32 = match view.info.dtype {
-        DType::F32 => |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-        DType::F16 => |b| half::f16::from_le_bytes([b[0], b[1]]).to_f32(),
-        DType::BF16 => |b| half::bf16::from_le_bytes([b[0], b[1]]).to_f32(),
-        DType::Other(_) => return None,
-    };
-    let (mut count, mut non_finite) = (0u64, 0u64);
-    let (mut min, mut max, mut sum, mut sum_sq) = (f64::INFINITY, f64::NEG_INFINITY, 0.0, 0.0);
-    for chunk in view.bytes.chunks_exact(size) {
-        let x = f64::from(decode(chunk));
-        if !x.is_finite() {
-            non_finite += 1;
-            continue;
-        }
-        count += 1;
-        min = min.min(x);
-        max = max.max(x);
-        sum += x;
-        sum_sq += x * x;
-    }
-    if count == 0 {
-        (min, max) = (0.0, 0.0);
-    }
-    Some(TensorStats {
-        count,
-        non_finite,
-        min,
-        max,
-        mean: if count == 0 { 0.0 } else { sum / count as f64 },
-        l2: sum_sq.sqrt(),
-    })
 }
 
 // ---------------------------------------------------------------- apply

@@ -9,6 +9,16 @@ use super::error::{ExtractError, Result};
 
 pub const TENSOR_NAME: &str = "direction";
 
+/// `<out>.stats.json`, next to the direction file.
+pub fn companion_path(out: &Path) -> PathBuf {
+    let mut name = out
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".stats.json");
+    out.with_file_name(name)
+}
+
 /// Checked before any computation: an existing `--out` needs `--overwrite`, its directory
 /// must exist, and the engine only reads `.safetensors` directions.
 pub fn check_output(out: &Path, overwrite: bool) -> Result<()> {
@@ -33,6 +43,10 @@ pub fn check_output(out: &Path, overwrite: bool) -> Result<()> {
     }
     if out.exists() && !overwrite {
         return Err(ExtractError::OutputExists(out.to_path_buf()));
+    }
+    let companion = companion_path(out);
+    if companion.exists() && !overwrite {
+        return Err(ExtractError::OutputExists(companion));
     }
     Ok(())
 }
@@ -64,6 +78,78 @@ pub fn encode(direction: &[f32], metadata: &BTreeMap<String, String>) -> Result<
         return Err(ExtractError::Compute("tenseur direction incohérent".into()));
     }
     Ok(bytes)
+}
+
+fn io_error(path: &Path, e: std::io::Error) -> ExtractError {
+    ExtractError::Io {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    }
+}
+
+/// Synced temporary sibling of `target` holding `bytes`.
+fn write_temp(target: &Path, bytes: &[u8]) -> Result<PathBuf> {
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "direction.safetensors".into());
+    let temp = target.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| io_error(&temp, e))?;
+        file.write_all(bytes).map_err(|e| io_error(&temp, e))?;
+        file.sync_all().map_err(|e| io_error(&temp, e))
+    })();
+    match written {
+        Ok(()) => Ok(temp),
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(e)
+        }
+    }
+}
+
+/// The direction and its companion, both or neither: the two temporaries are written
+/// first, the companion is renamed, then the direction; if that last rename fails the
+/// companion is removed again. A failure never leaves a temporary behind.
+pub fn write_pair_atomic(
+    out: &Path,
+    bytes: &[u8],
+    companion: &[u8],
+    overwrite: bool,
+) -> Result<()> {
+    let companion_out = companion_path(out);
+    let temp_main = write_temp(out, bytes)?;
+    let temp_companion = match write_temp(&companion_out, companion) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_main);
+            return Err(e);
+        }
+    };
+    let cleanup = || {
+        let _ = std::fs::remove_file(&temp_main);
+        let _ = std::fs::remove_file(&temp_companion);
+    };
+    for target in [out, companion_out.as_path()] {
+        if target.exists() && !overwrite {
+            cleanup();
+            return Err(ExtractError::OutputExists(target.to_path_buf()));
+        }
+    }
+    if let Err(e) = std::fs::rename(&temp_companion, &companion_out) {
+        cleanup();
+        return Err(io_error(&companion_out, e));
+    }
+    if let Err(e) = std::fs::rename(&temp_main, out) {
+        cleanup();
+        let _ = std::fs::remove_file(&companion_out);
+        return Err(io_error(out, e));
+    }
+    Ok(())
 }
 
 /// Temporary sibling (same volume, so `rename` is atomic), synced, then renamed over

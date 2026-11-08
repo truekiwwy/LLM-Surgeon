@@ -3204,3 +3204,855 @@ fn make_fake_qwen2_on_disk() {
     write_fake_qwen2_dir(&dir, "F32", false);
     write_prompt_files(&dir);
 }
+
+// ------------------------------------------------------------------ tui (prompt 9)
+
+use std::sync::atomic::AtomicUsize;
+
+use ratatui::backend::TestBackend as TuiBackend;
+use ratatui::crossterm::event::{Event as TermEvent, KeyCode as TermKey};
+use ratatui::style::{Color as TuiColor, Modifier as TuiModifier};
+use ratatui::Terminal as TuiTerminal;
+use weight_surgeon::engine::stats as estats;
+use weight_surgeon::tui::{
+    self, App as TuiApp, Computation as TuiComputation, EventSource, ModelView, Msg as TuiMsg,
+    ScriptedEventSource, StatsProvider, StatsRequest, Tab as TuiTab, TensorEntry,
+    Theme as TuiTheme, TuiError, VectorView, Worker,
+};
+
+fn f32_le(values: &[f32]) -> Vec<u8> {
+    values.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+fn stats_of(values: &[f32], bins: usize) -> estats::TensorStats {
+    let never = AtomicBool::new(false);
+    estats::tensor_stats(
+        &f32_le(values),
+        &weight_surgeon::engine::DType::F32,
+        &[values.len()],
+        bins,
+        &never,
+    )
+    .unwrap()
+}
+
+fn tui_entries(layers: usize, hidden: usize) -> Vec<TensorEntry> {
+    let entry = |name: String, shape: Vec<usize>| TensorEntry {
+        name,
+        dtype: "F32".into(),
+        bytes: shape.iter().product::<usize>() as u64 * 4,
+        shape,
+    };
+    let mut entries = vec![entry("model.embed_tokens.weight".into(), vec![64, hidden])];
+    for i in 0..layers {
+        for p in ["gate_proj", "up_proj"] {
+            entries.push(entry(
+                format!("model.layers.{i}.mlp.{p}.weight"),
+                vec![32, hidden],
+            ));
+        }
+        entries.push(entry(
+            format!("model.layers.{i}.mlp.down_proj.weight"),
+            vec![hidden, 32],
+        ));
+    }
+    entries
+}
+
+fn tui_app(mode: ColorMode, layers: usize) -> TuiApp {
+    let model = ModelView::from_entries(Path::new("modele"), &tui_entries(layers, 16));
+    TuiApp::new(Some(model), None, TuiTheme::new(mode), (100, 32))
+}
+
+fn tui_buffer(app: &TuiApp, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let mut terminal = TuiTerminal::new(TuiBackend::new(w, h)).unwrap();
+    terminal.draw(|f| tui::view(f, app)).unwrap();
+    terminal.backend().buffer().clone()
+}
+
+/// (x, y) of the first char of `needle` in the buffer (every glyph used is one cell wide).
+fn find_cell(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16, u16)> {
+    let width = buffer.area.width as usize;
+    buffer
+        .content()
+        .chunks(width)
+        .enumerate()
+        .find_map(|(y, row)| {
+            let line: Vec<&str> = row.iter().map(|c| c.symbol()).collect();
+            let text = line.concat();
+            text.find(needle)
+                .map(|byte| (text[..byte].chars().count() as u16, y as u16))
+        })
+}
+
+#[test]
+fn tui_inspector_render_contains_list_metrics_and_histogram() {
+    let mut app = tui_app(ColorMode::TrueColor, 4);
+    app.computation =
+        TuiComputation::Done(Ok(stats_of(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.0, 0.0], 64)));
+    let text = tui::render_snapshot(&app, 100, 32).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 32);
+    assert!(lines.iter().all(|l| l.chars().count() <= 100));
+    assert!(lines[1].contains("1 Inspecteur de poids") && lines[1].contains("2 Steering vector"));
+    for expected in [
+        "Couches (4)",
+        "[gate]",
+        "▶L0",
+        "tenseur         model.layers.0.mlp.gate_proj.weight",
+        "dtype · shape   F32 · [32, 16] · 2048 octets",
+        "min · max       0.000000 · 6.000000",
+        "moyenne         2.625000e0",
+        "écart-type      2.117634e0 (population)",
+        "sparsité        25.000 % de zéros exacts",
+        "NaN · ±Inf      0 NaN · 0 +Inf · 0 -Inf",
+        "éléments finis  8 / 8",
+        "Distribution des valeurs finies (linéaire)",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?} in\n{text}");
+    }
+    assert!(
+        ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+            .iter()
+            .any(|b| text.contains(b)),
+        "histogram blocks"
+    );
+    assert!(lines[31].contains("↑↓ couche") && lines[31].contains("prêt"));
+}
+
+#[test]
+fn tui_small_terminal_and_resize() {
+    let mut app = tui_app(ColorMode::Plain, 2);
+    let small = tui::render_snapshot(&app, 79, 23).unwrap();
+    assert!(
+        small.contains("Terminal trop petit (80×24 minimum)"),
+        "{small}"
+    );
+    assert!(!tui::render_snapshot(&app, 80, 24)
+        .unwrap()
+        .contains("trop petit"));
+    app.dirty = false;
+    tui::update(&mut app, TuiMsg::Resize(120, 40));
+    assert_eq!((app.size, app.dirty), ((120, 40), true));
+    assert_eq!(
+        tui::render_snapshot(&app, 120, 40).unwrap().lines().count(),
+        40
+    );
+}
+
+#[test]
+fn tui_nan_alert_blinks_color_not_text() {
+    let mut values = vec![f32::NAN; 12];
+    values.extend([f32::INFINITY; 3]);
+    values.extend([1.0, 2.0, 3.0]);
+    let stats = stats_of(&values, 64);
+    assert_eq!(
+        stats.histogram.as_ref().unwrap().counts.iter().sum::<u64>(),
+        3,
+        "no NaN/Inf in the bins"
+    );
+    let alert = "⚠ NaN/Inf DÉTECTÉ : 12 NaN · 3 +Inf · 0 -Inf";
+    for mode in [ColorMode::TrueColor, ColorMode::Plain] {
+        let mut app = tui_app(mode, 2);
+        app.computation = TuiComputation::Done(Ok(stats.clone()));
+        app.flagged.insert((0, 0), true);
+        app.ticks = 0;
+        let on = tui_buffer(&app, 100, 32);
+        app.ticks = weight_surgeon::tui::app::BLINK_TICKS;
+        let off = tui_buffer(&app, 100, 32);
+        let (x, y) =
+            find_cell(&on, alert).unwrap_or_else(|| panic!("alert missing (on, {mode:?})"));
+        assert!(
+            find_cell(&off, alert).is_some(),
+            "the text stays when the blink is off"
+        );
+        let (cell_on, cell_off) = (&on[(x, y)], &off[(x, y)]);
+        match mode {
+            ColorMode::TrueColor => {
+                assert_eq!(cell_on.fg, TuiColor::Rgb(255, 85, 85));
+                assert_ne!(cell_off.fg, TuiColor::Rgb(255, 85, 85));
+            }
+            _ => {
+                assert!(
+                    cell_on.modifier.contains(TuiModifier::REVERSED),
+                    "no color: reversed instead"
+                );
+                assert!(!cell_off.modifier.contains(TuiModifier::REVERSED));
+                assert_eq!(cell_on.fg, TuiColor::Reset);
+            }
+        }
+        let text = tui::render_snapshot(&app, 100, 32).unwrap();
+        assert!(
+            text.lines().any(|l| l.contains("▶L0") && l.contains('⚠')),
+            "⚠ marker in the layer list"
+        );
+    }
+}
+
+struct SpyProvider {
+    entries: Vec<TensorEntry>,
+    calls: Arc<AtomicUsize>,
+    fail: bool,
+}
+
+impl StatsProvider for SpyProvider {
+    fn list_tensors(&self) -> Vec<TensorEntry> {
+        self.entries.clone()
+    }
+    fn tensor_stats(
+        &self,
+        name: &str,
+        bins: usize,
+        _cancel: &AtomicBool,
+    ) -> Result<estats::TensorStats, TuiError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match self.fail {
+            true => Err(TuiError::Stats(format!("tenseur introuvable : {name}"))),
+            false => Ok(stats_of(&[1.0, -1.0, 0.5], bins)),
+        }
+    }
+}
+
+fn spy(fail: bool) -> (SpyProvider, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    (
+        SpyProvider {
+            entries: tui_entries(3, 16),
+            calls: Arc::clone(&calls),
+            fail,
+        },
+        calls,
+    )
+}
+
+fn wait_reply(worker: &Worker) -> weight_surgeon::tui::StatsReply {
+    let started = Instant::now();
+    loop {
+        if let Some(reply) = worker.try_recv() {
+            return reply;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "worker never answered"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn request(generation: u64, tensor: &str) -> StatsRequest {
+    StatsRequest {
+        generation,
+        key: (0, 0),
+        tensor: tensor.into(),
+        bins: 16,
+    }
+}
+
+/// Blocks on "slow" until cancelled; "fast" answers at once.
+struct SlowProvider {
+    started: Arc<AtomicBool>,
+    saw_cancel: Arc<AtomicBool>,
+}
+
+impl StatsProvider for SlowProvider {
+    fn list_tensors(&self) -> Vec<TensorEntry> {
+        Vec::new()
+    }
+    fn tensor_stats(
+        &self,
+        name: &str,
+        bins: usize,
+        cancel: &AtomicBool,
+    ) -> Result<estats::TensorStats, TuiError> {
+        if name == "slow" {
+            self.started.store(true, Ordering::SeqCst);
+            let begin = Instant::now();
+            while begin.elapsed() < Duration::from_secs(10) {
+                if cancel.load(Ordering::SeqCst) {
+                    self.saw_cancel.store(true, Ordering::SeqCst);
+                    return Err(TuiError::Stats("annulé".into()));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Ok(stats_of(&[2.0], bins))
+    }
+}
+
+#[test]
+fn tui_worker_caches_cancels_and_reports_errors() {
+    let (provider, calls) = spy(false);
+    let worker = Worker::spawn(Arc::new(provider), 64);
+    worker.request(request(1, "t"));
+    assert_eq!(wait_reply(&worker).generation, 1);
+    worker.request(request(2, "t"));
+    let second = wait_reply(&worker);
+    assert!(second.result.is_ok() && second.generation == 2);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "same (layer, projection): served from the cache"
+    );
+
+    let started = Arc::new(AtomicBool::new(false));
+    let saw_cancel = Arc::new(AtomicBool::new(false));
+    let worker = Worker::spawn(
+        Arc::new(SlowProvider {
+            started: Arc::clone(&started),
+            saw_cancel: Arc::clone(&saw_cancel),
+        }),
+        64,
+    );
+    worker.request(StatsRequest {
+        key: (5, 0),
+        ..request(1, "slow")
+    });
+    let begin = Instant::now();
+    while !started.load(Ordering::SeqCst) {
+        assert!(begin.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    worker.request(StatsRequest {
+        key: (6, 0),
+        ..request(2, "fast")
+    });
+    let reply = wait_reply(&worker);
+    assert_eq!(reply.generation, 2, "the cancelled job sends nothing");
+    assert!(
+        saw_cancel.load(Ordering::SeqCst),
+        "selection change cancels the running job"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let provider = weight_surgeon::tui::ModelStatsProvider::open(&model(dir.path())).unwrap();
+    let worker = Worker::spawn(Arc::new(provider), 64);
+    worker.request(request(1, "nope"));
+    let reply = wait_reply(&worker);
+    let message = reply.result.clone().unwrap_err();
+    assert!(message.contains("introuvable"), "{message}");
+    let mut app = tui_app(ColorMode::Plain, 2);
+    app.start();
+    let generation = app.generation;
+    tui::update(
+        &mut app,
+        TuiMsg::StatsReady {
+            generation,
+            key: (0, 0),
+            result: Err(message),
+        },
+    );
+    assert!(tui::render_snapshot(&app, 100, 32)
+        .unwrap()
+        .contains("erreur : statistiques : tenseur introuvable : nope"));
+}
+
+/// Vector file (`direction` + metadata) and optional companion.
+fn write_vector(dir: &Path, name: &str, values: &[f32], companion: Option<Value>) -> PathBuf {
+    let path = dir.join(name);
+    let data = f32_le(values);
+    let metadata = json!({"model": "qwen2-mini", "layer": "2", "site": "resid_post", "pooling": "last",
+        "n_pos": "4", "n_neg": "4", "d_prime": "2.5", "threshold_accuracy": "0.9",
+        "pos_mean_proj": "1.15", "neg_mean_proj": "-0.35", "cos_mean_pos_neg": "0.1234"});
+    let mut header = json!({"__metadata__": metadata, "direction": {"dtype": "F32", "shape": [values.len()], "data_offsets": [0, data.len()]}}).to_string();
+    while !(8 + header.len()).is_multiple_of(8) {
+        header.push(' ');
+    }
+    let mut file = (header.len() as u64).to_le_bytes().to_vec();
+    file.extend_from_slice(header.as_bytes());
+    file.extend_from_slice(&data);
+    std::fs::write(&path, file).unwrap();
+    if let Some(c) = companion {
+        std::fs::write(
+            weight_surgeon::extract::companion_path(&path),
+            c.to_string(),
+        )
+        .unwrap();
+    }
+    path
+}
+
+fn unit_vector(n: usize) -> Vec<f32> {
+    let raw: Vec<f64> = (0..n)
+        .map(|i| (i as f64 + 1.0) * if i % 2 == 0 { 1.0 } else { -1.0 })
+        .collect();
+    let norm = raw.iter().map(|x| x * x).sum::<f64>().sqrt();
+    raw.iter().map(|x| (x / norm) as f32).collect()
+}
+
+fn companion_json(schema: u32) -> Value {
+    json!({"schema": schema, "pos_projections": [1.0, 1.2, 0.9, 1.5], "neg_projections": [-0.5, -0.2, 0.1, -0.8],
+        "threshold": 0.5, "d_prime": 2.5, "threshold_accuracy": 0.9, "cos_mean_pos_neg": 0.1234,
+        "raw_diff_norm": 3.0, "layer": 2, "site": "resid_post", "pooling": "last", "hidden_size": 16})
+}
+
+fn steering_text(vector: VectorView, model: Option<ModelView>) -> String {
+    let app = TuiApp::new(
+        model,
+        Some(vector),
+        TuiTheme::new(ColorMode::Plain),
+        (100, 32),
+    );
+    let app = TuiApp {
+        tab: TuiTab::Steering,
+        ..app
+    };
+    tui::render_snapshot(&app, 100, 32).unwrap()
+}
+
+#[test]
+fn tui_steering_tab_with_and_without_companion() {
+    let dir = tempfile::tempdir().unwrap();
+    let values = unit_vector(16);
+    let path = write_vector(
+        dir.path(),
+        "v.safetensors",
+        &values,
+        Some(companion_json(1)),
+    );
+    let text = steering_text(VectorView::load(&path).unwrap(), None);
+    for expected in [
+        "taille          16",
+        "norme L2        1.000  normalisé ✓",
+        "d′ (séparation)",
+        "2.50",
+        "90 %",
+        "cos(μ₊, μ₋)     0.1234",
+        "proj. μ₊ · μ₋   1.1500 · -0.3500",
+        "couche · site   2 · resid_post",
+        "seuil 0.5000",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?} in\n{text}");
+    }
+    assert!(text.contains('┼'), "threshold marker on the butterfly axis");
+    let mut order: Vec<usize> = (0..16).collect();
+    order.sort_by(|&a, &b| values[b].abs().total_cmp(&values[a].abs()).then(a.cmp(&b)));
+    for (rank, &i) in order.iter().take(10).enumerate() {
+        let line = format!("{:>2}. dim {i:<5}{:+.4}", rank + 1, values[i]);
+        assert!(text.contains(&line), "top-10 {line:?} in\n{text}");
+    }
+
+    let bare = write_vector(dir.path(), "bare.safetensors", &values, None);
+    let text = steering_text(VectorView::load(&bare).unwrap(), None);
+    assert!(
+        text.contains("projections indisponibles : relancer `surgeon")
+            && text.contains("extract` (v4.0+)"),
+        "wrapped, not cut:\n{text}"
+    );
+    let unknown = write_vector(
+        dir.path(),
+        "future.safetensors",
+        &values,
+        Some(companion_json(2)),
+    );
+    assert!(steering_text(VectorView::load(&unknown).unwrap(), None)
+        .contains("fichier compagnon ignoré : schema 2 inconnu"));
+    std::fs::write(weight_surgeon::extract::companion_path(&unknown), "{oops").unwrap();
+    assert!(steering_text(VectorView::load(&unknown).unwrap(), None)
+        .contains("fichier compagnon ignoré"));
+
+    let half: Vec<f32> = values.iter().map(|v| v * 0.5).collect();
+    let half_path = write_vector(dir.path(), "half.safetensors", &half, None);
+    assert!(steering_text(VectorView::load(&half_path).unwrap(), None)
+        .contains("0.500  non normalisé ⚠"));
+    let mut broken = values.clone();
+    broken[3] = f32::NAN;
+    let nan_path = write_vector(dir.path(), "nan.safetensors", &broken, None);
+    assert!(steering_text(VectorView::load(&nan_path).unwrap(), None)
+        .contains("⚠ NaN/Inf DÉTECTÉ : 1 NaN · 0 +Inf · 0 -Inf"));
+
+    let big = write_vector(dir.path(), "big.safetensors", &vec![0.01; 4096], None);
+    let model = ModelView::from_entries(Path::new("m"), &tui_entries(2, 16));
+    assert!(
+        steering_text(VectorView::load(&big).unwrap(), Some(model.clone()))
+            .contains("incompatible ✗ (4096 ≠ 16)")
+    );
+    assert!(steering_text(VectorView::load(&path).unwrap(), Some(model)).contains("compatible ✓"));
+}
+
+#[test]
+fn tui_view_is_pure_and_idle_loop_does_not_redraw() {
+    let (provider, calls) = spy(false);
+    let model = ModelView::from_entries(Path::new("m"), &provider.list_tensors());
+    let mut app = TuiApp::new(
+        Some(model),
+        None,
+        TuiTheme::new(ColorMode::TrueColor),
+        (100, 32),
+    );
+    app.computation = TuiComputation::Done(Ok(stats_of(&[1.0, 2.0], 16)));
+    for _ in 0..100 {
+        tui::render_snapshot(&app, 100, 32).unwrap();
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "view never computes");
+    drop(provider);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut broken = unit_vector(16);
+    broken[0] = f32::NAN;
+    let path = write_vector(dir.path(), "nan.safetensors", &broken, None);
+    let ticks = 100usize;
+    for (vector, alert) in [
+        (Some(VectorView::load(&path).unwrap()), true),
+        (None, false),
+    ] {
+        let mut app = TuiApp::new(None, vector, TuiTheme::new(ColorMode::TrueColor), (100, 32));
+        let mut terminal = TuiTerminal::new(TuiBackend::new(100, 32)).unwrap();
+        let mut events = ScriptedEventSource::new((0..ticks).map(|_| None));
+        let stats = tui::run_loop(&mut terminal, &mut app, &mut events, None).unwrap();
+        let flips = match alert {
+            true => ticks / weight_surgeon::tui::app::BLINK_TICKS as usize,
+            false => 0,
+        };
+        assert_eq!(stats.ticks, ticks);
+        assert!(
+            stats.draws <= flips + 1,
+            "{} draws for {flips} blink flips",
+            stats.draws
+        );
+        assert!(stats.draws >= 1);
+    }
+}
+
+#[derive(Default)]
+struct MockGuard {
+    restores: usize,
+}
+
+impl weight_surgeon::tui::TerminalGuard for MockGuard {
+    fn restore(&mut self) -> std::io::Result<()> {
+        self.restores += 1;
+        Ok(())
+    }
+}
+
+struct PanickingEvents;
+
+impl EventSource for PanickingEvents {
+    fn poll(&mut self, _: Duration) -> std::io::Result<Option<TermEvent>> {
+        panic!("simulated panic in the loop");
+    }
+}
+
+#[test]
+fn tui_full_loop_restores_terminal_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let vector = VectorView::load(&write_vector(
+        dir.path(),
+        "v.safetensors",
+        &unit_vector(16),
+        None,
+    ))
+    .unwrap();
+    for fail in [false, true] {
+        let (provider, _) = spy(fail);
+        let model = ModelView::from_entries(Path::new("m"), &provider.list_tensors());
+        let worker = Worker::spawn(Arc::new(provider), 64);
+        let mut app = TuiApp::new(
+            Some(model),
+            Some(vector.clone()),
+            TuiTheme::new(ColorMode::Plain),
+            (100, 32),
+        );
+        let mut terminal = TuiTerminal::new(TuiBackend::new(100, 32)).unwrap();
+        let mut guard = MockGuard::default();
+        let mut events = ScriptedEventSource::keys([
+            TermKey::Tab,
+            TermKey::Down,
+            TermKey::Down,
+            TermKey::Right,
+            TermKey::Char('q'),
+        ]);
+        tui::run_session(
+            &mut guard,
+            &mut terminal,
+            &mut app,
+            &mut events,
+            Some(&worker),
+        )
+        .unwrap();
+        assert_eq!(
+            (app.tab, app.top_scroll, app.pan, app.selection.layer),
+            (TuiTab::Steering, 2, 1, 0)
+        );
+        assert!(app.should_quit);
+        assert_eq!(guard.restores, 1, "fail={fail}");
+    }
+
+    let mut app = TuiApp::new(None, None, TuiTheme::new(ColorMode::Plain), (100, 32));
+    let mut terminal = TuiTerminal::new(TuiBackend::new(100, 32)).unwrap();
+    let mut guard = MockGuard::default();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tui::run_session(
+            &mut guard,
+            &mut terminal,
+            &mut app,
+            &mut PanickingEvents,
+            None,
+        )
+    }));
+    assert!(outcome.is_err());
+    assert_eq!(guard.restores, 1, "restored during unwinding");
+}
+
+#[test]
+fn tui_cli_snapshot_non_tty_json_and_bad_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = model(dir.path());
+    let (code, out, err) = run(&deps(), &["tui", "--model", s(&m)]);
+    assert_eq!(code, 1, "{err}");
+    assert!(out.is_empty());
+    assert!(err.contains("nécessite un terminal interactif") && err.contains("--snapshot"));
+
+    let (code, out, err) = run(
+        &ui_deps(ColorMode::TrueColor, true),
+        &["tui", "--snapshot", "--model", s(&m), "--size", "90x30"],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains('\x1b'));
+    assert_eq!(out.lines().count(), 30);
+    assert!(out.lines().all(|l| l.chars().count() <= 90));
+    assert!(out.contains("Couches (1)") && out.contains("min · max"));
+
+    let (code, out, _) = run(&deps(), &["tui", "--snapshot"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("Aucun modèle ni vecteur chargé"));
+
+    let (code, out, err) = run(&deps(), &["--json", "tui", "--snapshot"]);
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert!(out.is_empty() && err.contains("pas de sortie JSON"));
+    let (code, _, err) = run(
+        &deps(),
+        &[
+            "tui",
+            "--snapshot",
+            "--model",
+            s(&dir.path().join("absent")),
+        ],
+    );
+    assert_eq!(code, exit::INVALID_INPUT, "{err}");
+    std::fs::write(
+        dir.path().join("corrupt.safetensors"),
+        b"not a safetensors file",
+    )
+    .unwrap();
+    let (code, _, _) = run(
+        &deps(),
+        &[
+            "tui",
+            "--snapshot",
+            "--vector",
+            s(&dir.path().join("corrupt.safetensors")),
+        ],
+    );
+    assert_eq!(code, exit::INVALID_INPUT);
+    let (code, _, _) = run(&deps(), &["tui", "--snapshot", "--size", "12"]);
+    assert_eq!(code, exit::INVALID_INPUT);
+}
+
+#[test]
+fn tui_binary_snapshot_has_no_ansi_and_refuses_pipes() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = model(dir.path());
+    let out = binary()
+        .args(["tui", "--snapshot", "--model", s(&m)])
+        .env("CLICOLOR_FORCE", "1")
+        .env("COLORTERM", "truecolor")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(!text.contains('\x1b') && text.lines().count() == 32);
+    let piped = binary()
+        .args(["tui"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(piped.status.code(), Some(1));
+    assert!(piped.stdout.is_empty());
+}
+
+#[test]
+fn extract_writes_new_metadata_and_companion() {
+    let f = extract_fixture("F32", false);
+    let (code, v) = run_args(&deps(), &f.args("c.safetensors", &[]));
+    assert_eq!(code, 0, "{v}");
+    let out = f.dir.path().join("c.safetensors");
+    let companion_path = weight_surgeon::extract::companion_path(&out);
+    assert_eq!(v["data"]["stats_path"], s(&companion_path));
+    let companion: Value =
+        serde_json::from_str(&std::fs::read_to_string(&companion_path).unwrap()).unwrap();
+    assert_eq!(companion["schema"], 1);
+    assert_eq!(companion["pos_projections"].as_array().unwrap().len(), 6);
+    assert_eq!(companion["neg_projections"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        (
+            companion["layer"].as_u64(),
+            companion["hidden_size"].as_u64()
+        ),
+        (Some(2), Some(HIDDEN as u64))
+    );
+    assert_eq!(
+        (companion["site"].as_str(), companion["pooling"].as_str()),
+        (Some("resid_post"), Some("last"))
+    );
+    assert_eq!(
+        companion["threshold_accuracy"],
+        v["data"]["stats"]["threshold_accuracy"]
+    );
+    assert_eq!(companion["threshold"], v["data"]["stats"]["threshold"]);
+    let (_, meta) = read_direction(&out);
+    for key in [
+        "d_prime",
+        "threshold_accuracy",
+        "pos_mean_proj",
+        "neg_mean_proj",
+        "cos_mean_pos_neg",
+    ] {
+        let parsed = meta[key].parse::<f64>();
+        assert!(
+            parsed.is_ok() || meta[key] == "inf",
+            "{key} = {:?}",
+            meta[key]
+        );
+    }
+    assert_eq!(
+        meta["cos_mean_pos_neg"].parse::<f64>().unwrap(),
+        v["data"]["stats"]["cosine_means"].as_f64().unwrap()
+    );
+    assert_eq!(
+        weight_surgeon::engine::load_direction_vector(&out, None)
+            .unwrap()
+            .len(),
+        HIDDEN,
+        "still one 1D tensor"
+    );
+
+    let orphan = f.dir.path().join("o.safetensors");
+    std::fs::write(weight_surgeon::extract::companion_path(&orphan), "old").unwrap();
+    let (code, v) = run_args(&deps(), &f.args("o.safetensors", &[]));
+    assert_eq!(
+        (code, v["error"]["kind"].as_str()),
+        (exit::INVALID_INPUT, Some("output_exists"))
+    );
+    assert!(!orphan.exists());
+    let (code, _) = run_args(&deps(), &f.args("o.safetensors", &["--overwrite"]));
+    assert_eq!(code, 0, "--overwrite covers the companion");
+    assert_ne!(
+        std::fs::read_to_string(weight_surgeon::extract::companion_path(&orphan)).unwrap(),
+        "old"
+    );
+
+    let mut same = f.args("deg.safetensors", &[]);
+    let neg = same.iter().position(|a| a == "--neg-prompts").unwrap();
+    same[neg + 1] = s(&f.pos).to_owned();
+    assert_eq!(run_args(&deps(), &same).0, exit::EXTRACT_FAILED);
+    assert!(
+        !weight_surgeon::extract::companion_path(&f.dir.path().join("deg.safetensors")).exists(),
+        "no companion left"
+    );
+}
+
+/// Extends the prompt 6 guard to the TUI: no print macro, no `unsafe`.
+#[test]
+fn tui_module_has_no_print_and_no_unsafe() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tui");
+    let mut files = Vec::new();
+    for dir in [root.clone(), root.join("widgets")] {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    assert!(files.len() >= 14, "{files:?}");
+    for path in files {
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(!source.contains("unsafe"), "{}: unsafe", path.display());
+        let code = source.split("#[cfg(test)]").next().unwrap();
+        for (n, line) in code.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for banned in ["println!(", "print!(", "eprintln!(", "eprint!("] {
+                assert!(
+                    !line.contains(banned),
+                    "{}:{}: {banned}",
+                    path.display(),
+                    n + 1
+                );
+            }
+        }
+    }
+}
+
+/// Metrics for the deliverable (not a gate):
+/// `cargo test --release --test integration tui_metrics -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn tui_metrics() {
+    let (rows, cols) = (4096usize, 11008usize);
+    let bytes: Vec<u8> = (0..rows * cols)
+        .flat_map(|i| half::bf16::from_f32(((i % 1999) as f32 - 999.0) / 997.0).to_le_bytes())
+        .collect();
+    let never = AtomicBool::new(false);
+    let started = Instant::now();
+    let stats = estats::tensor_stats(
+        &bytes,
+        &weight_surgeon::engine::DType::BF16,
+        &[rows, cols],
+        64,
+        &never,
+    )
+    .unwrap();
+    eprintln!(
+        "METRIC stats 4096x11008 bf16 ({} MB): {:?}, mean {:.6}",
+        bytes.len() / 1_000_000,
+        started.elapsed(),
+        stats.mean
+    );
+
+    let mut app = tui_app(ColorMode::TrueColor, 28);
+    app.computation = TuiComputation::Done(Ok(stats));
+    let mut terminal = TuiTerminal::new(TuiBackend::new(120, 40)).unwrap();
+    let started = Instant::now();
+    for _ in 0..200 {
+        terminal.draw(|f| tui::view(f, &app)).unwrap();
+    }
+    eprintln!(
+        "METRIC render 120x40: {:?} per frame",
+        started.elapsed() / 200
+    );
+
+    // Real time: the poll really waits, and a worker answers the first request.
+    let (provider, _) = spy(false);
+    let model = ModelView::from_entries(Path::new("m"), &provider.list_tensors());
+    let worker = Worker::spawn(Arc::new(provider), 64);
+    let mut idle = TuiApp::new(
+        Some(model),
+        None,
+        TuiTheme::new(ColorMode::TrueColor),
+        (120, 40),
+    );
+    let mut events = IdleEvents(Instant::now() + Duration::from_secs(5));
+    let loop_stats = tui::run_loop(&mut terminal, &mut idle, &mut events, Some(&worker)).unwrap();
+    eprintln!(
+        "METRIC redraws over 5 s idle ({} ticks, first frame and stats reply included): {}",
+        loop_stats.ticks, loop_stats.draws
+    );
+}
+
+/// Sleeps through each poll like a terminal with no input, then sends `q`.
+struct IdleEvents(Instant);
+
+impl EventSource for IdleEvents {
+    fn poll(&mut self, timeout: Duration) -> std::io::Result<Option<TermEvent>> {
+        if Instant::now() >= self.0 {
+            return Ok(Some(TermEvent::Key(
+                ratatui::crossterm::event::KeyEvent::from(TermKey::Char('q')),
+            )));
+        }
+        std::thread::sleep(timeout);
+        Ok(None)
+    }
+}

@@ -56,7 +56,11 @@ Chaque résultat contient la même enveloppe que `surgeon --json` :
 `surgeon_extract` (ou `surgeon extract` en ligne de commande) calcule
 `v = normalize(mean(pos) - mean(neg))` sur les activations d'une couche, et écrit un
 `.safetensors` avec un tenseur 1D F32 `direction` (taille `hidden_size`) et ses métadonnées
-(couche, site, pooling...). Seuls Qwen2/Qwen2.5 sont supportés (`model_type: "qwen2"`).
+(couche, site, pooling, `d_prime`, `threshold_accuracy`, `pos_mean_proj`, `neg_mean_proj`,
+`cos_mean_pos_neg`...). Un fichier compagnon `<out>.stats.json` (`"schema": 1`) garde la
+projection de chaque prompt et le seuil ; `surgeon tui --vector` le dessine. Le résultat de
+l'outil donne son chemin dans `data.stats_path`. Seuls Qwen2/Qwen2.5 sont supportés
+(`model_type: "qwen2"`).
 
 ```bash
 surgeon extract --model ./Qwen2.5-7B-Instruct --pos-prompts pos.json --neg-prompts neg.json \
@@ -92,9 +96,10 @@ colonnes, donc `axis: "rows"`.
   serveur continue.
 - **Progression** : avec `_meta.progressToken`, une `notifications/progress` par tenseur
   (apply), par prompt (eval), ou une pour les poids puis une par prompt (extract).
-- **Extraction sans écriture partielle** : fichier temporaire puis `rename` ; un `out`
-  existant exige `overwrite: true` ; annulation ou erreur, aucun fichier n'est laissé.
-  `--read-only` refuse `surgeon_extract`.
+- **Extraction sans écriture partielle** : fichiers temporaires puis `rename`, vecteur et
+  compagnon ensemble ; un `out` ou un compagnon existant exige `overwrite: true` ;
+  annulation ou erreur, aucun fichier n'est laissé. `--read-only` refuse `surgeon_extract`.
+- **Pas de tableau de bord** : `surgeon tui` est interactif et n'est pas exposé en MCP.
 
 ## Protocole
 

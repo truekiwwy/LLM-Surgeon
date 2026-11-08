@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(truncate_middle("日本語のパスです", 7).width(), 7);
         assert_eq!(truncate_middle("abc", 0), "…");
         let backup = truncate_middle(
-            r"C:\Users\kiwwy\AppData\Local\Temp\claude\scratchpad\visual\work.safetensors.bak-1794157219",
+            r"D:\data\models\AppData\Local\Temp\claude\scratchpad\visual\work.safetensors.bak-1794157219",
             60,
         );
         assert!(backup.width() <= 60, "{backup}");

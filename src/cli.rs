@@ -57,6 +57,8 @@ pub enum Commands {
     Eval(EvalArgs),
     /// Extract a steering vector from a Qwen2 layer (pure Rust, CPU).
     Extract(ExtractArgs),
+    /// Terminal dashboard: MLP weight inspector and steering vector viewer.
+    Tui(TuiArgs),
     /// Print the JSON Schema of patch.json, or the MCP tool definitions (raw JSON).
     Schema(SchemaArgs),
     /// Run the MCP (Model Context Protocol) server on stdio.
@@ -154,6 +156,24 @@ pub struct ExtractArgs {
     pub overwrite: bool,
 }
 
+/// Exit codes: 0 normal exit, 1 not an interactive terminal, 2 invalid arguments or files
+/// (`--json` included: the TUI has no JSON output), 70 internal.
+#[derive(Debug, Clone, Args)]
+pub struct TuiArgs {
+    /// Model directory or SafeTensors file (shards and index supported).
+    #[arg(long)]
+    pub model: Option<PathBuf>,
+    /// Direction file (.safetensors) produced by `surgeon extract`.
+    #[arg(long)]
+    pub vector: Option<PathBuf>,
+    /// Print one frame as plain text on stdout and exit (no interactive terminal needed).
+    #[arg(long)]
+    pub snapshot: bool,
+    /// Frame size for --snapshot, COLSxROWS.
+    #[arg(long, default_value = "100x32", value_parser = crate::tui::parse_size)]
+    pub size: (u16, u16),
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct SchemaArgs {
     #[arg(long, value_enum, default_value = "patch")]
@@ -164,7 +184,7 @@ pub struct SchemaArgs {
 pub enum SchemaKind {
     /// JSON Schema (draft-07) of patch.json.
     Patch,
-    /// The four MCP tool definitions, exactly as `tools/list` returns them.
+    /// The MCP tool definitions, exactly as `tools/list` returns them.
     Tools,
 }
 
