@@ -23,6 +23,7 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
+use crate::extract::{ChatTemplate, DTypeChoice, Pooling, Site};
 pub use crate::patch::exit_code;
 use crate::patch::{LayerSelection, Projection};
 
@@ -54,6 +55,8 @@ pub enum Commands {
     Apply(ApplyArgs),
     /// Evaluate a model on prompts.
     Eval(EvalArgs),
+    /// Extract a steering vector from a Qwen2 layer (pure Rust, CPU).
+    Extract(ExtractArgs),
     /// Print the JSON Schema of patch.json, or the MCP tool definitions (raw JSON).
     Schema(SchemaArgs),
     /// Run the MCP (Model Context Protocol) server on stdio.
@@ -115,6 +118,40 @@ pub struct EvalArgs {
     pub llama_cpp_dir: Option<PathBuf>,
     #[arg(long)]
     pub allow_degraded: bool,
+}
+
+/// Exit codes: 0 ok, 1 insufficient resources (or cancelled), 2 invalid arguments, prompt
+/// files or existing `--out`, 7 extraction failed, 70 internal.
+#[derive(Debug, Clone, Args)]
+pub struct ExtractArgs {
+    /// Directory with config.json, tokenizer.json and the *.safetensors (or an index).
+    #[arg(long)]
+    pub model: PathBuf,
+    /// JSON array of strings or of {"text": ...}, JSONL, or plain text.
+    #[arg(long)]
+    pub pos_prompts: PathBuf,
+    #[arg(long)]
+    pub neg_prompts: PathBuf,
+    /// 0-based layer; must be < num_hidden_layers.
+    #[arg(long, default_value_t = 20)]
+    pub layer: usize,
+    /// Output .safetensors (one 1D F32 tensor named `direction`).
+    #[arg(long)]
+    pub out: PathBuf,
+    #[arg(long, value_enum, default_value_t = Pooling::Last)]
+    pub pooling: Pooling,
+    #[arg(long, value_enum, default_value_t = Site::ResidPost)]
+    pub site: Site,
+    #[arg(long, value_enum, default_value_t = ChatTemplate::NoTemplate)]
+    pub chat_template: ChatTemplate,
+    /// Prompts are truncated on the right beyond this many tokens.
+    #[arg(long, default_value_t = 512)]
+    pub max_tokens: usize,
+    #[arg(long, value_enum, default_value_t = DTypeChoice::Auto)]
+    pub dtype: DTypeChoice,
+    /// Replace an existing --out.
+    #[arg(long)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, Args)]

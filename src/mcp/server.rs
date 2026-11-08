@@ -19,6 +19,7 @@ use super::sandbox::Sandbox;
 use super::tools::{self, ToolContext};
 use crate::app::{exit, panic_message, AppDeps, ProgressEvent, ProgressSink};
 use crate::cli::McpArgs;
+use crate::extract::PromptSet;
 
 /// A larger incoming line is answered with -32600 and skipped up to the next newline.
 pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
@@ -26,7 +27,8 @@ pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 const INSTRUCTIONS: &str = "surgeon modifie les poids MLP de modèles SafeTensors. \
 Outils : surgeon_check (budget RAM/VRAM), surgeon_inspect (couches et matrices MLP), \
 surgeon_apply (applique un patch EN PLACE ; faire d'abord dry_run: true), surgeon_eval \
-(non-régression et export GGUF). Garde-fous : chemins limités aux dossiers autorisés, \
+(non-régression et export GGUF), surgeon_extract (vecteur de direction depuis une couche \
+Qwen2, à donner ensuite comme vector_file d'un patch). Garde-fous : chemins limités aux dossiers autorisés, \
 sauvegarde vérifiée imposée avant écriture, rollback automatique sur erreur ou annulation. \
 Le format du patch est le schéma de l'argument patch de surgeon_apply.";
 
@@ -321,6 +323,7 @@ impl<W: Write> Session<'_, W> {
         let mut sink = McpProgress {
             writer: self.writer,
             token,
+            extract_sets: (0, 0),
         };
         let mut ctx = ToolContext {
             deps: self.deps,
@@ -374,6 +377,8 @@ impl<W: Write> Session<'_, W> {
 struct McpProgress<'a, W: Write> {
     writer: &'a ProtocolWriter<W>,
     token: Option<Value>,
+    /// (positive, negative) prompt counts of a running extraction.
+    extract_sets: (usize, usize),
 }
 
 impl<W: Write> ProgressSink for McpProgress<'_, W> {
@@ -381,7 +386,30 @@ impl<W: Write> ProgressSink for McpProgress<'_, W> {
         let Some(token) = &self.token else {
             return;
         };
+        let (pos, neg) = self.extract_sets;
+        // Extraction: one step for the weights, then one per prompt (pos, then neg).
+        let extract_total = 1 + pos + neg;
         let (progress, total, message) = match event {
+            ProgressEvent::ExtractStart { n_pos, n_neg, .. } => {
+                self.extract_sets = (n_pos, n_neg);
+                return;
+            }
+            ProgressEvent::ExtractLoading { done, total } if done == total => (
+                1,
+                extract_total,
+                format!("poids chargés ({total} tenseurs)"),
+            ),
+            ProgressEvent::ExtractPrompt { set, done, total } => {
+                let offset = match set {
+                    PromptSet::Pos => 0,
+                    PromptSet::Neg => pos,
+                };
+                (
+                    1 + offset + done,
+                    extract_total,
+                    format!("{} {done}/{total}", set.as_str()),
+                )
+            }
             ProgressEvent::Shift {
                 op_id,
                 tensor,

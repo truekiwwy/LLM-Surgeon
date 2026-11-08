@@ -17,6 +17,7 @@
 //!                     -> BackupSet::create_many_in (touched shards only)
 //!                     -> apply_patch -> EngineBackend::shift_tensor -> WritableModel::shift_tensor
 //!                        ; error | NaN | Ctrl-C -> RollbackHandle::rollback ; ok -> flush -> commit
+//!          -> extract -> load_prompt_texts -> core_extract_request -> extract::run_extraction
 //!          -> eval    -> load_prompts -> export_gguf (temporary f16, unless .gguf)
 //!                     -> generator_factory -> run_eval -> export_if_healthy
 //! Every human byte goes through `ui::*` (output audit in `ui.rs`); `--json` builds
@@ -26,7 +27,8 @@
 //!
 //! Exit codes: 0 ok, 1 general error, 2 invalid CLI/patch/input, 3 execution failed and
 //! model intact (rolled back or never touched), 4 CRITICAL (rollback failed, or model left
-//! modified without backup), 5 eval degraded/broken, 6 GGUF export failed, 70 internal.
+//! modified without backup), 5 eval degraded/broken, 6 GGUF export failed, 7 extraction
+//! failed, 70 internal.
 //!
 //! Deviations from the assembly spec, adapted to the real signatures:
 //! - One `EngineBackend` owns 1..N `WritableModel`s: a single file is a 1-shard model, so a
@@ -55,7 +57,7 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::cli::{ApplyArgs, CheckArgs, Cli, Commands, EvalArgs, InspectArgs};
+use crate::cli::{ApplyArgs, CheckArgs, Cli, Commands, EvalArgs, ExtractArgs, InspectArgs};
 use crate::engine::{
     self, BroadcastAxis, DType, EngineError, LayerSpec, MlpProj, ReadOnlyModel, ShiftOp,
     ShiftStats, TensorView, WritableModel,
@@ -65,6 +67,9 @@ use crate::eval::{
     EvalConfig, EvalError, EvalPrompt, EvalReport, EvalVerdict, GenerationOutcome,
     GgufExportConfig, LlamaCliGenerator, PromptStatus, SystemCommandRunner, TextGenerator,
     ALLOWED_QUANTS,
+};
+use crate::extract::{
+    self, ExtractError, ExtractEvent, ExtractObserver, ExtractReport, ExtractRequest, PromptSet,
 };
 use crate::hardware::{
     self, BudgetPolicy, HardwareBudget, HardwareError, HardwareProbe, SystemProbe, Verdict,
@@ -86,6 +91,8 @@ pub mod exit {
     pub const CRITICAL: i32 = exit_code::CRITICAL;
     pub const EVAL_UNHEALTHY: i32 = 5;
     pub const EXPORT_FAILED: i32 = 6;
+    /// `extract`: config, tokenizer or weights invalid, degenerate direction, NaN/Inf.
+    pub const EXTRACT_FAILED: i32 = 7;
     pub const INTERNAL: i32 = 70;
 }
 
@@ -289,6 +296,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Inspect(_) => "inspect",
         Commands::Apply(_) => "apply",
         Commands::Eval(_) => "eval",
+        Commands::Extract(_) => "extract",
         Commands::Schema(_) => "schema",
         Commands::Mcp(_) => "mcp",
     }
@@ -300,6 +308,10 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         Commands::Inspect(args) => core_inspect(args, deps, &io.ui),
         Commands::Apply(args) => apply(args, deps, io),
         Commands::Eval(args) => eval(args, deps, &io.ui),
+        Commands::Extract(args) => {
+            let ui = io.ui;
+            core_extract(args, deps, &ui, &mut CliSink::new(io))
+        }
         // Routed by run_with before dispatch: they have no envelope.
         Commands::Schema(_) | Commands::Mcp(_) => Err(Outcome::fail(
             exit::INTERNAL,
@@ -943,6 +955,27 @@ pub enum ProgressEvent {
         done: usize,
         total: usize,
     },
+    /// Extraction planned: resources checked, dtype chosen, weights about to load.
+    ExtractStart {
+        model: PathBuf,
+        layer: usize,
+        site: String,
+        pooling: String,
+        dtype: String,
+        weight_bytes: u64,
+        n_pos: usize,
+        n_neg: usize,
+    },
+    ExtractLoading {
+        done: usize,
+        total: usize,
+    },
+    ExtractPrompt {
+        set: PromptSet,
+        done: usize,
+        total: usize,
+    },
+    ExtractWriting,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1063,17 +1096,32 @@ struct CliSink<'a, 'io> {
     io: &'a mut Io<'io>,
     /// Visible width of the progress line currently drawn on stderr (0: none).
     shown: usize,
+    extract: ExtractView,
 }
+
+/// What the extraction lines need between events.
+#[derive(Default)]
+struct ExtractView {
+    dtype: String,
+    weight_bytes: u64,
+    n_pos: usize,
+    n_neg: usize,
+    pos_done: usize,
+    neg_done: usize,
+}
+
+const FORWARD_BAR_WIDTH: usize = 16;
 
 impl<'a, 'io> CliSink<'a, 'io> {
     fn new(io: &'a mut Io<'io>) -> Self {
-        Self { io, shown: 0 }
+        Self {
+            io,
+            shown: 0,
+            extract: ExtractView::default(),
+        }
     }
 
     fn progress(&mut self, op_id: &str, tensor: &str, done: usize, total: usize) {
-        if !self.io.err_is_tty || self.io.err_ui.is_off() {
-            return;
-        }
         let ui = self.io.err_ui;
         let line = format!(
             "{} {} · {} · {}  {}",
@@ -1083,7 +1131,35 @@ impl<'a, 'io> CliSink<'a, 'io> {
             ui::metric(&ui, format!("{done}/{total}")),
             ui::progress_bar(&ui, done, total, BAR_WIDTH)
         );
-        let width = ui::visible_width(&line);
+        self.draw(&line);
+    }
+
+    /// `[FORWARD]  pos 8/16  ████░░░░  ·  neg 0/16`; without bar once every prompt ran.
+    fn forward_line(&self, ui: &Ui, bar: bool) -> String {
+        let e = &self.extract;
+        let pos = ui::metric(ui, format!("pos {}/{}", e.pos_done, e.n_pos));
+        let neg = ui::metric(ui, format!("neg {}/{}", e.neg_done, e.n_neg));
+        let badge = ui::badge(ui, "FORWARD");
+        match bar {
+            true => {
+                let bar = ui::progress_bar(
+                    ui,
+                    e.pos_done + e.neg_done,
+                    e.n_pos + e.n_neg,
+                    FORWARD_BAR_WIDTH,
+                );
+                format!("{badge} {pos}  {bar}  ·  {neg}")
+            }
+            false => format!("{badge} {pos} · {neg}"),
+        }
+    }
+
+    /// In-place line on an interactive stderr only.
+    fn draw(&mut self, line: &str) {
+        if !self.io.err_is_tty || self.io.err_ui.is_off() {
+            return;
+        }
+        let width = ui::visible_width(line);
         let blank = " ".repeat(self.shown.saturating_sub(width));
         let _ = write!(self.io.err, "\r{line}{blank}");
         let _ = self.io.err.flush();
@@ -1117,6 +1193,21 @@ impl ProgressSink for CliSink<'_, '_> {
         } = &event
         {
             return self.progress(op_id, tensor, *done, *total);
+        }
+        match &event {
+            ProgressEvent::ExtractPrompt { set, done, .. } => {
+                match set {
+                    PromptSet::Pos => self.extract.pos_done = *done,
+                    PromptSet::Neg => self.extract.neg_done = *done,
+                }
+                if !(*set == PromptSet::Neg && *done >= self.extract.n_neg) {
+                    let err_ui = self.io.err_ui;
+                    let line = self.forward_line(&err_ui, true);
+                    return self.draw(&line);
+                }
+            }
+            ProgressEvent::ExtractLoading { done, total } if done < total => return,
+            _ => {}
         }
         self.clear_progress();
         match event {
@@ -1172,7 +1263,47 @@ impl ProgressSink for CliSink<'_, '_> {
                 ui::dim(&ui, &format!("{seconds:.1} s"))
             )),
             ProgressEvent::Rollback(outcome) => self.io.line(&rollback_line(&ui, &outcome)),
-            ProgressEvent::Shift { .. } | ProgressEvent::EvalPrompt { .. } => {}
+            ProgressEvent::ExtractStart {
+                model,
+                layer,
+                site,
+                pooling,
+                dtype,
+                weight_bytes,
+                n_pos,
+                n_neg,
+            } => {
+                self.extract = ExtractView {
+                    dtype,
+                    weight_bytes,
+                    n_pos,
+                    n_neg,
+                    ..ExtractView::default()
+                };
+                self.io.line(&format!(
+                    "{} {} · couche {} · {} · pooling {}  {}",
+                    ui::badge(&ui, "EXTRACT"),
+                    ui::metric(&ui, "Qwen2"),
+                    ui::metric(&ui, layer),
+                    ui::metric(&ui, site),
+                    ui::metric(&ui, pooling),
+                    ui::path(&ui, &model)
+                ));
+            }
+            ProgressEvent::ExtractLoading { done, total } => self.io.line(&format!(
+                "{} poids chargés {} tenseurs · {} · {}",
+                ui::badge(&ui, "LOAD"),
+                ui::metric(&ui, format!("{done}/{total}")),
+                ui::metric(&ui, &self.extract.dtype),
+                ui::metric(&ui, size(self.extract.weight_bytes))
+            )),
+            ProgressEvent::ExtractPrompt { .. } => {
+                let line = self.forward_line(&ui, false);
+                self.io.line(&line);
+            }
+            ProgressEvent::Shift { .. }
+            | ProgressEvent::EvalPrompt { .. }
+            | ProgressEvent::ExtractWriting => {}
         }
     }
 }
@@ -1637,4 +1768,133 @@ fn eval_text(ui: &Ui, report: &EvalReport, max_new_tokens: u32) -> String {
         ui::metric(ui, report.passed),
         ui::progress_bar(ui, report.passed, total, BAR_WIDTH)
     )
+}
+
+// ---------------------------------------------------------------- extract
+
+/// CLI entry: reads the two prompt files, then [`core_extract_request`].
+pub fn core_extract(
+    args: &ExtractArgs,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let load = |set: &str, path: &Path| {
+        extract::load_prompt_texts(path).map_err(|message| {
+            extract_failure(&ExtractError::Prompts {
+                set: set.into(),
+                message,
+            })
+        })
+    };
+    let request = ExtractRequest {
+        model_dir: args.model.clone(),
+        pos_prompts: load("pos", &args.pos_prompts)?,
+        neg_prompts: load("neg", &args.neg_prompts)?,
+        layer: args.layer,
+        out: args.out.clone(),
+        pooling: args.pooling,
+        site: args.site,
+        chat_template: args.chat_template,
+        max_tokens: args.max_tokens,
+        dtype: args.dtype,
+        overwrite: args.overwrite,
+    };
+    core_extract_request(&request, deps, ui, sink)
+}
+
+/// Shared by the CLI and the MCP tool. Cancellation (`deps.interrupted`) is honored
+/// between two tensors and between two prompts; nothing is written then.
+pub fn core_extract_request(
+    request: &ExtractRequest,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let mut observer = SinkObserver {
+        sink,
+        interrupted: &deps.interrupted,
+        request,
+    };
+    let report = extract::run_extraction(request, deps.probe.as_ref(), &mut observer)
+        .map_err(|e| extract_failure(&e))?;
+    let mut outcome = Outcome::ok(to_value(&report), extract_text(ui, &report));
+    outcome.warnings = report.warnings.clone();
+    Ok(outcome)
+}
+
+fn extract_failure(e: &ExtractError) -> Outcome {
+    let code = match e {
+        ExtractError::InvalidArgument(_)
+        | ExtractError::Prompts { .. }
+        | ExtractError::OutputExists(_) => exit::INVALID_INPUT,
+        ExtractError::InsufficientResources(_) | ExtractError::Cancelled => exit::GENERAL,
+        _ => exit::EXTRACT_FAILED,
+    };
+    Outcome::fail(code, e).with_kind(e.kind())
+}
+
+/// Adapts the extraction progress to a [`ProgressSink`] and turns the interruption flag
+/// into a `Break`.
+struct SinkObserver<'a> {
+    sink: &'a mut dyn ProgressSink,
+    interrupted: &'a AtomicBool,
+    request: &'a ExtractRequest,
+}
+
+impl ExtractObserver for SinkObserver<'_> {
+    fn on_event(&mut self, event: ExtractEvent) -> ControlFlow<()> {
+        let progress = match event {
+            ExtractEvent::Planned {
+                dtype_used,
+                weight_bytes,
+                ..
+            } => ProgressEvent::ExtractStart {
+                model: self.request.model_dir.clone(),
+                layer: self.request.layer,
+                site: self.request.site.as_str().into(),
+                pooling: self.request.pooling.as_str().into(),
+                dtype: dtype_used,
+                weight_bytes,
+                n_pos: self.request.pos_prompts.len(),
+                n_neg: self.request.neg_prompts.len(),
+            },
+            ExtractEvent::LoadingWeights {
+                done_tensors,
+                total_tensors,
+            } => ProgressEvent::ExtractLoading {
+                done: done_tensors,
+                total: total_tensors,
+            },
+            ExtractEvent::Prompt { set, done, total } => {
+                ProgressEvent::ExtractPrompt { set, done, total }
+            }
+            ExtractEvent::Writing => ProgressEvent::ExtractWriting,
+        };
+        self.sink.event(progress);
+        match self.interrupted.load(Ordering::SeqCst) {
+            true => ControlFlow::Break(()),
+            false => ControlFlow::Continue(()),
+        }
+    }
+}
+
+/// `[VERDICT]` and `[WRITE]`, then the warnings; the earlier steps were streamed.
+fn extract_text(ui: &Ui, report: &ExtractReport) -> String {
+    let s = &report.stats;
+    let d_prime = s.d_prime.map_or("∞".to_owned(), |d| format!("{d:.2}"));
+    let mut text = format!(
+        "{} d′ {} · accuracy {} · ‖Δ‖ {}\n{} {}\n",
+        ui::badge(ui, "VERDICT"),
+        ui::metric(ui, d_prime),
+        ui::metric(ui, format!("{:.0}%", s.threshold_accuracy * 100.0)),
+        ui::metric(ui, format!("{:.3}", s.raw_diff_norm)),
+        ui::badge(ui, "WRITE"),
+        ui::path(ui, &report.out_path),
+    );
+    for w in &report.warnings {
+        text.push_str(&warning_line(ui, w));
+        text.push('\n');
+    }
+    text
 }

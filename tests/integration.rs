@@ -1501,7 +1501,7 @@ fn mcp_full_session_is_pure_json_rpc() {
         .as_str()
         .unwrap()
         .contains("sauvegarde"));
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 5);
     let (is_error, env) = envelope(&responses, 3);
     assert!(!is_error, "{env}");
     assert_eq!(env["command"], "check");
@@ -2125,7 +2125,8 @@ fn schema_tools_kind_equals_tools_list() {
             "surgeon_check",
             "surgeon_inspect",
             "surgeon_apply",
-            "surgeon_eval"
+            "surgeon_eval",
+            "surgeon_extract"
         ]
     );
     for tool in exported.as_array().unwrap() {
@@ -2245,4 +2246,961 @@ fn mcp_binary_speaks_only_json_rpc_on_stdout() {
         .collect();
     assert_eq!(responses.len(), 3);
     assert!(!envelope(&responses, 3).0);
+}
+
+// ------------------------------------------------------------------ extract (prompt 8)
+
+use std::cell::RefCell as ExtractCell;
+use std::ops::ControlFlow as Flow;
+
+use weight_surgeon::cli::ExtractArgs;
+use weight_surgeon::extract::{
+    self as ex, ExtractEvent, ExtractObserver, ExtractRequest, RawTensor, SafetensorsDir,
+    TensorSource,
+};
+use weight_surgeon::hardware::BudgetPolicy;
+
+const POS_WORDS: [&str; 12] = [
+    "joie", "soleil", "rire", "fete", "danse", "musique", "ami", "lumiere", "chaleur", "sourire",
+    "jardin", "plage",
+];
+const NEG_WORDS: [&str; 12] = [
+    "pluie", "nuit", "froid", "brume", "silence", "gris", "orage", "vide", "hiver", "ombre",
+    "perte", "peur",
+];
+const FILLER: [&str; 10] = [
+    "le", "la", "un", "une", "est", "et", "tres", "il", "elle", "nous",
+];
+const HIDDEN: usize = 16;
+const INTER: usize = 32;
+const LAYERS: usize = 4;
+const VOCAB: usize = 64;
+
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self, scale: f32) -> f32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((self.0 >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0) * scale
+    }
+}
+
+fn vocab() -> Vec<String> {
+    ["[UNK]", "<|im_start|>", "<|im_end|>", "user", "assistant"]
+        .iter()
+        .chain(&POS_WORDS)
+        .chain(&NEG_WORDS)
+        .chain(&FILLER)
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Every tensor of the full 4-layer model (final norm and lm_head included, so the tests
+/// can prove they are never read).
+fn qwen_tensors() -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    let mut rng = Rng(42);
+    let head = HIDDEN / 2;
+    let mut shapes = vec![("model.embed_tokens.weight".to_owned(), vec![VOCAB, HIDDEN])];
+    for l in 0..LAYERS {
+        let p = format!("model.layers.{l}");
+        for (suffix, shape) in [
+            ("self_attn.q_proj.weight", vec![2 * head, HIDDEN]),
+            ("self_attn.q_proj.bias", vec![2 * head]),
+            ("self_attn.k_proj.weight", vec![2 * head, HIDDEN]),
+            ("self_attn.k_proj.bias", vec![2 * head]),
+            ("self_attn.v_proj.weight", vec![2 * head, HIDDEN]),
+            ("self_attn.v_proj.bias", vec![2 * head]),
+            ("self_attn.o_proj.weight", vec![HIDDEN, 2 * head]),
+            ("mlp.gate_proj.weight", vec![INTER, HIDDEN]),
+            ("mlp.up_proj.weight", vec![INTER, HIDDEN]),
+            ("mlp.down_proj.weight", vec![HIDDEN, INTER]),
+            ("input_layernorm.weight", vec![HIDDEN]),
+            ("post_attention_layernorm.weight", vec![HIDDEN]),
+        ] {
+            shapes.push((format!("{p}.{suffix}"), shape));
+        }
+    }
+    shapes.push(("model.norm.weight".into(), vec![HIDDEN]));
+    shapes.push(("lm_head.weight".into(), vec![VOCAB, HIDDEN]));
+    shapes
+        .into_iter()
+        .map(|(name, shape)| {
+            let n: usize = shape.iter().product();
+            let values = (0..n)
+                .map(|_| {
+                    if name.contains("norm") {
+                        1.0 + rng.next(0.1)
+                    } else {
+                        rng.next(0.4)
+                    }
+                })
+                .collect();
+            (name, shape, values)
+        })
+        .collect()
+}
+
+/// F32 or BF16 SafeTensors with any shapes.
+fn write_tensors(path: &Path, dtype: &str, tensors: &[(String, Vec<usize>, Vec<f32>)]) {
+    let mut header = serde_json::Map::new();
+    let mut data = Vec::new();
+    for (name, shape, values) in tensors {
+        let start = data.len();
+        for v in values {
+            match dtype {
+                "BF16" => data.extend_from_slice(&half::bf16::from_f32(*v).to_le_bytes()),
+                _ => data.extend_from_slice(&v.to_le_bytes()),
+            }
+        }
+        header.insert(
+            name.clone(),
+            json!({"dtype": dtype, "shape": shape, "data_offsets": [start, data.len()]}),
+        );
+    }
+    let mut header = serde_json::to_string(&header).unwrap();
+    while !header.len().is_multiple_of(8) {
+        header.push(' ');
+    }
+    let mut file = (header.len() as u64).to_le_bytes().to_vec();
+    file.extend_from_slice(header.as_bytes());
+    file.extend_from_slice(&data);
+    std::fs::write(path, file).unwrap();
+}
+
+fn write_tokenizer(path: &Path) {
+    use tokenizers::models::wordlevel::WordLevel;
+    use tokenizers::pre_tokenizers::whitespace::Whitespace;
+    use tokenizers::{AddedToken, Tokenizer};
+    let model = WordLevel::builder()
+        .vocab(
+            vocab()
+                .into_iter()
+                .enumerate()
+                .map(|(i, w)| (w, i as u32))
+                .collect(),
+        )
+        .unk_token("[UNK]".into())
+        .build()
+        .unwrap();
+    let mut tokenizer = Tokenizer::new(model);
+    tokenizer.with_pre_tokenizer(Some(Whitespace {}));
+    tokenizer
+        .add_special_tokens([
+            AddedToken::from("<|im_start|>", true),
+            AddedToken::from("<|im_end|>", true),
+        ])
+        .unwrap();
+    tokenizer.save(path, false).unwrap();
+}
+
+fn qwen_config(model_type: &str) -> Value {
+    json!({"architectures": ["Qwen2ForCausalLM"], "model_type": model_type, "vocab_size": VOCAB,
+        "hidden_size": HIDDEN, "intermediate_size": INTER, "num_hidden_layers": LAYERS,
+        "num_attention_heads": 2, "num_key_value_heads": 2, "max_position_embeddings": 128,
+        "rms_norm_eps": 1e-6, "rope_theta": 10000.0, "tie_word_embeddings": false,
+        "sliding_window": 128, "hidden_act": "silu", "torch_dtype": "float32"})
+}
+
+/// Deterministic mini Qwen2: config.json, tokenizer.json, weights (one file or two shards
+/// with an index).
+fn write_fake_qwen2_dir(dir: &Path, dtype: &str, sharded: bool) -> PathBuf {
+    let model = dir.join("qwen2-mini");
+    std::fs::create_dir_all(&model).unwrap();
+    std::fs::write(model.join("config.json"), qwen_config("qwen2").to_string()).unwrap();
+    write_tokenizer(&model.join("tokenizer.json"));
+    let tensors = qwen_tensors();
+    if sharded {
+        let (a, b) = tensors.split_at(tensors.len() / 2);
+        let names = [
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors",
+        ];
+        write_tensors(&model.join(names[0]), dtype, a);
+        write_tensors(&model.join(names[1]), dtype, b);
+        let weight_map: serde_json::Map<String, Value> = a
+            .iter()
+            .map(|t| (t.0.clone(), json!(names[0])))
+            .chain(b.iter().map(|t| (t.0.clone(), json!(names[1]))))
+            .collect();
+        std::fs::write(
+            model.join("model.safetensors.index.json"),
+            json!({"weight_map": weight_map}).to_string(),
+        )
+        .unwrap();
+    } else {
+        write_tensors(&model.join("model.safetensors"), dtype, &tensors);
+    }
+    model
+}
+
+/// Six positive and six negative prompts made of vocabulary words.
+fn write_prompt_files(dir: &Path) -> (PathBuf, PathBuf) {
+    let make = |words: &[&str]| -> Vec<String> {
+        (0..6)
+            .map(|i| format!("{} {} est {}", FILLER[i % 4], words[i], words[(i + 3) % 12]))
+            .collect()
+    };
+    let (pos, neg) = (dir.join("pos.json"), dir.join("neg.json"));
+    std::fs::write(&pos, serde_json::to_string(&make(&POS_WORDS)).unwrap()).unwrap();
+    std::fs::write(&neg, serde_json::to_string(&make(&NEG_WORDS)).unwrap()).unwrap();
+    (pos, neg)
+}
+
+struct ExtractFixture {
+    dir: tempfile::TempDir,
+    model: PathBuf,
+    pos: PathBuf,
+    neg: PathBuf,
+}
+
+fn extract_fixture(dtype: &str, sharded: bool) -> ExtractFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let model = write_fake_qwen2_dir(dir.path(), dtype, sharded);
+    let (pos, neg) = write_prompt_files(dir.path());
+    ExtractFixture {
+        dir,
+        model,
+        pos,
+        neg,
+    }
+}
+
+impl ExtractFixture {
+    fn args(&self, out: &str, extra: &[&str]) -> Vec<String> {
+        let mut args: Vec<String> = [
+            "extract",
+            "--model",
+            s(&self.model),
+            "--pos-prompts",
+            s(&self.pos),
+            "--neg-prompts",
+            s(&self.neg),
+            "--layer",
+            "2",
+            "--out",
+            s(&self.dir.path().join(out)),
+        ]
+        .map(String::from)
+        .to_vec();
+        args.extend(extra.iter().map(|a| a.to_string()));
+        args
+    }
+
+    fn request(&self, out: &str, layer: usize) -> ExtractRequest {
+        let load = |p: &Path| ex::load_prompt_texts(p).unwrap();
+        ExtractRequest {
+            model_dir: self.model.clone(),
+            pos_prompts: load(&self.pos),
+            neg_prompts: load(&self.neg),
+            layer,
+            out: self.dir.path().join(out),
+            pooling: ex::Pooling::Last,
+            site: ex::Site::ResidPost,
+            chat_template: ex::ChatTemplate::NoTemplate,
+            max_tokens: 512,
+            dtype: ex::DTypeChoice::Auto,
+            overwrite: false,
+        }
+    }
+}
+
+fn read_direction(path: &Path) -> (Vec<f32>, std::collections::HashMap<String, String>) {
+    let bytes = std::fs::read(path).unwrap();
+    let st = safetensors::SafeTensors::deserialize(&bytes).unwrap();
+    let view = st.tensor("direction").unwrap();
+    assert_eq!(view.dtype(), safetensors::Dtype::F32);
+    assert_eq!(view.shape(), [HIDDEN]);
+    let values = view
+        .data()
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let (_, meta) = safetensors::SafeTensors::read_metadata(&bytes).unwrap();
+    (values, meta.metadata().clone().unwrap())
+}
+
+#[test]
+fn extract_end_to_end_is_deterministic_and_readable() {
+    let f = extract_fixture("F32", false);
+    let (code, out, err) = run_args_raw(
+        &deps(),
+        &["--json".to_owned()]
+            .into_iter()
+            .chain(f.args("a.safetensors", &[]))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(err.is_empty() && !out.contains('\x1b') && !out.contains("[EXTRACT]"));
+    assert!(out.ends_with('\n') && out.matches('\n').count() == 1);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["command"], "extract");
+    assert_eq!(v["data"]["hidden_size"], HIDDEN);
+    assert_eq!(
+        (v["data"]["n_pos"].as_u64(), v["data"]["n_neg"].as_u64()),
+        (Some(6), Some(6))
+    );
+    assert_eq!(v["data"]["dtype_used"], "f32");
+    let few = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w.as_str().unwrap().contains("recommandés"))
+        .count();
+    assert_eq!(few, 2, "fewer than 8 prompts per set");
+
+    let (direction, meta) = read_direction(&f.dir.path().join("a.safetensors"));
+    let norm: f64 = direction
+        .iter()
+        .map(|&x| f64::from(x).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    assert!((norm - 1.0).abs() < 1e-5, "‖v‖ = {norm}");
+    for (key, value) in [
+        ("model", "qwen2-mini"),
+        ("layer", "2"),
+        ("site", "resid_post"),
+        ("pooling", "last"),
+        ("chat_template", "none"),
+        ("n_pos", "6"),
+        ("n_neg", "6"),
+        ("dtype_used", "f32"),
+        ("model_type", "qwen2"),
+    ] {
+        assert_eq!(meta[key], value, "{key}");
+    }
+    assert!(meta["raw_diff_norm"].parse::<f64>().unwrap() > 0.0);
+    assert_eq!(meta["surgeon_version"], env!("CARGO_PKG_VERSION"));
+
+    let (code, _, _) = run_args_raw(&deps(), &f.args("b.safetensors", &[]));
+    assert_eq!(code, 0);
+    assert_eq!(
+        std::fs::read(f.dir.path().join("a.safetensors")).unwrap(),
+        std::fs::read(f.dir.path().join("b.safetensors")).unwrap(),
+        "deterministic"
+    );
+    let path = f.dir.path().join("a.safetensors");
+    assert_eq!(
+        weight_surgeon::engine::load_direction_vector(&path, Some("direction")).unwrap(),
+        direction
+    );
+    assert_eq!(
+        weight_surgeon::engine::load_direction_vector(&path, None).unwrap(),
+        direction
+    );
+}
+
+#[test]
+fn extracted_vector_drives_apply_exactly() {
+    let f = extract_fixture("F32", false);
+    assert_eq!(run_args_raw(&deps(), &f.args("v.safetensors", &[])).0, 0);
+    let vector = f.dir.path().join("v.safetensors");
+    let v = weight_surgeon::engine::load_direction_vector(&vector, Some("direction")).unwrap();
+    assert_eq!(v.len(), HIDDEN, "direction length == hidden_size");
+    let weights = f.model.join("model.safetensors");
+    let down = "model.layers.2.mlp.down_proj.weight";
+    let before = read_f32(&weights, down);
+    // down_proj is [hidden, intermediate]: v indexes its rows, so the engine axis is `cols`.
+    let patch = json!({"schema_version": 1, "operations": [{"id": "steer", "layers": "2",
+        "projections": ["down_proj"], "operation": "subtract", "vector_file": s(&vector),
+        "vector_tensor": "direction", "alpha": 0.5, "axis": "cols"}]});
+    let patch_path = f.dir.path().join("patch.json");
+    std::fs::write(&patch_path, patch.to_string()).unwrap();
+    let (code, v_json) = run_json(
+        &deps(),
+        &[
+            "apply",
+            "--model",
+            s(&weights),
+            "--patch",
+            s(&patch_path),
+            "--dry-run",
+        ],
+    );
+    assert_eq!(code, 0, "{v_json}");
+    assert_eq!(read_f32(&weights, down), before, "dry run writes nothing");
+    let (code, v_json) = run_json(
+        &deps(),
+        &["apply", "--model", s(&weights), "--patch", s(&patch_path)],
+    );
+    assert_eq!(code, 0, "{v_json}");
+    let after = read_f32(&weights, down);
+    for (i, (&new, &old)) in after.iter().zip(&before).enumerate() {
+        let expected = old - 0.5 * v[i / INTER];
+        assert_eq!(new.to_bits(), expected.to_bits(), "element {i}");
+    }
+}
+
+/// Records every tensor read, delegating to the real memory-mapped source.
+struct Spy {
+    inner: SafetensorsDir,
+    reads: ExtractCell<Vec<String>>,
+}
+
+impl TensorSource for Spy {
+    fn meta(&self, name: &str) -> Option<(weight_surgeon::engine::DType, Vec<usize>)> {
+        self.inner.meta(name)
+    }
+    fn read(&self, name: &str) -> ex::Result<RawTensor<'_>> {
+        self.reads.borrow_mut().push(name.to_owned());
+        self.inner.read(name)
+    }
+}
+
+struct Quiet;
+
+impl ExtractObserver for Quiet {
+    fn on_event(&mut self, _: ExtractEvent) -> Flow<()> {
+        Flow::Continue(())
+    }
+}
+
+#[test]
+fn extract_reads_nothing_past_layer_l_and_checks_resources_first() {
+    let f = extract_fixture("BF16", true);
+    let spy = Spy {
+        inner: SafetensorsDir::open(&f.model).unwrap(),
+        reads: ExtractCell::new(Vec::new()),
+    };
+    let report = ex::run_extraction_with(
+        &f.request("l1.safetensors", 1),
+        &spy,
+        &FakeProbe {
+            available: 64 << 30,
+        },
+        &mut Quiet,
+    )
+    .unwrap();
+    assert_eq!(report.layer, 1);
+    let reads = spy.reads.borrow();
+    assert_eq!(reads.len(), 1 + 2 * 12);
+    for name in reads.iter() {
+        assert!(
+            !name.contains("layers.2") && !name.contains("layers.3"),
+            "{name}"
+        );
+        assert!(
+            name != "lm_head.weight" && name != "model.norm.weight",
+            "{name}"
+        );
+    }
+    drop(reads);
+
+    let spy = Spy {
+        inner: SafetensorsDir::open(&f.model).unwrap(),
+        reads: ExtractCell::new(Vec::new()),
+    };
+    let err = ex::run_extraction_with(
+        &f.request("tiny.safetensors", 2),
+        &spy,
+        &FakeProbe { available: 1 << 20 },
+        &mut Quiet,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ex::ExtractError::InsufficientResources(_)),
+        "{err}"
+    );
+    assert!(
+        spy.reads.borrow().is_empty(),
+        "no weight read before the resource check"
+    );
+    assert!(!f.dir.path().join("tiny.safetensors").exists());
+
+    let mut poor = deps();
+    poor.probe = Box::new(FakeProbe { available: 1 << 20 });
+    let (code, v) = run_args(&poor, &f.args("x.safetensors", &[]));
+    assert_eq!(code, exit::GENERAL);
+    assert_eq!(v["error"]["kind"], "insufficient_resources");
+}
+
+#[test]
+fn extract_dtype_auto_falls_back_to_bf16() {
+    let f = extract_fixture("F32", false);
+    let cfg = ex::load_config(&f.model).unwrap();
+    let source = SafetensorsDir::open(&f.model).unwrap();
+    let totals = ex::check_tensors(&source, &ex::required_tensors(&cfg, 2)).unwrap();
+    let plan = ex::plan_memory(&cfg, totals, 512);
+    assert!(plan.bf16_bytes < plan.f32_bytes);
+    let just_enough = ex::required_ram(plan.bf16_bytes, &BudgetPolicy::default());
+    let report = ex::run_extraction(
+        &f.request("auto.safetensors", 2),
+        &FakeProbe {
+            available: just_enough,
+        },
+        &mut Quiet,
+    )
+    .unwrap();
+    assert_eq!(report.dtype_used, "bf16");
+    assert!(report.warnings.iter().any(|w| w.contains("bf16")));
+    let (_, meta) = read_direction(&f.dir.path().join("auto.safetensors"));
+    assert_eq!(meta["dtype_used"], "bf16");
+}
+
+/// Cancels after the third prompt, as the MCP reader thread does on a cancellation.
+struct CancelAtThird(usize);
+
+impl ExtractObserver for CancelAtThird {
+    fn on_event(&mut self, event: ExtractEvent) -> Flow<()> {
+        if matches!(event, ExtractEvent::Prompt { .. }) {
+            self.0 += 1;
+        }
+        match self.0 >= 3 {
+            true => Flow::Break(()),
+            false => Flow::Continue(()),
+        }
+    }
+}
+
+#[test]
+fn extract_never_leaves_a_partial_or_clobbered_file() {
+    let f = extract_fixture("F32", false);
+    let existing = f.dir.path().join("taken.safetensors");
+    std::fs::write(&existing, "keep me").unwrap();
+    let (code, v) = run_args(&deps(), &f.args("taken.safetensors", &[]));
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert_eq!(v["error"]["kind"], "output_exists");
+    assert_eq!(std::fs::read(&existing).unwrap(), b"keep me");
+
+    let err = ex::run_extraction(
+        &f.request("cancel.safetensors", 2),
+        &FakeProbe {
+            available: 64 << 30,
+        },
+        &mut CancelAtThird(0),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ex::ExtractError::Cancelled));
+    let names: Vec<String> = std::fs::read_dir(f.dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.contains("cancel")),
+        "no output nor temporary: {names:?}"
+    );
+
+    let (code, v) = run_args(&deps(), &f.args("missing/dir/out.safetensors", &[]));
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("inexistant"));
+
+    let (code, _) = run_args(&deps(), &f.args("taken.safetensors", &["--overwrite"]));
+    assert_eq!(code, 0, "--overwrite replaces it");
+    assert_ne!(std::fs::read(&existing).unwrap(), b"keep me");
+}
+
+#[test]
+fn extract_errors_are_typed() {
+    let f = extract_fixture("BF16", true);
+    let json_args = |out: &str, extra: &[&str]| f.args(out, extra);
+    let mut out_of_range = json_args("o.safetensors", &[]);
+    let layer = out_of_range.iter().position(|a| a == "--layer").unwrap();
+    out_of_range[layer + 1] = "4".into();
+    let (code, v) = run_args(&deps(), &out_of_range);
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("num_hidden_layers = 4"),
+        "{v}"
+    );
+
+    let mut same = json_args("same.safetensors", &[]);
+    let neg = same.iter().position(|a| a == "--neg-prompts").unwrap();
+    same[neg + 1] = s(&f.pos).to_owned();
+    let (code, v) = run_args(&deps(), &same);
+    assert_eq!(code, exit::EXTRACT_FAILED);
+    assert_eq!(v["error"]["kind"], "degenerate_direction");
+    assert!(
+        !f.dir.path().join("same.safetensors").exists(),
+        "no zero vector written"
+    );
+
+    std::fs::write(
+        f.model.join("config.json"),
+        qwen_config("qwen3").to_string(),
+    )
+    .unwrap();
+    let (code, v) = run_args(&deps(), &json_args("q3.safetensors", &[]));
+    assert_eq!(code, exit::EXTRACT_FAILED);
+    assert_eq!(v["error"]["kind"], "unsupported_architecture");
+    assert!(v["error"]["message"].as_str().unwrap().contains("qwen3"));
+
+    let g = extract_fixture("BF16", true);
+    let (code, v) = run_args(
+        &deps(),
+        &g.args(
+            "ok.safetensors",
+            &[
+                "--pooling",
+                "mean",
+                "--site",
+                "mlp_out",
+                "--chat-template",
+                "chatml",
+                "--max-tokens",
+                "5",
+            ],
+        ),
+    );
+    assert_eq!(code, 0, "{v}");
+    assert!(
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("tronqué")),
+        "{v}"
+    );
+    let (_, meta) = read_direction(&g.dir.path().join("ok.safetensors"));
+    assert_eq!(
+        (
+            meta["pooling"].as_str(),
+            meta["site"].as_str(),
+            meta["chat_template"].as_str()
+        ),
+        ("mean", "mlp_out", "chatml")
+    );
+}
+
+#[derive(Default)]
+struct Recorder(Vec<ProgressEvent>);
+
+impl ProgressSink for Recorder {
+    fn event(&mut self, event: ProgressEvent) {
+        self.0.push(event);
+    }
+}
+
+#[test]
+fn extract_progress_one_event_per_prompt() {
+    let f = extract_fixture("F32", false);
+    let args = ExtractArgs {
+        model: f.model.clone(),
+        pos_prompts: f.pos.clone(),
+        neg_prompts: f.neg.clone(),
+        layer: 2,
+        out: f.dir.path().join("p.safetensors"),
+        pooling: ex::Pooling::Last,
+        site: ex::Site::ResidPost,
+        chat_template: ex::ChatTemplate::NoTemplate,
+        max_tokens: 512,
+        dtype: ex::DTypeChoice::F32,
+        overwrite: false,
+    };
+    let mut recorder = Recorder::default();
+    let outcome =
+        weight_surgeon::app::core_extract(&args, &deps(), &Ui::off(), &mut recorder).unwrap();
+    assert!(outcome.is_ok());
+    let prompts: Vec<(ex::PromptSet, usize)> = recorder
+        .0
+        .iter()
+        .filter_map(|e| match e {
+            ProgressEvent::ExtractPrompt { set, done, .. } => Some((*set, *done)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prompts.len(), 12);
+    let expected: Vec<(ex::PromptSet, usize)> = (1..=6)
+        .map(|d| (ex::PromptSet::Pos, d))
+        .chain((1..=6).map(|d| (ex::PromptSet::Neg, d)))
+        .collect();
+    assert_eq!(prompts, expected);
+    assert!(matches!(
+        recorder.0.first(),
+        Some(ProgressEvent::ExtractStart {
+            n_pos: 6,
+            n_neg: 6,
+            ..
+        })
+    ));
+    assert!(recorder.0.contains(&ProgressEvent::ExtractLoading {
+        done: 37,
+        total: 37
+    }));
+    assert_eq!(recorder.0.last(), Some(&ProgressEvent::ExtractWriting));
+}
+
+#[test]
+fn extract_human_ui_golden_and_json_without_ui_bytes() {
+    let f = extract_fixture("F32", false);
+    let (_, json_out, _) = run_args_raw(
+        &deps(),
+        &["--json".to_owned()]
+            .into_iter()
+            .chain(f.args("j.safetensors", &[]))
+            .collect::<Vec<_>>(),
+    );
+    let report: Value = serde_json::from_str(&json_out).unwrap();
+    let stats = &report["data"]["stats"];
+
+    let (code, colored, err) = run_args_raw(
+        &ui_deps(ColorMode::TrueColor, false),
+        &f.args("h.safetensors", &[]),
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(colored.contains("\x1b[38;2;65;105;225m[EXTRACT]"));
+    assert!(!err.contains('\r'), "no carriage return off a TTY");
+    let width = Ui::new(ColorMode::Plain).width();
+    let d_prime = stats["d_prime"]
+        .as_f64()
+        .map_or("∞".to_owned(), |d| format!("{d:.2}"));
+    let expected = [
+        format!(
+            "[EXTRACT]  Qwen2 · couche 2 · resid_post · pooling last  {}",
+            weight_surgeon::ui::truncate_middle(s(&f.model), width)
+        ),
+        "[LOAD]     poids chargés 37/37 tenseurs · f32 · 34.9 KiB".to_owned(),
+        "[FORWARD]  pos 6/6 · neg 6/6".to_owned(),
+        format!(
+            "[VERDICT]  d′ {d_prime} · accuracy {:.0}% · ‖Δ‖ {:.3}",
+            stats["threshold_accuracy"].as_f64().unwrap() * 100.0,
+            stats["raw_diff_norm"].as_f64().unwrap()
+        ),
+        format!(
+            "[WRITE]    {}",
+            weight_surgeon::ui::truncate_middle(s(&f.dir.path().join("h.safetensors")), width)
+        ),
+    ]
+    .into_iter()
+    .chain(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| format!("  ! {}", w.as_str().unwrap())),
+    )
+    .collect::<Vec<_>>()
+    .join("\n")
+        + "\n";
+    assert_eq!(strip_ansi(&colored), expected);
+
+    let (code, tty_out, tty_err) = run_args_raw(
+        &ui_deps(ColorMode::TrueColor, true),
+        &f.args("t.safetensors", &[]),
+    );
+    assert_eq!(code, 0);
+    assert!(
+        tty_err.contains('\r') && strip_ansi(&tty_err).contains("[FORWARD]"),
+        "in-place bar on a TTY"
+    );
+    assert!(strip_ansi(&tty_out).contains("[FORWARD]  pos 6/6 · neg 6/6"));
+
+    let (code, out, err) = run_args_raw(
+        &ui_deps(ColorMode::TrueColor, true),
+        &["--json".to_owned()]
+            .into_iter()
+            .chain(f.args("k.safetensors", &[]))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(code, 0);
+    assert!(err.is_empty(), "no ui byte on stderr under --json");
+    for forbidden in [
+        "\x1b",
+        "█",
+        "[EXTRACT]",
+        "[LOAD]",
+        "[FORWARD]",
+        "[VERDICT]",
+        "[WRITE]",
+        "\r",
+    ] {
+        assert!(!out.contains(forbidden), "{forbidden:?}");
+    }
+    assert_eq!(out.matches('\n').count(), 1);
+}
+
+#[test]
+fn mcp_extract_tool_end_to_end() {
+    let f = extract_fixture("F32", false);
+    let cfg = mcp_cfg(f.dir.path());
+    let prompts = |words: &[&str]| -> Vec<String> {
+        (0..6)
+            .map(|i| format!("le {} est {}", words[i], words[i + 3]))
+            .collect()
+    };
+    let args = |out: &str| json!({"model": "qwen2-mini", "pos_prompts": prompts(&POS_WORDS), "neg_prompts": prompts(&NEG_WORDS), "layer": 2, "out": out});
+    let outside = tempfile::tempdir().unwrap();
+    let with_token = rpc(
+        json!(2),
+        "tools/call",
+        json!({"name": "surgeon_extract", "arguments": args("m.safetensors"), "_meta": {"progressToken": "x"}}),
+    );
+    let responses = session(
+        &deps(),
+        &cfg,
+        &[
+            init("2025-06-18"),
+            rpc(json!(1), "tools/list", json!({})),
+            with_token,
+            call(3, "surgeon_extract", args("n.safetensors")),
+            call(
+                4,
+                "surgeon_extract",
+                args(s(&outside.path().join("o.safetensors"))),
+            ),
+            call(
+                5,
+                "surgeon_extract",
+                json!({"model": "qwen2-mini", "pos_prompts": ["a"], "pos_prompts_file": "pos.json", "neg_prompts": ["b"], "out": "z.safetensors"}),
+            ),
+        ],
+    );
+    assert_eq!(
+        reply(&responses, json!(1))["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    let (is_error, env) = envelope(&responses, 2);
+    assert!(!is_error, "{env}");
+    assert_eq!(env["command"], "extract");
+    assert_eq!(env["data"]["hidden_size"], HIDDEN);
+    assert!(f.dir.path().join("m.safetensors").exists());
+    let progress: Vec<&Value> = responses
+        .iter()
+        .filter(|r| r["method"] == "notifications/progress")
+        .collect();
+    assert_eq!(
+        progress.len(),
+        1 + 6 + 6,
+        "weights, then one per prompt; none for the call without token"
+    );
+    for (i, p) in progress.iter().enumerate() {
+        assert_eq!(p["params"]["progress"], i + 1);
+        assert_eq!(p["params"]["total"], 13);
+    }
+    assert!(!envelope(&responses, 3).0);
+    assert_eq!(
+        envelope(&responses, 4).1["error"]["kind"],
+        "path_not_allowed"
+    );
+    assert_eq!(
+        envelope(&responses, 5).1["error"]["kind"],
+        "invalid_arguments"
+    );
+
+    let read_only = McpConfig::new(&[f.dir.path().to_path_buf()], true, false).unwrap();
+    let responses = session(
+        &deps(),
+        &read_only,
+        &[
+            init("2025-06-18"),
+            call(1, "surgeon_extract", args("r.safetensors")),
+        ],
+    );
+    assert_eq!(envelope(&responses, 1).1["error"]["kind"], "read_only");
+    assert!(!f.dir.path().join("r.safetensors").exists());
+}
+
+#[test]
+fn mcp_binary_extract_speaks_only_json_rpc() {
+    let f = extract_fixture("BF16", false);
+    let mut child = binary()
+        .args(["mcp", "--allow-dir", s(f.dir.path())])
+        .env("CLICOLOR_FORCE", "1")
+        .env("COLORTERM", "truecolor")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let input = [
+        init("2025-06-18"),
+        rpc(json!(1), "tools/list", json!({})),
+        call(2, "surgeon_extract", json!({"model": "qwen2-mini", "pos_prompts_file": "pos.json", "neg_prompts_file": "neg.json", "layer": 1, "out": "bin.safetensors"})),
+    ]
+    .join("\n")
+        + "\n";
+    {
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+    }
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            let _ = child.kill();
+            panic!("surgeon mcp did not exit within 60 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let (mut out, mut err) = (String::new(), String::new());
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert_eq!(status.code(), Some(0), "{err}");
+    assert!(!out.contains('\x1b') && !err.contains('\x1b'));
+    let responses: Vec<Value> = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+        .collect();
+    assert_eq!(
+        reply(&responses, json!(1))["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    assert!(!envelope(&responses, 2).0, "{out}");
+    assert!(f.dir.path().join("bin.safetensors").exists());
+}
+
+/// The extraction module never prints and never uses `unsafe` (the mmap stays in engine).
+#[test]
+fn extract_module_has_no_print_and_no_unsafe() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/extract");
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(!source.contains("unsafe"), "{}: unsafe", path.display());
+        let code = source.split("#[cfg(test)]").next().unwrap();
+        for (n, line) in code.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for banned in ["println!(", "print!(", "eprintln!(", "eprint!("] {
+                assert!(
+                    !line.contains(banned),
+                    "{}:{}: {banned}",
+                    path.display(),
+                    n + 1
+                );
+            }
+        }
+    }
+}
+
+/// Writes the mini model and prompt files to `$SURGEON_FAKE_QWEN2_DIR` for a manual run
+/// of the release binary: `cargo test --test integration make_fake_qwen2 -- --ignored`.
+#[test]
+#[ignore]
+fn make_fake_qwen2_on_disk() {
+    let dir = PathBuf::from(std::env::var("SURGEON_FAKE_QWEN2_DIR").unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    write_fake_qwen2_dir(&dir, "F32", false);
+    write_prompt_files(&dir);
 }

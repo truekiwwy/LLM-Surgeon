@@ -13,11 +13,12 @@ use serde_json::{json, Map, Value};
 
 use super::server::McpConfig;
 use crate::app::{
-    core_apply, core_check, core_eval, core_inspect, envelope_of, exit, AppDeps, ApplyRequest,
-    CoreResult, Outcome, ProgressSink,
+    core_apply, core_check, core_eval, core_extract_request, core_inspect, envelope_of, exit,
+    AppDeps, ApplyRequest, CoreResult, Outcome, ProgressSink,
 };
 use crate::cli::{CheckArgs, EvalArgs, InspectArgs, SchemaKind};
 use crate::eval::{load_prompts, EvalPrompt};
+use crate::extract::{self, ChatTemplate, DTypeChoice, ExtractRequest, Pooling, Site};
 use crate::patch::{LayerSelection, LayersField, PatchFile, Projection};
 use crate::ui::Ui;
 
@@ -25,7 +26,14 @@ pub const TOOL_CHECK: &str = "surgeon_check";
 pub const TOOL_INSPECT: &str = "surgeon_inspect";
 pub const TOOL_APPLY: &str = "surgeon_apply";
 pub const TOOL_EVAL: &str = "surgeon_eval";
-const TOOLS: [&str; 4] = [TOOL_CHECK, TOOL_INSPECT, TOOL_APPLY, TOOL_EVAL];
+pub const TOOL_EXTRACT: &str = "surgeon_extract";
+const TOOLS: [&str; 5] = [
+    TOOL_CHECK,
+    TOOL_INSPECT,
+    TOOL_APPLY,
+    TOOL_EVAL,
+    TOOL_EXTRACT,
+];
 
 const DEFAULT_MAX_TENSORS: u32 = 500;
 const DEFAULT_MAX_NEW_TOKENS: u32 = 256;
@@ -138,6 +146,64 @@ fn default_max_new_tokens() -> u32 {
     DEFAULT_MAX_NEW_TOKENS
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(
+    description = "Arguments de surgeon_extract : pour chaque ensemble, fournir exactement un de *_prompts ou *_prompts_file."
+)]
+pub struct ExtractToolArgs {
+    #[schemars(
+        description = "Dossier du modèle Qwen2/Qwen2.5 (config.json, tokenizer.json, *.safetensors), dans un dossier autorisé."
+    )]
+    pub model: PathBuf,
+    #[serde(default)]
+    #[schemars(description = "Prompts positifs : ceux qui présentent le comportement à isoler.")]
+    pub pos_prompts: Option<Vec<String>>,
+    #[serde(default)]
+    #[schemars(description = "Fichier de prompts positifs (tableau JSON, JSONL ou texte).")]
+    pub pos_prompts_file: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(description = "Prompts négatifs ou neutres.")]
+    pub neg_prompts: Option<Vec<String>>,
+    #[serde(default)]
+    #[schemars(description = "Fichier de prompts négatifs (tableau JSON, JSONL ou texte).")]
+    pub neg_prompts_file: Option<PathBuf>,
+    #[serde(default = "default_extract_layer")]
+    #[schemars(
+        description = "Couche (base 0), défaut 20 ; doit être < num_hidden_layers du modèle."
+    )]
+    pub layer: u32,
+    #[schemars(
+        description = "Fichier .safetensors produit (un tenseur 1D F32 `direction`), dans un dossier autorisé."
+    )]
+    pub out: PathBuf,
+    #[serde(default)]
+    pub pooling: Pooling,
+    #[serde(default)]
+    pub site: Site,
+    #[serde(default)]
+    pub chat_template: ChatTemplate,
+    #[serde(default = "default_extract_max_tokens")]
+    #[schemars(
+        range(min = 1),
+        description = "Tokens gardés par prompt (troncature à droite), défaut 512."
+    )]
+    pub max_tokens: u32,
+    #[serde(default)]
+    pub dtype: DTypeChoice,
+    #[serde(default)]
+    #[schemars(description = "Remplace un fichier out existant (sinon erreur).")]
+    pub overwrite: bool,
+}
+
+fn default_extract_layer() -> u32 {
+    20
+}
+
+fn default_extract_max_tokens() -> u32 {
+    512
+}
+
 /// Draft-07 with every subschema inlined: many MCP clients mishandle `$ref`.
 fn schema_value<T: JsonSchema>() -> Value {
     let mut settings = SchemaSettings::draft07();
@@ -207,6 +273,13 @@ pub fn tool_definitions() -> Value {
             schema_value::<EvalToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false }),
         ),
+        tool(
+            TOOL_EXTRACT,
+            "Extraction de direction",
+            "Calcule un vecteur de direction (steering) v = normalize(mean(pos) - mean(neg)) à partir des activations d'une couche d'un modèle Qwen2, en Rust pur sur CPU, et l'écrit dans un .safetensors (tenseur `direction`) à utiliser comme vector_file d'un patch surgeon_apply. Renvoie des diagnostics de séparation (d′, accuracy).",
+            schema_value::<ExtractToolArgs>(),
+            json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
+        ),
     ]))
 }
 
@@ -238,7 +311,8 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         TOOL_CHECK => ("check", check(arguments, ctx)),
         TOOL_INSPECT => ("inspect", inspect(arguments, ctx)),
         TOOL_APPLY => ("apply", apply(arguments, ctx)),
-        _ => ("eval", eval(arguments, ctx)),
+        TOOL_EVAL => ("eval", eval(arguments, ctx)),
+        _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);
     if !outcome.is_ok() && ctx.deps.interrupted.load(Ordering::SeqCst) {
@@ -395,6 +469,71 @@ fn eval(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         allow_degraded: args.allow_degraded,
     };
     core_eval(&core_args, prompts, ctx.deps, &Ui::off(), ctx.sink)
+}
+
+fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
+    if ctx.cfg.read_only {
+        return Err(invalid(
+            "read_only",
+            "serveur lancé avec --read-only : surgeon_extract écrit un fichier, il est désactivé",
+        ));
+    }
+    let args: ExtractToolArgs = parse(arguments)?;
+    let root = ctx.cfg.sandbox.base().to_path_buf();
+    let model_dir = sandboxed(ctx, "model", &args.model, &root)?;
+    let pos_prompts = prompt_set(
+        ctx,
+        "pos",
+        args.pos_prompts,
+        args.pos_prompts_file.as_deref(),
+        &root,
+    )?;
+    let neg_prompts = prompt_set(
+        ctx,
+        "neg",
+        args.neg_prompts,
+        args.neg_prompts_file.as_deref(),
+        &root,
+    )?;
+    let out = sandboxed(ctx, "out", &args.out, &root)?;
+    let request = ExtractRequest {
+        model_dir,
+        pos_prompts,
+        neg_prompts,
+        layer: args.layer as usize,
+        out,
+        pooling: args.pooling,
+        site: args.site,
+        chat_template: args.chat_template,
+        max_tokens: args.max_tokens as usize,
+        dtype: args.dtype,
+        overwrite: args.overwrite,
+    };
+    core_extract_request(&request, ctx.deps, &Ui::off(), ctx.sink)
+}
+
+/// Exactly one of the inline list or the (sandboxed) file.
+fn prompt_set(
+    ctx: &ToolContext,
+    set: &str,
+    inline: Option<Vec<String>>,
+    file: Option<&Path>,
+    root: &Path,
+) -> Result<Vec<String>, Outcome> {
+    let texts = match (inline, file) {
+        (Some(list), None) => extract::check_texts(list),
+        (None, Some(path)) => {
+            let path = sandboxed(ctx, &format!("{set}_prompts_file"), path, root)?;
+            extract::load_prompt_texts(&path)
+        }
+        _ => {
+            return Err(invalid(
+                "invalid_arguments",
+                format!("fournir exactement un de {set}_prompts ou {set}_prompts_file"),
+            ))
+        }
+    };
+    texts.map_err(|m| invalid("invalid_input", format!("prompts {set} : {m}")))
 }
 
 /// Same rules as `load_prompts` for inline prompts: at least one, missing ids become

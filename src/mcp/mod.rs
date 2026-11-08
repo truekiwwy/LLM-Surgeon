@@ -25,7 +25,8 @@
 //!                       -> emit -> envelope_of (--json) | Outcome.human
 //! MCP: main -> run_with -> run_stdio -> serve -> tools::call
 //!                       -> core_check / core_inspect (Ui::off)
-//!                       -> core_apply / core_eval (McpProgress) -> envelope_of
+//!                       -> core_apply / core_eval / core_extract_request (McpProgress)
+//!                       -> envelope_of
 //! ```
 //!
 //! stdout audit: in `mcp` mode `run_with` hands `out` to `serve`, which moves it into the
@@ -49,7 +50,8 @@ pub use sandbox::{Sandbox, SandboxError};
 pub use server::{serve, McpConfig, MAX_LINE_BYTES};
 pub use tools::{
     patch_schema, render_schema, tool_definitions, ApplyToolArgs, CheckToolArgs, EvalToolArgs,
-    InspectToolArgs, TOOL_APPLY, TOOL_CHECK, TOOL_EVAL, TOOL_INSPECT,
+    ExtractToolArgs, InspectToolArgs, TOOL_APPLY, TOOL_CHECK, TOOL_EVAL, TOOL_EXTRACT,
+    TOOL_INSPECT,
 };
 
 use crate::app::{exit, AppDeps};
