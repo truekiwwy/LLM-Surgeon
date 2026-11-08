@@ -71,8 +71,8 @@ pub use stats::{
     separation, separation_with_projections, Separation, SeparationStats, MIN_DIFF_NORM,
 };
 pub use weights::{
-    check_tensors, load_tensors, required_tensors, RawTensor, SafetensorsDir, TensorSource,
-    TensorTotals,
+    check_tensors, load_tensors, required_tensors, required_tensors_full, RawTensor,
+    SafetensorsDir, TensorSource, TensorTotals,
 };
 
 use crate::hardware::{BudgetPolicy, HardwareProbe};
@@ -210,7 +210,7 @@ fn gib(bytes: u64) -> String {
 }
 
 /// CPU only: RAM decides. `auto` prefers f32 and falls back to bf16.
-fn choose_dtype(
+pub(crate) fn choose_dtype(
     choice: DTypeChoice,
     plan: MemoryPlan,
     probe: &dyn HardwareProbe,
@@ -243,7 +243,7 @@ fn choose_dtype(
     }
 }
 
-fn dtype_name(dtype: DType) -> &'static str {
+pub(crate) fn dtype_name(dtype: DType) -> &'static str {
     match dtype {
         DType::BF16 => "bf16",
         _ => "f32",

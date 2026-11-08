@@ -19,6 +19,9 @@
 //! LlamaCliGenerator::generate -> command (args) -> stream_child -> Command::spawn (no shell)
 //!          -> reader thread -> sync_channel -> Utf8Decoder::push -> on_chunk
 //!          ; Break | timeout | read error -> ChildGuard (kill + wait) ; exit != 0 -> CommandFailed
+//! SystemCommandRunner::run_streaming -> spawn (no shell) -> 2 reader threads (LineSplitter)
+//!          -> sync_channel -> on_line ; Break | cancel flag | timeout -> ChildGuard kill + wait
+//! ensure_gguf -> .gguf as is | export_gguf (f16, no quant) -> GgufModel (deleted on drop)
 //! export_if_healthy -> export_gguf (Healthy, or Degraded + allow_degraded)
 //!          -> validate (quant whitelist, outtype, dirs, converter, find_binary(quantize))
 //!          -> CommandRunner::run(python, convert) -> CommandRunner::run(llama-quantize)
@@ -44,11 +47,13 @@ mod loop_detector;
 mod prompts;
 mod runner;
 
-pub use command::{CommandOutput, CommandRunner, SystemCommandRunner};
+pub(crate) use command::last_lines;
+pub use command::{CommandOutput, CommandRunner, StreamControl, SystemCommandRunner};
 pub use error::{EvalError, Result};
-pub use generator::{locate_binary, GenerationOutcome, LlamaCliGenerator, TextGenerator};
+pub use generator::{locate_binary, Decoding, GenerationOutcome, LlamaCliGenerator, TextGenerator};
 pub use gguf::{
-    export_gguf, export_if_healthy, GgufExportConfig, GgufExportReport, StepReport, ALLOWED_QUANTS,
+    ensure_gguf, export_gguf, export_if_healthy, is_gguf, model_dir, GgufExportConfig,
+    GgufExportReport, GgufModel, StepReport, ALLOWED_QUANTS, LLAMA_DIR_REQUIRED,
 };
 pub use loop_detector::{LoopDetector, LoopDetectorConfig, LoopReason, LoopVerdict};
 pub use prompts::{load_prompts, EvalPrompt};

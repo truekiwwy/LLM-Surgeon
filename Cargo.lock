@@ -2509,6 +2509,7 @@ dependencies = [
  "nvml-wrapper",
  "ratatui",
  "rayon",
+ "regex",
  "safetensors",
  "schemars",
  "serde",

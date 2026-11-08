@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -65,6 +66,16 @@ impl ReadOnlyModel {
         // In bounds: parse_index validated every range against this same mapping.
         let bytes = &self.mmap[info.byte_start..info.byte_end];
         Ok(TensorView { info, bytes })
+    }
+
+    /// The header's `__metadata__`, sorted; empty when absent. Re-parsed from the mapping
+    /// (header only) so `ModelIndex` keeps its shape.
+    pub fn metadata(&self) -> BTreeMap<String, String> {
+        safetensors::SafeTensors::read_metadata(&self.mmap)
+            .ok()
+            .and_then(|(_, m)| m.metadata().clone())
+            .map(|m| m.into_iter().collect())
+            .unwrap_or_default()
     }
 }
 

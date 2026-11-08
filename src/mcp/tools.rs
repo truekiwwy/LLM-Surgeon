@@ -13,13 +13,20 @@ use serde_json::{json, Map, Value};
 
 use super::server::McpConfig;
 use crate::app::{
-    core_apply, core_check, core_eval, core_extract_request, core_inspect, envelope_of, exit,
-    AppDeps, ApplyRequest, CoreResult, Outcome, ProgressSink,
+    core_apply, core_bench_dump, core_bench_eval, core_bench_logits, core_bench_ppl, core_check,
+    core_eval, core_extract_request, core_inspect, envelope_of, exit, AppDeps, ApplyRequest,
+    CoreResult, Outcome, ProgressSink,
 };
+use crate::bench;
+use crate::bench::dump::DumpRequest;
+use crate::bench::logits_metrics::LogitsRequest;
+use crate::bench::ppl_runner::{PplBaseline, PplRequest};
+use crate::bench::prompt::Template;
+use crate::bench::score::EvalRequest;
 use crate::cli::{CheckArgs, EvalArgs, InspectArgs, SchemaKind};
 use crate::eval::{load_prompts, EvalPrompt};
 use crate::extract::{self, ChatTemplate, DTypeChoice, ExtractRequest, Pooling, Site};
-use crate::patch::{LayerSelection, LayersField, PatchFile, Projection};
+use crate::patch::{LayerSelection, LayersField, PatchFile, Projection, ValidationIssue};
 use crate::ui::Ui;
 
 pub const TOOL_CHECK: &str = "surgeon_check";
@@ -27,12 +34,14 @@ pub const TOOL_INSPECT: &str = "surgeon_inspect";
 pub const TOOL_APPLY: &str = "surgeon_apply";
 pub const TOOL_EVAL: &str = "surgeon_eval";
 pub const TOOL_EXTRACT: &str = "surgeon_extract";
-const TOOLS: [&str; 5] = [
+pub const TOOL_BENCH: &str = "surgeon_bench";
+const TOOLS: [&str; 6] = [
     TOOL_CHECK,
     TOOL_INSPECT,
     TOOL_APPLY,
     TOOL_EVAL,
     TOOL_EXTRACT,
+    TOOL_BENCH,
 ];
 
 const DEFAULT_MAX_TENSORS: u32 = 500;
@@ -280,6 +289,13 @@ pub fn tool_definitions() -> Value {
             schema_value::<ExtractToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
+        tool(
+            TOOL_BENCH,
+            "Mesure d'une chirurgie",
+            "Mesure l'effet d'une chirurgie, selon mode : dump (logits d'un modèle Qwen2 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH, intervalle de Wilson, comparaison appariée). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision.",
+            schema_value::<BenchToolArgs>(),
+            json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
+        ),
     ]))
 }
 
@@ -312,6 +328,7 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         TOOL_INSPECT => ("inspect", inspect(arguments, ctx)),
         TOOL_APPLY => ("apply", apply(arguments, ctx)),
         TOOL_EVAL => ("eval", eval(arguments, ctx)),
+        TOOL_BENCH => (bench_command(&arguments), bench(arguments, ctx)),
         _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);
@@ -561,4 +578,399 @@ fn normalize_prompts(mut prompts: Vec<EvalPrompt>) -> Result<Vec<EvalPrompt>, Ou
         }
     }
     Ok(prompts)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum BenchMode {
+    /// Compare deux dumps de logits (before, after).
+    Logits,
+    /// Perplexité via llama-perplexity (model, text).
+    Ppl,
+    /// Pass@1 exact match glouton sur un dataset (model, dataset).
+    Eval,
+    /// Écrit les logits d'un modèle Qwen2 sur des prompts (model, prompts, out).
+    Dump,
+}
+
+/// Flat on purpose (no `oneOf` at the top): which fields a mode takes is checked at
+/// runtime, with one issue per offending field.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(
+    description = "Arguments de surgeon_bench : mode, puis les champs de ce mode (logits : before, after ; ppl : model, text ; eval : model, dataset ; dump : model, prompts, out)."
+)]
+pub struct BenchToolArgs {
+    pub mode: BenchMode,
+    #[serde(default)]
+    #[schemars(description = "logits : dump de référence (.safetensors, .npy, .pt/.pth).")]
+    pub before: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(description = "logits : dump comparé, même forme.")]
+    pub after: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(description = "logits : tenseur lu (défaut logits).")]
+    pub tensor: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "logits : taille des ensembles top-k (défaut 5)."
+    )]
+    pub top_k: Option<u32>,
+    #[serde(default)]
+    #[schemars(description = "logits : prompts listés dans worst_prompts (défaut 5).")]
+    pub worst: Option<u32>,
+    #[serde(default)]
+    #[schemars(description = "logits : avertit si la KL moyenne dépasse strictement ce seuil.")]
+    pub warn_kl: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        description = "logits : avertit si la part de top-1 changés (0..1) dépasse strictement ce seuil."
+    )]
+    pub warn_top1_shift: Option<f64>,
+    #[serde(default)]
+    #[schemars(description = "logits, ppl, eval : seuil dépassé => exit_code 9 (isError).")]
+    pub fail_on_warn: Option<bool>,
+    #[serde(default)]
+    #[schemars(
+        description = "ppl, eval : .gguf ou dossier SafeTensors (converti en GGUF temporaire) ; dump : dossier Qwen2."
+    )]
+    pub model: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(description = "ppl : fichier texte évalué.")]
+    pub text: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(description = "ppl, eval : modèle de référence, mesuré en premier.")]
+    pub baseline_model: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "ppl : perplexité de référence connue (exclusif avec baseline_model)."
+    )]
+    pub baseline_ppl: Option<f64>,
+    #[serde(default)]
+    #[schemars(description = "ppl : incertitude ± de baseline_ppl.")]
+    pub baseline_ppl_err: Option<f64>,
+    #[serde(default)]
+    #[schemars(range(min = 1), description = "ppl : contexte -c (défaut 512).")]
+    pub ctx: Option<u32>,
+    #[serde(default)]
+    #[schemars(range(min = 1), description = "ppl : --chunks.")]
+    pub chunks: Option<u32>,
+    #[serde(default)]
+    #[schemars(range(min = 1), description = "ppl : -t.")]
+    pub threads: Option<u32>,
+    #[serde(default)]
+    #[schemars(description = "ppl : couches sur GPU (défaut 0, CPU reproductible).")]
+    pub n_gpu_layers: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "ppl, eval : racine de llama.cpp ; défaut : $LLAMA_CPP_DIR du serveur."
+    )]
+    pub llama_cpp_dir: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "ppl : avertit si le delta arrondi dépasse strictement ce seuil (défaut 0.2)."
+    )]
+    pub warn_delta: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "ppl : délai par run ; eval : délai par question (secondes)."
+    )]
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    #[schemars(
+        description = "eval : tableau JSON (ou JSONL) de {question|problem, answer|solution, id?}."
+    )]
+    pub dataset: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "eval : N premières entrées dans l'ordre du fichier (défaut 50)."
+    )]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "eval : tokens générés au plus par question (défaut 512)."
+    )]
+    pub max_new_tokens: Option<u32>,
+    #[serde(default)]
+    #[schemars(description = "eval : gabarit contenant {question} (texte, jamais un chemin).")]
+    pub prompt_template: Option<String>,
+    #[serde(default)]
+    pub format: Option<crate::bench::dataset::DatasetFormat>,
+    #[serde(default)]
+    #[schemars(description = "eval : avertit si l'exactitude (0..1) est strictement inférieure.")]
+    pub min_accuracy: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        description = "dump : fichier de prompts (tableau JSON de chaînes ou de {text}, JSONL ou texte)."
+    )]
+    pub prompts: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(description = "dump : .safetensors écrit (logits, prompt_offsets).")]
+    pub out: Option<PathBuf>,
+    #[serde(default)]
+    pub dtype: Option<DTypeChoice>,
+    #[serde(default)]
+    pub out_dtype: Option<crate::bench::dump::OutDtype>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "dump : troncature par prompt (défaut 256)."
+    )]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "dump : plafond de positions, vérifié avant calcul (défaut 4096)."
+    )]
+    pub max_total_positions: Option<u32>,
+    #[serde(default)]
+    #[schemars(description = "dump : remplace out s'il existe.")]
+    pub overwrite: Option<bool>,
+}
+
+/// (mode, required fields, optional fields).
+const BENCH_FIELDS: [(&str, &[&str], &[&str]); 4] = [
+    (
+        "logits",
+        &["before", "after"],
+        &[
+            "tensor",
+            "top_k",
+            "worst",
+            "warn_kl",
+            "warn_top1_shift",
+            "fail_on_warn",
+        ],
+    ),
+    (
+        "ppl",
+        &["model", "text"],
+        &[
+            "baseline_model",
+            "baseline_ppl",
+            "baseline_ppl_err",
+            "ctx",
+            "chunks",
+            "threads",
+            "n_gpu_layers",
+            "llama_cpp_dir",
+            "warn_delta",
+            "timeout_secs",
+            "fail_on_warn",
+        ],
+    ),
+    (
+        "eval",
+        &["model", "dataset"],
+        &[
+            "baseline_model",
+            "limit",
+            "max_new_tokens",
+            "prompt_template",
+            "format",
+            "llama_cpp_dir",
+            "timeout_secs",
+            "min_accuracy",
+            "fail_on_warn",
+        ],
+    ),
+    (
+        "dump",
+        &["model", "prompts", "out"],
+        &[
+            "dtype",
+            "out_dtype",
+            "max_tokens",
+            "max_total_positions",
+            "overwrite",
+        ],
+    ),
+];
+
+fn bench_command(arguments: &Value) -> &'static str {
+    match arguments.get("mode").and_then(Value::as_str) {
+        Some("logits") => "bench logits",
+        Some("ppl") => "bench ppl",
+        Some("eval") => "bench eval",
+        Some("dump") => "bench dump",
+        _ => "bench",
+    }
+}
+
+/// `-32602` for surgeon_bench: a property its schema does not declare. (The five older
+/// tools report it as an `invalid_arguments` tool error, kept for compatibility.)
+pub(crate) fn unknown_property(name: &str, arguments: &Value) -> Option<String> {
+    if name != TOOL_BENCH {
+        return None;
+    }
+    let schema = schema_value::<BenchToolArgs>();
+    let known = schema.get("properties")?.as_object()?;
+    let unknown: Vec<&String> = arguments
+        .as_object()?
+        .keys()
+        .filter(|k| !known.contains_key(*k))
+        .collect();
+    (!unknown.is_empty()).then(|| format!("{TOOL_BENCH} : propriété(s) inconnue(s) {unknown:?}"))
+}
+
+/// One issue per missing field and per field the mode does not take.
+fn bench_issues(mode: &str, arguments: &Map<String, Value>) -> Vec<ValidationIssue> {
+    let Some((_, required, optional)) = BENCH_FIELDS.iter().find(|(m, _, _)| *m == mode) else {
+        return Vec::new();
+    };
+    let present = |k: &str| arguments.get(k).is_some_and(|v| !v.is_null());
+    let issue = |path: &str, message: String| ValidationIssue {
+        path: path.to_owned(),
+        message,
+    };
+    let mut issues: Vec<ValidationIssue> = required
+        .iter()
+        .filter(|k| !present(k))
+        .map(|k| issue(k, format!("requis en mode {mode}")))
+        .collect();
+    issues.extend(
+        arguments
+            .keys()
+            .filter(|k| *k != "mode" && present(k))
+            .filter(|k| !required.contains(&k.as_str()) && !optional.contains(&k.as_str()))
+            .map(|k| issue(k, format!("non utilisé en mode {mode}"))),
+    );
+    if present("baseline_model") && present("baseline_ppl") {
+        issues.push(issue("baseline_ppl", "exclusif avec baseline_model".into()));
+    }
+    if present("baseline_ppl_err") && !present("baseline_ppl") {
+        issues.push(issue("baseline_ppl_err", "requiert baseline_ppl".into()));
+    }
+    issues
+}
+
+fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
+    let args: BenchToolArgs = parse(arguments.clone())?;
+    if ctx.cfg.read_only && args.mode == BenchMode::Dump {
+        return Err(invalid(
+            "read_only",
+            "serveur lancé avec --read-only : surgeon_bench mode dump écrit un fichier, il est désactivé",
+        ));
+    }
+    let mode = bench_command(&arguments).trim_start_matches("bench ");
+    let issues = arguments
+        .as_object()
+        .map(|o| bench_issues(mode, o))
+        .unwrap_or_default();
+    if !issues.is_empty() {
+        let mut failure = invalid(
+            "invalid_arguments",
+            format!("champs incohérents avec le mode {mode}"),
+        );
+        if let Some(body) = failure.error.as_mut() {
+            body.issues = issues;
+        }
+        return Err(failure);
+    }
+    let root = ctx.cfg.sandbox.base().to_path_buf();
+    let path = |ctx: &ToolContext, name: &str, value: &Option<PathBuf>| {
+        let value = value
+            .as_ref()
+            .ok_or_else(|| invalid("invalid_arguments", format!("{name} requis")))?;
+        sandboxed(ctx, name, value, &root)
+    };
+    let optional_path = |ctx: &ToolContext, name: &str, value: &Option<PathBuf>| {
+        value
+            .as_ref()
+            .map(|v| sandboxed(ctx, name, v, &root))
+            .transpose()
+    };
+    // Same trust rule as surgeon_eval: a tool-provided directory is sandboxed, the
+    // operator's $LLAMA_CPP_DIR is not.
+    let llama_cpp_dir = match optional_path(ctx, "llama_cpp_dir", &args.llama_cpp_dir)? {
+        Some(dir) => Some(dir),
+        None => std::env::var_os("LLAMA_CPP_DIR").map(PathBuf::from),
+    };
+    let timeout = args.timeout_secs.map(std::time::Duration::from_secs);
+    let fail_on_warn = args.fail_on_warn.unwrap_or(false);
+    let ui = Ui::off();
+    match args.mode {
+        BenchMode::Logits => {
+            let req = LogitsRequest {
+                before: path(ctx, "before", &args.before)?,
+                after: path(ctx, "after", &args.after)?,
+                tensor: args.tensor,
+                top_k: args.top_k.map_or(bench::DEFAULT_TOP_K, |k| k as usize),
+                worst: args.worst.map_or(bench::DEFAULT_WORST, |w| w as usize),
+                warn_kl: args.warn_kl,
+                warn_top1_shift: args.warn_top1_shift,
+            };
+            core_bench_logits(&req, fail_on_warn, ctx.deps, &ui, ctx.sink)
+        }
+        BenchMode::Ppl => {
+            let baseline_model = optional_path(ctx, "baseline_model", &args.baseline_model)?;
+            let baseline = match (baseline_model, args.baseline_ppl) {
+                (Some(model), _) => Some(PplBaseline::Model(model)),
+                (None, Some(ppl)) => Some(PplBaseline::Value {
+                    ppl,
+                    err: args.baseline_ppl_err,
+                }),
+                (None, None) => None,
+            };
+            let req = PplRequest {
+                model: path(ctx, "model", &args.model)?,
+                text: path(ctx, "text", &args.text)?,
+                baseline,
+                ctx: args.ctx.unwrap_or(bench::DEFAULT_CTX),
+                chunks: args.chunks,
+                threads: args.threads,
+                n_gpu_layers: args.n_gpu_layers.unwrap_or(0),
+                llama_cpp_dir,
+                warn_delta: args.warn_delta.unwrap_or(bench::DEFAULT_WARN_DELTA),
+                timeout,
+                // Never from an agent: no free-form argument reaches llama.cpp over MCP.
+                llama_args: Vec::new(),
+            };
+            core_bench_ppl(&req, fail_on_warn, ctx.deps, &ui, ctx.sink)
+        }
+        BenchMode::Eval => {
+            let template = match &args.prompt_template {
+                Some(text) => Template::new(text),
+                None => Ok(Template::default()),
+            }
+            .map_err(|e| invalid("invalid_arguments", e))?;
+            let req = EvalRequest {
+                model: path(ctx, "model", &args.model)?,
+                dataset: path(ctx, "dataset", &args.dataset)?,
+                baseline_model: optional_path(ctx, "baseline_model", &args.baseline_model)?,
+                limit: args.limit.map_or(bench::DEFAULT_LIMIT, |l| l as usize),
+                max_new_tokens: args.max_new_tokens.unwrap_or(bench::DEFAULT_MAX_NEW_TOKENS),
+                template,
+                format: args.format.unwrap_or_default(),
+                llama_cpp_dir,
+                timeout,
+                min_accuracy: args.min_accuracy,
+            };
+            core_bench_eval(&req, fail_on_warn, ctx.deps, &ui, ctx.sink)
+        }
+        BenchMode::Dump => {
+            let prompts_file = path(ctx, "prompts", &args.prompts)?;
+            let prompts = extract::load_prompt_texts(&prompts_file)
+                .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?;
+            let req = DumpRequest {
+                model: path(ctx, "model", &args.model)?,
+                prompts,
+                out: path(ctx, "out", &args.out)?,
+                dtype: args.dtype.unwrap_or_default(),
+                out_dtype: args.out_dtype.unwrap_or_default(),
+                max_tokens: args
+                    .max_tokens
+                    .map_or(bench::DEFAULT_DUMP_MAX_TOKENS, |m| m as usize),
+                max_total_positions: args
+                    .max_total_positions
+                    .map_or(bench::DEFAULT_MAX_TOTAL_POSITIONS, |m| m as usize),
+                overwrite: args.overwrite.unwrap_or(false),
+            };
+            core_bench_dump(&req, ctx.deps, &ui, ctx.sink)
+        }
+    }
 }

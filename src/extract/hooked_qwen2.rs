@@ -207,9 +207,16 @@ impl DecoderLayer {
     }
 }
 
+/// Final norm and output projection, only loaded by [`HookedQwen2::from_tensors_full`].
+struct LmHead {
+    norm: RmsNorm,
+    lm_head: Linear,
+}
+
 pub struct HookedQwen2 {
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
+    head: Option<LmHead>,
     head_dim: usize,
     rope_theta: f64,
     sliding_window: usize,
@@ -241,22 +248,61 @@ impl HookedQwen2 {
         dtype: DType,
         device: &Device,
     ) -> Result<Self> {
+        Self::build(tensors, cfg, up_to_layer, dtype, device, false)
+    }
+
+    /// Every layer, the final norm and `lm_head` (the embeddings when
+    /// `tie_word_embeddings`), for [`Self::forward_logits`]. Tensors as listed by
+    /// `weights::required_tensors_full`.
+    pub fn from_tensors_full(
+        tensors: HashMap<String, Tensor>,
+        cfg: &Qwen2Config,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self> {
+        Self::build(tensors, cfg, cfg.num_hidden_layers - 1, dtype, device, true)
+    }
+
+    fn build(
+        tensors: HashMap<String, Tensor>,
+        cfg: &Qwen2Config,
+        up_to_layer: usize,
+        dtype: DType,
+        device: &Device,
+        with_head: bool,
+    ) -> Result<Self> {
         if up_to_layer >= cfg.num_hidden_layers {
             return Err(ExtractError::InvalidArgument(format!(
                 "couche {up_to_layer} hors bornes : num_hidden_layers = {}",
                 cfg.num_hidden_layers
             )));
         }
-        let vb = VarBuilder::from_tensors(tensors, dtype, device).pp("model");
+        let root = VarBuilder::from_tensors(tensors, dtype, device);
+        let vb = root.pp("model");
         let embed_tokens =
             candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))?;
         let vb_l = vb.pp("layers");
         let layers = (0..=up_to_layer)
             .map(|i| DecoderLayer::new(cfg, vb_l.pp(i)))
             .collect::<candle_core::Result<Vec<_>>>()?;
+        let head = match with_head {
+            false => None,
+            true => Some(LmHead {
+                norm: candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm"))?,
+                lm_head: match cfg.tie_word_embeddings {
+                    true => Linear::new(embed_tokens.embeddings().clone(), None),
+                    false => candle_nn::linear_no_bias(
+                        cfg.hidden_size,
+                        cfg.vocab_size,
+                        root.pp("lm_head"),
+                    )?,
+                },
+            }),
+        };
         Ok(Self {
             embed_tokens,
             layers,
+            head,
             head_dim: cfg.head_dim(),
             rope_theta: cfg.rope_theta,
             sliding_window: cfg.sliding_window(),
@@ -337,6 +383,17 @@ impl HookedQwen2 {
                 mlp_last.ok_or_else(|| ExtractError::Compute("couche cible absente".into()))
             }
         }
+    }
+
+    /// `[seq, vocab]` logits in f32 for a batch of one (teacher forcing on the prompt):
+    /// every layer, final norm, `lm_head`. Needs [`Self::from_tensors_full`].
+    pub fn forward_logits(&self, input_ids: &Tensor) -> Result<Tensor> {
+        let head = self.head.as_ref().ok_or_else(|| {
+            ExtractError::Compute("modèle chargé sans norme finale ni lm_head".into())
+        })?;
+        let hidden = self.run(input_ids, |_, _, _| {})?;
+        let logits = hidden.apply(&head.norm)?.apply(&head.lm_head)?;
+        Ok(logits.squeeze(0)?.to_dtype(DType::F32)?)
     }
 
     pub fn dtype(&self) -> DType {
@@ -515,6 +572,42 @@ mod tests {
                 .collect();
             assert_eq!(a, b, "layer {layer}");
         }
+    }
+
+    #[test]
+    fn forward_logits_matches_the_reference_at_every_position() {
+        for (kv, tied) in [(2, false), (1, true)] {
+            let mut c = cfg(kv);
+            c.tie_word_embeddings = tied;
+            let mut w = weights(&c, 21 + kv as u64);
+            if tied {
+                w.remove("lm_head.weight");
+            }
+            let input = ids(&[3, 17, 42, 5, 9, 60, 1]);
+            let vb = VarBuilder::from_tensors(w.clone(), DType::F32, &Device::Cpu);
+            let mut rc = reference_cfg(&c);
+            rc.tie_word_embeddings = tied;
+            let mut reference = reference::Model::new(&rc, vb).unwrap();
+            let hidden = reference
+                .forward(&input, 0, None)
+                .unwrap()
+                .squeeze(0)
+                .unwrap();
+            let head = match tied {
+                true => &w["model.embed_tokens.weight"],
+                false => &w["lm_head.weight"],
+            };
+            let expected = hidden.matmul(&head.t().unwrap()).unwrap();
+
+            let hooked = HookedQwen2::from_tensors_full(w, &c, DType::F32, &Device::Cpu).unwrap();
+            let logits = hooked.forward_logits(&input).unwrap();
+            assert_eq!(logits.dims(), [7, 64]);
+            let diff = max_abs_diff(&logits, &expected);
+            assert!(diff < 1e-4, "kv={kv} tied={tied}: max |Δlogit| = {diff}");
+        }
+        let c = cfg(2);
+        let partial = HookedQwen2::from_tensors(weights(&c, 3), &c, 1, DType::F32, &Device::Cpu);
+        assert!(partial.unwrap().forward_logits(&ids(&[1, 2])).is_err());
     }
 
     #[test]

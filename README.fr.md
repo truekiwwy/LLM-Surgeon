@@ -17,19 +17,19 @@ codes ANSI.
 
 ## Architecture
 
-Sept piliers, un seul binaire :
+Huit piliers, un seul binaire :
 
 ```text
-                       surgeon (src/main.rs -> app::run_with)
-   ┌────────┬─────────┬─────────┬────────┬─────────┬────────┬─────────┐
-   check    inspect   apply     eval     extract   tui      mcp / schema
-   │        │         │         │        │         │        │
-   hardware engine    patch     eval     extract   tui      mcp
-   RAM,VRAM mmap      patch.json llama.cpp Qwen2   ratatui  JSON-RPC
-   budget   stats     backup    loops,   forward   worker   stdio,
-            (rayon)   rollback  GGUF     (candle)  + LRU    sandbox
-   └────────┴────┬────┴─────────┴────────┴────┬────┴────────┴─────────┘
-                 engine::stats (shared)       ui (terminal identity)
+                          surgeon (src/main.rs -> app::run_with)
+   ┌────────┬─────────┬──────────┬──────────┬─────────┬─────────┬────────┬──────────────┐
+   check    inspect   apply      eval       extract   bench     tui      mcp / schema
+   │        │         │          │          │         │         │        │
+   hardware engine    patch      eval       extract   bench     tui      mcp
+   RAM,VRAM mmap      patch.json llama.cpp  Qwen2     KL, PPL,  ratatui  JSON-RPC
+   budget   stats     backup     loops,     forward   Pass@1,   worker   stdio,
+            (rayon)   rollback   GGUF       (candle)  dumps     + LRU    sandbox
+   └────────┴────┬────┴──────────┴──────────┴────┬────┴─────────┴────────┴──────────────┘
+                 engine::stats (shared)          ui (terminal identity)
 ```
 
 | Pilier | Module | Ce qu'il garantit |
@@ -39,6 +39,7 @@ Sept piliers, un seul binaire :
 | Patch | `src/patch` | `patch.json` validé d'abord, sauvegarde vérifiée par SHA-256, rollback automatique. |
 | Évaluation | `src/eval` | Détection de boucles et attentes via llama.cpp, export GGUF seulement si le modèle est sain. |
 | Extraction | `src/extract` | Vecteur de steering depuis une couche Qwen2, écriture atomique plus un fichier compagnon de statistiques. |
+| Mesure | `src/bench` | Dumps de logits et écarts KL/top-k, delta de perplexité, Pass@1 ; rapports déterministes. |
 | Tableau de bord | `src/tui` | État de style Elm, rendu pur, worker en arrière-plan avec annulation. |
 | Agents | `src/mcp` | Serveur MCP sur stdio, chemins confinés aux dossiers autorisés. |
 
@@ -61,7 +62,8 @@ surgeon 0.1.0
 
 Le binaire est installé dans `$HOME/.cargo/bin` (Linux, macOS) ou `%USERPROFILE%\.cargo\bin`
 (Windows). `surgeon eval` a aussi besoin d'un llama.cpp compilé (`llama-cli`,
-`llama-quantize`, `convert_hf_to_gguf.py` et ses dépendances Python).
+`llama-quantize`, `convert_hf_to_gguf.py` et ses dépendances Python) ; `surgeon bench ppl`
+a besoin de `llama-perplexity`, `surgeon bench eval` de `llama-completion` (ou `llama-cli`).
 
 ## Tutoriel
 
@@ -363,10 +365,10 @@ indisponibles.
 
 ### 7. Le confier à un agent IA (MCP)
 
-`surgeon mcp` sert cinq outils sur stdio (`surgeon_check`, `surgeon_inspect`,
-`surgeon_apply`, `surgeon_eval`, `surgeon_extract`). Chaque chemin doit tomber sous un
-dossier autorisé, et une sauvegarde vérifiée est imposée avant toute écriture. Le tableau de
-bord n'est pas exposé en MCP.
+`surgeon mcp` sert six outils sur stdio (`surgeon_check`, `surgeon_inspect`,
+`surgeon_apply`, `surgeon_eval`, `surgeon_extract`, `surgeon_bench`). Chaque chemin doit
+tomber sous un dossier autorisé, et une sauvegarde vérifiée est imposée avant toute
+écriture. Le tableau de bord n'est pas exposé en MCP.
 
 ```bash
 surgeon mcp --allow-dir <MODELS_DIR> --read-only
@@ -396,18 +398,125 @@ surgeon mcp 0.1.0 : prêt sur stdio, 1 dossier(s) autorisé(s), lecture seule
 Schémas des outils : `surgeon schema --kind tools`. Détails, garde-fous et versions du
 protocole : [docs/MCP.md](docs/MCP.md).
 
+### 8. Mesurer une chirurgie (`surgeon bench`)
+
+Quatre modes mesurent ce qu'un patch a changé. La recette d'un agent : extraire une
+direction (étape 3), l'appliquer **sur une copie** du modèle (étape 4), écrire les logits des
+deux modèles sur les mêmes prompts, les comparer, puis vérifier la perplexité et un benchmark
+en exact match avant de décider. Ici `patch.json` retranche `0.5 × [1, …, 1]` au
+`gate_proj` de la couche 1, sans sauvegarde puisqu'il travaille sur une copie :
+
+```json
+{"schema_version": 1, "backup": false, "operations": [{"id": "g1", "layers": "1", "projections": ["gate_proj"], "operation": "subtract", "vector_file": "v16.json", "alpha": 0.5, "axis": "rows"}]}
+```
+
+```bash
+cp -r qwen2-mini qwen2-patched
+surgeon apply --model qwen2-patched/model.safetensors --patch patch.json
+surgeon bench dump --model qwen2-mini --prompts pos.json --out before.safetensors
+surgeon bench dump --model qwen2-patched --prompts pos.json --out after.safetensors
+surgeon bench logits --before before.safetensors --after after.safetensors --warn-kl 0.05
+```
+
+```text
+[APPLY]    patch.json · 1 opérations
+[SHIFT]    g1 terminée · Δmax 0.5000 · 1 tenseurs
+[COMMIT]   modèle patché · 0.0 s
+[BENCH]    dump · 6 prompts · 24 positions · vocab 64 · f32
+[WRITE]    before.safetensors
+[BENCH]    dump · 6 prompts · 24 positions · vocab 64 · f32
+[WRITE]    after.safetensors
+[BENCH]    logits · 24 positions · vocab 64
+[KL]       moyenne 0.1648 · max 0.4785 @ 23 · p95 0.4187 · cos(p,q) 0.8684
+[TOP-K]    top-1 changé 66.7 % · top-5 (ensemble) 95.8 % · recouvrement 0.51
+  pires prompts : #1 0.2656 · #2 0.2572 · #3 0.1641 · #5 0.1311 · #4 0.0934
+[VERDICT]  avertissement : KL moyenne 0.1648 > 0.05
+```
+
+`bench dump` exécute toute la passe avant Qwen2 en Rust pur et écrit de façon atomique
+`logits` `[positions, vocab]`, `prompt_offsets` et des métadonnées (`prompts_sha256`,
+`tokenizer_sha256`...). `bench logits` lit aussi les tenseurs `[batch, seq, vocab]`, en
+f32/f16/bf16, les `.npy` et les `.pt`, et avertit quand les deux dumps viennent de prompts ou
+de tokenizers différents.
+
+`bench ppl` et `bench eval` pilotent llama.cpp (un dossier SafeTensors est converti en GGUF
+temporaire, supprimé ensuite). Les deux sorties ci-dessous viennent de
+`examples/fake_llama.rs` copié en `llama-perplexity` et `llama-completion` : il imprime une
+perplexité dérivée des octets du modèle et répond la somme des nombres de chaque problème.
+Ces runs exercent donc la vraie gestion des processus, pas un vrai modèle.
+
+```bash
+surgeon bench ppl --model after.gguf --text text.txt --baseline-model before.gguf --llama-cpp-dir llama
+surgeon bench eval --model after.gguf --dataset ds.json --baseline-model before.gguf --llama-cpp-dir llama --max-new-tokens 64 --min-accuracy 0.5
+```
+
+```text
+[BENCH]    ppl · ctx 512  after.gguf
+[PPL]      6.0930 ± 0.04 → 7.2870 ± 0.04 · Δ +1.1940 (hors du bruit)
+[VERDICT]  avertissement : ΔPPL 1.1940 > 0.2
+[BENCH]    eval · 4 questions · auto  ds.json
+[PASS@1]   1/4 · 25.0 % · IC95 [4.6 ; 69.9] · boucles 0
+[PASS@1]   référence 2/4 · 50.0 % · IC95 [15.0 ; 85.0] · boucles 0
+  appariement : perdues 2 · gagnées 1 · Δ -25.0 points
+[VERDICT]  avertissement : exactitude 25.0 % < minimum 50.0 %
+  ! échantillon réduit (n = 4) : l'intervalle de confiance est large (± 32.7 points)
+```
+
+Le dataset est un tableau JSON (ou JSONL) de `question` (ou `problem`), `answer` (ou
+`solution`) et d'un `id` facultatif ; aucun contenu de GSM8K ou de MATH n'est livré dans ce
+dépôt :
+
+```json
+[{"id": "q1", "question": "What is 12 plus 30?", "answer": "12 + 30 = 42\n#### 42"},
+ {"id": "q4", "question": "What is half of 9?", "answer": "Half of 9 is $\\boxed{\\frac{9}{2}}$."}]
+```
+
+Définitions utilisées par les rapports (`--json` donne tous les champs) :
+
+- **KL** : `KL(before‖after) = Σ p_i (log p_i − log q_i)` avec `p = softmax(before)` et
+  `q = softmax(after)`, en f64 via log-sum-exp : la distribution « avant » sert de
+  référence. Les termes `p_i = 0` sont ignorés ; un token fini avant et à `−∞` après rend la
+  position infinie, comptée dans `kl_infinite_positions` et exclue de `kl_mean`, `kl_max` et
+  `kl_p95` (rang le plus proche).
+- **Cosinus** : `cosine_probs_mean` compare les vecteurs de probabilités ;
+  `cosine_logits_mean`, libellé à part, les logits bruts.
+- **Top-k** : `top1_shift_rate` est la part des positions dont l'argmax change (égalités :
+  plus petit index) ; `topk_set_change_rate` la part dont l'ensemble des `k` meilleurs tokens
+  diffère (`--top-k`, 5 par défaut), `topk_overlap_mean` la moyenne de `|A∩B| / k`.
+- **ΔPPL** : `ppl − ppl_baseline`, arrondi à 4 décimales (ce qu'imprime llama.cpp) avant la
+  comparaison stricte avec `--warn-delta` : `7.4 − 7.2` vaut `0.20000000000000018` en
+  flottant et ne dépasse pas 0.2. `within_noise` quand `|Δ| ≤ sqrt(err² + err_baseline²)` ;
+  un delta négatif est une amélioration, jamais un avertissement.
+- **Pass@1** : exact match d'un échantillon glouton (`--temp 0 --top-k 1 --seed 42`). La
+  réponse finale est la première trouvée parmi `#### X`, `\boxed{X}` (accolades imbriquées),
+  le dernier `**X**`, « the answer is X », le dernier nombre ; nombres et fractions se
+  comparent avec une tolérance relative de 1e-9 (`18` = `18.0` = `1,8e1`,
+  `1/2` = `\frac{1}{2}`). L'intervalle à 95 % est celui de Wilson ; avec `--baseline-model`
+  la comparaison est appariée (ids `lost`, `gained`).
+- **Déterminisme** : les réductions suivent un ordre fixe, donc `bench logits` donne les mêmes
+  bits avec 1 ou 12 threads ; deux runs donnent le même JSON hors `timing_ms`.
+
+Un avertissement ne change jamais le code de sortie, sauf un seuil (`--warn-kl`,
+`--warn-top1-shift`, `--warn-delta`, `--min-accuracy`) strictement dépassé avec
+`--fail-on-warn` : code 9, le rapport restant dans `data`. Sans seuil, le verdict vaut
+`none`. Mesuré sur un portable à 12 threads : `bench logits` sur deux dumps f16 de
+4096 positions × 151 936 tokens prend 5,3 s avec 49 Mio de mémoire privée (les dumps sont
+mappés en mémoire) ; noter 1 000 sorties d'eval prend 5 ms.
+
 ## Codes de sortie
 
 | Code | Signification |
 | --- | --- |
 | 0 | Succès |
-| 1 | Échec général : ressources insuffisantes, modèle illisible, Ctrl-C, `tui` sans terminal interactif |
+| 1 | Échec général : ressources insuffisantes, modèle illisible, binaire llama.cpp introuvable, Ctrl-C, `tui` sans terminal interactif |
 | 2 | Entrée invalide : arguments, patch, prompts, chemins ; rien n'a été touché |
 | 3 | Échec d'exécution ; le modèle est intact (jamais touché, ou restauré depuis la sauvegarde) |
 | 4 | Critique : rollback raté, ou pas de sauvegarde et modèle laissé partiellement patché |
 | 5 | `eval` : modèle malade (boucles, attentes non tenues) ; pas d'export |
 | 6 | `eval` : échec de l'export GGUF |
 | 7 | `extract` : config, tokenizer ou poids invalides, direction dégénérée, NaN/Inf |
+| 8 | `bench` : échec du bench (processus llama.cpp, sortie illisible, dumps incompatibles, génération) |
+| 9 | `bench --fail-on-warn` : un seuil a été dépassé (le rapport est dans `data`) |
 | 70 | Erreur interne (panic), signalée après restauration du terminal |
 
 ## Commandes
@@ -419,6 +528,7 @@ protocole : [docs/MCP.md](docs/MCP.md).
 | `surgeon apply` | Applique un `patch.json` en place (`--dry-run` d'abord) | modèle, sauvegarde |
 | `surgeon eval` | Non-régression via llama.cpp, export GGUF conditionnel | GGUF |
 | `surgeon extract` | Vecteur de steering depuis une couche Qwen2 | vecteur, compagnon `.stats.json` |
+| `surgeon bench` | Dumps de logits et KL/top-k, delta de perplexité, Pass@1 | dump de logits (`dump` seulement) |
 | `surgeon tui` | Tableau de bord : inspecteur de poids et visualiseur de vecteur | rien |
 | `surgeon schema` | JSON Schema de `patch.json`, ou définitions des outils MCP | stdout seulement |
 | `surgeon mcp` | Serveur MCP sur stdio | via ses outils |
@@ -433,7 +543,8 @@ surgeon schema --kind tools
 Le steering et la chirurgie de poids changent ce que fait un modèle, y compris ses
 comportements de sécurité : une direction peut retirer des refus aussi facilement qu'en
 ajouter. Ne travaillez que sur des modèles dont la licence autorise la modification, gardez
-les sauvegardes, mesurez l'effet avec `surgeon eval` avant de partager quoi que ce soit, et
+les sauvegardes, mesurez l'effet avec `surgeon eval` et `surgeon bench` avant de partager
+quoi que ce soit, et
 ne distribuez pas un modèle dont vous avez retiré les garde-fous.
 
 ## Limites connues
@@ -441,6 +552,14 @@ ne distribuez pas un modèle dont vous avez retiré les garde-fous.
 - `extract` ne prend en charge que Qwen2 et Qwen2.5, sur le CPU ; les gros modèles demandent
   beaucoup de RAM (`--dtype bf16` la divise par deux).
 - `eval` et l'export GGUF dépendent d'un llama.cpp compilé à part.
+- `bench dump` ne prend en charge que Qwen2, sur le CPU. `bench ppl` et `bench eval`
+  dépendent des options du llama.cpp installé (`llama-perplexity`, anciennement
+  `perplexity` ; `--chunks`, `-ngl`, `--temp`, `--top-k`, `--seed`) ; le déchargement GPU
+  peut faire varier les derniers chiffres d'un run à l'autre.
+- 50 questions (le défaut de `bench eval`) donnent un intervalle large : 40/50 donne
+  [67,0 % ; 88,8 %], seules les fortes régressions sont concluantes.
+- Les dumps `.pt` sont lus au mieux : archives `torch.save` non compressées, tenseurs
+  contigus seulement.
 - Seules les projections MLP (`gate_proj`, `up_proj`, `down_proj`) sont couvertes.
 - Le tableau de bord exige un terminal interactif d'au moins 80×24, avec stdin, stdout et
   stderr qui y sont rattachés ; sinon, utilisez `--snapshot`.
@@ -488,8 +607,10 @@ README existe. Les commits suivent `type: description` (`feat`, `fix`, `refactor
 │   ├── patch/             patch.json, validation, sauvegarde, rollback
 │   ├── eval/              exécution llama.cpp, détecteur de boucles, export GGUF
 │   ├── extract/           passe avant Qwen2, vecteur de steering, fichier compagnon
+│   ├── bench/             dumps de logits et KL, perplexité, Pass@1 (GSM8K/MATH)
 │   ├── mcp/               serveur JSON-RPC, outils, sandbox
 │   └── tui/               tableau de bord : app, worker, terminal, thème, widgets/
+├── examples/fake_llama.rs faux binaires llama.cpp pour les tests de bench
 └── tests/
     ├── integration.rs     parcours de bout en bout et tests du binaire
     ├── deps_purity.rs     aucun compilateur C dans l'arbre des dépendances

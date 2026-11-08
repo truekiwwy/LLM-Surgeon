@@ -20,6 +20,8 @@
 //!          -> extract -> load_prompt_texts -> core_extract_request -> extract::run_extraction
 //!          -> eval    -> load_prompts -> export_gguf (temporary f16, unless .gguf)
 //!                     -> generator_factory -> run_eval -> export_if_healthy
+//!          -> bench   -> bench_cli (args -> *Request) -> core_bench_{logits,ppl,eval,dump}
+//!                     -> bench::{logits_metrics, ppl_runner, score, dump}::run (see `bench/mod.rs`)
 //! Every human byte goes through `ui::*` (output audit in `ui.rs`); `--json` builds
 //! `Ui::off()` for both streams, so no rendering reaches stdout or stderr.
 //! emit -> JSON envelope | human text (write errors ignored: closed pipe never panics)
@@ -28,7 +30,7 @@
 //! Exit codes: 0 ok, 1 general error, 2 invalid CLI/patch/input, 3 execution failed and
 //! model intact (rolled back or never touched), 4 CRITICAL (rollback failed, or model left
 //! modified without backup), 5 eval degraded/broken, 6 GGUF export failed, 7 extraction
-//! failed, 70 internal.
+//! failed, 8 bench failed, 9 bench threshold exceeded under `--fail-on-warn`, 70 internal.
 //!
 //! Deviations from the assembly spec, adapted to the real signatures:
 //! - One `EngineBackend` owns 1..N `WritableModel`s: a single file is a 1-shard model, so a
@@ -57,17 +59,27 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::cli::{ApplyArgs, CheckArgs, Cli, Commands, EvalArgs, ExtractArgs, InspectArgs};
+use crate::bench::dump::DumpRequest;
+use crate::bench::logits_metrics::LogitsRequest;
+use crate::bench::ppl_runner::{PplBaseline, PplRequest};
+use crate::bench::prompt::Template;
+use crate::bench::report::{self as bench_report, BenchRun};
+use crate::bench::score::EvalRequest;
+use crate::bench::{self, BenchError};
+use crate::cli::{
+    ApplyArgs, BenchArgs, BenchCommand, CheckArgs, Cli, Commands, EvalArgs, ExtractArgs,
+    InspectArgs,
+};
 use crate::engine::stats::TensorStats;
 use crate::engine::{
     self, BroadcastAxis, DType, EngineError, LayerSpec, MlpProj, ReadOnlyModel, ShiftOp,
     ShiftStats, WritableModel,
 };
 use crate::eval::{
-    export_gguf, export_if_healthy, load_prompts, locate_binary, run_eval, CommandRunner,
+    ensure_gguf, export_if_healthy, is_gguf, load_prompts, locate_binary, run_eval, CommandRunner,
     EvalConfig, EvalError, EvalPrompt, EvalReport, EvalVerdict, GenerationOutcome,
     GgufExportConfig, LlamaCliGenerator, PromptStatus, SystemCommandRunner, TextGenerator,
-    ALLOWED_QUANTS,
+    ALLOWED_QUANTS, LLAMA_DIR_REQUIRED,
 };
 use crate::extract::{
     self, ExtractError, ExtractEvent, ExtractObserver, ExtractReport, ExtractRequest, PromptSet,
@@ -94,6 +106,10 @@ pub mod exit {
     pub const EXPORT_FAILED: i32 = 6;
     /// `extract`: config, tokenizer or weights invalid, degenerate direction, NaN/Inf.
     pub const EXTRACT_FAILED: i32 = 7;
+    /// `bench`: process failed, unreadable output, incompatible shapes, generation failed.
+    pub const BENCH_FAILED: i32 = 8;
+    /// `bench --fail-on-warn`: a threshold was exceeded (the report is still in `data`).
+    pub const THRESHOLD_EXCEEDED: i32 = 9;
     pub const INTERNAL: i32 = 70;
 }
 
@@ -304,6 +320,12 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Schema(_) => "schema",
         Commands::Tui(_) => "tui",
         Commands::Mcp(_) => "mcp",
+        Commands::Bench(args) => match args.command {
+            BenchCommand::Logits(_) => "bench logits",
+            BenchCommand::Ppl(_) => "bench ppl",
+            BenchCommand::Eval(_) => "bench eval",
+            BenchCommand::Dump(_) => "bench dump",
+        },
     }
 }
 
@@ -317,6 +339,7 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
             let ui = io.ui;
             core_extract(args, deps, &ui, &mut CliSink::new(io))
         }
+        Commands::Bench(args) => bench_cli(args, deps, io),
         // Routed by run_with before dispatch: they have no envelope.
         Commands::Schema(_) | Commands::Mcp(_) | Commands::Tui(_) => Err(Outcome::fail(
             exit::INTERNAL,
@@ -940,6 +963,26 @@ pub enum ProgressEvent {
         total: usize,
     },
     ExtractWriting,
+    /// `bench dump`: prompts forwarded and written.
+    BenchDumpPrompt {
+        done: usize,
+        total: usize,
+    },
+    /// `bench logits`: blocks of positions compared.
+    BenchLogitsBlock {
+        done: usize,
+        total: usize,
+    },
+    /// `bench ppl`: chunks evaluated by llama-perplexity (total when announced).
+    BenchPplChunk {
+        done: usize,
+        total: Option<usize>,
+    },
+    /// `bench eval`: questions answered (per model when a baseline runs first).
+    BenchEvalQuestion {
+        done: usize,
+        total: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1118,6 +1161,27 @@ impl<'a, 'io> CliSink<'a, 'io> {
         }
     }
 
+    /// `[BENCH]  ppl 12/40  ████░░░░`, in place on an interactive stderr only.
+    fn bench_progress(&mut self, label: &str, done: usize, total: Option<usize>) {
+        let ui = self.io.err_ui;
+        let line = match total {
+            Some(total) => format!(
+                "{} {} {}  {}",
+                ui::badge(&ui, "BENCH"),
+                ui::metric(&ui, label),
+                ui::metric(&ui, format!("{done}/{total}")),
+                ui::progress_bar(&ui, done, total, BAR_WIDTH)
+            ),
+            None => format!(
+                "{} {} {}",
+                ui::badge(&ui, "BENCH"),
+                ui::metric(&ui, label),
+                ui::metric(&ui, done)
+            ),
+        };
+        self.draw(&line);
+    }
+
     /// In-place line on an interactive stderr only.
     fn draw(&mut self, line: &str) {
         if !self.io.err_is_tty || self.io.err_ui.is_off() {
@@ -1157,6 +1221,18 @@ impl ProgressSink for CliSink<'_, '_> {
         } = &event
         {
             return self.progress(op_id, tensor, *done, *total);
+        }
+        let bench = match &event {
+            ProgressEvent::BenchDumpPrompt { done, total } => Some(("dump", *done, Some(*total))),
+            ProgressEvent::BenchLogitsBlock { done, total } => {
+                Some(("logits", *done, Some(*total)))
+            }
+            ProgressEvent::BenchPplChunk { done, total } => Some(("ppl", *done, *total)),
+            ProgressEvent::BenchEvalQuestion { done, total } => Some(("eval", *done, Some(*total))),
+            _ => None,
+        };
+        if let Some((label, done, total)) = bench {
+            return self.bench_progress(label, done, total);
         }
         match &event {
             ProgressEvent::ExtractPrompt { set, done, .. } => {
@@ -1267,7 +1343,11 @@ impl ProgressSink for CliSink<'_, '_> {
             }
             ProgressEvent::Shift { .. }
             | ProgressEvent::EvalPrompt { .. }
-            | ProgressEvent::ExtractWriting => {}
+            | ProgressEvent::ExtractWriting
+            | ProgressEvent::BenchDumpPrompt { .. }
+            | ProgressEvent::BenchLogitsBlock { .. }
+            | ProgressEvent::BenchPplChunk { .. }
+            | ProgressEvent::BenchEvalQuestion { .. } => {}
         }
     }
 }
@@ -1501,15 +1581,6 @@ impl TextGenerator for Interruptible<'_> {
     }
 }
 
-/// Deletes the temporary GGUF on every path, including errors and panics.
-struct TempFile(PathBuf);
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 fn eval(args: &EvalArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
     let prompts = load_prompts(&args.prompts)
         .map_err(|e| Outcome::fail(exit::INVALID_INPUT, e).with_kind("invalid_input"))?;
@@ -1543,26 +1614,16 @@ pub fn core_eval(
             EvalError::InvalidQuant(args.quant.clone()).to_string(),
         ));
     }
-    let is_gguf = args
-        .model
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
-    if is_gguf && args.export_gguf.is_some() {
+    if is_gguf(&args.model) && args.export_gguf.is_some() {
         return Err(invalid(
             "--export-gguf convertit depuis SafeTensors : impossible depuis un .gguf".into(),
         ));
     }
-    let model_dir = match args.model.is_dir() {
-        true => args.model.clone(),
-        false => args
-            .model
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
-    };
+    let model_dir = crate::eval::model_dir(&args.model);
     let llama_dir = || {
-        args.llama_cpp_dir.clone().ok_or_else(|| {
-            invalid("--llama-cpp-dir (ou LLAMA_CPP_DIR) requis pour convertir en GGUF".into())
-        })
+        args.llama_cpp_dir
+            .clone()
+            .ok_or_else(|| invalid(LLAMA_DIR_REQUIRED.into()))
     };
     let export_cfg =
         |llama_cpp_dir: PathBuf, output_gguf: PathBuf, quant: Option<String>| GgufExportConfig {
@@ -1579,29 +1640,22 @@ pub fn core_eval(
         None => None,
     };
 
-    let mut temp = None;
-    let gguf = match is_gguf {
-        true => args.model.clone(),
-        false => {
-            // Next to the model: an f16 copy can be tens of GB, often too big for /tmp.
-            let file = TempFile(
-                model_dir.join(format!(".weight-surgeon-eval-{}.gguf", std::process::id())),
-            );
-            let cfg = export_cfg(llama_dir()?, file.0.clone(), None);
-            export_gguf(&cfg, deps.runner.as_ref()).map_err(|e| {
-                Outcome::fail(
-                    exit::GENERAL,
-                    format!("conversion GGUF pour l'évaluation : {e}"),
-                )
-                .with_kind("eval_failed")
-            })?;
-            let path = file.0.clone();
-            temp = Some(file);
-            path
-        }
-    };
+    let gguf = ensure_gguf(
+        &args.model,
+        args.llama_cpp_dir.as_deref(),
+        "eval",
+        deps.runner.as_ref(),
+    )
+    .map_err(|e| match e {
+        EvalError::InvalidConfig(m) if m == LLAMA_DIR_REQUIRED => invalid(m),
+        e => Outcome::fail(
+            exit::GENERAL,
+            format!("conversion GGUF pour l'évaluation : {e}"),
+        )
+        .with_kind("eval_failed"),
+    })?;
 
-    let generator = (deps.generator_factory)(&gguf, args)
+    let generator = (deps.generator_factory)(gguf.path(), args)
         .map_err(|e| Outcome::fail(exit::GENERAL, e).with_kind("eval_failed"))?;
     let mut generator = Interruptible {
         inner: generator,
@@ -1618,7 +1672,7 @@ pub fn core_eval(
         .map_err(|e| Outcome::fail(exit::GENERAL, e).with_kind("eval_failed"))?;
     drop(generator);
     // Freed before the final conversion, which needs the disk space again.
-    drop(temp);
+    drop(gguf);
 
     let human = eval_text(ui, &report, args.max_new_tokens);
     if deps.interrupted.load(Ordering::SeqCst) {
@@ -1861,4 +1915,207 @@ fn extract_text(ui: &Ui, report: &ExtractReport) -> String {
         text.push('\n');
     }
     text
+}
+
+// ---------------------------------------------------------------- bench
+
+/// Usage and file errors are code 2; resources, missing binaries and cancellations 1;
+/// everything that failed while running the bench 8.
+fn bench_failure(e: &BenchError) -> Outcome {
+    let code = match e {
+        BenchError::InvalidArgument(_)
+        | BenchError::Input { .. }
+        | BenchError::OutputExists(_)
+        | BenchError::Model(_) => exit::INVALID_INPUT,
+        BenchError::InsufficientResources(_)
+        | BenchError::BinaryNotFound(_)
+        | BenchError::Cancelled => exit::GENERAL,
+        _ => exit::BENCH_FAILED,
+    };
+    Outcome::fail(code, e).with_kind(e.kind())
+}
+
+/// Warnings never change the exit code, except threshold ones under `--fail-on-warn`
+/// (code 9, the report still in `data`).
+fn bench_outcome<R: Serialize>(run: &BenchRun<R>, fail_on_warn: bool, human: String) -> CoreResult {
+    let data = to_value(&run.report);
+    if fail_on_warn && !run.threshold_warnings.is_empty() {
+        let mut failed = Outcome::fail(
+            exit::THRESHOLD_EXCEEDED,
+            format!("seuil dépassé : {}", run.threshold_warnings.join(" ; ")),
+        )
+        .with_kind("threshold_exceeded")
+        .with_data(data, human);
+        failed.warnings = run.warnings.clone();
+        return Err(failed);
+    }
+    let mut outcome = Outcome::ok(data, human);
+    outcome.warnings = run.warnings.clone();
+    Ok(outcome)
+}
+
+fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
+    let ui = io.ui;
+    let mut sink = CliSink::new(io);
+    let invalid = |e: BenchError| bench_failure(&e);
+    let timeout = |secs: Option<u64>| match secs {
+        Some(0) => Err(invalid(BenchError::InvalidArgument(
+            "--timeout-secs doit être >= 1".into(),
+        ))),
+        other => Ok(other.map(Duration::from_secs)),
+    };
+    match &args.command {
+        BenchCommand::Logits(a) => {
+            let req = LogitsRequest {
+                before: a.before.clone(),
+                after: a.after.clone(),
+                tensor: a.tensor.clone(),
+                top_k: a.top_k,
+                worst: a.worst,
+                warn_kl: a.warn_kl,
+                warn_top1_shift: a.warn_top1_shift,
+            };
+            core_bench_logits(&req, a.fail_on_warn, deps, &ui, &mut sink)
+        }
+        BenchCommand::Ppl(a) => {
+            let baseline = match (&a.baseline_model, a.baseline_ppl) {
+                (Some(model), _) => Some(PplBaseline::Model(model.clone())),
+                (None, Some(ppl)) => Some(PplBaseline::Value {
+                    ppl,
+                    err: a.baseline_ppl_err,
+                }),
+                (None, None) => None,
+            };
+            let req = PplRequest {
+                model: a.model.clone(),
+                text: a.text.clone(),
+                baseline,
+                ctx: a.ctx,
+                chunks: a.chunks,
+                threads: a.threads,
+                n_gpu_layers: a.n_gpu_layers,
+                llama_cpp_dir: a.llama_cpp_dir.clone(),
+                warn_delta: a.warn_delta,
+                timeout: timeout(a.timeout_secs)?,
+                llama_args: bench::ppl_runner::validate_llama_args(&a.llama_args)
+                    .map_err(invalid)?,
+            };
+            core_bench_ppl(&req, a.fail_on_warn, deps, &ui, &mut sink)
+        }
+        BenchCommand::Eval(a) => {
+            let req = EvalRequest {
+                model: a.model.clone(),
+                dataset: a.dataset.clone(),
+                baseline_model: a.baseline_model.clone(),
+                limit: a.limit,
+                max_new_tokens: a.max_new_tokens,
+                template: Template::from_cli(a.prompt_template.as_deref()).map_err(invalid)?,
+                format: a.format,
+                llama_cpp_dir: a.llama_cpp_dir.clone(),
+                timeout: timeout(a.timeout_secs)?,
+                min_accuracy: a.min_accuracy,
+            };
+            core_bench_eval(&req, a.fail_on_warn, deps, &ui, &mut sink)
+        }
+        BenchCommand::Dump(a) => {
+            let prompts = extract::load_prompt_texts(&a.prompts)
+                .map_err(|m| invalid(BenchError::input(&a.prompts, m)))?;
+            let req = DumpRequest {
+                model: a.model.clone(),
+                prompts,
+                out: a.out.clone(),
+                dtype: a.dtype,
+                out_dtype: a.out_dtype,
+                max_tokens: a.max_tokens,
+                max_total_positions: a.max_total_positions,
+                overwrite: a.overwrite,
+            };
+            core_bench_dump(&req, deps, &ui, &mut sink)
+        }
+    }
+}
+
+/// Shared by the CLI and the MCP tool; cancellation checked before each block.
+pub fn core_bench_logits(
+    req: &LogitsRequest,
+    fail_on_warn: bool,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let run = bench::logits_metrics::run(
+        req,
+        deps.probe.as_ref(),
+        &deps.interrupted,
+        &mut |done, total| sink.event(ProgressEvent::BenchLogitsBlock { done, total }),
+    )
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, fail_on_warn, bench_report::logits_text(ui, &run))
+}
+
+/// Shared by the CLI and the MCP tool; cancellation kills llama-perplexity.
+pub fn core_bench_ppl(
+    req: &PplRequest,
+    fail_on_warn: bool,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let run = bench::ppl_runner::run(
+        req,
+        deps.runner.as_ref(),
+        &deps.interrupted,
+        &mut |done, total| sink.event(ProgressEvent::BenchPplChunk { done, total }),
+    )
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, fail_on_warn, bench_report::ppl_text(ui, &run))
+}
+
+/// Shared by the CLI and the MCP tool. Generators come from `deps.generator_factory`, set
+/// to greedy seeded decoding; cancellation stops the running generation.
+pub fn core_bench_eval(
+    req: &EvalRequest,
+    fail_on_warn: bool,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let mut make = |gguf: &Path| -> bench::Result<Box<dyn TextGenerator>> {
+        let args = EvalArgs {
+            model: gguf.to_path_buf(),
+            prompts: PathBuf::new(),
+            max_new_tokens: req.max_new_tokens,
+            export_gguf: None,
+            quant: "Q4_K_M".into(),
+            llama_cpp_dir: req.llama_cpp_dir.clone(),
+            allow_degraded: false,
+        };
+        (deps.generator_factory)(gguf, &args).map_err(BenchError::from)
+    };
+    let run = bench::score::run(
+        req,
+        deps.runner.as_ref(),
+        &mut make,
+        &deps.interrupted,
+        &mut |done, total| sink.event(ProgressEvent::BenchEvalQuestion { done, total }),
+    )
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, fail_on_warn, bench_report::eval_text(ui, &run))
+}
+
+/// Shared by the CLI and the MCP tool; nothing is written unless the whole dump succeeds.
+pub fn core_bench_dump(
+    req: &DumpRequest,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let run = bench::dump::run(
+        req,
+        deps.probe.as_ref(),
+        &deps.interrupted,
+        &mut |done, total| sink.event(ProgressEvent::BenchDumpPrompt { done, total }),
+    )
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, false, bench_report::dump_text(ui, &run))
 }

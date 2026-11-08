@@ -1501,7 +1501,7 @@ fn mcp_full_session_is_pure_json_rpc() {
         .as_str()
         .unwrap()
         .contains("sauvegarde"));
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 6);
     let (is_error, env) = envelope(&responses, 3);
     assert!(!is_error, "{env}");
     assert_eq!(env["command"], "check");
@@ -2126,7 +2126,8 @@ fn schema_tools_kind_equals_tools_list() {
             "surgeon_inspect",
             "surgeon_apply",
             "surgeon_eval",
-            "surgeon_extract"
+            "surgeon_extract",
+            "surgeon_bench"
         ]
     );
     for tool in exported.as_array().unwrap() {
@@ -3057,7 +3058,7 @@ fn mcp_extract_tool_end_to_end() {
             .as_array()
             .unwrap()
             .len(),
-        5
+        6
     );
     let (is_error, env) = envelope(&responses, 2);
     assert!(!is_error, "{env}");
@@ -3163,7 +3164,7 @@ fn mcp_binary_extract_speaks_only_json_rpc() {
             .as_array()
             .unwrap()
             .len(),
-        5
+        6
     );
     assert!(!envelope(&responses, 2).0, "{out}");
     assert!(f.dir.path().join("bin.safetensors").exists());
@@ -4054,5 +4055,1143 @@ impl EventSource for IdleEvents {
         }
         std::thread::sleep(timeout);
         Ok(None)
+    }
+}
+
+// ------------------------------------------------------------------ bench (prompt 10)
+
+use std::collections::VecDeque;
+
+use weight_surgeon::eval::StreamControl;
+
+/// `logits` [rows, 8] in F32 (no `prompt_offsets`).
+fn logits_dump(dir: &Path, name: &str, rows: &[[f32; 8]]) -> PathBuf {
+    let path = dir.join(name);
+    let values: Vec<f32> = rows.iter().flatten().copied().collect();
+    write_safetensors(&path, &[("logits", [rows.len(), 8], values)]);
+    path
+}
+
+/// Position 0 unchanged; position 1 goes from uniform to `[0, .., 0, ln 3]`: KL = 0.0858,
+/// argmax and top-5 set changed, overlap 4/5, cos(p, q) = 0.8839.
+fn golden_dumps(dir: &Path) -> (PathBuf, PathBuf) {
+    let mut moved = [0.0f32; 8];
+    moved[7] = 3f32.ln();
+    (
+        logits_dump(dir, "before.safetensors", &[[0.0; 8], [0.0; 8]]),
+        logits_dump(dir, "after.safetensors", &[[0.0; 8], moved]),
+    )
+}
+
+#[test]
+fn bench_logits_cli_json_thresholds_and_exit_codes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (before, after) = golden_dumps(dir.path());
+    let args = [
+        "bench",
+        "logits",
+        "--before",
+        s(&before),
+        "--after",
+        s(&after),
+    ];
+    let (code, v) = run_json(&deps(), &args);
+    assert_eq!(code, exit::OK);
+    assert_eq!(v["command"], "bench logits");
+    let d = &v["data"];
+    assert!(
+        (d["kl_mean"].as_f64().unwrap() - 0.042_908_6).abs() < 1e-6,
+        "{d}"
+    );
+    assert_eq!(d["kl_max_position"], 1);
+    assert_eq!(d["top1_shift_rate"], 0.5);
+    assert_eq!(d["k"], 5);
+    assert_eq!(d["topk_set_change_rate"], 0.5);
+    assert_eq!(d["kl_direction"], "KL(before‖after)");
+    assert_eq!(d["verdict"], "none");
+    assert!(d["timing_ms"]["total"].is_u64());
+
+    let mut warn = args.to_vec();
+    warn.extend(["--warn-kl", "0.01"]);
+    let (code, v) = run_json(&deps(), &warn);
+    assert_eq!(code, exit::OK, "a warning alone never fails");
+    assert_eq!(v["data"]["verdict"], "warn");
+    assert!(v["warnings"][0].as_str().unwrap().contains("KL moyenne"));
+    warn.push("--fail-on-warn");
+    let (code, v) = run_json(&deps(), &warn);
+    assert_eq!(code, 9);
+    assert_eq!(v["error"]["kind"], "threshold_exceeded");
+    assert_eq!(v["data"]["verdict"], "warn", "the report is kept");
+
+    let small = logits_dump(dir.path(), "small.safetensors", &[[0.0; 8]]);
+    let (code, v) = run_json(
+        &deps(),
+        &[
+            "bench",
+            "logits",
+            "--before",
+            s(&before),
+            "--after",
+            s(&small),
+        ],
+    );
+    assert_eq!(code, 8);
+    assert_eq!(v["error"]["kind"], "shape_mismatch");
+    let (code, v) = run_json(
+        &deps(),
+        &[
+            "bench",
+            "logits",
+            "--before",
+            s(&before),
+            "--after",
+            "absent.safetensors",
+        ],
+    );
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert_eq!(v["error"]["kind"], "invalid_input");
+    let (code, _) = run_json(&deps(), &[&args[..], &["--top-k", "9"]].concat());
+    assert_eq!(code, exit::INVALID_INPUT, "k above the vocabulary");
+
+    let mut panicking = deps();
+    panicking.generator_factory = Box::new(|_, _| panic!("factory exploded"));
+    std::fs::write(dir.path().join("m.gguf"), b"GGUF").unwrap();
+    std::fs::write(
+        dir.path().join("d.json"),
+        r#"[{"question":"q","answer":"1"}]"#,
+    )
+    .unwrap();
+    let (code, v) = run_json(
+        &panicking,
+        &[
+            "bench",
+            "eval",
+            "--model",
+            s(&dir.path().join("m.gguf")),
+            "--dataset",
+            s(&dir.path().join("d.json")),
+        ],
+    );
+    assert_eq!(code, exit::INTERNAL);
+    assert_eq!(v["error"]["kind"], "internal");
+}
+
+#[test]
+fn bench_human_output_golden_in_truecolor() {
+    use weight_surgeon::ui::strip_ansi;
+    let dir = tempfile::tempdir().unwrap();
+    let (before, after) = golden_dumps(dir.path());
+    let deps = ui_deps(ColorMode::TrueColor, false);
+    let args = [
+        "bench",
+        "logits",
+        "--before",
+        s(&before),
+        "--after",
+        s(&after),
+        "--warn-kl",
+        "0.01",
+    ];
+    let (code, out, err) = run(&deps, &args);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\x1b[38;2;65;105;225m"), "royal blue badges");
+    assert_eq!(
+        strip_ansi(&out),
+        "[BENCH]    logits · 2 positions · vocab 8\n\
+         [KL]       moyenne 0.0429 · max 0.0858 @ 1 · p95 0.0858 · cos(p,q) 0.9419\n\
+         [TOP-K]    top-1 changé 50.0 % · top-5 (ensemble) 50.0 % · recouvrement 0.90\n\
+         [VERDICT]  avertissement : KL moyenne 0.0429 > 0.01\n"
+    );
+
+    let f = ppl_fixture();
+    let deps = ppl_deps(
+        ColorMode::TrueColor,
+        vec![ppl_output("7.2000"), ppl_output("7.2500")],
+    )
+    .0;
+    let (code, out, err) = run(
+        &deps,
+        &[
+            "bench",
+            "ppl",
+            "--model",
+            s(&f.after),
+            "--text",
+            s(&f.text),
+            "--baseline-model",
+            s(&f.before),
+            "--llama-cpp-dir",
+            s(&f.llama),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let text = strip_ansi(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[0].starts_with("[BENCH]    ppl · ctx 512  "), "{text}");
+    assert_eq!(
+        lines[1],
+        "[PPL]      7.2000 ± 0.04 → 7.2500 ± 0.04 · Δ +0.0500 (dans le bruit)"
+    );
+    assert_eq!(lines[2], "[VERDICT]  ok · seuils respectés");
+
+    let e = eval_fixture_bench();
+    let mut deps = ui_deps(ColorMode::TrueColor, false);
+    deps.generator_factory = Box::new(answer_by_model);
+    let (code, out, err) = run(
+        &deps,
+        &[
+            "bench",
+            "eval",
+            "--model",
+            s(&e.after),
+            "--dataset",
+            s(&e.dataset),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let text = strip_ansi(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines[0].starts_with("[BENCH]    eval · 2 questions · auto  "),
+        "{text}"
+    );
+    assert_eq!(
+        lines[1],
+        "[PASS@1]   1/2 · 50.0 % · IC95 [9.5 ; 90.5] · boucles 0"
+    );
+    assert_eq!(lines[2], "[VERDICT]  aucun seuil fourni");
+    assert!(lines[3].contains("échantillon réduit (n = 2)"), "{text}");
+}
+
+#[test]
+fn bench_json_on_the_binary_is_one_clean_document_even_with_forced_colors() {
+    let dir = tempfile::tempdir().unwrap();
+    let (before, after) = golden_dumps(dir.path());
+    let out = binary()
+        .args([
+            "--json",
+            "bench",
+            "logits",
+            "--before",
+            s(&before),
+            "--after",
+            s(&after),
+        ])
+        .env("CLICOLOR_FORCE", "1")
+        .env("COLORTERM", "truecolor")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(
+        !stdout.contains('\x1b') && !stderr.contains('\x1b'),
+        "{stderr}"
+    );
+    let v: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["command"], "bench logits");
+
+    let human = binary()
+        .args([
+            "bench",
+            "logits",
+            "--before",
+            s(&before),
+            "--after",
+            s(&after),
+        ])
+        .env("CLICOLOR_FORCE", "1")
+        .env("COLORTERM", "truecolor")
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("\x1b["),
+        "colors when asked"
+    );
+}
+
+// -------------------------------------------------------------- bench dump
+
+fn dump_args<'a>(model: &'a Path, prompts: &'a Path, out: &'a Path) -> Vec<&'a str> {
+    vec![
+        "bench",
+        "dump",
+        "--model",
+        s(model),
+        "--prompts",
+        s(prompts),
+        "--out",
+        s(out),
+    ]
+}
+
+fn temp_files(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.contains(".tmp-"))
+        .collect()
+}
+
+#[test]
+fn bench_dump_writes_a_complete_file_and_the_same_model_compares_to_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = write_fake_qwen2_dir(dir.path(), "F32", true);
+    let (prompts, _) = write_prompt_files(dir.path());
+    let a = dir.path().join("a.safetensors");
+    let (code, v) = run_json(&deps(), &dump_args(&model, &prompts, &a));
+    assert_eq!(code, 0, "{v}");
+    let d = &v["data"];
+    assert_eq!(d["n_prompts"], 6);
+    assert_eq!(d["vocab_size"], VOCAB);
+    assert_eq!(d["dtype_used"], "f32");
+    let n = d["n_positions"].as_u64().unwrap() as usize;
+
+    let bytes = std::fs::read(&a).unwrap();
+    let st = safetensors::SafeTensors::deserialize(&bytes).unwrap();
+    let logits = st.tensor("logits").unwrap();
+    assert_eq!(logits.shape(), [n, VOCAB]);
+    let offsets: Vec<i64> = st
+        .tensor("prompt_offsets")
+        .unwrap()
+        .data()
+        .chunks_exact(8)
+        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(offsets.len(), 7);
+    assert_eq!((offsets[0], offsets[6]), (0, n as i64));
+    let (_, meta) = safetensors::SafeTensors::read_metadata(&bytes).unwrap();
+    let meta = meta.metadata().clone().unwrap();
+    for key in [
+        "model",
+        "dtype_used",
+        "n_prompts",
+        "n_positions",
+        "vocab_size",
+        "prompts_sha256",
+        "tokenizer_sha256",
+        "max_tokens",
+        "surgeon_version",
+    ] {
+        assert!(meta.contains_key(key), "{key}");
+    }
+    assert_eq!(meta["prompts_sha256"], d["prompts_sha256"]);
+
+    let b = dir.path().join("b.safetensors");
+    assert_eq!(run_json(&deps(), &dump_args(&model, &prompts, &b)).0, 0);
+    assert_eq!(std::fs::read(&b).unwrap(), bytes, "bit-identical dumps");
+    let (code, v) = run_json(
+        &deps(),
+        &["bench", "logits", "--before", s(&a), "--after", s(&b)],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(v["data"]["kl_mean"], 0.0);
+    assert_eq!(v["data"]["top1_shift_rate"], 0.0);
+    assert_eq!(v["data"]["prompts"], 6);
+    assert!(v["warnings"].as_array().unwrap().is_empty());
+
+    let (code, v) = run_json(&deps(), &dump_args(&model, &prompts, &a));
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert_eq!(v["error"]["kind"], "output_exists");
+    let mut again = dump_args(&model, &prompts, &a);
+    again.extend(["--overwrite", "--out-dtype", "f16"]);
+    assert_eq!(run_json(&deps(), &again).0, 0);
+    assert!(
+        std::fs::metadata(&a).unwrap().len() < bytes.len() as u64,
+        "f16 is smaller"
+    );
+    assert!(temp_files(dir.path()).is_empty());
+}
+
+#[test]
+fn bench_dump_refuses_before_computing_and_leaves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = write_fake_qwen2_dir(dir.path(), "F32", false);
+    let (prompts, _) = write_prompt_files(dir.path());
+    let out = dir.path().join("out.safetensors");
+
+    let mut capped = dump_args(&model, &prompts, &out);
+    capped.extend(["--max-total-positions", "3"]);
+    let (code, v) = run_json(&deps(), &capped);
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("GiB"),
+        "{v}"
+    );
+
+    let mut poor = deps();
+    poor.probe = Box::new(FakeProbe { available: 0 });
+    let (code, v) = run_json(&poor, &dump_args(&model, &prompts, &out));
+    assert_eq!(code, exit::GENERAL);
+    assert_eq!(v["error"]["kind"], "insufficient_resources");
+
+    let cancelled = deps();
+    cancelled.interrupted.store(true, Ordering::SeqCst);
+    let (code, v) = run_json(&cancelled, &dump_args(&model, &prompts, &out));
+    assert_eq!(code, exit::GENERAL);
+    assert_eq!(v["error"]["kind"], "cancelled");
+
+    std::fs::write(model.join("config.json"), qwen_config("qwen3").to_string()).unwrap();
+    let (code, v) = run_json(&deps(), &dump_args(&model, &prompts, &out));
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert!(v["error"]["message"].as_str().unwrap().contains("qwen3"));
+
+    assert!(!out.exists());
+    assert!(temp_files(dir.path()).is_empty());
+}
+
+/// The agent recipe: copy the model, patch the copy, dump both, compare.
+#[test]
+fn bench_dump_before_and_after_an_apply_on_a_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = write_fake_qwen2_dir(dir.path(), "F32", false);
+    let copy = dir.path().join("qwen2-patched");
+    std::fs::create_dir_all(&copy).unwrap();
+    for entry in std::fs::read_dir(&model).unwrap() {
+        let path = entry.unwrap().path();
+        std::fs::copy(&path, copy.join(path.file_name().unwrap())).unwrap();
+    }
+    std::fs::write(
+        dir.path().join("v16.json"),
+        serde_json::to_string(&[1.0f32; HIDDEN]).unwrap(),
+    )
+    .unwrap();
+    let patch = dir.path().join("patch.json");
+    let ops = json!([op("g", "1", "gate_proj", "v16.json", "rows")]);
+    std::fs::write(
+        &patch,
+        json!({"schema_version": 1, "backup": false, "operations": ops}).to_string(),
+    )
+    .unwrap();
+    let weights = copy.join("model.safetensors");
+    let (code, v) = run_json(
+        &deps(),
+        &[
+            "apply",
+            "--model",
+            s(&weights),
+            "--patch",
+            s(&patch),
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code, 0, "{v}");
+
+    let (prompts, _) = write_prompt_files(dir.path());
+    let (a, b) = (
+        dir.path().join("a.safetensors"),
+        dir.path().join("b.safetensors"),
+    );
+    assert_eq!(run_json(&deps(), &dump_args(&model, &prompts, &a)).0, 0);
+    assert_eq!(run_json(&deps(), &dump_args(&copy, &prompts, &b)).0, 0);
+    let (code, v) = run_json(
+        &deps(),
+        &["bench", "logits", "--before", s(&a), "--after", s(&b)],
+    );
+    assert_eq!(code, 0);
+    assert!(v["data"]["kl_mean"].as_f64().unwrap() > 0.0, "{v}");
+    assert_eq!(v["data"]["worst_prompts"].as_array().unwrap().len(), 5);
+}
+
+// -------------------------------------------------------------- bench ppl
+
+/// Writes the GGUF a conversion would produce, otherwise replays perplexity outputs.
+struct PplRunner {
+    calls: Calls,
+    outputs: RefCell<VecDeque<CommandOutput>>,
+}
+
+impl CommandRunner for PplRunner {
+    fn run(
+        &self,
+        program: &Path,
+        args: &[String],
+        _cwd: Option<&Path>,
+    ) -> weight_surgeon::eval::Result<CommandOutput> {
+        self.calls
+            .borrow_mut()
+            .push((program.to_path_buf(), args.to_vec()));
+        if let Some(i) = args.iter().position(|a| a == "--outfile") {
+            std::fs::write(&args[i + 1], b"GGUF\x03\x00\x00\x00").unwrap();
+            return Ok(CommandOutput {
+                status_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        }
+        Ok(self.outputs.borrow_mut().pop_front().unwrap())
+    }
+}
+
+fn ppl_output(ppl: &str) -> CommandOutput {
+    CommandOutput {
+        status_code: 0,
+        stdout: String::new(),
+        stderr: format!(
+            "perplexity: calculating perplexity over 2 chunks, n_ctx=512\n[1]6.1000,\n[2]{ppl},\nFinal estimate: PPL = {ppl} +/- 0.04000\n"
+        ),
+    }
+}
+
+type Calls = Rc<RefCell<Vec<(PathBuf, Vec<String>)>>>;
+
+fn ppl_deps(mode: ColorMode, outputs: Vec<CommandOutput>) -> (AppDeps, Calls) {
+    let mut deps = ui_deps(mode, false);
+    let calls = Calls::default();
+    deps.runner = Box::new(PplRunner {
+        calls: Rc::clone(&calls),
+        outputs: RefCell::new(outputs.into()),
+    });
+    (deps, calls)
+}
+
+struct PplFixture {
+    dir: tempfile::TempDir,
+    after: PathBuf,
+    before: PathBuf,
+    text: PathBuf,
+    llama: PathBuf,
+}
+
+fn ppl_fixture() -> PplFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let llama = dir.path().join("llama.cpp");
+    std::fs::create_dir_all(&llama).unwrap();
+    let exe = format!("llama-perplexity{}", std::env::consts::EXE_SUFFIX);
+    std::fs::write(llama.join(exe), "").unwrap();
+    std::fs::write(llama.join("convert_hf_to_gguf.py"), "").unwrap();
+    let (after, before, text) = (
+        dir.path().join("after.gguf"),
+        dir.path().join("before.gguf"),
+        dir.path().join("text.txt"),
+    );
+    for f in [&after, &before] {
+        std::fs::write(f, b"GGUF").unwrap();
+    }
+    std::fs::write(&text, "Le texte de référence pour la perplexité.\n").unwrap();
+    PplFixture {
+        dir,
+        after,
+        before,
+        text,
+        llama,
+    }
+}
+
+fn ppl_args<'a>(f: &'a PplFixture, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "bench",
+        "ppl",
+        "--model",
+        s(&f.after),
+        "--text",
+        s(&f.text),
+        "--llama-cpp-dir",
+        s(&f.llama),
+    ];
+    args.extend_from_slice(extra);
+    args
+}
+
+#[test]
+fn bench_ppl_baselines_rounded_delta_and_exact_arguments() {
+    let f = ppl_fixture();
+    let (deps, calls) = ppl_deps(ColorMode::Plain, vec![ppl_output("7.4000")]);
+    let (code, v) = run_json(&deps, &ppl_args(&f, &[]));
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["data"]["ppl"], 7.4);
+    assert_eq!(v["data"]["ppl_err"], 0.04);
+    assert!(v["data"]["delta"].is_null() && v["data"]["baseline"].is_null());
+    assert_eq!(v["data"]["verdict"], "none");
+    let recorded = calls.borrow();
+    assert_eq!(recorded.len(), 1);
+    let args = &recorded[0].1;
+    assert_eq!(args.len(), 6);
+    assert_eq!((args[0].as_str(), args[2].as_str()), ("-m", "-f"));
+    assert!(Path::new(&args[1]).is_absolute() && Path::new(&args[3]).is_absolute());
+    assert_eq!(&args[4..], ["-c", "512"]);
+    drop(recorded);
+
+    let (deps, _) = ppl_deps(ColorMode::Plain, vec![ppl_output("7.4000")]);
+    let (code, v) = run_json(&deps, &ppl_args(&f, &["--baseline-ppl", "7.2"]));
+    assert_eq!(code, 0);
+    assert_eq!(v["data"]["delta"]["delta"], 0.2);
+    assert_eq!(
+        v["data"]["delta"]["exceeded"], false,
+        "7.4 - 7.2 is not above 0.2"
+    );
+    assert!(v["warnings"].as_array().unwrap().is_empty());
+
+    let (deps, _) = ppl_deps(ColorMode::Plain, vec![ppl_output("7.4001")]);
+    let (code, v) = run_json(
+        &deps,
+        &ppl_args(&f, &["--baseline-ppl", "7.2", "--fail-on-warn"]),
+    );
+    assert_eq!(code, 9);
+    assert_eq!(v["data"]["delta"]["exceeded"], true);
+
+    let (deps, calls) = ppl_deps(
+        ColorMode::Plain,
+        vec![ppl_output("7.2000"), ppl_output("7.2500")],
+    );
+    let (code, v) = run_json(
+        &deps,
+        &ppl_args(
+            &f,
+            &[
+                "--baseline-model",
+                s(&f.before),
+                "--llama-arg",
+                "--batch-size=64",
+            ],
+        ),
+    );
+    assert_eq!(code, 0, "{v}");
+    let order: Vec<String> = calls.borrow().iter().map(|(_, a)| a[1].clone()).collect();
+    assert_eq!(order.len(), 2);
+    assert!(
+        order[0].ends_with("before.gguf") && order[1].ends_with("after.gguf"),
+        "baseline first"
+    );
+    assert_eq!(v["data"]["baseline"]["source"], "model");
+    assert_eq!(v["data"]["delta"]["within_noise"], true);
+    assert!(calls.borrow()[1]
+        .1
+        .ends_with(&["--batch-size".to_owned(), "64".to_owned()]));
+
+    let (code, _) = run_json(
+        &deps,
+        &ppl_args(
+            &f,
+            &["--baseline-model", s(&f.before), "--baseline-ppl", "7"],
+        ),
+    );
+    assert_eq!(code, exit::INVALID_INPUT, "conflicting baselines");
+    let (code, v) = run_json(&deps, &ppl_args(&f, &["--llama-arg", "--log-file=x.txt"]));
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--log-file"));
+}
+
+#[test]
+fn bench_ppl_failures_are_typed_and_the_temporary_gguf_is_removed() {
+    let f = ppl_fixture();
+    let noisy: String = (1..=30).map(|i| format!("log line {i}\n")).collect();
+    let failing = CommandOutput {
+        status_code: 1,
+        stdout: String::new(),
+        stderr: noisy,
+    };
+    let (deps, _) = ppl_deps(ColorMode::Plain, vec![failing.clone()]);
+    let (code, v) = run_json(&deps, &ppl_args(&f, &[]));
+    assert_eq!(code, 8);
+    assert_eq!(v["error"]["kind"], "process_failed");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("log line 30") && !message.contains("log line 10\n"),
+        "{message}"
+    );
+
+    let truncated = CommandOutput {
+        status_code: 0,
+        stdout: String::new(),
+        stderr: "[1]6.1,[2]6.4,".into(),
+    };
+    let (deps, _) = ppl_deps(ColorMode::Plain, vec![truncated, ppl_output("nan")]);
+    for _ in 0..2 {
+        let (code, v) = run_json(&deps, &ppl_args(&f, &[]));
+        assert_eq!(code, 8);
+        assert_eq!(v["error"]["kind"], "ppl_parse_failed");
+    }
+
+    // A SafeTensors directory: converted to a temporary GGUF, removed on success and error.
+    let model_dir = f.dir.path().join("hf");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    bf16_model(&model_dir);
+    let leftovers = || -> Vec<String> {
+        std::fs::read_dir(&model_dir)
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.ends_with(".gguf"))
+            .collect()
+    };
+    let hf = ppl_args(&f, &[]);
+    let hf: Vec<&str> = hf
+        .iter()
+        .map(|a| if *a == s(&f.after) { s(&model_dir) } else { *a })
+        .collect();
+    let (deps, calls) = ppl_deps(ColorMode::Plain, vec![ppl_output("8.0")]);
+    assert_eq!(run_json(&deps, &hf).0, 0);
+    assert_eq!(calls.borrow().len(), 2, "convert, then perplexity");
+    assert!(calls.borrow()[1].1[1].contains(".weight-surgeon-bench-ppl-"));
+    assert!(leftovers().is_empty());
+    let (deps, _) = ppl_deps(ColorMode::Plain, vec![failing]);
+    assert_eq!(run_json(&deps, &hf).0, 8);
+    assert!(leftovers().is_empty(), "removed after an error too");
+    let (code, v) = run_json(
+        &deps,
+        &[
+            "bench",
+            "ppl",
+            "--model",
+            s(&model_dir),
+            "--text",
+            s(&f.text),
+        ],
+    );
+    if std::env::var_os("LLAMA_CPP_DIR").is_none() {
+        assert_eq!(code, exit::GENERAL, "{v}");
+        assert_eq!(v["error"]["kind"], "binary_not_found");
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--llama-cpp-dir"));
+    }
+}
+
+// -------------------------------------------------------------- bench eval
+
+struct Fixed(&'static str);
+
+impl TextGenerator for Fixed {
+    fn generate(
+        &mut self,
+        _prompt: &str,
+        _max_new_tokens: u32,
+        on_chunk: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> weight_surgeon::eval::Result<GenerationOutcome> {
+        let _ = on_chunk(self.0);
+        Ok(GenerationOutcome {
+            text: self.0.to_owned(),
+            stopped_early: false,
+            duration_ms: 0,
+        })
+    }
+}
+
+/// "before.gguf" answers 8, any other model answers 5.
+fn answer_by_model(
+    gguf: &Path,
+    _: &weight_surgeon::cli::EvalArgs,
+) -> Result<Box<dyn TextGenerator>, EvalError> {
+    Ok(Box::new(Fixed(match gguf.ends_with("before.gguf") {
+        true => "So it is 8.\n#### 8",
+        false => "So it is 5.\n#### 5",
+    })))
+}
+
+struct EvalBenchFixture {
+    _dir: tempfile::TempDir,
+    after: PathBuf,
+    before: PathBuf,
+    dataset: PathBuf,
+}
+
+fn eval_fixture_bench() -> EvalBenchFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let (after, before, dataset) = (
+        dir.path().join("after.gguf"),
+        dir.path().join("before.gguf"),
+        dir.path().join("dataset.json"),
+    );
+    for f in [&after, &before] {
+        std::fs::write(f, b"GGUF").unwrap();
+    }
+    // Original problems written for these tests.
+    std::fs::write(
+        &dataset,
+        "[{\"id\":\"q1\",\"question\":\"Two plus three?\",\"answer\":\"2 + 3 = 5\\n#### 5\"},\n \
+         {\"id\":\"q2\",\"question\":\"Four plus four?\",\"answer\":\"4 + 4 = 8\\n#### 8\"}]",
+    )
+    .unwrap();
+    EvalBenchFixture {
+        _dir: dir,
+        after,
+        before,
+        dataset,
+    }
+}
+
+#[test]
+fn bench_eval_scores_pairs_and_gates_on_min_accuracy() {
+    use sha2::Digest as _;
+    let e = eval_fixture_bench();
+    let mut deps = deps();
+    deps.generator_factory = Box::new(answer_by_model);
+    let base = [
+        "bench",
+        "eval",
+        "--model",
+        s(&e.after),
+        "--dataset",
+        s(&e.dataset),
+    ];
+    let (code, v) = run_json(&deps, &base);
+    assert_eq!(code, 0, "{v}");
+    let d = &v["data"];
+    assert_eq!((d["n"].as_u64(), d["correct"].as_u64()), (Some(2), Some(1)));
+    assert_eq!(d["accuracy"], 0.5);
+    let digest = sha2::Sha256::digest(std::fs::read(&e.dataset).unwrap());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(d["dataset_sha256"], hex);
+    assert_eq!(d["items"][0]["reason"], "correct");
+    assert_eq!(d["items"][1]["extracted"], "5");
+
+    let (code, v) = run_json(
+        &deps,
+        &[&base[..], &["--baseline-model", s(&e.before)]].concat(),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(v["data"]["paired"]["lost"], json!(["q2"]));
+    assert_eq!(v["data"]["paired"]["gained"], json!(["q1"]));
+    assert_eq!(v["data"]["paired"]["delta_accuracy"], 0.0);
+
+    let (code, v) = run_json(&deps, &[&base[..], &["--min-accuracy", "0.6"]].concat());
+    assert_eq!(code, 0);
+    assert_eq!(v["data"]["verdict"], "warn");
+    let (code, v) = run_json(
+        &deps,
+        &[&base[..], &["--min-accuracy", "0.6", "--fail-on-warn"]].concat(),
+    );
+    assert_eq!(code, 9);
+    assert_eq!(v["error"]["kind"], "threshold_exceeded");
+    let (code, _) = run_json(
+        &deps,
+        &[&base[..], &["--prompt-template", "no variable"]].concat(),
+    );
+    assert_eq!(code, exit::INVALID_INPUT);
+    let (code, _) = run_json(&deps, &[&base[..], &["--limit", "0"]].concat());
+    assert_eq!(code, exit::INVALID_INPUT);
+}
+
+// -------------------------------------------------------------- bench over MCP
+
+/// Blocks in `run_streaming` until the cancel flag rises, then reports a killed child.
+struct CancelRunner {
+    killed: Rc<RefCell<bool>>,
+}
+
+impl CommandRunner for CancelRunner {
+    fn run(
+        &self,
+        _: &Path,
+        _: &[String],
+        _: Option<&Path>,
+    ) -> weight_surgeon::eval::Result<CommandOutput> {
+        unreachable!("only streaming runs here")
+    }
+
+    fn run_streaming(
+        &self,
+        _: &Path,
+        _: &[String],
+        _: Option<&Path>,
+        control: StreamControl<'_>,
+        _on_line: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> weight_surgeon::eval::Result<CommandOutput> {
+        let started = Instant::now();
+        while !control.cancel.unwrap().load(Ordering::SeqCst) {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "never cancelled"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        *self.killed.borrow_mut() = true;
+        Ok(CommandOutput {
+            status_code: -1,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
+}
+
+fn copy_into(src: &Path, dir: &Path) -> PathBuf {
+    let target = dir.join(src.file_name().unwrap());
+    std::fs::copy(src, &target).unwrap();
+    target
+}
+
+#[test]
+fn mcp_bench_runs_every_mode_and_guards_its_arguments() {
+    let f = ppl_fixture();
+    let root = f.dir.path();
+    let (before, after) = golden_dumps(root);
+    let e = eval_fixture_bench();
+    copy_into(&e.dataset, root);
+    write_fake_qwen2_dir(root, "F32", false);
+    let (prompts, _) = write_prompt_files(root);
+    let (mut deps, _) = ppl_deps(ColorMode::Plain, vec![ppl_output("7.3000")]);
+    deps.generator_factory = Box::new(answer_by_model);
+    let lines = [
+        init("2025-06-18"),
+        call(
+            1,
+            "surgeon_bench",
+            json!({"mode": "logits", "before": "before.safetensors", "after": "after.safetensors"}),
+        ),
+        call(
+            2,
+            "surgeon_bench",
+            json!({"mode": "ppl", "model": "after.gguf", "text": "text.txt", "llama_cpp_dir": "llama.cpp", "baseline_ppl": 7.2}),
+        ),
+        call(
+            3,
+            "surgeon_bench",
+            json!({"mode": "eval", "model": "after.gguf", "dataset": "dataset.json", "llama_cpp_dir": "llama.cpp"}),
+        ),
+        call(
+            4,
+            "surgeon_bench",
+            json!({"mode": "dump", "model": "qwen2-mini", "prompts": s(&prompts), "out": "dump.safetensors"}),
+        ),
+        call(
+            5,
+            "surgeon_bench",
+            json!({"mode": "logits", "before": "before.safetensors", "text": "text.txt"}),
+        ),
+        call(
+            6,
+            "surgeon_bench",
+            json!({"mode": "logits", "before": "b", "after": "a", "frobnicate": 1}),
+        ),
+        call(
+            7,
+            "surgeon_bench",
+            json!({"mode": "logits", "before": "../outside.safetensors", "after": "after.safetensors"}),
+        ),
+        call(8, "surgeon_bench", json!({"before": "before.safetensors"})),
+        call(
+            9,
+            "surgeon_bench",
+            json!({"mode": "ppl", "model": "after.gguf", "text": "text.txt", "baseline_ppl_err": 0.1}),
+        ),
+    ];
+    let responses = session(&deps, &mcp_cfg(root), &lines);
+    let (is_error, env) = envelope(&responses, 1);
+    assert!(!is_error, "{env}");
+    assert_eq!(env["command"], "bench logits");
+    assert_eq!(env["data"]["top1_shift_rate"], 0.5);
+    let (is_error, env) = envelope(&responses, 2);
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["delta"]["delta"], 0.1);
+    let (is_error, env) = envelope(&responses, 3);
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["correct"], 1);
+    let (is_error, env) = envelope(&responses, 4);
+    assert!(!is_error, "{env}");
+    assert!(root.join("dump.safetensors").exists());
+    let (is_error, env) = envelope(&responses, 5);
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "invalid_arguments");
+    let paths: Vec<&str> = env["error"]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["after", "text"]);
+    assert_eq!(error_code(&responses, json!(6)), mcp::INVALID_PARAMS);
+    assert_eq!(
+        envelope(&responses, 7).1["error"]["kind"],
+        "path_not_allowed"
+    );
+    assert_eq!(
+        envelope(&responses, 8).1["error"]["kind"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        envelope(&responses, 9).1["error"]["issues"][0]["path"],
+        "baseline_ppl_err"
+    );
+
+    let read_only = McpConfig::new(&[root.to_path_buf()], true, false).unwrap();
+    let responses = session(
+        &deps,
+        &read_only,
+        &[
+            init("2025-06-18"),
+            call(
+                1,
+                "surgeon_bench",
+                json!({"mode": "dump", "model": "qwen2-mini", "prompts": s(&prompts), "out": "other.safetensors"}),
+            ),
+            call(
+                2,
+                "surgeon_bench",
+                json!({"mode": "logits", "before": "before.safetensors", "after": "after.safetensors"}),
+            ),
+        ],
+    );
+    assert_eq!(envelope(&responses, 1).1["error"]["kind"], "read_only");
+    assert!(!root.join("other.safetensors").exists());
+    assert!(!envelope(&responses, 2).0, "reading stays allowed");
+    let _ = (before, after);
+}
+
+#[test]
+fn mcp_bench_progress_and_cancellation_kill_the_process() {
+    let f = ppl_fixture();
+    let root = f.dir.path();
+    let (deps, _) = ppl_deps(ColorMode::Plain, vec![ppl_output("7.3000")]);
+    let ppl = json!({"mode": "ppl", "model": "after.gguf", "text": "text.txt", "llama_cpp_dir": "llama.cpp"});
+    let with_token = rpc(
+        json!(1),
+        "tools/call",
+        json!({"name": "surgeon_bench", "arguments": ppl, "_meta": {"progressToken": "p"}}),
+    );
+    let responses = session(&deps, &mcp_cfg(root), &[init("2025-06-18"), with_token]);
+    let progress: Vec<&Value> = responses
+        .iter()
+        .filter(|r| r["method"] == "notifications/progress")
+        .collect();
+    assert_eq!(progress.len(), 2, "{responses:?}");
+    assert_eq!(progress[1]["params"]["progressToken"], "p");
+    assert_eq!(progress[1]["params"]["progress"], 2);
+    assert_eq!(progress[1]["params"]["total"], 2);
+
+    let mut deps = deps;
+    let killed = Rc::new(RefCell::new(false));
+    deps.runner = Box::new(CancelRunner {
+        killed: Rc::clone(&killed),
+    });
+    let cancel =
+        json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 1}})
+            .to_string();
+    let responses = session(
+        &deps,
+        &mcp_cfg(root),
+        &[init("2025-06-18"), call(1, "surgeon_bench", ppl), cancel],
+    );
+    let (is_error, env) = envelope(&responses, 1);
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "cancelled");
+    assert!(*killed.borrow(), "the llama-perplexity child was stopped");
+}
+
+#[test]
+fn mcp_binary_bench_speaks_only_json_rpc() {
+    let dir = tempfile::tempdir().unwrap();
+    golden_dumps(dir.path());
+    let mut child = binary()
+        .args(["mcp", "--allow-dir", s(dir.path())])
+        .env("CLICOLOR_FORCE", "1")
+        .env("COLORTERM", "truecolor")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let input = [
+        init("2025-06-18"),
+        INITIALIZED.to_owned(),
+        call(
+            2,
+            "surgeon_bench",
+            json!({"mode": "logits", "before": "before.safetensors", "after": "after.safetensors"}),
+        ),
+    ]
+    .join("\n")
+        + "\n";
+    {
+        use std::io::Write as _;
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input.as_bytes()).unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let out = String::from_utf8(output.stdout).unwrap();
+    assert!(!out.contains('\x1b') && !String::from_utf8_lossy(&output.stderr).contains('\x1b'));
+    let responses: Vec<Value> = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+        .collect();
+    assert!(responses.iter().all(|r| r["jsonrpc"] == "2.0"));
+    assert!(!envelope(&responses, 2).0);
+}
+
+#[test]
+fn bench_module_has_no_print_and_no_unsafe() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bench");
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(!source.contains("unsafe"), "{}: unsafe", path.display());
+        let code = source.split("#[cfg(test)]").next().unwrap();
+        for (n, line) in code.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for banned in [
+                "println!(",
+                "print!(",
+                "eprintln!(",
+                "eprint!(",
+                ".unwrap()",
+                ".expect(",
+                "panic!(",
+            ] {
+                assert!(
+                    !line.contains(banned),
+                    "{}:{}: {banned}",
+                    path.display(),
+                    n + 1
+                );
+            }
+        }
+    }
+}
+
+/// Two f16 dumps of 4096 positions × 151936 tokens (Qwen2 vocabulary, ~1.2 GB each) in
+/// `$SURGEON_BENCH_DUMPS_DIR`, for the throughput and memory measures of `bench logits`:
+/// `cargo test --release --test integration make_large_logits_dumps -- --ignored`.
+#[test]
+#[ignore]
+fn make_large_logits_dumps() {
+    use std::io::Write as _;
+    let dir = PathBuf::from(std::env::var("SURGEON_BENCH_DUMPS_DIR").unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    let (positions, vocab, prompts) = (4096usize, 151_936usize, 16usize);
+    let offsets: Vec<i64> = (0..=prompts)
+        .map(|p| (p * positions / prompts) as i64)
+        .collect();
+    for (name, seed, shift) in [
+        ("large_before.safetensors", 1u64, 0.0f32),
+        ("large_after.safetensors", 1, 0.05),
+    ] {
+        let logits_bytes = positions * vocab * 2;
+        let mut header = json!({
+            "logits": {"dtype": "F16", "shape": [positions, vocab], "data_offsets": [0, logits_bytes]},
+            "prompt_offsets": {"dtype": "I64", "shape": [prompts + 1], "data_offsets": [logits_bytes, logits_bytes + 8 * (prompts + 1)]},
+        })
+        .to_string();
+        while !(8 + header.len()).is_multiple_of(8) {
+            header.push(' ');
+        }
+        let mut out = std::io::BufWriter::new(std::fs::File::create(dir.join(name)).unwrap());
+        out.write_all(&(header.len() as u64).to_le_bytes()).unwrap();
+        out.write_all(header.as_bytes()).unwrap();
+        let mut state = seed;
+        let mut row = Vec::with_capacity(vocab * 2);
+        for _ in 0..positions {
+            row.clear();
+            for i in 0..vocab {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let base = ((state >> 40) as f32 / (1u64 << 24) as f32) * 20.0 - 10.0;
+                let v = base + if i % 7 == 0 { shift * base } else { 0.0 };
+                row.extend(half::f16::from_f32(v).to_le_bytes());
+            }
+            out.write_all(&row).unwrap();
+        }
+        for o in &offsets {
+            out.write_all(&o.to_le_bytes()).unwrap();
+        }
+        out.flush().unwrap();
     }
 }

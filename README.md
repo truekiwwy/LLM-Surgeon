@@ -16,19 +16,19 @@ tiny fake Qwen2 model (4 layers, hidden size 16), copied without ANSI codes.
 
 ## Architecture
 
-Seven pillars, one binary:
+Eight pillars, one binary:
 
 ```text
-                       surgeon (src/main.rs -> app::run_with)
-   ┌────────┬─────────┬─────────┬────────┬─────────┬────────┬─────────┐
-   check    inspect   apply     eval     extract   tui      mcp / schema
-   │        │         │         │        │         │        │
-   hardware engine    patch     eval     extract   tui      mcp
-   RAM,VRAM mmap      patch.json llama.cpp Qwen2   ratatui  JSON-RPC
-   budget   stats     backup    loops,   forward   worker   stdio,
-            (rayon)   rollback  GGUF     (candle)  + LRU    sandbox
-   └────────┴────┬────┴─────────┴────────┴────┬────┴────────┴─────────┘
-                 engine::stats (shared)       ui (terminal identity)
+                          surgeon (src/main.rs -> app::run_with)
+   ┌────────┬─────────┬──────────┬──────────┬─────────┬─────────┬────────┬──────────────┐
+   check    inspect   apply      eval       extract   bench     tui      mcp / schema
+   │        │         │          │          │         │         │        │
+   hardware engine    patch      eval       extract   bench     tui      mcp
+   RAM,VRAM mmap      patch.json llama.cpp  Qwen2     KL, PPL,  ratatui  JSON-RPC
+   budget   stats     backup     loops,     forward   Pass@1,   worker   stdio,
+            (rayon)   rollback   GGUF       (candle)  dumps     + LRU    sandbox
+   └────────┴────┬────┴──────────┴──────────┴────┬────┴─────────┴────────┴──────────────┘
+                 engine::stats (shared)          ui (terminal identity)
 ```
 
 | Pillar | Module | What it guarantees |
@@ -38,6 +38,7 @@ Seven pillars, one binary:
 | Patching | `src/patch` | `patch.json` validated first, SHA-256 checked backup, automatic rollback. |
 | Evaluation | `src/eval` | Loop detection and expectations through llama.cpp, GGUF export only when healthy. |
 | Extraction | `src/extract` | Steering vector from a Qwen2 layer, atomic output plus a companion stats file. |
+| Measurement | `src/bench` | Logits dumps and KL/top-k shifts, perplexity delta, Pass@1; deterministic reports. |
 | Dashboard | `src/tui` | Elm-style state, pure rendering, background worker with cancellation. |
 | Agents | `src/mcp` | MCP server on stdio, paths confined to allowed directories. |
 
@@ -59,7 +60,8 @@ surgeon 0.1.0
 
 The binary goes to `$HOME/.cargo/bin` (Linux, macOS) or `%USERPROFILE%\.cargo\bin`
 (Windows). `surgeon eval` also needs a built llama.cpp (`llama-cli`, `llama-quantize`,
-`convert_hf_to_gguf.py` and its Python requirements).
+`convert_hf_to_gguf.py` and its Python requirements); `surgeon bench ppl` needs
+`llama-perplexity`, `surgeon bench eval` needs `llama-completion` (or `llama-cli`).
 
 ## Tutorial
 
@@ -357,10 +359,10 @@ projections are unavailable.
 
 ### 7. Hand it to an AI agent (MCP)
 
-`surgeon mcp` serves five tools on stdio (`surgeon_check`, `surgeon_inspect`,
-`surgeon_apply`, `surgeon_eval`, `surgeon_extract`). Every path must fall under an allowed
-directory, and a verified backup is imposed before any write. The dashboard is not exposed
-through MCP.
+`surgeon mcp` serves six tools on stdio (`surgeon_check`, `surgeon_inspect`,
+`surgeon_apply`, `surgeon_eval`, `surgeon_extract`, `surgeon_bench`). Every path must fall
+under an allowed directory, and a verified backup is imposed before any write. The dashboard
+is not exposed through MCP.
 
 ```bash
 surgeon mcp --allow-dir <MODELS_DIR> --read-only
@@ -390,18 +392,122 @@ surgeon mcp 0.1.0 : prêt sur stdio, 1 dossier(s) autorisé(s), lecture seule
 Tool schemas: `surgeon schema --kind tools`. Details, guards and protocol versions:
 [docs/MCP.md](docs/MCP.md) (in French).
 
+### 8. Measure a surgery (`surgeon bench`)
+
+Four modes measure what a patch changed. The recipe an agent follows: extract a direction
+(step 3), apply it **on a copy** of the model (step 4), dump the logits of both models on
+the same prompts, compare them, then check the perplexity and an exact-match benchmark
+before deciding. Here `patch.json` subtracts `0.5 × [1, …, 1]` from the `gate_proj` of
+layer 1, without backup since it works on a copy:
+
+```json
+{"schema_version": 1, "backup": false, "operations": [{"id": "g1", "layers": "1", "projections": ["gate_proj"], "operation": "subtract", "vector_file": "v16.json", "alpha": 0.5, "axis": "rows"}]}
+```
+
+```bash
+cp -r qwen2-mini qwen2-patched
+surgeon apply --model qwen2-patched/model.safetensors --patch patch.json
+surgeon bench dump --model qwen2-mini --prompts pos.json --out before.safetensors
+surgeon bench dump --model qwen2-patched --prompts pos.json --out after.safetensors
+surgeon bench logits --before before.safetensors --after after.safetensors --warn-kl 0.05
+```
+
+```text
+[APPLY]    patch.json · 1 opérations
+[SHIFT]    g1 terminée · Δmax 0.5000 · 1 tenseurs
+[COMMIT]   modèle patché · 0.0 s
+[BENCH]    dump · 6 prompts · 24 positions · vocab 64 · f32
+[WRITE]    before.safetensors
+[BENCH]    dump · 6 prompts · 24 positions · vocab 64 · f32
+[WRITE]    after.safetensors
+[BENCH]    logits · 24 positions · vocab 64
+[KL]       moyenne 0.1648 · max 0.4785 @ 23 · p95 0.4187 · cos(p,q) 0.8684
+[TOP-K]    top-1 changé 66.7 % · top-5 (ensemble) 95.8 % · recouvrement 0.51
+  pires prompts : #1 0.2656 · #2 0.2572 · #3 0.1641 · #5 0.1311 · #4 0.0934
+[VERDICT]  avertissement : KL moyenne 0.1648 > 0.05
+```
+
+`bench dump` runs the whole Qwen2 forward in pure Rust and writes `logits`
+`[positions, vocab]`, `prompt_offsets` and metadata (`prompts_sha256`, `tokenizer_sha256`...)
+atomically. `bench logits` also reads `[batch, seq, vocab]` tensors, f32/f16/bf16, `.npy`
+and `.pt` files, and warns when the two dumps come from different prompts or tokenizers.
+
+`bench ppl` and `bench eval` drive llama.cpp (a SafeTensors directory is converted to a
+temporary GGUF, removed afterwards). The two outputs below come from
+`examples/fake_llama.rs` copied as `llama-perplexity` and `llama-completion`: it prints a
+perplexity derived from the model bytes and answers the sum of the numbers of each problem,
+so these runs exercise the real process handling, not a real model.
+
+```bash
+surgeon bench ppl --model after.gguf --text text.txt --baseline-model before.gguf --llama-cpp-dir llama
+surgeon bench eval --model after.gguf --dataset ds.json --baseline-model before.gguf --llama-cpp-dir llama --max-new-tokens 64 --min-accuracy 0.5
+```
+
+```text
+[BENCH]    ppl · ctx 512  after.gguf
+[PPL]      6.0930 ± 0.04 → 7.2870 ± 0.04 · Δ +1.1940 (hors du bruit)
+[VERDICT]  avertissement : ΔPPL 1.1940 > 0.2
+[BENCH]    eval · 4 questions · auto  ds.json
+[PASS@1]   1/4 · 25.0 % · IC95 [4.6 ; 69.9] · boucles 0
+[PASS@1]   référence 2/4 · 50.0 % · IC95 [15.0 ; 85.0] · boucles 0
+  appariement : perdues 2 · gagnées 1 · Δ -25.0 points
+[VERDICT]  avertissement : exactitude 25.0 % < minimum 50.0 %
+  ! échantillon réduit (n = 4) : l'intervalle de confiance est large (± 32.7 points)
+```
+
+The dataset is a JSON array (or JSONL) of `question` (or `problem`), `answer` (or
+`solution`) and an optional `id`; no GSM8K or MATH content ships with this repository:
+
+```json
+[{"id": "q1", "question": "What is 12 plus 30?", "answer": "12 + 30 = 42\n#### 42"},
+ {"id": "q4", "question": "What is half of 9?", "answer": "Half of 9 is $\\boxed{\\frac{9}{2}}$."}]
+```
+
+Definitions used by the reports (`--json` gives every field):
+
+- **KL**: `KL(before‖after) = Σ p_i (log p_i − log q_i)` with `p = softmax(before)` and
+  `q = softmax(after)`, in f64 through log-sum-exp: the "before" distribution is the
+  reference. Terms with `p_i = 0` are skipped; a token finite before and `−∞` after makes the
+  position infinite, counted in `kl_infinite_positions` and kept out of `kl_mean`, `kl_max`
+  and `kl_p95` (nearest rank).
+- **Cosine**: `cosine_probs_mean` compares the probability vectors; `cosine_logits_mean`,
+  labelled apart, the raw logits.
+- **Top-k**: `top1_shift_rate` is the share of positions whose argmax changes (ties go to the
+  lowest index); `topk_set_change_rate` the share whose set of `k` best tokens differs
+  (`--top-k`, default 5), `topk_overlap_mean` the mean `|A∩B| / k`.
+- **ΔPPL**: `ppl − ppl_baseline`, rounded to 4 decimals (what llama.cpp prints) before the
+  strict comparison with `--warn-delta`: `7.4 − 7.2` is `0.20000000000000018` in floating
+  point and does not exceed 0.2. `within_noise` when `|Δ| ≤ sqrt(err² + err_baseline²)`; a
+  negative delta is an improvement, never a warning.
+- **Pass@1**: exact match of one greedy sample (`--temp 0 --top-k 1 --seed 42`). The final
+  answer is the first found of `#### X`, `\boxed{X}` (nested braces), the last `**X**`,
+  "the answer is X", the last number; numbers and fractions compare with a relative
+  tolerance of 1e-9 (`18` = `18.0` = `1,8e1`, `1/2` = `\frac{1}{2}`). The 95 % interval is
+  Wilson's; with `--baseline-model` the comparison is paired (`lost`, `gained` ids).
+- **Determinism**: reductions run in a fixed order, so `bench logits` gives the same bits
+  with 1 or 12 threads; two runs give the same JSON apart from `timing_ms`.
+
+A warning never changes the exit code, except a threshold (`--warn-kl`,
+`--warn-top1-shift`, `--warn-delta`, `--min-accuracy`) strictly exceeded under
+`--fail-on-warn`: exit code 9, the report still in `data`. Without a threshold the verdict
+is `none`. Measured on a 12-thread laptop: `bench logits` on two f16 dumps of
+4096 positions × 151,936 tokens takes 5.3 s with 49 MiB of private memory (the dumps are
+memory-mapped); scoring 1,000 eval outputs takes 5 ms.
+
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Success |
-| 1 | General failure: insufficient resources, unreadable model, Ctrl-C, `tui` without an interactive terminal |
+| 1 | General failure: insufficient resources, unreadable model, missing llama.cpp binary, Ctrl-C, `tui` without an interactive terminal |
 | 2 | Invalid input: arguments, patch, prompts, paths; nothing was touched |
 | 3 | Execution failed; the model is intact (never touched, or restored from the backup) |
 | 4 | Critical: rollback failed, or no backup and the model was left partially patched |
 | 5 | `eval`: unhealthy model (loops, failed expectations); no export |
 | 6 | `eval`: GGUF export failed |
 | 7 | `extract`: invalid config, tokenizer or weights, degenerate direction, NaN/Inf |
+| 8 | `bench`: run failed (llama.cpp process, unreadable output, incompatible dumps, generation) |
+| 9 | `bench --fail-on-warn`: a threshold was exceeded (the report is in `data`) |
 | 70 | Internal error (panic), reported after the terminal is restored |
 
 ## Commands
@@ -413,6 +519,7 @@ Tool schemas: `surgeon schema --kind tools`. Details, guards and protocol versio
 | `surgeon apply` | Applies a `patch.json` in place (`--dry-run` first) | model, backup |
 | `surgeon eval` | Non-regression through llama.cpp, conditional GGUF export | GGUF |
 | `surgeon extract` | Steering vector from a Qwen2 layer | vector, companion `.stats.json` |
+| `surgeon bench` | Logits dumps and KL/top-k, perplexity delta, Pass@1 | logits dump (`dump` only) |
 | `surgeon tui` | Dashboard: weight inspector and steering vector viewer | nothing |
 | `surgeon schema` | JSON Schema of `patch.json`, or the MCP tool definitions | stdout only |
 | `surgeon mcp` | MCP server on stdio | through its tools |
@@ -426,14 +533,21 @@ surgeon schema --kind tools
 
 Steering and weight surgery change what a model does, including its safety behaviors: a
 direction can be used to remove refusals as easily as to add them. Work only on models whose
-license allows modification, keep the backups, measure the effect with `surgeon eval` before
-sharing anything, and do not distribute a model whose safeguards you have removed.
+license allows modification, keep the backups, measure the effect with `surgeon eval` and
+`surgeon bench` before sharing anything, and do not distribute a model whose safeguards you have removed.
 
 ## Known limits
 
 - `extract` supports Qwen2 and Qwen2.5 only, on the CPU; large models need a lot of RAM
   (`--dtype bf16` halves it).
 - `eval` and the GGUF export depend on an external llama.cpp build.
+- `bench dump` supports Qwen2 only, on the CPU. `bench ppl` and `bench eval` depend on the
+  flags of the installed llama.cpp (`llama-perplexity`, formerly `perplexity`; `--chunks`,
+  `-ngl`, `--temp`, `--top-k`, `--seed`); GPU offload can change the last digits between runs.
+- 50 questions (the `bench eval` default) make a wide interval: 40/50 gives
+  [67.0 %, 88.8 %], so only large regressions are conclusive.
+- `.pt` dumps are read on a best-effort basis: uncompressed `torch.save` archives,
+  contiguous tensors only.
 - Only the MLP projections (`gate_proj`, `up_proj`, `down_proj`) are covered.
 - The dashboard needs an interactive terminal of at least 80×24, with stdin, stdout and
   stderr attached to it; otherwise use `--snapshot`.
@@ -480,8 +594,10 @@ exists. Commits follow `type: description` (`feat`, `fix`, `refactor`, `docs`, `
 │   ├── patch/             patch.json, validation, backup, rollback
 │   ├── eval/              llama.cpp runner, loop detector, GGUF export
 │   ├── extract/           Qwen2 forward, steering vector, companion file
+│   ├── bench/             logits dumps and KL, perplexity, Pass@1 (GSM8K/MATH)
 │   ├── mcp/               JSON-RPC server, tools, sandbox
 │   └── tui/               dashboard: app, worker, terminal, theme, widgets/
+├── examples/fake_llama.rs stand-in llama.cpp binaries for the bench tests
 └── tests/
     ├── integration.rs     end-to-end flows and binary smoke tests
     ├── deps_purity.rs     no C compiler in the dependency tree
