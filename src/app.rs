@@ -7,6 +7,7 @@
 //! ```text
 //! main -> install_panic_hook, Ui::detect, parse_cli_with, real_deps -> run_with
 //!      -> catch_unwind(dispatch)
+//! run_with -> schema (raw JSON) | mcp (stdio server, see `mcp/mod.rs`) | dispatch
 //! dispatch -> check   -> hardware::evaluate_budget
 //!          -> inspect -> hardware::compute_model_size (shards) -> ReadOnlyModel::open
 //!                     -> engine::find_mlp_tensors -> tensor_stats (mmap view, streamed)
@@ -61,16 +62,17 @@ use crate::engine::{
 };
 use crate::eval::{
     export_gguf, export_if_healthy, load_prompts, locate_binary, run_eval, CommandRunner,
-    EvalConfig, EvalError, EvalReport, EvalVerdict, GenerationOutcome, GgufExportConfig,
-    LlamaCliGenerator, PromptStatus, SystemCommandRunner, TextGenerator, ALLOWED_QUANTS,
+    EvalConfig, EvalError, EvalPrompt, EvalReport, EvalVerdict, GenerationOutcome,
+    GgufExportConfig, LlamaCliGenerator, PromptStatus, SystemCommandRunner, TextGenerator,
+    ALLOWED_QUANTS,
 };
 use crate::hardware::{
     self, BudgetPolicy, HardwareBudget, HardwareError, HardwareProbe, SystemProbe, Verdict,
 };
 use crate::patch::{
     self, apply_patch, load_patch, validate_patch, ApplyReport, Axis, BackupSet, LayerSelection,
-    OpStats, OperationKind, PatchBackend, PatchError, Projection, RollbackHandle, ValidationIssue,
-    ValidationOptions,
+    OpStats, OperationKind, PatchBackend, PatchError, PatchFile, Projection, RollbackHandle,
+    ValidationIssue, ValidationOptions,
 };
 use crate::ui::{self, ColorMode, Ui, UiConfig};
 
@@ -162,7 +164,7 @@ pub fn install_panic_hook() {
     }));
 }
 
-fn panic_message(payload: &(dyn Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
     LAST_PANIC
         .lock()
         .ok()
@@ -259,6 +261,13 @@ where
 }
 
 pub fn run_with(cli: Cli, deps: &AppDeps, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    // Raw outputs: no envelope, no UI, whatever `--json` says. Routed before the panic
+    // catcher so that, in `mcp` mode, the hook reports on stderr and never on stdout.
+    match &cli.command {
+        Commands::Schema(args) => return crate::mcp::write_schema(args.kind, out),
+        Commands::Mcp(args) => return crate::mcp::run_stdio(args, deps, out, err),
+        _ => {}
+    }
     let mut io = Io::new(out, err, &deps.ui, cli.json);
     CATCHING.store(true, Ordering::SeqCst);
     // A panic unwinds through BackupSet::drop, which rolls back an uncommitted patch.
@@ -268,6 +277,7 @@ pub fn run_with(cli: Cli, deps: &AppDeps, out: &mut dyn Write, err: &mut dyn Wri
                 exit::INTERNAL,
                 format!("erreur interne : {}", panic_message(payload.as_ref())),
             )
+            .with_kind("internal")
         });
     CATCHING.store(false, Ordering::SeqCst);
     emit(&mut io, cli.json, Some(command_name(&cli.command)), outcome)
@@ -279,67 +289,107 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Inspect(_) => "inspect",
         Commands::Apply(_) => "apply",
         Commands::Eval(_) => "eval",
+        Commands::Schema(_) => "schema",
+        Commands::Mcp(_) => "mcp",
     }
 }
 
 fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
     let result = match command {
-        Commands::Check(args) => check(args, deps, &io.ui),
-        Commands::Inspect(args) => inspect(args, deps, &io.ui),
+        Commands::Check(args) => core_check(args, deps, &io.ui),
+        Commands::Inspect(args) => core_inspect(args, deps, &io.ui),
         Commands::Apply(args) => apply(args, deps, io),
         Commands::Eval(args) => eval(args, deps, &io.ui),
+        // Routed by run_with before dispatch: they have no envelope.
+        Commands::Schema(_) | Commands::Mcp(_) => Err(Outcome::fail(
+            exit::INTERNAL,
+            "commande sans enveloppe JSON",
+        )),
     };
     result.unwrap_or_else(|failure| failure)
 }
 
 // ---------------------------------------------------------------- output
 
-/// Result of one command, successful or not. Commands return `Result<Outcome, Outcome>`
-/// so `?` works through the `From` conversions below.
-#[derive(Debug)]
-struct Outcome {
-    code: i32,
-    data: Value,
+/// Result of one command core, successful or not. Cores return [`CoreResult`] so `?`
+/// works through the `From` conversions below; [`envelope_of`] is the only JSON form,
+/// shared by the CLI `--json` output and the MCP tool results.
+#[derive(Debug, Clone)]
+pub struct Outcome {
+    pub exit_code: i32,
+    pub data: Value,
+    pub warnings: Vec<String>,
+    /// Boxed: keeps `Result<Outcome, Outcome>` small on the success path.
+    pub error: Option<Box<ErrorBody>>,
+    /// Terminal rendering (empty when built with `Ui::off()`), never part of the envelope.
     human: String,
-    error: Option<ErrorBody>,
 }
 
-#[derive(Debug, Serialize)]
-struct ErrorBody {
-    message: String,
+pub type CoreResult = Result<Outcome, Outcome>;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ErrorBody {
+    pub message: String,
+    /// Stable machine-readable category (`invalid_patch`, `path_not_allowed`...).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    issues: Vec<ValidationIssue>,
+    pub issues: Vec<ValidationIssue>,
 }
 
-#[derive(Serialize)]
-struct Envelope<'a> {
-    ok: bool,
-    command: Option<&'a str>,
-    exit_code: i32,
-    data: &'a Value,
-    error: Option<&'a ErrorBody>,
+/// `{"ok","command","exit_code","data","error","warnings"}`, in that order.
+#[derive(Debug, Serialize)]
+pub struct Envelope<'a> {
+    pub ok: bool,
+    pub command: Option<&'a str>,
+    pub exit_code: i32,
+    pub data: &'a Value,
+    pub error: Option<&'a ErrorBody>,
+    pub warnings: &'a [String],
+}
+
+pub fn envelope_of<'a>(command: Option<&'a str>, outcome: &'a Outcome) -> Envelope<'a> {
+    Envelope {
+        ok: outcome.is_ok(),
+        command,
+        exit_code: outcome.exit_code,
+        data: &outcome.data,
+        error: outcome.error.as_deref(),
+        warnings: &outcome.warnings,
+    }
 }
 
 impl Outcome {
     fn ok(data: Value, human: String) -> Self {
         Self {
-            code: exit::OK,
+            exit_code: exit::OK,
             data,
-            human,
+            warnings: Vec::new(),
             error: None,
+            human,
         }
     }
 
-    fn fail(code: i32, message: impl Display) -> Self {
+    pub fn fail(code: i32, message: impl Display) -> Self {
         Self {
-            code,
+            exit_code: code,
             data: Value::Null,
-            human: String::new(),
-            error: Some(ErrorBody {
+            warnings: Vec::new(),
+            error: Some(Box::new(ErrorBody {
                 message: message.to_string(),
+                kind: None,
                 issues: Vec::new(),
-            }),
+            })),
+            human: String::new(),
         }
+    }
+
+    /// Sets `error.kind`; no effect on a success.
+    pub fn with_kind(mut self, kind: &str) -> Self {
+        if let Some(error) = self.error.as_mut() {
+            error.kind = Some(kind.to_owned());
+        }
+        self
     }
 
     fn with_data(mut self, data: Value, human: String) -> Self {
@@ -347,11 +397,26 @@ impl Outcome {
         self.human = human;
         self
     }
+
+    pub fn is_ok(&self) -> bool {
+        self.exit_code == exit::OK
+    }
 }
 
 impl From<PatchError> for Outcome {
     fn from(e: PatchError) -> Self {
-        let mut outcome = Outcome::fail(i32::from(&e), &e);
+        let code = i32::from(&e);
+        let kind = match (&e, code) {
+            (
+                PatchError::Invalid(_)
+                | PatchError::InvalidJson { .. }
+                | PatchError::PatchUnreadable { .. },
+                _,
+            ) => "invalid_patch",
+            (_, exit::CRITICAL) => "critical",
+            _ => "execution_failed",
+        };
+        let mut outcome = Outcome::fail(code, &e).with_kind(kind);
         if let (PatchError::Invalid(issues), Some(body)) = (&e, outcome.error.as_mut()) {
             body.issues = issues.clone();
         }
@@ -361,13 +426,18 @@ impl From<PatchError> for Outcome {
 
 impl From<HardwareError> for Outcome {
     fn from(e: HardwareError) -> Self {
-        Outcome::fail(exit::GENERAL, e)
+        let kind = match &e {
+            HardwareError::PathNotFound(_) => "model_not_found",
+            HardwareError::InsufficientResources { .. } => "insufficient_resources",
+            _ => "model_error",
+        };
+        Outcome::fail(exit::GENERAL, e).with_kind(kind)
     }
 }
 
 impl From<EngineError> for Outcome {
     fn from(e: EngineError) -> Self {
-        Outcome::fail(exit::GENERAL, e)
+        Outcome::fail(exit::GENERAL, e).with_kind("model_error")
     }
 }
 
@@ -375,14 +445,7 @@ impl From<EngineError> for Outcome {
 /// exit code still reports the real outcome.
 fn emit(io: &mut Io, json: bool, command: Option<&str>, outcome: Outcome) -> i32 {
     if json {
-        let envelope = Envelope {
-            ok: outcome.code == exit::OK,
-            command,
-            exit_code: outcome.code,
-            data: &outcome.data,
-            error: outcome.error.as_ref(),
-        };
-        let _ = serde_json::to_writer(&mut *io.out, &envelope);
+        let _ = serde_json::to_writer(&mut *io.out, &envelope_of(command, &outcome));
         let _ = writeln!(io.out);
     } else {
         let _ = write!(io.out, "{}", outcome.human);
@@ -392,7 +455,7 @@ fn emit(io: &mut Io, json: bool, command: Option<&str>, outcome: Outcome) -> i32
         }
     }
     let _ = io.out.flush();
-    outcome.code
+    outcome.exit_code
 }
 
 /// `[ERREUR]` badge on an interactive stderr. A redirected stderr keeps the stable
@@ -431,14 +494,16 @@ fn size(bytes: u64) -> String {
 
 // ---------------------------------------------------------------- check
 
-fn check(args: &CheckArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outcome> {
+/// Hardware budget; human text only when `ui` is not `Off`.
+pub fn core_check(args: &CheckArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
     let mut policy = BudgetPolicy::default();
     if let Some(margin) = args.policy_ram_margin_gib {
         if !(margin.is_finite() && margin >= 0.0) {
             return Err(Outcome::fail(
                 exit::INVALID_INPUT,
                 "--policy-ram-margin-gib doit être un nombre positif",
-            ));
+            )
+            .with_kind("invalid_input"));
         }
         policy.ram_safety_margin_bytes = (margin * GIB) as u64;
     }
@@ -449,6 +514,7 @@ fn check(args: &CheckArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outcome> 
             exit::GENERAL,
             format!("ressources insuffisantes : {reason}"),
         )
+        .with_kind("insufficient_resources")
         .with_data(to_value(&budget), human)),
         _ => Ok(Outcome::ok(to_value(&budget), human)),
     }
@@ -523,7 +589,8 @@ pub struct TensorStats {
     pub l2: f64,
 }
 
-fn inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outcome> {
+/// MLP tensor topology (and streamed statistics); human text only when `ui` is not `Off`.
+pub fn core_inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
     let shards = hardware::compute_model_size(&args.model)?.shard_files;
     let layers = LayerSpec::from(&args.layers);
     let projs: Vec<MlpProj> = match args.projections.is_empty() {
@@ -542,7 +609,7 @@ fn inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outco
         let model = ReadOnlyModel::open(shard)?;
         for info in engine::find_mlp_tensors(model.index(), &layers, &projs) {
             if deps.interrupted.load(Ordering::SeqCst) {
-                return Err(Outcome::fail(exit::GENERAL, INTERRUPTED));
+                return Err(Outcome::fail(exit::GENERAL, INTERRUPTED).with_kind("cancelled"));
             }
             let stats = match args.show_stats {
                 true => tensor_stats(&model.tensor(&info.name)?),
@@ -832,34 +899,96 @@ impl PatchBackend for EngineBackend {
     }
 }
 
+/// Progress of a command core. The CLI renders it as the terminal UI, the MCP server as
+/// `notifications/progress`, tests ignore it with [`NullSink`].
+pub trait ProgressSink {
+    fn event(&mut self, event: ProgressEvent);
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProgressEvent {
+    ApplyStart {
+        patch: PathBuf,
+        operations: usize,
+    },
+    Warn(String),
+    DryRun {
+        op_id: String,
+        tensors: Vec<String>,
+        vector_len: usize,
+    },
+    Backup {
+        path: PathBuf,
+    },
+    /// One tensor shifted: `done/total` within the operation, `overall_*` across the patch.
+    Shift {
+        op_id: String,
+        tensor: String,
+        done: usize,
+        total: usize,
+        overall_done: usize,
+        overall_total: usize,
+    },
+    OpDone {
+        op_id: String,
+        max_delta: f32,
+        tensors: usize,
+    },
+    Commit {
+        seconds: f64,
+    },
+    Rollback(RollbackOutcome),
+    EvalPrompt {
+        id: String,
+        done: usize,
+        total: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RollbackOutcome {
+    Restored,
+    /// The backups to restore by hand.
+    Failed {
+        backups: Vec<PathBuf>,
+    },
+    /// No backup was taken and the model was left partially modified.
+    NoBackup,
+}
+
+pub struct NullSink;
+
+impl ProgressSink for NullSink {
+    fn event(&mut self, _: ProgressEvent) {}
+}
+
 /// Progress decorator: `apply_patch` has no hook, so the events are derived from the
 /// backend calls. Every target is resolved (preflight) before the first shift, which gives
-/// each operation its total; a completed operation prints one `[SHIFT]` line on stdout.
-struct ObservedBackend<'a, 'io, B: PatchBackend> {
+/// each operation its total.
+struct ObservedBackend<'a, B: PatchBackend> {
     inner: &'a mut B,
-    io: &'a mut Io<'io>,
+    sink: &'a mut dyn ProgressSink,
     op_ids: Vec<String>,
     totals: RefCell<Vec<usize>>,
     op: usize,
     done: usize,
+    overall_done: usize,
     max_delta: f32,
-    /// Visible width of the progress line currently drawn on stderr (0: none).
-    shown: usize,
 }
 
 const BAR_WIDTH: usize = 20;
 
-impl<'a, 'io, B: PatchBackend> ObservedBackend<'a, 'io, B> {
-    fn new(inner: &'a mut B, io: &'a mut Io<'io>, op_ids: Vec<String>) -> Self {
+impl<'a, B: PatchBackend> ObservedBackend<'a, B> {
+    fn new(inner: &'a mut B, sink: &'a mut dyn ProgressSink, op_ids: Vec<String>) -> Self {
         Self {
             inner,
-            io,
+            sink,
             op_ids,
             totals: RefCell::new(Vec::new()),
             op: 0,
             done: 0,
+            overall_done: 0,
             max_delta: 0.0,
-            shown: 0,
         }
     }
 
@@ -870,54 +999,9 @@ impl<'a, 'io, B: PatchBackend> ObservedBackend<'a, 'io, B> {
     fn total(&self) -> usize {
         self.totals.borrow().get(self.op).copied().unwrap_or(0)
     }
-
-    /// In-place bar, only on an interactive stderr: a redirected stderr never gets `\r`.
-    fn progress(&mut self, tensor: &str) {
-        if !self.io.err_is_tty || self.io.err_ui.is_off() {
-            return;
-        }
-        let ui = self.io.err_ui;
-        let line = format!(
-            "{} {} · {} · {}  {}",
-            ui::badge(&ui, "SHIFT"),
-            ui::metric(&ui, self.op_id()),
-            ui::metric(&ui, projection_label(tensor)),
-            ui::metric(&ui, format!("{}/{}", self.done, self.total())),
-            ui::progress_bar(&ui, self.done, self.total(), BAR_WIDTH)
-        );
-        let width = ui::visible_width(&line);
-        let blank = " ".repeat(self.shown.saturating_sub(width));
-        let _ = write!(self.io.err, "\r{line}{blank}");
-        let _ = self.io.err.flush();
-        self.shown = width;
-    }
-
-    fn clear_progress(&mut self) {
-        if self.shown > 0 {
-            let _ = write!(self.io.err, "\r{}\r", " ".repeat(self.shown));
-            let _ = self.io.err.flush();
-            self.shown = 0;
-        }
-    }
-
-    fn finish_op(&mut self) {
-        self.clear_progress();
-        let ui = self.io.ui;
-        let line = format!(
-            "{} {} terminée · Δmax {} · {} tenseurs",
-            ui::badge(&ui, "SHIFT"),
-            ui::metric(&ui, self.op_id()),
-            ui::metric(&ui, format!("{:.4}", self.max_delta)),
-            ui::metric(&ui, self.done)
-        );
-        self.io.line(&line);
-        self.op += 1;
-        self.done = 0;
-        self.max_delta = 0.0;
-    }
 }
 
-impl<B: PatchBackend> PatchBackend for ObservedBackend<'_, '_, B> {
+impl<B: PatchBackend> PatchBackend for ObservedBackend<'_, B> {
     fn resolve_targets(
         &self,
         layers: &LayerSelection,
@@ -940,48 +1024,251 @@ impl<B: PatchBackend> PatchBackend for ObservedBackend<'_, '_, B> {
         op: OperationKind,
         axis: Axis,
     ) -> patch::Result<OpStats> {
-        let result = self
+        let stats = self
             .inner
-            .shift_tensor(tensor_name, direction, alpha, op, axis);
-        match &result {
-            Ok(stats) => {
-                self.done += 1;
-                self.max_delta = self.max_delta.max(stats.max_abs_delta);
-                self.progress(tensor_name);
-                if self.done >= self.total() {
-                    self.finish_op();
-                }
-            }
-            Err(_) => self.clear_progress(),
+            .shift_tensor(tensor_name, direction, alpha, op, axis)?;
+        self.done += 1;
+        self.overall_done += 1;
+        self.max_delta = self.max_delta.max(stats.max_abs_delta);
+        let overall_total = self.totals.borrow().iter().sum();
+        self.sink.event(ProgressEvent::Shift {
+            op_id: self.op_id(),
+            tensor: tensor_name.to_owned(),
+            done: self.done,
+            total: self.total(),
+            overall_done: self.overall_done,
+            overall_total,
+        });
+        if self.done >= self.total() {
+            self.sink.event(ProgressEvent::OpDone {
+                op_id: self.op_id(),
+                max_delta: self.max_delta,
+                tensors: self.done,
+            });
+            self.op += 1;
+            self.done = 0;
+            self.max_delta = 0.0;
         }
-        result
+        Ok(stats)
     }
 
     fn flush(&mut self) -> patch::Result<()> {
-        self.clear_progress();
         self.inner.flush()
     }
 }
 
-fn apply(args: &ApplyArgs, deps: &AppDeps, io: &mut Io) -> Result<Outcome, Outcome> {
-    // Relative vector paths resolve against the patch directory ("" for "patch.json").
-    let base_dir = args.patch.parent().unwrap_or(Path::new(""));
-    let opts = ValidationOptions {
+/// Renders apply events as the terminal UI: one line per step on stdout, the in-place bar
+/// on an interactive stderr only (a redirected stderr never gets `\r`).
+struct CliSink<'a, 'io> {
+    io: &'a mut Io<'io>,
+    /// Visible width of the progress line currently drawn on stderr (0: none).
+    shown: usize,
+}
+
+impl<'a, 'io> CliSink<'a, 'io> {
+    fn new(io: &'a mut Io<'io>) -> Self {
+        Self { io, shown: 0 }
+    }
+
+    fn progress(&mut self, op_id: &str, tensor: &str, done: usize, total: usize) {
+        if !self.io.err_is_tty || self.io.err_ui.is_off() {
+            return;
+        }
+        let ui = self.io.err_ui;
+        let line = format!(
+            "{} {} · {} · {}  {}",
+            ui::badge(&ui, "SHIFT"),
+            ui::metric(&ui, op_id),
+            ui::metric(&ui, projection_label(tensor)),
+            ui::metric(&ui, format!("{done}/{total}")),
+            ui::progress_bar(&ui, done, total, BAR_WIDTH)
+        );
+        let width = ui::visible_width(&line);
+        let blank = " ".repeat(self.shown.saturating_sub(width));
+        let _ = write!(self.io.err, "\r{line}{blank}");
+        let _ = self.io.err.flush();
+        self.shown = width;
+    }
+
+    fn clear_progress(&mut self) {
+        if self.shown > 0 {
+            let _ = write!(self.io.err, "\r{}\r", " ".repeat(self.shown));
+            let _ = self.io.err.flush();
+            self.shown = 0;
+        }
+    }
+}
+
+impl Drop for CliSink<'_, '_> {
+    fn drop(&mut self) {
+        self.clear_progress();
+    }
+}
+
+impl ProgressSink for CliSink<'_, '_> {
+    fn event(&mut self, event: ProgressEvent) {
+        let ui = self.io.ui;
+        if let ProgressEvent::Shift {
+            op_id,
+            tensor,
+            done,
+            total,
+            ..
+        } = &event
+        {
+            return self.progress(op_id, tensor, *done, *total);
+        }
+        self.clear_progress();
+        match event {
+            ProgressEvent::ApplyStart { patch, operations } => self.io.line(&format!(
+                "{} {} · {} opérations",
+                ui::badge(&ui, "APPLY"),
+                ui::path(&ui, &patch),
+                ui::metric(&ui, operations)
+            )),
+            ProgressEvent::Warn(warning) => self.io.line(&warning_line(&ui, &warning)),
+            ProgressEvent::DryRun {
+                op_id,
+                tensors,
+                vector_len,
+            } => {
+                self.io.line(&format!(
+                    "{} {} · {} tenseurs · vecteur de {}",
+                    ui::badge(&ui, "DRY-RUN"),
+                    ui::metric(&ui, &op_id),
+                    ui::metric(&ui, tensors.len()),
+                    ui::metric(&ui, vector_len)
+                ));
+                for t in &tensors {
+                    self.io.line(&format!(
+                        "{} {}",
+                        ui::text(&ui, "          "),
+                        ui::dim(&ui, t)
+                    ));
+                }
+            }
+            // BackupGuard::create re-hashes the copy against the original before returning.
+            ProgressEvent::Backup { path } => self.io.line(&format!(
+                "{} {}  {}",
+                ui::badge(&ui, "BACKUP"),
+                ui::path(&ui, &path),
+                ui::metric(&ui, "✓ sha256 vérifié")
+            )),
+            ProgressEvent::OpDone {
+                op_id,
+                max_delta,
+                tensors,
+            } => self.io.line(&format!(
+                "{} {} terminée · Δmax {} · {} tenseurs",
+                ui::badge(&ui, "SHIFT"),
+                ui::metric(&ui, op_id),
+                ui::metric(&ui, format!("{max_delta:.4}")),
+                ui::metric(&ui, tensors)
+            )),
+            ProgressEvent::Commit { seconds } => self.io.line(&format!(
+                "{} {} · {}",
+                ui::badge(&ui, "COMMIT"),
+                ui::metric(&ui, "modèle patché"),
+                ui::dim(&ui, &format!("{seconds:.1} s"))
+            )),
+            ProgressEvent::Rollback(outcome) => self.io.line(&rollback_line(&ui, &outcome)),
+            ProgressEvent::Shift { .. } | ProgressEvent::EvalPrompt { .. } => {}
+        }
+    }
+}
+
+/// Never followed by a `[COMMIT]`: only emitted when `apply_patch` failed.
+fn rollback_line(ui: &Ui, outcome: &RollbackOutcome) -> String {
+    let badge = ui::badge(ui, "ROLLBACK");
+    match outcome {
+        RollbackOutcome::Restored => format!("{badge} {}", ui::metric(ui, "restauré ✓")),
+        RollbackOutcome::Failed { backups } => {
+            let files = backups
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{badge} {} {}",
+                ui::metric(ui, "ÉCHEC CRITIQUE ✗"),
+                ui::dim(ui, &format!("restaurer manuellement depuis {files}"))
+            )
+        }
+        RollbackOutcome::NoBackup => format!(
+            "{badge} {} {}",
+            ui::metric(ui, "IMPOSSIBLE ✗"),
+            ui::dim(ui, "pas de backup : modèle partiellement modifié")
+        ),
+    }
+}
+
+fn rollback_outcome(e: &PatchError, backups: &[PathBuf]) -> Option<RollbackOutcome> {
+    match e {
+        PatchError::ExecutionFailed {
+            rolled_back: true, ..
+        } => Some(RollbackOutcome::Restored),
+        PatchError::RollbackFailed { .. } => Some(RollbackOutcome::Failed {
+            backups: backups.to_vec(),
+        }),
+        PatchError::ExecutionFailed {
+            left_modified: true,
+            ..
+        } => Some(RollbackOutcome::NoBackup),
+        _ => None,
+    }
+}
+
+/// Input of [`core_apply`], filled by the CLI (`patch.json` on disk) or by the MCP server
+/// (inline patch, sandboxed paths).
+#[derive(Debug, Clone)]
+pub struct ApplyRequest {
+    pub model: PathBuf,
+    pub patch: PatchFile,
+    /// Shown by the `[APPLY]` step.
+    pub patch_label: PathBuf,
+    /// Relative `vector_file`s resolve against it.
+    pub base_dir: PathBuf,
+    pub dry_run: bool,
+    pub no_backup: bool,
+    pub backup_dir: Option<PathBuf>,
+}
+
+fn apply(args: &ApplyArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
+    let request = ApplyRequest {
+        model: args.model.clone(),
+        patch: load_patch(&args.patch)?,
+        patch_label: args.patch.clone(),
+        // Relative vector paths resolve against the patch directory ("" for "patch.json").
+        base_dir: args.patch.parent().unwrap_or(Path::new("")).to_path_buf(),
+        dry_run: args.dry_run,
         no_backup: args.no_backup,
+        backup_dir: args.backup_dir.clone(),
+    };
+    core_apply(&request, deps, &mut CliSink::new(io))
+}
+
+/// validate -> budget (warning only) -> open shards -> dry-run preflight -> backup of the
+/// touched shards -> apply_patch (rollback on error, NaN, Ctrl-C or cancellation).
+pub fn core_apply(
+    request: &ApplyRequest,
+    deps: &AppDeps,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let opts = ValidationOptions {
+        no_backup: request.no_backup,
         ..Default::default()
     };
-    let patch = validate_patch(&load_patch(&args.patch)?, base_dir, &opts)?;
-    let ui = io.ui;
-    io.line(&format!(
-        "{} {} · {} opérations",
-        ui::badge(&ui, "APPLY"),
-        ui::path(&ui, &args.patch),
-        ui::metric(&ui, patch.operations.len())
-    ));
+    let patch = validate_patch(&request.patch, &request.base_dir, &opts)?;
+    sink.event(ProgressEvent::ApplyStart {
+        patch: request.patch_label.clone(),
+        operations: patch.operations.len(),
+    });
 
     // Absolute, so backups next to a relative `--model` get a printable location.
-    let model = std::path::absolute(&args.model)
-        .map_err(|e| Outcome::fail(exit::GENERAL, format!("{} : {e}", args.model.display())))?;
+    let model = std::path::absolute(&request.model).map_err(|e| {
+        Outcome::fail(exit::GENERAL, format!("{} : {e}", request.model.display()))
+            .with_kind("model_error")
+    })?;
     let shards = hardware::compute_model_size(&model)?.shard_files;
     let budget = hardware::evaluate_budget(&model, deps.probe.as_ref(), &BudgetPolicy::default())?;
     let mut warnings: Vec<String> = patch.warnings.iter().map(ToString::to_string).collect();
@@ -992,27 +1279,18 @@ fn apply(args: &ApplyArgs, deps: &AppDeps, io: &mut Io) -> Result<Outcome, Outco
         ));
     }
     for w in &warnings {
-        io.line(&warning_line(&ui, w));
+        sink.event(ProgressEvent::Warn(w.clone()));
     }
 
     let mut backend = EngineBackend::open(&shards, Arc::clone(&deps.interrupted))?;
     let preview = apply_patch(&patch, &mut backend, None, true)?;
-    if args.dry_run {
+    if request.dry_run {
         for op in &preview.operations {
-            io.line(&format!(
-                "{} {} · {} tenseurs · vecteur de {}",
-                ui::badge(&ui, "DRY-RUN"),
-                ui::metric(&ui, &op.id),
-                ui::metric(&ui, op.tensors.len()),
-                ui::metric(&ui, op.vector_len)
-            ));
-            for t in &op.tensors {
-                io.line(&format!(
-                    "{} {}",
-                    ui::text(&ui, "          "),
-                    ui::dim(&ui, &t.name)
-                ));
-            }
+            sink.event(ProgressEvent::DryRun {
+                op_id: op.id.clone(),
+                tensors: op.tensors.iter().map(|t| t.name.clone()).collect(),
+                vector_len: op.vector_len,
+            });
         }
         return Ok(apply_outcome(&preview, &[], &warnings));
     }
@@ -1035,7 +1313,7 @@ fn apply(args: &ApplyArgs, deps: &AppDeps, io: &mut Io) -> Result<Outcome, Outco
     let mut backup = match patch.backup {
         true => Some(BackupSet::create_many_in(
             &touched,
-            args.backup_dir.as_deref(),
+            request.backup_dir.as_deref(),
         )?),
         false => None,
     };
@@ -1045,13 +1323,7 @@ fn apply(args: &ApplyArgs, deps: &AppDeps, io: &mut Io) -> Result<Outcome, Outco
         .map(|g| g.backup_path().to_path_buf())
         .collect();
     for file in &backup_files {
-        // BackupGuard::create re-hashes the copy against the original before returning.
-        io.line(&format!(
-            "{} {}  {}",
-            ui::badge(&ui, "BACKUP"),
-            ui::path(&ui, file),
-            ui::metric(&ui, "✓ sha256 vérifié")
-        ));
+        sink.event(ProgressEvent::Backup { path: file.clone() });
     }
 
     let started = Instant::now();
@@ -1059,73 +1331,48 @@ fn apply(args: &ApplyArgs, deps: &AppDeps, io: &mut Io) -> Result<Outcome, Outco
     let guard = backup.as_mut().map(|b| b as &mut dyn RollbackHandle);
     let result = apply_patch(
         &patch,
-        &mut ObservedBackend::new(&mut backend, io, op_ids),
+        &mut ObservedBackend::new(&mut backend, sink, op_ids),
         guard,
         false,
     );
     match result {
         Ok(report) => {
-            io.line(&format!(
-                "{} {} · {}",
-                ui::badge(&ui, "COMMIT"),
-                ui::metric(&ui, "modèle patché"),
-                ui::dim(&ui, &format!("{:.1} s", started.elapsed().as_secs_f64()))
-            ));
+            sink.event(ProgressEvent::Commit {
+                seconds: started.elapsed().as_secs_f64(),
+            });
             Ok(apply_outcome(&report, &backup_files, &warnings))
         }
         Err(e) => {
-            if let Some(line) = rollback_line(&ui, &e, &backup_files) {
-                io.line(&line);
+            if let Some(outcome) = rollback_outcome(&e, &backup_files) {
+                sink.event(ProgressEvent::Rollback(outcome));
             }
             Err(e.into())
         }
     }
 }
 
-/// Only reached when `apply_patch` failed, so never followed by a `[COMMIT]`.
-fn rollback_line(ui: &Ui, e: &PatchError, backups: &[PathBuf]) -> Option<String> {
-    let badge = ui::badge(ui, "ROLLBACK");
-    let files = backups
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    match e {
-        PatchError::ExecutionFailed {
-            rolled_back: true, ..
-        } => Some(format!("{badge} {}", ui::metric(ui, "restauré ✓"))),
-        PatchError::RollbackFailed { .. } => Some(format!(
-            "{badge} {} {}",
-            ui::metric(ui, "ÉCHEC CRITIQUE ✗"),
-            ui::dim(ui, &format!("restaurer manuellement depuis {files}"))
-        )),
-        PatchError::ExecutionFailed {
-            left_modified: true,
-            ..
-        } => Some(format!(
-            "{badge} {} {}",
-            ui::metric(ui, "IMPOSSIBLE ✗"),
-            ui::dim(ui, "pas de backup : modèle partiellement modifié")
-        )),
-        _ => None,
-    }
-}
-
 /// Backups are kept after success: they are the manual undo. The human text was streamed
-/// step by step, so the outcome only carries the JSON data.
+/// through the sink, so the outcome only carries the JSON data.
 fn apply_outcome(report: &ApplyReport, backups: &[PathBuf], warnings: &[String]) -> Outcome {
-    Outcome::ok(
+    let mut outcome = Outcome::ok(
         json!({ "report": report, "backups": backups, "warnings": warnings }),
         String::new(),
-    )
+    );
+    outcome.warnings = warnings.to_vec();
+    outcome
 }
 
 // ---------------------------------------------------------------- eval
 
-/// Stops the generation at the next chunk once Ctrl-C was pressed.
+/// Stops the generation at the next chunk once Ctrl-C (or an MCP cancellation) raised the
+/// flag, and reports one progress event per prompt (`run_eval` calls `generate` once per
+/// prompt, in order).
 struct Interruptible<'a> {
     inner: Box<dyn TextGenerator>,
     flag: &'a AtomicBool,
+    sink: &'a mut dyn ProgressSink,
+    ids: Vec<String>,
+    done: usize,
 }
 
 impl TextGenerator for Interruptible<'_> {
@@ -1135,18 +1382,27 @@ impl TextGenerator for Interruptible<'_> {
         max_new_tokens: u32,
         on_chunk: &mut dyn FnMut(&str) -> ControlFlow<()>,
     ) -> crate::eval::Result<GenerationOutcome> {
-        if self.flag.load(Ordering::SeqCst) {
-            return Err(EvalError::Generator(INTERRUPTED.into()));
-        }
         let flag = self.flag;
-        self.inner.generate(
-            prompt,
-            max_new_tokens,
-            &mut |chunk| match flag.load(Ordering::SeqCst) {
-                true => ControlFlow::Break(()),
-                false => on_chunk(chunk),
-            },
-        )
+        let result = match flag.load(Ordering::SeqCst) {
+            true => Err(EvalError::Generator(INTERRUPTED.into())),
+            false => self
+                .inner
+                .generate(
+                    prompt,
+                    max_new_tokens,
+                    &mut |chunk| match flag.load(Ordering::SeqCst) {
+                        true => ControlFlow::Break(()),
+                        false => on_chunk(chunk),
+                    },
+                ),
+        };
+        self.done += 1;
+        self.sink.event(ProgressEvent::EvalPrompt {
+            id: self.ids.get(self.done - 1).cloned().unwrap_or_default(),
+            done: self.done,
+            total: self.ids.len(),
+        });
+        result
     }
 }
 
@@ -1159,15 +1415,32 @@ impl Drop for TempFile {
     }
 }
 
-fn eval(args: &EvalArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outcome> {
-    let invalid = |message: String| Outcome::fail(exit::INVALID_INPUT, message);
+fn eval(args: &EvalArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
+    let prompts = load_prompts(&args.prompts)
+        .map_err(|e| Outcome::fail(exit::INVALID_INPUT, e).with_kind("invalid_input"))?;
+    core_eval(args, prompts, deps, ui, &mut NullSink)
+}
+
+/// Converts to a temporary GGUF unless the model already is one, evaluates the prompts,
+/// then exports when healthy. `args.prompts` is ignored: the prompts come loaded.
+pub fn core_eval(
+    args: &EvalArgs,
+    prompts: Vec<EvalPrompt>,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let invalid =
+        |message: String| Outcome::fail(exit::INVALID_INPUT, message).with_kind("invalid_input");
     if !args.model.exists() {
-        return Err(invalid(format!(
-            "modèle introuvable : {}",
-            args.model.display()
-        )));
+        return Err(
+            invalid(format!("modèle introuvable : {}", args.model.display()))
+                .with_kind("model_not_found"),
+        );
     }
-    let prompts = load_prompts(&args.prompts).map_err(|e| invalid(e.to_string()))?;
+    if prompts.is_empty() {
+        return Err(invalid("aucun prompt".into()));
+    }
     // Checked now so a typo does not waste a whole evaluation before the export.
     let quant = args.quant.trim().to_ascii_uppercase();
     if args.export_gguf.is_some() && !ALLOWED_QUANTS.contains(&quant.as_str()) {
@@ -1225,6 +1498,7 @@ fn eval(args: &EvalArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outcome> {
                     exit::GENERAL,
                     format!("conversion GGUF pour l'évaluation : {e}"),
                 )
+                .with_kind("eval_failed")
             })?;
             let path = file.0.clone();
             temp = Some(file);
@@ -1232,18 +1506,21 @@ fn eval(args: &EvalArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outcome> {
         }
     };
 
-    let generator =
-        (deps.generator_factory)(&gguf, args).map_err(|e| Outcome::fail(exit::GENERAL, e))?;
+    let generator = (deps.generator_factory)(&gguf, args)
+        .map_err(|e| Outcome::fail(exit::GENERAL, e).with_kind("eval_failed"))?;
     let mut generator = Interruptible {
         inner: generator,
         flag: &deps.interrupted,
+        sink,
+        ids: prompts.iter().map(|p| p.id.clone()).collect(),
+        done: 0,
     };
     let cfg = EvalConfig {
         max_new_tokens: args.max_new_tokens,
         ..Default::default()
     };
-    let report =
-        run_eval(&mut generator, &prompts, &cfg).map_err(|e| Outcome::fail(exit::GENERAL, e))?;
+    let report = run_eval(&mut generator, &prompts, &cfg)
+        .map_err(|e| Outcome::fail(exit::GENERAL, e).with_kind("eval_failed"))?;
     drop(generator);
     // Freed before the final conversion, which needs the disk space again.
     drop(temp);
@@ -1251,6 +1528,7 @@ fn eval(args: &EvalArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outcome> {
     let human = eval_text(ui, &report, args.max_new_tokens);
     if deps.interrupted.load(Ordering::SeqCst) {
         return Err(Outcome::fail(exit::GENERAL, INTERRUPTED)
+            .with_kind("cancelled")
             .with_data(json!({ "report": report, "export": null }), human));
     }
     let export = match (&args.export_gguf, final_llama_dir) {
@@ -1259,6 +1537,7 @@ fn eval(args: &EvalArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outcome> {
             export_if_healthy(&report, &cfg, deps.runner.as_ref(), args.allow_degraded).map_err(
                 |e| {
                     Outcome::fail(exit::EXPORT_FAILED, format!("export GGUF : {e}"))
+                        .with_kind("export_failed")
                         .with_data(json!({ "report": report, "export": null }), human.clone())
                 },
             )?
@@ -1298,6 +1577,7 @@ fn eval(args: &EvalArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outcome> {
                 exit::EVAL_UNHEALTHY,
                 format!("modèle {verdict:?}{skipped}").to_lowercase(),
             )
+            .with_kind("eval_unhealthy")
             .with_data(data, human))
         }
     }

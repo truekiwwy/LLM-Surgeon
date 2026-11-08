@@ -1,20 +1,40 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use schemars::gen::SchemaGenerator;
+use schemars::schema::{InstanceType, Schema, SchemaObject};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::error::{PatchError, Result};
 
+// The JSON Schema derived here mirrors serde exactly (deny_unknown_fields, defaults, enum
+// spellings) and adds the structural checks of `validate_patch` that a schema can express
+// (non-empty lists, unique items, alpha bounds, layer spec syntax), so an agent fails
+// before calling the tool. Descriptions are in French: an AI agent reads them.
+
 /// `patch.json`, version 1. Unknown fields are rejected so a typo never goes unnoticed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(
+    description = "Patch de chirurgie de poids (patch.json, version 1) : liste d'opérations qui décalent des matrices MLP d'un modèle SafeTensors (W ∓= alpha·v)."
+)]
 pub struct PatchFile {
+    #[schemars(schema_with = "schema_version_schema")]
     pub schema_version: u32,
     #[serde(default)]
+    #[schemars(description = "Description libre du patch, destinée à l'humain qui le relit.")]
     pub description: Option<String>,
     /// Defaults to `true`: backing up is the safe choice when the agent forgets the field.
     #[serde(default = "default_true")]
+    #[schemars(
+        description = "Sauvegarde vérifiée (SHA-256) des fichiers touchés avant écriture. Défaut true ; le serveur MCP l'impose sauf --allow-no-backup."
+    )]
     pub backup: bool,
+    #[schemars(
+        length(min = 1),
+        description = "Opérations appliquées dans l'ordre ; au moins une. Toute erreur annule l'ensemble (rollback)."
+    )]
     pub operations: Vec<Operation>,
 }
 
@@ -22,31 +42,78 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+fn schema_version_schema(_: &mut SchemaGenerator) -> Schema {
+    let mut schema = SchemaObject {
+        instance_type: Some(InstanceType::Integer.into()),
+        const_value: Some(1.into()),
+        ..Default::default()
+    };
+    schema.metadata().description = Some("Version du format de patch : toujours 1.".into());
+    schema.into()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(description = "Une opération : un vecteur direction appliqué à des projections MLP.")]
 pub struct Operation {
+    #[schemars(
+        length(min = 1),
+        description = "Identifiant unique de l'opération, repris dans le rapport."
+    )]
     pub id: String,
     pub layers: LayersField,
+    #[schemars(schema_with = "projections_schema")]
     pub projections: Vec<Projection>,
     pub operation: OperationKind,
     /// Relative paths are resolved against the directory of the patch file.
+    #[schemars(
+        description = "Fichier du vecteur direction (.safetensors ou .json). Chemin relatif au dossier du patch (CLI) ou à base_dir (MCP)."
+    )]
     pub vector_file: PathBuf,
     #[serde(default)]
+    #[schemars(
+        description = "Nom du tenseur à lire dans un .safetensors qui en contient plusieurs ; interdit avec un .json."
+    )]
     pub vector_tensor: Option<String>,
+    #[schemars(
+        range(min = -100.0, max = 100.0),
+        description = "Intensité du décalage W ∓= alpha·v, dans [-100, 100] ; |alpha| > 5 déclenche un avertissement."
+    )]
     pub alpha: f32,
     #[serde(default)]
+    #[schemars(
+        description = "Axe de diffusion du vecteur. Pour des poids [out, in] (Llama) et une direction du flux résiduel : rows pour gate_proj/up_proj, cols pour down_proj. Défaut cols."
+    )]
     pub axis: Axis,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+fn projections_schema(gen: &mut SchemaGenerator) -> Schema {
+    let mut schema = SchemaObject {
+        instance_type: Some(InstanceType::Array.into()),
+        ..Default::default()
+    };
+    let array = schema.array();
+    array.items = Some(gen.subschema_for::<Projection>().into());
+    array.min_items = Some(1);
+    array.unique_items = Some(true);
+    schema.metadata().description =
+        Some("Projections MLP visées, sans doublon (un doublon décalerait deux fois).".into());
+    schema.into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+#[schemars(description = "subtract retire alpha·v des poids, add l'ajoute.")]
 pub enum OperationKind {
     Subtract,
     Add,
 }
 
 /// Declaration order is the canonical order (gate, up, down).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[schemars(description = "Matrice MLP : gate_proj, up_proj ou down_proj.")]
 pub enum Projection {
     #[serde(rename = "gate_proj")]
     Gate,
@@ -70,12 +137,14 @@ impl FromStr for Projection {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+// Cols is the default per the patch contract. For a residual-stream direction on
+// Llama-style `[out, in]` weights, gate/up expect `rows` and down expects `cols`. (A plain
+// comment: a variant doc comment would turn the schema enum into a oneOf.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+#[schemars(description = "rows : v de longueur = colonnes ; cols : v de longueur = lignes.")]
 pub enum Axis {
     Rows,
-    /// Default per the patch contract. Note: for a residual-stream direction on Llama-style
-    /// `[out, in]` weights, gate/up expect `rows` and down expects `cols`.
     #[default]
     Cols,
 }
@@ -89,7 +158,49 @@ pub enum LayersField {
     Range(LayerRange),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// ECMA-262 (no inline flags): "all" in any case, "10-20" or "3,5,7", spaces tolerated,
+/// exactly what `LayerSelection::from_str` accepts.
+pub const LAYER_SPEC_PATTERN: &str = r"^\s*([Aa][Ll][Ll]|\d+\s*-\s*\d+|\d+(\s*,\s*\d+)*)\s*$";
+
+/// Written by hand: the untagged enum needs the spec-string pattern and the non-empty,
+/// duplicate-free list that `validate_patch` enforces.
+impl JsonSchema for LayersField {
+    fn schema_name() -> String {
+        "LayersField".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        let index = serde_json::json!({ "type": "integer", "minimum": 0 });
+        serde_json::from_value(serde_json::json!({
+            "description": "Couches visées : \"all\", une plage \"10-20\" ou une liste \"3,5,7\" (chaîne), un tableau d'indices [10, 11, 12], ou un objet {\"start\": 10, \"end\": 20} (bornes incluses).",
+            "anyOf": [
+                {
+                    "type": "string",
+                    "pattern": LAYER_SPEC_PATTERN,
+                    "description": "\"all\", \"10-20\" ou \"3,5,7\"."
+                },
+                {
+                    "type": "array",
+                    "items": index,
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "description": "Indices de couches, sans doublon."
+                },
+                {
+                    "type": "object",
+                    "properties": { "start": index, "end": index },
+                    "required": ["start", "end"],
+                    "additionalProperties": false,
+                    "description": "Plage inclusive, start <= end."
+                }
+            ]
+        }))
+        // The literal above always deserializes; a permissive schema is the safe fallback.
+        .unwrap_or(Schema::Bool(true))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LayerRange {
     pub start: usize,
@@ -97,7 +208,7 @@ pub struct LayerRange {
     pub end: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum LayerSelection {
     All,
     List(Vec<usize>),

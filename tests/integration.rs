@@ -1194,3 +1194,1055 @@ fn no_print_macros_outside_tests() {
         }
     }
 }
+
+// ------------------------------------------------------------------ schema & MCP (prompt 7)
+
+use std::io::Read as _;
+use std::time::{Duration, Instant};
+
+use weight_surgeon::app::{core_apply, ApplyRequest, ProgressEvent, ProgressSink, RollbackOutcome};
+use weight_surgeon::cli::SchemaKind;
+use weight_surgeon::mcp::{self, McpConfig};
+use weight_surgeon::patch::{parse_patch, validate_patch, ValidationOptions};
+
+fn patch_validator() -> jsonschema::Validator {
+    jsonschema::draft7::new(&mcp::patch_schema()).unwrap()
+}
+
+fn one_op_patch(layers: Value) -> Value {
+    json!({"schema_version": 1, "operations": [{"id": "a", "layers": layers,
+        "projections": ["gate_proj"], "operation": "subtract", "vector_file": "v.json", "alpha": 0.5}]})
+}
+
+#[test]
+fn schema_output_is_raw_deterministic_draft07() {
+    let (code, plain, err) = run(&deps(), &["schema"]);
+    assert_eq!(code, 0);
+    assert!(err.is_empty());
+    assert!(plain.ends_with('\n') && !plain.ends_with("\n\n"));
+    assert!(!plain.contains('\x1b') && !plain.contains('█') && !plain.contains("[CHECK]"));
+    assert_eq!(
+        plain,
+        mcp::render_schema(SchemaKind::Patch),
+        "byte for byte"
+    );
+    assert_eq!(
+        run(&deps(), &["--json", "schema"]).1,
+        plain,
+        "--json changes nothing"
+    );
+    let colored = ui_deps(ColorMode::TrueColor, true);
+    assert_eq!(run(&colored, &["schema", "--kind", "patch"]).1, plain);
+    let schema: Value = serde_json::from_str(&plain).unwrap();
+    assert!(jsonschema::draft7::meta::is_valid(&schema));
+
+    let out = binary()
+        .arg("schema")
+        .env("CLICOLOR_FORCE", "1")
+        .env("COLORTERM", "truecolor")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), plain);
+    assert_eq!(
+        mcp::write_schema(SchemaKind::Patch, &mut BrokenPipe),
+        0,
+        "closed pipe"
+    );
+}
+
+#[test]
+fn schema_mirrors_serde_and_validation() {
+    let schema = mcp::patch_schema();
+    let text = schema.to_string();
+    assert!(
+        !text.contains("$ref") && !text.contains("definitions"),
+        "fully inlined"
+    );
+    assert_eq!(schema["title"], "PatchFile");
+    assert_eq!(schema["$schema"], "http://json-schema.org/draft-07/schema#");
+    assert_eq!(schema["additionalProperties"], false);
+    assert_eq!(schema["properties"]["schema_version"]["const"], 1);
+    let ops = &schema["properties"]["operations"];
+    assert_eq!(ops["minItems"], 1);
+    let op = &ops["items"]["properties"];
+    assert_eq!(ops["items"]["additionalProperties"], false);
+    assert_eq!(op["operation"]["enum"], json!(["subtract", "add"]));
+    assert_eq!(
+        op["projections"]["items"]["enum"],
+        json!(["gate_proj", "up_proj", "down_proj"])
+    );
+    assert_eq!(op["axis"]["enum"], json!(["rows", "cols"]));
+    assert_eq!(op["axis"]["default"], "cols");
+    assert_eq!(
+        (
+            op["alpha"]["minimum"].as_f64(),
+            op["alpha"]["maximum"].as_f64()
+        ),
+        (Some(-100.0), Some(100.0))
+    );
+    assert!(op["axis"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("Défaut cols"));
+
+    let v = patch_validator();
+    for ok in [
+        json!("all"),
+        json!("ALL"),
+        json!([1, 2]),
+        json!({"start": 1, "end": 3}),
+        json!("10-20"),
+        json!(" 3, 5 ,7 "),
+    ] {
+        assert!(v.is_valid(&one_op_patch(ok.clone())), "{ok}");
+    }
+    for bad in [
+        json!("foo"),
+        json!([]),
+        json!({"start": 3}),
+        json!([1, 1]),
+        json!({"start": 1, "end": 2, "step": 1}),
+        json!(-1),
+        json!("1-3,5"),
+    ] {
+        assert!(!v.is_valid(&one_op_patch(bad.clone())), "{bad}");
+    }
+}
+
+/// "Accepted by Rust" means `parse_patch` (serde) then `validate_patch` without file
+/// checks: serde alone accepts `operations: []`, validation refuses it.
+fn rust_accepts(patch: &Value) -> bool {
+    let opts = ValidationOptions {
+        check_files: false,
+        ..Default::default()
+    };
+    parse_patch(&patch.to_string()).is_ok_and(|p| validate_patch(&p, Path::new("."), &opts).is_ok())
+}
+
+#[test]
+fn schema_and_rust_agree_on_valid_and_invalid_patches() {
+    let v = patch_validator();
+    let op = |extra: Value| {
+        let mut base = json!({"id": "a", "layers": "all", "projections": ["gate_proj"],
+            "operation": "subtract", "vector_file": "v.json", "alpha": 0.5});
+        if let (Some(b), Some(e)) = (base.as_object_mut(), extra.as_object()) {
+            b.extend(e.clone());
+        }
+        base
+    };
+    let valid = [
+        json!({"schema_version": 1, "operations": [op(json!({}))]}),
+        json!({"schema_version": 1, "description": "test", "backup": false, "operations": [op(json!({
+            "layers": [10, 11], "axis": "rows", "vector_file": "d.safetensors", "vector_tensor": "layer_14"}))]}),
+        json!({"schema_version": 1, "operations": [op(json!({"layers": {"start": 2, "end": 4}})),
+            op(json!({"id": "b", "operation": "add", "alpha": -100}))]}),
+        json!({"schema_version": 1, "operations": [op(json!({"alpha": 100, "projections": ["gate_proj", "up_proj", "down_proj"]}))]}),
+        json!({"schema_version": 1, "operations": [op(json!({"layers": "10-20", "alpha": 0}))]}),
+        json!({"schema_version": 1, "description": null, "operations": [op(json!({"layers": " 3,5,7 ", "axis": "cols"}))]}),
+    ];
+    for patch in &valid {
+        assert!(v.is_valid(patch), "schema rejects {patch}");
+        assert!(rust_accepts(patch), "Rust rejects {patch}");
+    }
+    let invalid = [
+        json!({"schema_version": 1, "operations": [op(json!({}))], "bakup": true}),
+        json!({"schema_version": 1, "operations": [op(json!({"alhpa": 1}))]}),
+        json!({"schema_version": 1, "operations": [op(json!({"alpha": "0.5"}))]}),
+        json!({"schema_version": 1, "operations": []}),
+        json!({"schema_version": 1, "operations": [op(json!({"layers": {"start": 3}}))]}),
+        json!({"operations": [op(json!({}))]}),
+    ];
+    for patch in &invalid {
+        assert!(!v.is_valid(patch), "schema accepts {patch}");
+        assert!(!rust_accepts(patch), "Rust accepts {patch}");
+    }
+}
+
+// ---------------------------------------------------------------- MCP helpers
+
+fn rpc(id: Value, method: &str, params: Value) -> String {
+    json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
+}
+
+fn init(version: &str) -> String {
+    rpc(
+        json!(0),
+        "initialize",
+        json!({"protocolVersion": version, "capabilities": {},
+        "clientInfo": {"name": "test", "version": "0"}}),
+    )
+}
+
+const INITIALIZED: &str = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+
+fn call(id: i64, tool: &str, arguments: Value) -> String {
+    rpc(
+        json!(id),
+        "tools/call",
+        json!({"name": tool, "arguments": arguments}),
+    )
+}
+
+fn mcp_cfg(dir: &Path) -> McpConfig {
+    McpConfig::new(&[dir.to_path_buf()], false, false).unwrap()
+}
+
+fn serve_bytes(deps: &AppDeps, cfg: &McpConfig, input: Vec<u8>) -> (i32, String, String) {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = mcp::serve(std::io::Cursor::new(input), &mut out, &mut err, deps, cfg);
+    (
+        code,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+/// Every stdout line must be one JSON-RPC 2.0 message; returns them in order.
+fn session(deps: &AppDeps, cfg: &McpConfig, lines: &[String]) -> Vec<Value> {
+    let (code, out, _) = serve_bytes(deps, cfg, (lines.join("\n") + "\n").into_bytes());
+    assert_eq!(code, 0);
+    out.lines()
+        .map(|line| {
+            assert!(
+                !line.trim().is_empty() && !line.contains('\x1b') && !line.contains('█'),
+                "{line:?}"
+            );
+            let v: Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}"));
+            assert_eq!(v["jsonrpc"], "2.0");
+            v
+        })
+        .collect()
+}
+
+fn reply(responses: &[Value], id: Value) -> &Value {
+    responses
+        .iter()
+        .find(|r| r["id"] == id && (r.get("result").is_some() || r.get("error").is_some()))
+        .unwrap_or_else(|| panic!("no reply for {id} in {responses:?}"))
+}
+
+/// The tool envelope of a successful JSON-RPC reply (`isError` may still be true).
+fn envelope(responses: &[Value], id: i64) -> (bool, Value) {
+    let result = &reply(responses, json!(id))["result"];
+    assert!(result.get("structuredContent").is_some(), "{result}");
+    let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        text, result["structuredContent"],
+        "text and structuredContent agree"
+    );
+    (
+        result["isError"].as_bool().unwrap(),
+        result["structuredContent"].clone(),
+    )
+}
+
+fn error_code(responses: &[Value], id: Value) -> i64 {
+    reply(responses, id)["error"]["code"].as_i64().unwrap()
+}
+
+/// bf16 SafeTensors: gate [2,3] = 1..6, down [3,2] = 10..60.
+fn bf16_model(dir: &Path) -> PathBuf {
+    let path = dir.join("model.safetensors");
+    let encode = |values: &[f32]| {
+        values
+            .iter()
+            .flat_map(|v| half::bf16::from_f32(*v).to_le_bytes())
+            .collect::<Vec<u8>>()
+    };
+    let gate = encode(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let down = encode(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+    let header = json!({
+        GATE: {"dtype": "BF16", "shape": [2, 3], "data_offsets": [0, gate.len()]},
+        DOWN: {"dtype": "BF16", "shape": [3, 2], "data_offsets": [gate.len(), gate.len() + down.len()]},
+    });
+    let mut header = header.to_string();
+    while !header.len().is_multiple_of(8) {
+        header.push(' ');
+    }
+    let mut file = (header.len() as u64).to_le_bytes().to_vec();
+    file.extend_from_slice(header.as_bytes());
+    file.extend_from_slice(&gate);
+    file.extend_from_slice(&down);
+    std::fs::write(&path, file).unwrap();
+    path
+}
+
+fn mcp_patch(ops: Value, backup: bool) -> Value {
+    json!({"schema_version": 1, "backup": backup, "operations": ops})
+}
+
+// ---------------------------------------------------------------- MCP, function level
+
+#[test]
+fn mcp_full_session_is_pure_json_rpc() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = model(dir.path());
+    let lines = [
+        init("2025-06-18"),
+        INITIALIZED.to_owned(),
+        rpc(json!(2), "tools/list", json!({})),
+        call(3, "surgeon_check", json!({"model": "model.safetensors"})),
+    ];
+    let responses = session(&deps(), &mcp_cfg(dir.path()), &lines);
+    assert_eq!(responses.len(), 3, "the notification gets no reply");
+    assert_eq!(
+        responses
+            .iter()
+            .map(|r| r["id"].clone())
+            .collect::<Vec<_>>(),
+        [json!(0), json!(2), json!(3)]
+    );
+    let init_result = &responses[0]["result"];
+    assert_eq!(init_result["protocolVersion"], "2025-06-18");
+    assert_eq!(init_result["capabilities"]["tools"]["listChanged"], false);
+    assert_eq!(init_result["serverInfo"]["name"], "surgeon");
+    assert!(init_result["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("sauvegarde"));
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 4);
+    let (is_error, env) = envelope(&responses, 3);
+    assert!(!is_error, "{env}");
+    assert_eq!(env["command"], "check");
+    assert_eq!(env["ok"], true);
+    assert!(env["warnings"].is_array());
+    assert!(env["data"]["verdict"].is_object());
+    let _ = m;
+}
+
+#[test]
+fn mcp_version_negotiation_ping_and_id_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = mcp_cfg(dir.path());
+    let old = session(&deps(), &cfg, &[init("2024-11-05")]);
+    assert_eq!(old[0]["result"]["protocolVersion"], "2024-11-05");
+    let latest = session(&deps(), &cfg, &[init("2025-11-25")]);
+    assert_eq!(latest[0]["result"]["protocolVersion"], "2025-11-25");
+    let unknown = session(&deps(), &cfg, &[init("1999-01-01")]);
+    assert_eq!(
+        unknown[0]["result"]["protocolVersion"],
+        *mcp::SUPPORTED_PROTOCOL_VERSIONS.last().unwrap()
+    );
+
+    let pings = session(
+        &deps(),
+        &cfg,
+        &[
+            rpc(json!("abc"), "ping", json!({})),
+            rpc(json!(7), "ping", json!({})),
+            r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#.to_owned(),
+        ],
+    );
+    assert_eq!(reply(&pings, json!("abc"))["result"], json!({}));
+    assert_eq!(reply(&pings, json!(7))["result"], json!({}));
+    assert_eq!(reply(&pings, Value::Null)["result"], json!({}));
+}
+
+#[test]
+fn mcp_protocol_errors_never_stop_the_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = mcp_cfg(dir.path());
+    let early = session(
+        &deps(),
+        &cfg,
+        &[
+            rpc(json!(1), "tools/list", json!({})),
+            init("2025-06-18"),
+            rpc(json!(2), "tools/list", json!({})),
+            init("2025-06-18").replace("\"id\":0", "\"id\":3"),
+        ],
+    );
+    assert_eq!(error_code(&early, json!(1)), mcp::SERVER_NOT_INITIALIZED);
+    assert!(reply(&early, json!(2)).get("result").is_some());
+    assert_eq!(
+        error_code(&early, json!(3)),
+        mcp::INVALID_REQUEST,
+        "initialize twice"
+    );
+
+    let responses = session(
+        &deps(),
+        &cfg,
+        &[
+            init("2025-06-18"),
+            "{not json".to_owned(),
+            r#"{"jsonrpc":"2.0","id":10}"#.to_owned(),
+            rpc(json!(11), "resources/list", json!({})),
+            rpc(json!(12), "tools/call", json!({"arguments": {}})),
+            call(13, "surgeon_nope", json!({})),
+            r#"[{"jsonrpc":"2.0","id":14,"method":"ping"}]"#.to_owned(),
+            rpc(json!(15), "ping", json!({})),
+            r#"{"jsonrpc":"2.0","method":"notifications/whatever"}"#.to_owned(),
+        ],
+    );
+    let parse = responses
+        .iter()
+        .find(|r| r["error"]["code"] == mcp::PARSE_ERROR)
+        .unwrap();
+    assert_eq!(parse["id"], Value::Null);
+    assert_eq!(error_code(&responses, json!(10)), mcp::INVALID_REQUEST);
+    assert_eq!(error_code(&responses, json!(11)), mcp::METHOD_NOT_FOUND);
+    assert_eq!(error_code(&responses, json!(12)), mcp::INVALID_PARAMS);
+    assert_eq!(error_code(&responses, json!(13)), mcp::INVALID_PARAMS);
+    let batch = responses
+        .iter()
+        .filter(|r| r["error"]["code"] == mcp::INVALID_REQUEST && r["id"].is_null())
+        .count();
+    assert_eq!(batch, 1, "batch refused with id null");
+    assert_eq!(
+        reply(&responses, json!(15))["result"],
+        json!({}),
+        "still answering"
+    );
+    assert_eq!(responses.len(), 8, "unknown notification ignored");
+}
+
+#[test]
+fn mcp_tool_errors_are_results_with_is_error() {
+    let dir = tempfile::tempdir().unwrap();
+    model(dir.path());
+    write_patch(dir.path(), json!([]), true);
+    let mut bad = op("a", "0", "gate_proj", "v3.json", "rows");
+    bad["alpha"] = json!(500);
+    let ops = json!([
+        bad,
+        op("a", "0", "gate_proj", "v3.json", "rows"),
+        op("c", "0", "gate_proj", "v3.json", "rows")
+    ]);
+    let mut ops = ops;
+    ops[2]["layers"] = json!([]);
+    let lines = [
+        init("2025-06-18"),
+        call(1, "surgeon_check", json!({"model": "absent.safetensors"})),
+        call(
+            2,
+            "surgeon_apply",
+            json!({"model": "model.safetensors", "patch": mcp_patch(ops, true)}),
+        ),
+        call(
+            3,
+            "surgeon_check",
+            json!({"model": "model.safetensors", "extra": 1}),
+        ),
+    ];
+    let responses = session(&deps(), &mcp_cfg(dir.path()), &lines);
+    let (is_error, env) = envelope(&responses, 1);
+    assert!(is_error && env["ok"] == false);
+    assert_eq!(env["error"]["kind"], "model_not_found");
+    let (is_error, env) = envelope(&responses, 2);
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "invalid_patch");
+    assert_eq!(env["error"]["issues"].as_array().unwrap().len(), 3, "{env}");
+    assert_eq!(env["exit_code"], exit::INVALID_INPUT);
+    assert_eq!(
+        envelope(&responses, 3).1["error"]["kind"],
+        "invalid_arguments"
+    );
+    assert!(
+        responses.iter().all(|r| r.get("error").is_none()),
+        "no JSON-RPC error"
+    );
+
+    let mut poor = deps();
+    poor.probe = Box::new(FakeProbe { available: 0 });
+    let responses = session(
+        &poor,
+        &mcp_cfg(dir.path()),
+        &[
+            init("2025-06-18"),
+            call(1, "surgeon_check", json!({"model": "model.safetensors"})),
+        ],
+    );
+    let (is_error, env) = envelope(&responses, 1);
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "insufficient_resources");
+}
+
+#[test]
+fn mcp_apply_is_exact_and_always_backed_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = bf16_model(dir.path());
+    let original = std::fs::read(&m).unwrap();
+    std::fs::write(dir.path().join("v3.json"), "[1, 1, 1]").unwrap();
+    let gate_op = json!([op("g", "0", "gate_proj", "v3.json", "rows")]);
+    let cfg = mcp_cfg(dir.path());
+
+    let dry = session(
+        &deps(),
+        &cfg,
+        &[
+            init("2025-06-18"),
+            call(
+                1,
+                "surgeon_apply",
+                json!({"model": "model.safetensors", "patch": mcp_patch(gate_op.clone(), true), "dry_run": true}),
+            ),
+        ],
+    );
+    let (is_error, env) = envelope(&dry, 1);
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["report"]["dry_run"], true);
+    assert_eq!(
+        std::fs::read(&m).unwrap(),
+        original,
+        "dry run writes nothing"
+    );
+    assert!(backups_in(dir.path()).is_empty(), "dry run takes no backup");
+
+    // backup: false in the patch, yet the server imposes one.
+    let real = session(
+        &deps(),
+        &cfg,
+        &[
+            init("2025-06-18"),
+            call(
+                1,
+                "surgeon_apply",
+                json!({"model": "model.safetensors", "patch": mcp_patch(gate_op, false)}),
+            ),
+        ],
+    );
+    let (is_error, env) = envelope(&real, 1);
+    assert!(!is_error, "{env}");
+    let backups = backups_in(dir.path());
+    assert_eq!(backups.len(), 1, "backup imposed without --allow-no-backup");
+    assert_eq!(
+        std::fs::read(dir.path().join(&backups[0])).unwrap(),
+        original
+    );
+
+    // Reference: same file with gate - 0.5 * [1,1,1] per row, exact in bf16.
+    let reference = tempfile::tempdir().unwrap();
+    let expected_path = bf16_model(reference.path());
+    let mut expected = std::fs::read(&expected_path).unwrap();
+    let data_start = expected.len() - 24;
+    for (i, v) in [0.5f32, 1.5, 2.5, 3.5, 4.5, 5.5].iter().enumerate() {
+        expected[data_start + 2 * i..data_start + 2 * i + 2]
+            .copy_from_slice(&half::bf16::from_f32(*v).to_le_bytes());
+    }
+    assert_eq!(std::fs::read(&m).unwrap(), expected, "byte for byte");
+}
+
+#[test]
+fn mcp_honors_backup_false_only_with_allow_no_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    model(dir.path());
+    std::fs::write(dir.path().join("v3.json"), "[1, 1, 1]").unwrap();
+    let cfg = McpConfig::new(&[dir.path().to_path_buf()], false, true).unwrap();
+    let patch = mcp_patch(json!([op("g", "0", "gate_proj", "v3.json", "rows")]), false);
+    let responses = session(
+        &deps(),
+        &cfg,
+        &[
+            init("2025-06-18"),
+            call(
+                1,
+                "surgeon_apply",
+                json!({"model": "model.safetensors", "patch": patch}),
+            ),
+        ],
+    );
+    assert!(!envelope(&responses, 1).0);
+    assert!(backups_in(dir.path()).is_empty());
+}
+
+#[test]
+fn mcp_failed_or_cancelled_apply_leaves_the_model_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = model(dir.path());
+    let original = std::fs::read(&m).unwrap();
+    std::fs::write(dir.path().join("v3.json"), "[1, 1, 1]").unwrap();
+    std::fs::write(dir.path().join("v2.json"), "[1, 1]").unwrap();
+    let cfg = mcp_cfg(dir.path());
+    let failing = mcp_patch(
+        json!([
+            op("ok", "0", "gate_proj", "v3.json", "rows"),
+            op("bad", "0", "down_proj", "v2.json", "cols")
+        ]),
+        true,
+    );
+    let responses = session(
+        &deps(),
+        &cfg,
+        &[
+            init("2025-06-18"),
+            call(
+                1,
+                "surgeon_apply",
+                json!({"model": "model.safetensors", "patch": failing}),
+            ),
+        ],
+    );
+    let (is_error, env) = envelope(&responses, 1);
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "execution_failed");
+    assert_eq!(env["exit_code"], exit::EXECUTION_FAILED);
+    assert_eq!(std::fs::read(&m).unwrap(), original, "rolled back");
+
+    // The cancellation precedes the call in the stream: deterministic, applied at start.
+    let good = mcp_patch(json!([op("g", "0", "gate_proj", "v3.json", "rows")]), true);
+    let cancelled = session(&deps(), &cfg, &[
+        init("2025-06-18"),
+        json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 5, "reason": "test"}}).to_string(),
+        call(5, "surgeon_apply", json!({"model": "model.safetensors", "patch": good})),
+    ]);
+    let (is_error, env) = envelope(&cancelled, 5);
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "cancelled");
+    assert_eq!(std::fs::read(&m).unwrap(), original);
+}
+
+/// Raises the cancellation flag after the first shifted tensor, as the reader thread does
+/// when `notifications/cancelled` arrives mid-apply.
+struct CancelAfterFirstShift<'a> {
+    flag: &'a AtomicBool,
+    events: Vec<ProgressEvent>,
+}
+
+impl ProgressSink for CancelAfterFirstShift<'_> {
+    fn event(&mut self, event: ProgressEvent) {
+        if matches!(event, ProgressEvent::Shift { .. }) {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+        self.events.push(event);
+    }
+}
+
+#[test]
+fn cancellation_mid_apply_rolls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = model(dir.path());
+    let original = std::fs::read(&m).unwrap();
+    std::fs::write(dir.path().join("v3.json"), "[1, 1, 1]").unwrap();
+    let patch = parse_patch(
+        &mcp_patch(
+            json!([
+                op("g", "0", "gate_proj", "v3.json", "rows"),
+                op("d", "0", "down_proj", "v3.json", "cols")
+            ]),
+            true,
+        )
+        .to_string(),
+    )
+    .unwrap();
+    let deps = deps();
+    let request = ApplyRequest {
+        model: m.clone(),
+        patch,
+        patch_label: "patch".into(),
+        base_dir: dir.path().to_path_buf(),
+        dry_run: false,
+        no_backup: false,
+        backup_dir: None,
+    };
+    let mut sink = CancelAfterFirstShift {
+        flag: &deps.interrupted,
+        events: Vec::new(),
+    };
+    let failure = core_apply(&request, &deps, &mut sink).unwrap_err();
+    assert_eq!(
+        failure.error.unwrap().kind.as_deref(),
+        Some("execution_failed")
+    );
+    assert!(
+        sink.events
+            .contains(&ProgressEvent::Rollback(RollbackOutcome::Restored)),
+        "{:?}",
+        sink.events
+    );
+    assert_eq!(
+        std::fs::read(&m).unwrap(),
+        original,
+        "first tensor restored"
+    );
+}
+
+#[test]
+fn mcp_sandbox_refuses_paths_outside_without_leaking_them() {
+    let allowed = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    model(allowed.path());
+    let secret = model(outside.path());
+    std::fs::write(outside.path().join("v3.json"), "[1, 1, 1]").unwrap();
+    let escape = format!(
+        "../{}/model.safetensors",
+        outside.path().file_name().unwrap().to_string_lossy()
+    );
+    let outside_vector = outside.path().join("v3.json");
+    let lines = [
+        init("2025-06-18"),
+        call(1, "surgeon_check", json!({"model": escape})),
+        call(2, "surgeon_check", json!({"model": s(&secret)})),
+        call(
+            3,
+            "surgeon_apply",
+            json!({"model": "model.safetensors",
+            "patch": mcp_patch(json!([op("g", "0", "gate_proj", s(&outside_vector), "rows")]), true)}),
+        ),
+        call(
+            4,
+            "surgeon_inspect",
+            json!({"model": "missing.safetensors"}),
+        ),
+        call(
+            5,
+            "surgeon_eval",
+            json!({"model": "model.safetensors", "prompts_file": s(&outside.path().join("p.txt"))}),
+        ),
+    ];
+    let responses = session(&deps(), &mcp_cfg(allowed.path()), &lines);
+    for id in [1, 2, 3, 5] {
+        let (is_error, env) = envelope(&responses, id);
+        assert!(is_error);
+        assert_eq!(env["error"]["kind"], "path_not_allowed", "{id}: {env}");
+        let message = env["error"]["message"].as_str().unwrap();
+        assert!(
+            !message.contains(&outside.path().display().to_string()),
+            "{message}"
+        );
+    }
+    let (_, env) = envelope(&responses, 4);
+    assert_eq!(
+        env["error"]["kind"], "model_not_found",
+        "inside the sandbox: a normal error"
+    );
+}
+
+#[test]
+fn mcp_read_only_refuses_writes_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = model(dir.path());
+    let original = std::fs::read(&m).unwrap();
+    std::fs::write(dir.path().join("v3.json"), "[1, 1, 1]").unwrap();
+    let cfg = McpConfig::new(&[dir.path().to_path_buf()], true, false).unwrap();
+    let patch = mcp_patch(json!([op("g", "0", "gate_proj", "v3.json", "rows")]), true);
+    let responses = session(
+        &deps(),
+        &cfg,
+        &[
+            init("2025-06-18"),
+            call(
+                1,
+                "surgeon_apply",
+                json!({"model": "model.safetensors", "patch": patch}),
+            ),
+            call(2, "surgeon_check", json!({"model": "model.safetensors"})),
+            call(
+                3,
+                "surgeon_eval",
+                json!({"model": "model.safetensors", "prompts": [{"text": "x"}], "export_gguf": "out.gguf"}),
+            ),
+        ],
+    );
+    assert_eq!(envelope(&responses, 1).1["error"]["kind"], "read_only");
+    assert!(!envelope(&responses, 2).0);
+    assert_eq!(envelope(&responses, 3).1["error"]["kind"], "read_only");
+    assert_eq!(std::fs::read(&m).unwrap(), original);
+}
+
+#[test]
+fn mcp_progress_only_with_a_token() {
+    let dir = tempfile::tempdir().unwrap();
+    model(dir.path());
+    std::fs::write(dir.path().join("v3.json"), "[1, 1, 1]").unwrap();
+    let patch = mcp_patch(
+        json!([
+            op("g", "0", "gate_proj", "v3.json", "rows"),
+            op("d", "0", "down_proj", "v3.json", "cols")
+        ]),
+        true,
+    );
+    let with_token = rpc(
+        json!(1),
+        "tools/call",
+        json!({"name": "surgeon_apply",
+        "arguments": {"model": "model.safetensors", "patch": patch}, "_meta": {"progressToken": "tok"}}),
+    );
+    let responses = session(
+        &deps(),
+        &mcp_cfg(dir.path()),
+        &[init("2025-06-18"), with_token],
+    );
+    let progress: Vec<&Value> = responses
+        .iter()
+        .filter(|r| r["method"] == "notifications/progress")
+        .collect();
+    assert_eq!(progress.len(), 2, "one per shifted tensor");
+    for (i, p) in progress.iter().enumerate() {
+        assert_eq!(p["params"]["progressToken"], "tok");
+        assert_eq!(p["params"]["progress"], i + 1);
+        assert_eq!(p["params"]["total"], 2);
+        assert!(p.get("id").is_none());
+    }
+    assert!(!envelope(&responses, 1).0);
+
+    let prompts =
+        json!({"model": "m.gguf", "prompts": [{"text": "a"}, {"text": "b"}, {"text": "c"}]});
+    std::fs::write(dir.path().join("m.gguf"), "GGUF").unwrap();
+    let eval_with = rpc(
+        json!(2),
+        "tools/call",
+        json!({"name": "surgeon_eval", "arguments": prompts.clone(), "_meta": {"progressToken": 9}}),
+    );
+    let responses = session(
+        &deps(),
+        &mcp_cfg(dir.path()),
+        &[
+            init("2025-06-18"),
+            eval_with,
+            call(3, "surgeon_eval", prompts),
+        ],
+    );
+    let eval_progress: Vec<&Value> = responses
+        .iter()
+        .filter(|r| r["method"] == "notifications/progress")
+        .collect();
+    assert_eq!(
+        eval_progress.len(),
+        3,
+        "one per prompt, none for the call without token"
+    );
+    assert!(eval_progress
+        .iter()
+        .all(|p| p["params"]["progressToken"] == 9));
+}
+
+#[test]
+fn mcp_panic_in_a_tool_is_internal_error_and_server_lives_on() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("m.gguf"), "GGUF").unwrap();
+    let mut deps = deps();
+    deps.generator_factory = Box::new(|_, _| panic!("tool exploded"));
+    let (code, out, err) = serve_bytes(
+        &deps,
+        &mcp_cfg(dir.path()),
+        ([
+            init("2025-06-18"),
+            call(
+                1,
+                "surgeon_eval",
+                json!({"model": "m.gguf", "prompts": [{"text": "x"}]}),
+            ),
+            rpc(json!(2), "ping", json!({})),
+        ]
+        .join("\n")
+            + "\n")
+            .into_bytes(),
+    );
+    assert_eq!(code, 0);
+    let responses: Vec<Value> = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(error_code(&responses, json!(1)), mcp::INTERNAL_ERROR);
+    assert!(
+        !reply(&responses, json!(1))["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("exploded"),
+        "neutral message"
+    );
+    assert!(err.contains("tool exploded"), "detail on stderr");
+    assert_eq!(reply(&responses, json!(2))["result"], json!({}));
+}
+
+#[test]
+fn mcp_input_framing_is_robust() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = mcp_cfg(dir.path());
+    let mut input = Vec::new();
+    input.extend_from_slice("\u{feff}".as_bytes());
+    input.extend_from_slice(init("2025-06-18").as_bytes());
+    input.extend_from_slice(b"\r\n\n   \n");
+    input.extend_from_slice(rpc(json!(2), "ping", json!({})).as_bytes());
+    input.extend_from_slice(b"\r\n");
+    input.extend(std::iter::repeat_n(b'x', mcp::MAX_LINE_BYTES + 1));
+    input.push(b'\n');
+    input.extend_from_slice(rpc(json!(3), "ping", json!({})).as_bytes()); // EOF, no newline
+    let (code, out, _) = serve_bytes(&deps(), &cfg, input);
+    assert_eq!(code, 0, "clean EOF");
+    let responses: Vec<Value> = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 4, "{out}");
+    assert!(
+        reply(&responses, json!(0)).get("result").is_some(),
+        "BOM tolerated"
+    );
+    assert_eq!(
+        reply(&responses, json!(2))["result"],
+        json!({}),
+        "CRLF tolerated"
+    );
+    assert_eq!(
+        responses[2]["error"]["code"],
+        mcp::INVALID_REQUEST,
+        "oversized line"
+    );
+    assert_eq!(
+        reply(&responses, json!(3))["result"],
+        json!({}),
+        "resynchronized"
+    );
+
+    let (mut err, input) = (
+        Vec::new(),
+        init("2025-06-18") + "\n" + &rpc(json!(1), "ping", json!({})) + "\n",
+    );
+    let code = mcp::serve(
+        std::io::Cursor::new(input.into_bytes()),
+        BrokenPipe,
+        &mut err,
+        &deps(),
+        &cfg,
+    );
+    assert_eq!(code, exit::GENERAL, "stdout closed: stop, no panic");
+}
+
+#[test]
+fn schema_tools_kind_equals_tools_list() {
+    let (code, out, _) = run(&deps(), &["schema", "--kind", "tools"]);
+    assert_eq!(code, 0);
+    let exported: Value = serde_json::from_str(&out).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let responses = session(
+        &deps(),
+        &mcp_cfg(dir.path()),
+        &[init("2025-06-18"), rpc(json!(1), "tools/list", json!({}))],
+    );
+    assert_eq!(exported, reply(&responses, json!(1))["result"]["tools"]);
+    let names: Vec<&str> = exported
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "surgeon_check",
+            "surgeon_inspect",
+            "surgeon_apply",
+            "surgeon_eval"
+        ]
+    );
+    for tool in exported.as_array().unwrap() {
+        let schema = &tool["inputSchema"];
+        assert_eq!(schema["type"], "object");
+        assert!(
+            jsonschema::draft7::meta::is_valid(schema),
+            "{}",
+            tool["name"]
+        );
+        assert!(tool["description"].as_str().unwrap().len() > 20);
+        assert!(tool["annotations"]["readOnlyHint"].is_boolean());
+    }
+    assert_eq!(exported[2]["annotations"]["destructiveHint"], true);
+    assert_eq!(
+        exported[2]["inputSchema"]["properties"]["patch"]["additionalProperties"],
+        false
+    );
+}
+
+#[test]
+fn mcp_clap_errors_go_to_stderr() {
+    let (code, out, err) = run(&deps(), &["mcp", "--bogus"]);
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert!(out.is_empty(), "stdout reserved for the protocol");
+    assert!(err.contains("--bogus"));
+}
+
+/// Extends the prompt 6 guard to the MCP module.
+#[test]
+fn no_print_macros_in_mcp() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mcp");
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let source = std::fs::read_to_string(&path).unwrap();
+        let code = source.split("#[cfg(test)]").next().unwrap();
+        for (n, line) in code.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for banned in ["println!(", "print!(", "eprintln!(", "eprint!("] {
+                assert!(
+                    !line.contains(banned),
+                    "{}:{}: {banned}",
+                    path.display(),
+                    n + 1
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- MCP, process level
+
+#[test]
+fn mcp_binary_speaks_only_json_rpc_on_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    model(dir.path());
+    let mut child = binary()
+        .args(["mcp", "--allow-dir", s(dir.path())])
+        .env("CLICOLOR_FORCE", "1")
+        .env("COLORTERM", "truecolor")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let input = [
+        init("2025-06-18"),
+        INITIALIZED.to_owned(),
+        rpc(json!(2), "tools/list", json!({})),
+        call(3, "surgeon_check", json!({"model": "model.safetensors"})),
+    ]
+    .join("\n")
+        + "\n";
+    {
+        use std::io::Write as _;
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input.as_bytes()).unwrap();
+    } // stdin closed: EOF ends the server
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(30) {
+            let _ = child.kill();
+            panic!("surgeon mcp did not exit within 30 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let (mut out, mut err) = (String::new(), String::new());
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert_eq!(status.code(), Some(0), "{err}");
+    assert!(
+        !out.contains('\x1b') && !err.contains('\x1b'),
+        "no ANSI even with CLICOLOR_FORCE"
+    );
+    let responses: Vec<Value> = out
+        .lines()
+        .map(|l| {
+            let v: Value = serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l:?}"));
+            assert_eq!(v["jsonrpc"], "2.0");
+            v
+        })
+        .collect();
+    assert_eq!(responses.len(), 3);
+    assert!(!envelope(&responses, 3).0);
+}

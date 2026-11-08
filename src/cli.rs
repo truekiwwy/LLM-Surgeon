@@ -21,7 +21,7 @@
 
 use std::path::PathBuf;
 
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 pub use crate::patch::exit_code;
 use crate::patch::{LayerSelection, Projection};
@@ -54,6 +54,10 @@ pub enum Commands {
     Apply(ApplyArgs),
     /// Evaluate a model on prompts.
     Eval(EvalArgs),
+    /// Print the JSON Schema of patch.json, or the MCP tool definitions (raw JSON).
+    Schema(SchemaArgs),
+    /// Run the MCP (Model Context Protocol) server on stdio.
+    Mcp(McpArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -111,6 +115,34 @@ pub struct EvalArgs {
     pub llama_cpp_dir: Option<PathBuf>,
     #[arg(long)]
     pub allow_degraded: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct SchemaArgs {
+    #[arg(long, value_enum, default_value = "patch")]
+    pub kind: SchemaKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SchemaKind {
+    /// JSON Schema (draft-07) of patch.json.
+    Patch,
+    /// The four MCP tool definitions, exactly as `tools/list` returns them.
+    Tools,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct McpArgs {
+    /// Allowed directory, repeatable. Default: $SURGEON_MCP_ALLOW_DIRS (system path
+    /// separator), else the current directory.
+    #[arg(long)]
+    pub allow_dir: Vec<PathBuf>,
+    /// Refuse surgeon_apply and GGUF exports.
+    #[arg(long)]
+    pub read_only: bool,
+    /// Honor `backup: false` in patches (a backup is imposed otherwise).
+    #[arg(long)]
+    pub allow_no_backup: bool,
 }
 
 #[cfg(test)]

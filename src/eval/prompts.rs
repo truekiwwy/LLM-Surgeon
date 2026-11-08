@@ -1,22 +1,30 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::error::{EvalError, Result};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(description = "Un prompt d'évaluation et ses attentes facultatives.")]
 pub struct EvalPrompt {
     /// Optional in the file: missing ids become `prompt-<n>` (1-based).
     #[serde(default)]
+    #[schemars(description = "Identifiant unique ; absent ou vide : prompt-<n> (base 1).")]
     pub id: String,
+    #[schemars(length(min = 1), description = "Texte envoyé au modèle.")]
     pub text: String,
     /// Case-insensitive substrings that must all appear in the output.
     #[serde(default)]
+    #[schemars(
+        description = "Sous-chaînes qui doivent toutes apparaître (insensible à la casse)."
+    )]
     pub expect_contains: Option<Vec<String>>,
     /// Case-insensitive substrings that must not appear in the output.
     #[serde(default)]
+    #[schemars(description = "Sous-chaînes interdites dans la sortie (insensible à la casse).")]
     pub expect_not_contains: Option<Vec<String>>,
 }
 
