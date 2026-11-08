@@ -1,0 +1,60 @@
+//! Fast non-regression check of a patched model, then GGUF export if it is healthy.
+//!
+//! No dependency on the other modules of the crate: generation and process execution go
+//! through the `TextGenerator` and `CommandRunner` traits, mocked in tests.
+//!
+//! Graph (graphify):
+//!
+//! ```text
+//! modules:  error <- every module
+//!           loop_detector -> mod (truncate_chars)
+//!           command -> error
+//!           generator -> command (drain_tail, last_lines, spawn_error), error
+//!           prompts -> error
+//!           runner -> generator (TextGenerator), loop_detector, prompts, error
+//!           gguf -> command (CommandRunner), generator (find_binary), runner (EvalReport)
+//! run_eval -> LoopDetector::reset -> TextGenerator::generate -> on_chunk
+//!          -> LoopDetector::push -> step -> check_marker | check_period | feed_word | feed_line
+//!          -> ControlFlow::Break on Loop -> check_expectations -> verdict
+//! LlamaCliGenerator::generate -> command (args) -> stream_child -> Command::spawn (no shell)
+//!          -> reader thread -> sync_channel -> Utf8Decoder::push -> on_chunk
+//!          ; Break | timeout | read error -> ChildGuard (kill + wait) ; exit != 0 -> CommandFailed
+//! export_if_healthy -> export_gguf (Healthy, or Degraded + allow_degraded)
+//!          -> validate (quant whitelist, outtype, dirs, converter, find_binary(quantize))
+//!          -> CommandRunner::run(python, convert) -> CommandRunner::run(llama-quantize)
+//!             | fs::rename -> remove intermediate -> verify_gguf (non empty, "GGUF")
+//! ```
+//!
+//! Wiring for the assembler. `llama-cli` reads GGUF only, so the patched model must be
+//! converted once before it can be evaluated:
+//!
+//! ```text
+//! let prompts = load_prompts(&args.prompts)?;
+//! let f16 = export_gguf(&GgufExportConfig { quant: None, output_gguf: eval.f16.gguf, .. }, &SystemCommandRunner)?;
+//! let mut gen = LlamaCliGenerator { llama_cli_path: locate_binary("llama-cli", dir)?, model_path: f16.final_gguf, .. };
+//! let report = run_eval(&mut gen, &prompts, &EvalConfig::default())?;
+//! export_if_healthy(&report, &GgufExportConfig { quant: Some(args.quant), .. }, &SystemCommandRunner, args.allow_degraded)?;
+//! ```
+
+mod command;
+mod error;
+mod generator;
+mod gguf;
+mod loop_detector;
+mod prompts;
+mod runner;
+
+pub use command::{CommandOutput, CommandRunner, SystemCommandRunner};
+pub use error::{EvalError, Result};
+pub use generator::{locate_binary, GenerationOutcome, LlamaCliGenerator, TextGenerator};
+pub use gguf::{
+    export_gguf, export_if_healthy, GgufExportConfig, GgufExportReport, StepReport, ALLOWED_QUANTS,
+};
+pub use loop_detector::{LoopDetector, LoopDetectorConfig, LoopReason, LoopVerdict};
+pub use prompts::{load_prompts, EvalPrompt};
+pub use runner::{run_eval, EvalConfig, EvalReport, EvalVerdict, PromptResult, PromptStatus};
+
+/// Longest prefix of at most `max_chars` characters; never splits a multi-byte character.
+pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> &str {
+    s.char_indices().nth(max_chars).map_or(s, |(i, _)| &s[..i])
+}

@@ -1,0 +1,1360 @@
+//! Orchestration of the CLI: wires `hardware`, `engine`, `patch` and `eval` together.
+//! `main.rs` only parses, builds [`real_deps`], calls [`run_with`] and exits.
+//!
+//! Call graph (graphify, checked by hand). The four modules never import each other;
+//! only `cli` (-> patch types) and this module cross module boundaries:
+//!
+//! ```text
+//! main -> install_panic_hook, Ui::detect, parse_cli_with, real_deps -> run_with
+//!      -> catch_unwind(dispatch)
+//! dispatch -> check   -> hardware::evaluate_budget
+//!          -> inspect -> hardware::compute_model_size (shards) -> ReadOnlyModel::open
+//!                     -> engine::find_mlp_tensors -> tensor_stats (mmap view, streamed)
+//!          -> apply   -> patch::load_patch -> validate_patch -> hardware::evaluate_budget
+//!                     -> EngineBackend::open (WritableModel per shard)
+//!                     -> apply_patch(dry run: preflight, no write)
+//!                     -> BackupSet::create_many_in (touched shards only)
+//!                     -> apply_patch -> EngineBackend::shift_tensor -> WritableModel::shift_tensor
+//!                        ; error | NaN | Ctrl-C -> RollbackHandle::rollback ; ok -> flush -> commit
+//!          -> eval    -> load_prompts -> export_gguf (temporary f16, unless .gguf)
+//!                     -> generator_factory -> run_eval -> export_if_healthy
+//! Every human byte goes through `ui::*` (output audit in `ui.rs`); `--json` builds
+//! `Ui::off()` for both streams, so no rendering reaches stdout or stderr.
+//! emit -> JSON envelope | human text (write errors ignored: closed pipe never panics)
+//! ```
+//!
+//! Exit codes: 0 ok, 1 general error, 2 invalid CLI/patch/input, 3 execution failed and
+//! model intact (rolled back or never touched), 4 CRITICAL (rollback failed, or model left
+//! modified without backup), 5 eval degraded/broken, 6 GGUF export failed, 70 internal.
+//!
+//! Deviations from the assembly spec, adapted to the real signatures:
+//! - One `EngineBackend` owns 1..N `WritableModel`s: a single file is a 1-shard model, so a
+//!   separate `MultiShardBackend` would be a second code path doing the same thing.
+//! - The RAM budget is reported as a warning by `apply`, not enforced: `WritableModel` is a
+//!   memory map that only pages in the targeted tensors, so refusing a model larger than
+//!   RAM would block patches that work.
+//! - `apply` opens the shards and runs a dry-run preflight *before* the backup, so a patch
+//!   with no target or an unreadable vector fails without copying gigabytes.
+//! - Ctrl-C is cooperative: the flag is checked before every shift (rollback), between
+//!   prompts and chunks (eval) and between tensors (inspect). It never kills mid-write.
+
+use std::any::Any;
+use std::cell::RefCell;
+use std::ffi::OsString;
+use std::fmt::Display;
+use std::io::Write;
+use std::ops::ControlFlow;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use clap::Parser;
+use serde::Serialize;
+use serde_json::{json, Value};
+
+use crate::cli::{ApplyArgs, CheckArgs, Cli, Commands, EvalArgs, InspectArgs};
+use crate::engine::{
+    self, BroadcastAxis, DType, EngineError, LayerSpec, MlpProj, ReadOnlyModel, ShiftOp,
+    ShiftStats, TensorView, WritableModel,
+};
+use crate::eval::{
+    export_gguf, export_if_healthy, load_prompts, locate_binary, run_eval, CommandRunner,
+    EvalConfig, EvalError, EvalReport, EvalVerdict, GenerationOutcome, GgufExportConfig,
+    LlamaCliGenerator, PromptStatus, SystemCommandRunner, TextGenerator, ALLOWED_QUANTS,
+};
+use crate::hardware::{
+    self, BudgetPolicy, HardwareBudget, HardwareError, HardwareProbe, SystemProbe, Verdict,
+};
+use crate::patch::{
+    self, apply_patch, load_patch, validate_patch, ApplyReport, Axis, BackupSet, LayerSelection,
+    OpStats, OperationKind, PatchBackend, PatchError, Projection, RollbackHandle, ValidationIssue,
+    ValidationOptions,
+};
+use crate::ui::{self, ColorMode, Ui, UiConfig};
+
+pub mod exit {
+    use crate::patch::exit_code;
+
+    pub const OK: i32 = exit_code::OK;
+    pub const GENERAL: i32 = 1;
+    pub const INVALID_INPUT: i32 = exit_code::INVALID_PATCH;
+    pub const EXECUTION_FAILED: i32 = exit_code::EXECUTION_FAILED;
+    pub const CRITICAL: i32 = exit_code::CRITICAL;
+    pub const EVAL_UNHEALTHY: i32 = 5;
+    pub const EXPORT_FAILED: i32 = 6;
+    pub const INTERNAL: i32 = 70;
+}
+
+const GIB: f64 = (1u64 << 30) as f64;
+/// Per prompt; generous because CPU-only generation of 256 tokens can be slow.
+const GENERATION_TIMEOUT: Duration = Duration::from_secs(600);
+const INTERRUPTED: &str = "interrompu (Ctrl-C)";
+
+pub type GeneratorFactory =
+    Box<dyn Fn(&Path, &EvalArgs) -> std::result::Result<Box<dyn TextGenerator>, EvalError>>;
+
+pub struct AppDeps {
+    pub probe: Box<dyn HardwareProbe>,
+    pub runner: Box<dyn CommandRunner>,
+    /// Builds a generator for a GGUF file.
+    pub generator_factory: GeneratorFactory,
+    /// Set by the Ctrl-C handler.
+    pub interrupted: Arc<AtomicBool>,
+    /// Color modes; `run_with` replaces both with `Off` under `--json`.
+    pub ui: UiConfig,
+}
+
+/// Real hardware, real processes, and a Ctrl-C handler that only raises `interrupted`.
+pub fn real_deps() -> AppDeps {
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&interrupted);
+    if let Err(e) = ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst)) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "avertissement : Ctrl-C non intercepté ({e}), une interruption couperait net"
+        );
+    }
+    AppDeps {
+        probe: Box::new(SystemProbe::detect()),
+        runner: Box::new(SystemCommandRunner),
+        generator_factory: Box::new(real_generator),
+        interrupted,
+        ui: Ui::detect(false),
+    }
+}
+
+/// Prefers `llama-completion` (raw completion in recent llama.cpp), else `llama-cli`.
+/// `-no-cnv` disables chat mode on both; very old builds without it will reject it.
+fn real_generator(
+    gguf: &Path,
+    args: &EvalArgs,
+) -> std::result::Result<Box<dyn TextGenerator>, EvalError> {
+    let dir = args.llama_cpp_dir.as_deref();
+    let binary =
+        locate_binary("llama-completion", dir).or_else(|_| locate_binary("llama-cli", dir))?;
+    Ok(Box::new(LlamaCliGenerator {
+        llama_cli_path: binary,
+        model_path: gguf.to_path_buf(),
+        extra_args: vec!["-no-cnv".into()],
+        timeout: GENERATION_TIMEOUT,
+    }))
+}
+
+// ---------------------------------------------------------------- panic handling
+
+static CATCHING: AtomicBool = AtomicBool::new(false);
+static LAST_PANIC: Mutex<Option<String>> = Mutex::new(None);
+
+/// Inside `run_with` the panic text is kept for the error envelope (code 70); elsewhere
+/// it is printed. Either way the user gets one readable message, never a raw backtrace.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let text = info.to_string();
+        if CATCHING.load(Ordering::SeqCst) {
+            if let Ok(mut last) = LAST_PANIC.lock() {
+                *last = Some(text);
+            }
+        } else {
+            let _ = writeln!(std::io::stderr(), "erreur interne : {text}");
+        }
+    }));
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    LAST_PANIC
+        .lock()
+        .ok()
+        .and_then(|mut last| last.take())
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic sans message".into())
+}
+
+// ---------------------------------------------------------------- entry points
+
+/// Writers and terminal styles of one run. Under `--json` both `Ui`s are `Off`.
+struct Io<'a> {
+    out: &'a mut dyn Write,
+    err: &'a mut dyn Write,
+    ui: Ui,
+    err_ui: Ui,
+    err_is_tty: bool,
+}
+
+impl<'a> Io<'a> {
+    fn new(out: &'a mut dyn Write, err: &'a mut dyn Write, cfg: &UiConfig, json: bool) -> Self {
+        let mode = |m: ColorMode| if json { Ui::off() } else { Ui::new(m) };
+        Self {
+            out,
+            err,
+            ui: mode(cfg.out),
+            err_ui: mode(cfg.err),
+            err_is_tty: cfg.err_is_tty && !json,
+        }
+    }
+
+    /// One line on stdout; nothing at all in `Off` mode.
+    fn line(&mut self, line: &str) {
+        self.ui.line(self.out, line);
+    }
+}
+
+const PLAIN_UI: UiConfig = UiConfig {
+    out: ColorMode::Plain,
+    err: ColorMode::Plain,
+    err_is_tty: false,
+};
+
+/// Parses the arguments. `Err(code)` means the help, the version or a usage error has
+/// already been written (as a JSON envelope when `--json` is present).
+pub fn parse_cli<I, T>(args: I, out: &mut dyn Write, err: &mut dyn Write) -> Result<Cli, i32>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    parse_cli_with(args, &PLAIN_UI, false, out, err)
+}
+
+/// [`parse_cli`] with the terminal identity: the banner before the help when `banner`
+/// (main passes "stdout is a TTY and no --json"), and clap's styled help when `ui.out`
+/// has colors.
+pub fn parse_cli_with<I, T>(
+    args: I,
+    ui: &UiConfig,
+    banner: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<Cli, i32>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    use clap::error::ErrorKind;
+
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let json = args.iter().skip(1).any(|a| a == "--json");
+    let e = match Cli::try_parse_from(&args) {
+        Ok(cli) => return Ok(cli),
+        Err(e) => e,
+    };
+    let mut io = Io::new(out, err, ui, json);
+    let help = matches!(
+        e.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    );
+    if help || e.exit_code() == 0 {
+        if help && banner {
+            let _ = ui::print_banner(&io.ui, io.out);
+        }
+        let _ = match io.ui.mode() {
+            ColorMode::Ansi256 | ColorMode::TrueColor => write!(io.out, "{}", e.render().ansi()),
+            _ => write!(io.out, "{e}"),
+        };
+        return Err(e.exit_code());
+    }
+    let failure = Outcome::fail(exit::INVALID_INPUT, e.to_string().trim_end());
+    Err(emit(&mut io, json, None, failure))
+}
+
+pub fn run_with(cli: Cli, deps: &AppDeps, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let mut io = Io::new(out, err, &deps.ui, cli.json);
+    CATCHING.store(true, Ordering::SeqCst);
+    // A panic unwinds through BackupSet::drop, which rolls back an uncommitted patch.
+    let outcome = catch_unwind(AssertUnwindSafe(|| dispatch(&cli.command, deps, &mut io)))
+        .unwrap_or_else(|payload| {
+            Outcome::fail(
+                exit::INTERNAL,
+                format!("erreur interne : {}", panic_message(payload.as_ref())),
+            )
+        });
+    CATCHING.store(false, Ordering::SeqCst);
+    emit(&mut io, cli.json, Some(command_name(&cli.command)), outcome)
+}
+
+fn command_name(command: &Commands) -> &'static str {
+    match command {
+        Commands::Check(_) => "check",
+        Commands::Inspect(_) => "inspect",
+        Commands::Apply(_) => "apply",
+        Commands::Eval(_) => "eval",
+    }
+}
+
+fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
+    let result = match command {
+        Commands::Check(args) => check(args, deps, &io.ui),
+        Commands::Inspect(args) => inspect(args, deps, &io.ui),
+        Commands::Apply(args) => apply(args, deps, io),
+        Commands::Eval(args) => eval(args, deps, &io.ui),
+    };
+    result.unwrap_or_else(|failure| failure)
+}
+
+// ---------------------------------------------------------------- output
+
+/// Result of one command, successful or not. Commands return `Result<Outcome, Outcome>`
+/// so `?` works through the `From` conversions below.
+#[derive(Debug)]
+struct Outcome {
+    code: i32,
+    data: Value,
+    human: String,
+    error: Option<ErrorBody>,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorBody {
+    message: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    issues: Vec<ValidationIssue>,
+}
+
+#[derive(Serialize)]
+struct Envelope<'a> {
+    ok: bool,
+    command: Option<&'a str>,
+    exit_code: i32,
+    data: &'a Value,
+    error: Option<&'a ErrorBody>,
+}
+
+impl Outcome {
+    fn ok(data: Value, human: String) -> Self {
+        Self {
+            code: exit::OK,
+            data,
+            human,
+            error: None,
+        }
+    }
+
+    fn fail(code: i32, message: impl Display) -> Self {
+        Self {
+            code,
+            data: Value::Null,
+            human: String::new(),
+            error: Some(ErrorBody {
+                message: message.to_string(),
+                issues: Vec::new(),
+            }),
+        }
+    }
+
+    fn with_data(mut self, data: Value, human: String) -> Self {
+        self.data = data;
+        self.human = human;
+        self
+    }
+}
+
+impl From<PatchError> for Outcome {
+    fn from(e: PatchError) -> Self {
+        let mut outcome = Outcome::fail(i32::from(&e), &e);
+        if let (PatchError::Invalid(issues), Some(body)) = (&e, outcome.error.as_mut()) {
+            body.issues = issues.clone();
+        }
+        outcome
+    }
+}
+
+impl From<HardwareError> for Outcome {
+    fn from(e: HardwareError) -> Self {
+        Outcome::fail(exit::GENERAL, e)
+    }
+}
+
+impl From<EngineError> for Outcome {
+    fn from(e: EngineError) -> Self {
+        Outcome::fail(exit::GENERAL, e)
+    }
+}
+
+/// Write errors are ignored on purpose: a closed pipe must not turn into a panic, and the
+/// exit code still reports the real outcome.
+fn emit(io: &mut Io, json: bool, command: Option<&str>, outcome: Outcome) -> i32 {
+    if json {
+        let envelope = Envelope {
+            ok: outcome.code == exit::OK,
+            command,
+            exit_code: outcome.code,
+            data: &outcome.data,
+            error: outcome.error.as_ref(),
+        };
+        let _ = serde_json::to_writer(&mut *io.out, &envelope);
+        let _ = writeln!(io.out);
+    } else {
+        let _ = write!(io.out, "{}", outcome.human);
+        if let Some(e) = &outcome.error {
+            let text = error_text(io, &e.message);
+            let _ = writeln!(io.err, "{text}");
+        }
+    }
+    let _ = io.out.flush();
+    outcome.code
+}
+
+/// `[ERREUR]` badge on an interactive stderr. A redirected stderr keeps the stable
+/// `erreur : <message>` line that scripts (and the prompt 5 tests) rely on.
+fn error_text(io: &Io, message: &str) -> String {
+    let ui = &io.err_ui;
+    if !io.err_is_tty || ui.is_off() {
+        return format!("erreur : {message}");
+    }
+    let mut lines = message.lines();
+    let first = lines.next().unwrap_or_default();
+    std::iter::once(format!(
+        "{} {}",
+        ui::badge(ui, "ERREUR"),
+        ui::metric(ui, first)
+    ))
+    .chain(lines.map(|l| ui::dim(ui, l)))
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+fn to_value(value: &impl Serialize) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+/// `86.0 MiB`, `14.96 GiB`: binary units.
+fn size(bytes: u64) -> String {
+    let b = bytes as f64;
+    match bytes {
+        0..=1023 => format!("{bytes} B"),
+        1024..=1_048_575 => format!("{:.1} KiB", b / 1024.0),
+        1_048_576..=1_073_741_823 => format!("{:.1} MiB", b / 1_048_576.0),
+        _ => format!("{:.2} GiB", b / GIB),
+    }
+}
+
+// ---------------------------------------------------------------- check
+
+fn check(args: &CheckArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outcome> {
+    let mut policy = BudgetPolicy::default();
+    if let Some(margin) = args.policy_ram_margin_gib {
+        if !(margin.is_finite() && margin >= 0.0) {
+            return Err(Outcome::fail(
+                exit::INVALID_INPUT,
+                "--policy-ram-margin-gib doit être un nombre positif",
+            ));
+        }
+        policy.ram_safety_margin_bytes = (margin * GIB) as u64;
+    }
+    let budget = hardware::evaluate_budget(&args.model, deps.probe.as_ref(), &policy)?;
+    let human = budget_text(ui, &args.model, &budget);
+    match &budget.verdict {
+        Verdict::Insufficient { reason } => Err(Outcome::fail(
+            exit::GENERAL,
+            format!("ressources insuffisantes : {reason}"),
+        )
+        .with_data(to_value(&budget), human)),
+        _ => Ok(Outcome::ok(to_value(&budget), human)),
+    }
+}
+
+fn budget_text(ui: &Ui, model: &Path, b: &HardwareBudget) -> String {
+    let gpu = b.best_gpu.as_ref().map_or("aucun".to_owned(), |g| {
+        format!(
+            "{} · {} libres / {}",
+            g.name,
+            size(g.free_vram_bytes),
+            size(g.total_vram_bytes)
+        )
+    });
+    let need = format!(
+        "RAM {} · VRAM {}",
+        size(b.required_ram_bytes),
+        b.required_vram_bytes.map_or("n/a".to_owned(), size)
+    );
+    let verdict = match &b.verdict {
+        Verdict::FitsInVram => ui::metric(ui, "FITS IN VRAM"),
+        Verdict::FitsInRamOnly => ui::metric(ui, "FITS IN RAM ONLY"),
+        Verdict::Insufficient { reason } => {
+            format!("{} {}", ui::metric(ui, "INSUFFICIENT"), ui::dim(ui, reason))
+        }
+    };
+    let mut lines = vec![
+        format!(
+            "{} {}",
+            ui::badge(ui, "CHECK"),
+            ui::metric(ui, "weight-surgeon")
+        ),
+        ui::separator(ui),
+        ui::field(ui, "modèle", &ui::path(ui, model)),
+        ui::key_val(ui, "taille", &size(b.model_bytes)),
+        ui::key_val(
+            ui,
+            "RAM",
+            &format!("{} libres", size(b.available_ram_bytes)),
+        ),
+        ui::key_val(ui, "GPU", &gpu),
+        ui::key_val(ui, "besoin", &need),
+        format!("{} {verdict}", ui::badge(ui, "VERDICT")),
+    ];
+    lines.extend(b.warnings.iter().map(|w| warning_line(ui, w)));
+    lines.join("\n") + "\n"
+}
+
+fn warning_line(ui: &Ui, warning: &str) -> String {
+    format!("  {}", ui::dim(ui, &format!("! {warning}")))
+}
+
+// ---------------------------------------------------------------- inspect
+
+#[derive(Debug, Clone, Serialize)]
+struct InspectedTensor {
+    name: String,
+    dtype: DType,
+    shape: Vec<usize>,
+    shard: PathBuf,
+    stats: Option<TensorStats>,
+}
+
+/// Statistics over finite values; NaN/Inf are only counted.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct TensorStats {
+    pub count: u64,
+    pub non_finite: u64,
+    pub min: f64,
+    pub max: f64,
+    pub mean: f64,
+    pub l2: f64,
+}
+
+fn inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outcome> {
+    let shards = hardware::compute_model_size(&args.model)?.shard_files;
+    let layers = LayerSpec::from(&args.layers);
+    let projs: Vec<MlpProj> = match args.projections.is_empty() {
+        true => vec![MlpProj::Gate, MlpProj::Up, MlpProj::Down],
+        false => args
+            .projections
+            .iter()
+            .copied()
+            .map(MlpProj::from)
+            .collect(),
+    };
+    let sharded = shards.len() > 1;
+    let mut tensors = Vec::new();
+    let mut rows = Vec::new();
+    for shard in &shards {
+        let model = ReadOnlyModel::open(shard)?;
+        for info in engine::find_mlp_tensors(model.index(), &layers, &projs) {
+            if deps.interrupted.load(Ordering::SeqCst) {
+                return Err(Outcome::fail(exit::GENERAL, INTERRUPTED));
+            }
+            let stats = match args.show_stats {
+                true => tensor_stats(&model.tensor(&info.name)?),
+                false => None,
+            };
+            let mut row = vec![
+                ui::accent(ui, &layer_label(&info.name)),
+                ui::metric(ui, projection_label(&info.name)),
+                ui::metric(ui, info.dtype.to_string().to_lowercase()),
+                ui::metric(ui, shape_label(&info.shape)),
+                ui::metric(ui, size((info.byte_end - info.byte_start) as u64)),
+            ];
+            if args.show_stats {
+                row.extend(stats_cells(ui, stats.as_ref()));
+            }
+            if sharded {
+                let file = shard.file_name().map(|f| f.to_string_lossy());
+                row.push(ui::dim(ui, &file.unwrap_or_default()));
+            }
+            rows.push(row);
+            tensors.push(InspectedTensor {
+                name: info.name.clone(),
+                dtype: info.dtype.clone(),
+                shape: info.shape.clone(),
+                shard: shard.clone(),
+                stats,
+            });
+        }
+    }
+
+    let mut banner = Vec::new();
+    let _ = ui::print_banner(ui, &mut banner);
+    let mut human = String::from_utf8_lossy(&banner).into_owned();
+    human.push_str(&format!(
+        "{} {} tenseurs sélectionnés\n{}\n",
+        ui::badge(ui, "INSPECT"),
+        ui::metric(ui, rows.len()),
+        ui::separator(ui)
+    ));
+    if rows.is_empty() {
+        human.push_str(&ui::dim(
+            ui,
+            "aucun tenseur MLP ne correspond à la sélection",
+        ));
+        human.push('\n');
+    } else {
+        let mut headers = vec!["COUCHE", "PROJ", "DTYPE", "SHAPE", "TAILLE"];
+        if args.show_stats {
+            headers.extend(["MIN", "MAX", "MOYENNE", "L2"]);
+        }
+        if sharded {
+            headers.push("SHARD");
+        }
+        human.push_str(&ui::table(ui, &headers, &rows));
+    }
+    Ok(Outcome::ok(
+        json!({ "shards": shards, "tensors": tensors }),
+        human,
+    ))
+}
+
+/// `[L12]`, or `[—]` for a tensor outside numbered layers.
+fn layer_label(name: &str) -> String {
+    engine::parse_layer_index(name).map_or("[—]".to_owned(), |l| format!("[L{l}]"))
+}
+
+fn projection_label(name: &str) -> &str {
+    name.split('.')
+        .find(|part| part.ends_with("_proj"))
+        .unwrap_or("—")
+}
+
+fn shape_label(shape: &[usize]) -> String {
+    shape
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" × ")
+}
+
+fn stats_cells(ui: &Ui, stats: Option<&TensorStats>) -> Vec<String> {
+    let Some(s) = stats else {
+        // Unsupported dtype: no decoding, so no statistics.
+        return vec![ui::dim(ui, "—"); 4];
+    };
+    let mut l2 = ui::metric(ui, format!("{:.4}", s.l2));
+    if s.non_finite > 0 {
+        l2.push_str(&ui::dim(ui, &format!(" !{} NaN/Inf", s.non_finite)));
+    }
+    vec![
+        ui::metric(ui, format!("{:.4}", s.min)),
+        ui::metric(ui, format!("{:.4}", s.max)),
+        ui::metric(ui, format!("{:.4}", s.mean)),
+        l2,
+    ]
+}
+
+/// Streams the mapped bytes once: nothing is copied to the heap.
+fn tensor_stats(view: &TensorView<'_>) -> Option<TensorStats> {
+    let size = view.info.dtype.size_of()?;
+    let decode: fn(&[u8]) -> f32 = match view.info.dtype {
+        DType::F32 => |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+        DType::F16 => |b| half::f16::from_le_bytes([b[0], b[1]]).to_f32(),
+        DType::BF16 => |b| half::bf16::from_le_bytes([b[0], b[1]]).to_f32(),
+        DType::Other(_) => return None,
+    };
+    let (mut count, mut non_finite) = (0u64, 0u64);
+    let (mut min, mut max, mut sum, mut sum_sq) = (f64::INFINITY, f64::NEG_INFINITY, 0.0, 0.0);
+    for chunk in view.bytes.chunks_exact(size) {
+        let x = f64::from(decode(chunk));
+        if !x.is_finite() {
+            non_finite += 1;
+            continue;
+        }
+        count += 1;
+        min = min.min(x);
+        max = max.max(x);
+        sum += x;
+        sum_sq += x * x;
+    }
+    if count == 0 {
+        (min, max) = (0.0, 0.0);
+    }
+    Some(TensorStats {
+        count,
+        non_finite,
+        min,
+        max,
+        mean: if count == 0 { 0.0 } else { sum / count as f64 },
+        l2: sum_sq.sqrt(),
+    })
+}
+
+// ---------------------------------------------------------------- apply
+
+impl From<&LayerSelection> for LayerSpec {
+    fn from(selection: &LayerSelection) -> Self {
+        match selection {
+            LayerSelection::All => LayerSpec::All,
+            LayerSelection::List(layers) => LayerSpec::List(layers.clone()),
+            LayerSelection::Range {
+                start,
+                end_inclusive,
+            } => LayerSpec::Range {
+                start: *start,
+                end_inclusive: *end_inclusive,
+            },
+        }
+    }
+}
+
+impl From<Projection> for MlpProj {
+    fn from(p: Projection) -> Self {
+        match p {
+            Projection::Gate => MlpProj::Gate,
+            Projection::Up => MlpProj::Up,
+            Projection::Down => MlpProj::Down,
+        }
+    }
+}
+
+impl From<OperationKind> for ShiftOp {
+    fn from(op: OperationKind) -> Self {
+        match op {
+            OperationKind::Subtract => ShiftOp::Subtract,
+            OperationKind::Add => ShiftOp::Add,
+        }
+    }
+}
+
+impl From<Axis> for BroadcastAxis {
+    fn from(axis: Axis) -> Self {
+        match axis {
+            Axis::Rows => BroadcastAxis::Rows,
+            Axis::Cols => BroadcastAxis::Cols,
+        }
+    }
+}
+
+impl From<ShiftStats> for OpStats {
+    fn from(s: ShiftStats) -> Self {
+        OpStats {
+            max_abs_delta: s.max_abs_delta,
+            elements_modified: s.elements_modified,
+            nan_or_inf_produced: s.nan_or_inf_produced,
+        }
+    }
+}
+
+fn backend_error(e: EngineError) -> PatchError {
+    PatchError::Backend(e.to_string())
+}
+
+/// `PatchBackend` over the engine, for a single file or every shard of a sharded model.
+pub struct EngineBackend {
+    shards: Vec<(PathBuf, WritableModel)>,
+    interrupted: Arc<AtomicBool>,
+}
+
+impl EngineBackend {
+    pub fn open(shard_paths: &[PathBuf], interrupted: Arc<AtomicBool>) -> engine::Result<Self> {
+        let shards = shard_paths
+            .iter()
+            .map(|p| Ok((p.clone(), WritableModel::open(p)?)))
+            .collect::<engine::Result<_>>()?;
+        Ok(Self {
+            shards,
+            interrupted,
+        })
+    }
+
+    fn shard_of(&self, name: &str) -> Option<usize> {
+        self.shards
+            .iter()
+            .position(|(_, model)| model.index().get(name).is_ok())
+    }
+
+    /// Shards holding at least one of `names`: only those need a backup.
+    pub fn shards_holding<'n>(&self, names: impl IntoIterator<Item = &'n str>) -> Vec<PathBuf> {
+        let mut indices: Vec<usize> = names.into_iter().filter_map(|n| self.shard_of(n)).collect();
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+            .into_iter()
+            .map(|i| self.shards[i].0.clone())
+            .collect()
+    }
+}
+
+impl PatchBackend for EngineBackend {
+    fn resolve_targets(
+        &self,
+        layers: &LayerSelection,
+        projections: &[Projection],
+    ) -> patch::Result<Vec<String>> {
+        let spec = LayerSpec::from(layers);
+        let projs: Vec<MlpProj> = projections.iter().copied().map(MlpProj::from).collect();
+        let mut names: Vec<String> = self
+            .shards
+            .iter()
+            .flat_map(|(_, model)| {
+                engine::find_mlp_tensors(model.index(), &spec, &projs)
+                    .into_iter()
+                    .map(|t| t.name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        names.sort_by(|a, b| {
+            (engine::parse_layer_index(a), a).cmp(&(engine::parse_layer_index(b), b))
+        });
+        // A tensor listed by two shards must still be shifted once.
+        names.dedup();
+        Ok(names)
+    }
+
+    fn load_vector(&self, file: &Path, tensor: Option<&str>) -> patch::Result<Vec<f32>> {
+        engine::load_direction_vector(file, tensor).map_err(backend_error)
+    }
+
+    fn shift_tensor(
+        &mut self,
+        tensor_name: &str,
+        direction: &[f32],
+        alpha: f32,
+        op: OperationKind,
+        axis: Axis,
+    ) -> patch::Result<OpStats> {
+        // Checked before each tensor: apply_patch turns this error into a rollback.
+        if self.interrupted.load(Ordering::SeqCst) {
+            return Err(PatchError::Backend(INTERRUPTED.into()));
+        }
+        let shard = self
+            .shard_of(tensor_name)
+            .ok_or_else(|| backend_error(EngineError::TensorNotFound(tensor_name.into())))?;
+        self.shards[shard]
+            .1
+            .shift_tensor(tensor_name, direction, alpha, op.into(), axis.into())
+            .map(OpStats::from)
+            .map_err(backend_error)
+    }
+
+    fn flush(&mut self) -> patch::Result<()> {
+        self.shards
+            .iter()
+            .try_for_each(|(_, model)| model.flush())
+            .map_err(backend_error)
+    }
+}
+
+/// Progress decorator: `apply_patch` has no hook, so the events are derived from the
+/// backend calls. Every target is resolved (preflight) before the first shift, which gives
+/// each operation its total; a completed operation prints one `[SHIFT]` line on stdout.
+struct ObservedBackend<'a, 'io, B: PatchBackend> {
+    inner: &'a mut B,
+    io: &'a mut Io<'io>,
+    op_ids: Vec<String>,
+    totals: RefCell<Vec<usize>>,
+    op: usize,
+    done: usize,
+    max_delta: f32,
+    /// Visible width of the progress line currently drawn on stderr (0: none).
+    shown: usize,
+}
+
+const BAR_WIDTH: usize = 20;
+
+impl<'a, 'io, B: PatchBackend> ObservedBackend<'a, 'io, B> {
+    fn new(inner: &'a mut B, io: &'a mut Io<'io>, op_ids: Vec<String>) -> Self {
+        Self {
+            inner,
+            io,
+            op_ids,
+            totals: RefCell::new(Vec::new()),
+            op: 0,
+            done: 0,
+            max_delta: 0.0,
+            shown: 0,
+        }
+    }
+
+    fn op_id(&self) -> String {
+        self.op_ids.get(self.op).cloned().unwrap_or_default()
+    }
+
+    fn total(&self) -> usize {
+        self.totals.borrow().get(self.op).copied().unwrap_or(0)
+    }
+
+    /// In-place bar, only on an interactive stderr: a redirected stderr never gets `\r`.
+    fn progress(&mut self, tensor: &str) {
+        if !self.io.err_is_tty || self.io.err_ui.is_off() {
+            return;
+        }
+        let ui = self.io.err_ui;
+        let line = format!(
+            "{} {} · {} · {}  {}",
+            ui::badge(&ui, "SHIFT"),
+            ui::metric(&ui, self.op_id()),
+            ui::metric(&ui, projection_label(tensor)),
+            ui::metric(&ui, format!("{}/{}", self.done, self.total())),
+            ui::progress_bar(&ui, self.done, self.total(), BAR_WIDTH)
+        );
+        let width = ui::visible_width(&line);
+        let blank = " ".repeat(self.shown.saturating_sub(width));
+        let _ = write!(self.io.err, "\r{line}{blank}");
+        let _ = self.io.err.flush();
+        self.shown = width;
+    }
+
+    fn clear_progress(&mut self) {
+        if self.shown > 0 {
+            let _ = write!(self.io.err, "\r{}\r", " ".repeat(self.shown));
+            let _ = self.io.err.flush();
+            self.shown = 0;
+        }
+    }
+
+    fn finish_op(&mut self) {
+        self.clear_progress();
+        let ui = self.io.ui;
+        let line = format!(
+            "{} {} terminée · Δmax {} · {} tenseurs",
+            ui::badge(&ui, "SHIFT"),
+            ui::metric(&ui, self.op_id()),
+            ui::metric(&ui, format!("{:.4}", self.max_delta)),
+            ui::metric(&ui, self.done)
+        );
+        self.io.line(&line);
+        self.op += 1;
+        self.done = 0;
+        self.max_delta = 0.0;
+    }
+}
+
+impl<B: PatchBackend> PatchBackend for ObservedBackend<'_, '_, B> {
+    fn resolve_targets(
+        &self,
+        layers: &LayerSelection,
+        projections: &[Projection],
+    ) -> patch::Result<Vec<String>> {
+        let targets = self.inner.resolve_targets(layers, projections)?;
+        self.totals.borrow_mut().push(targets.len());
+        Ok(targets)
+    }
+
+    fn load_vector(&self, file: &Path, tensor: Option<&str>) -> patch::Result<Vec<f32>> {
+        self.inner.load_vector(file, tensor)
+    }
+
+    fn shift_tensor(
+        &mut self,
+        tensor_name: &str,
+        direction: &[f32],
+        alpha: f32,
+        op: OperationKind,
+        axis: Axis,
+    ) -> patch::Result<OpStats> {
+        let result = self
+            .inner
+            .shift_tensor(tensor_name, direction, alpha, op, axis);
+        match &result {
+            Ok(stats) => {
+                self.done += 1;
+                self.max_delta = self.max_delta.max(stats.max_abs_delta);
+                self.progress(tensor_name);
+                if self.done >= self.total() {
+                    self.finish_op();
+                }
+            }
+            Err(_) => self.clear_progress(),
+        }
+        result
+    }
+
+    fn flush(&mut self) -> patch::Result<()> {
+        self.clear_progress();
+        self.inner.flush()
+    }
+}
+
+fn apply(args: &ApplyArgs, deps: &AppDeps, io: &mut Io) -> Result<Outcome, Outcome> {
+    // Relative vector paths resolve against the patch directory ("" for "patch.json").
+    let base_dir = args.patch.parent().unwrap_or(Path::new(""));
+    let opts = ValidationOptions {
+        no_backup: args.no_backup,
+        ..Default::default()
+    };
+    let patch = validate_patch(&load_patch(&args.patch)?, base_dir, &opts)?;
+    let ui = io.ui;
+    io.line(&format!(
+        "{} {} · {} opérations",
+        ui::badge(&ui, "APPLY"),
+        ui::path(&ui, &args.patch),
+        ui::metric(&ui, patch.operations.len())
+    ));
+
+    // Absolute, so backups next to a relative `--model` get a printable location.
+    let model = std::path::absolute(&args.model)
+        .map_err(|e| Outcome::fail(exit::GENERAL, format!("{} : {e}", args.model.display())))?;
+    let shards = hardware::compute_model_size(&model)?.shard_files;
+    let budget = hardware::evaluate_budget(&model, deps.probe.as_ref(), &BudgetPolicy::default())?;
+    let mut warnings: Vec<String> = patch.warnings.iter().map(ToString::to_string).collect();
+    if let Verdict::Insufficient { reason } = &budget.verdict {
+        warnings.push(format!(
+            "le modèle ne tiendrait pas en mémoire ({reason}) ; sans effet sur apply, qui ne \
+             charge que les tenseurs ciblés"
+        ));
+    }
+    for w in &warnings {
+        io.line(&warning_line(&ui, w));
+    }
+
+    let mut backend = EngineBackend::open(&shards, Arc::clone(&deps.interrupted))?;
+    let preview = apply_patch(&patch, &mut backend, None, true)?;
+    if args.dry_run {
+        for op in &preview.operations {
+            io.line(&format!(
+                "{} {} · {} tenseurs · vecteur de {}",
+                ui::badge(&ui, "DRY-RUN"),
+                ui::metric(&ui, &op.id),
+                ui::metric(&ui, op.tensors.len()),
+                ui::metric(&ui, op.vector_len)
+            ));
+            for t in &op.tensors {
+                io.line(&format!(
+                    "{} {}",
+                    ui::text(&ui, "          "),
+                    ui::dim(&ui, &t.name)
+                ));
+            }
+        }
+        return Ok(apply_outcome(&preview, &[], &warnings));
+    }
+    if deps.interrupted.load(Ordering::SeqCst) {
+        return Err(PatchError::ExecutionFailed {
+            op_id: "preflight".into(),
+            cause: format!("{INTERRUPTED} avant toute écriture"),
+            rolled_back: false,
+            left_modified: false,
+        }
+        .into());
+    }
+
+    let touched = backend.shards_holding(
+        preview
+            .operations
+            .iter()
+            .flat_map(|op| op.tensors.iter().map(|t| t.name.as_str())),
+    );
+    let mut backup = match patch.backup {
+        true => Some(BackupSet::create_many_in(
+            &touched,
+            args.backup_dir.as_deref(),
+        )?),
+        false => None,
+    };
+    let backup_files: Vec<PathBuf> = backup
+        .iter()
+        .flat_map(|b| b.guards())
+        .map(|g| g.backup_path().to_path_buf())
+        .collect();
+    for file in &backup_files {
+        // BackupGuard::create re-hashes the copy against the original before returning.
+        io.line(&format!(
+            "{} {}  {}",
+            ui::badge(&ui, "BACKUP"),
+            ui::path(&ui, file),
+            ui::metric(&ui, "✓ sha256 vérifié")
+        ));
+    }
+
+    let started = Instant::now();
+    let op_ids = patch.operations.iter().map(|op| op.id.clone()).collect();
+    let guard = backup.as_mut().map(|b| b as &mut dyn RollbackHandle);
+    let result = apply_patch(
+        &patch,
+        &mut ObservedBackend::new(&mut backend, io, op_ids),
+        guard,
+        false,
+    );
+    match result {
+        Ok(report) => {
+            io.line(&format!(
+                "{} {} · {}",
+                ui::badge(&ui, "COMMIT"),
+                ui::metric(&ui, "modèle patché"),
+                ui::dim(&ui, &format!("{:.1} s", started.elapsed().as_secs_f64()))
+            ));
+            Ok(apply_outcome(&report, &backup_files, &warnings))
+        }
+        Err(e) => {
+            if let Some(line) = rollback_line(&ui, &e, &backup_files) {
+                io.line(&line);
+            }
+            Err(e.into())
+        }
+    }
+}
+
+/// Only reached when `apply_patch` failed, so never followed by a `[COMMIT]`.
+fn rollback_line(ui: &Ui, e: &PatchError, backups: &[PathBuf]) -> Option<String> {
+    let badge = ui::badge(ui, "ROLLBACK");
+    let files = backups
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match e {
+        PatchError::ExecutionFailed {
+            rolled_back: true, ..
+        } => Some(format!("{badge} {}", ui::metric(ui, "restauré ✓"))),
+        PatchError::RollbackFailed { .. } => Some(format!(
+            "{badge} {} {}",
+            ui::metric(ui, "ÉCHEC CRITIQUE ✗"),
+            ui::dim(ui, &format!("restaurer manuellement depuis {files}"))
+        )),
+        PatchError::ExecutionFailed {
+            left_modified: true,
+            ..
+        } => Some(format!(
+            "{badge} {} {}",
+            ui::metric(ui, "IMPOSSIBLE ✗"),
+            ui::dim(ui, "pas de backup : modèle partiellement modifié")
+        )),
+        _ => None,
+    }
+}
+
+/// Backups are kept after success: they are the manual undo. The human text was streamed
+/// step by step, so the outcome only carries the JSON data.
+fn apply_outcome(report: &ApplyReport, backups: &[PathBuf], warnings: &[String]) -> Outcome {
+    Outcome::ok(
+        json!({ "report": report, "backups": backups, "warnings": warnings }),
+        String::new(),
+    )
+}
+
+// ---------------------------------------------------------------- eval
+
+/// Stops the generation at the next chunk once Ctrl-C was pressed.
+struct Interruptible<'a> {
+    inner: Box<dyn TextGenerator>,
+    flag: &'a AtomicBool,
+}
+
+impl TextGenerator for Interruptible<'_> {
+    fn generate(
+        &mut self,
+        prompt: &str,
+        max_new_tokens: u32,
+        on_chunk: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> crate::eval::Result<GenerationOutcome> {
+        if self.flag.load(Ordering::SeqCst) {
+            return Err(EvalError::Generator(INTERRUPTED.into()));
+        }
+        let flag = self.flag;
+        self.inner.generate(
+            prompt,
+            max_new_tokens,
+            &mut |chunk| match flag.load(Ordering::SeqCst) {
+                true => ControlFlow::Break(()),
+                false => on_chunk(chunk),
+            },
+        )
+    }
+}
+
+/// Deletes the temporary GGUF on every path, including errors and panics.
+struct TempFile(PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn eval(args: &EvalArgs, deps: &AppDeps, ui: &Ui) -> Result<Outcome, Outcome> {
+    let invalid = |message: String| Outcome::fail(exit::INVALID_INPUT, message);
+    if !args.model.exists() {
+        return Err(invalid(format!(
+            "modèle introuvable : {}",
+            args.model.display()
+        )));
+    }
+    let prompts = load_prompts(&args.prompts).map_err(|e| invalid(e.to_string()))?;
+    // Checked now so a typo does not waste a whole evaluation before the export.
+    let quant = args.quant.trim().to_ascii_uppercase();
+    if args.export_gguf.is_some() && !ALLOWED_QUANTS.contains(&quant.as_str()) {
+        return Err(invalid(
+            EvalError::InvalidQuant(args.quant.clone()).to_string(),
+        ));
+    }
+    let is_gguf = args
+        .model
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+    if is_gguf && args.export_gguf.is_some() {
+        return Err(invalid(
+            "--export-gguf convertit depuis SafeTensors : impossible depuis un .gguf".into(),
+        ));
+    }
+    let model_dir = match args.model.is_dir() {
+        true => args.model.clone(),
+        false => args
+            .model
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
+    };
+    let llama_dir = || {
+        args.llama_cpp_dir.clone().ok_or_else(|| {
+            invalid("--llama-cpp-dir (ou LLAMA_CPP_DIR) requis pour convertir en GGUF".into())
+        })
+    };
+    let export_cfg =
+        |llama_cpp_dir: PathBuf, output_gguf: PathBuf, quant: Option<String>| GgufExportConfig {
+            llama_cpp_dir,
+            model_dir: model_dir.clone(),
+            output_gguf,
+            quant,
+            intermediate_type: "f16".into(),
+            python_bin: if cfg!(windows) { "python" } else { "python3" }.into(),
+            keep_intermediate: false,
+        };
+    let final_llama_dir = match args.export_gguf {
+        Some(_) => Some(llama_dir()?),
+        None => None,
+    };
+
+    let mut temp = None;
+    let gguf = match is_gguf {
+        true => args.model.clone(),
+        false => {
+            // Next to the model: an f16 copy can be tens of GB, often too big for /tmp.
+            let file = TempFile(
+                model_dir.join(format!(".weight-surgeon-eval-{}.gguf", std::process::id())),
+            );
+            let cfg = export_cfg(llama_dir()?, file.0.clone(), None);
+            export_gguf(&cfg, deps.runner.as_ref()).map_err(|e| {
+                Outcome::fail(
+                    exit::GENERAL,
+                    format!("conversion GGUF pour l'évaluation : {e}"),
+                )
+            })?;
+            let path = file.0.clone();
+            temp = Some(file);
+            path
+        }
+    };
+
+    let generator =
+        (deps.generator_factory)(&gguf, args).map_err(|e| Outcome::fail(exit::GENERAL, e))?;
+    let mut generator = Interruptible {
+        inner: generator,
+        flag: &deps.interrupted,
+    };
+    let cfg = EvalConfig {
+        max_new_tokens: args.max_new_tokens,
+        ..Default::default()
+    };
+    let report =
+        run_eval(&mut generator, &prompts, &cfg).map_err(|e| Outcome::fail(exit::GENERAL, e))?;
+    drop(generator);
+    // Freed before the final conversion, which needs the disk space again.
+    drop(temp);
+
+    let human = eval_text(ui, &report, args.max_new_tokens);
+    if deps.interrupted.load(Ordering::SeqCst) {
+        return Err(Outcome::fail(exit::GENERAL, INTERRUPTED)
+            .with_data(json!({ "report": report, "export": null }), human));
+    }
+    let export = match (&args.export_gguf, final_llama_dir) {
+        (Some(output), Some(dir)) => {
+            let cfg = export_cfg(dir, output.clone(), Some(quant.clone()));
+            export_if_healthy(&report, &cfg, deps.runner.as_ref(), args.allow_degraded).map_err(
+                |e| {
+                    Outcome::fail(exit::EXPORT_FAILED, format!("export GGUF : {e}"))
+                        .with_data(json!({ "report": report, "export": null }), human.clone())
+                },
+            )?
+        }
+        _ => None,
+    };
+
+    let mut human = human;
+    match (&export, &args.export_gguf) {
+        (Some(e), _) => human.push_str(&format!(
+            "{} {} · {} · {}  {}\n",
+            ui::badge(ui, "EXPORT"),
+            ui::path(ui, &e.final_gguf),
+            ui::metric(ui, &quant),
+            ui::metric(ui, size(e.final_size_bytes)),
+            ui::metric(ui, "✓ magic GGUF")
+        )),
+        (None, Some(_)) => human.push_str(&format!(
+            "{} {}\n",
+            ui::badge(ui, "EXPORT"),
+            ui::dim(
+                ui,
+                &format!("ignoré : verdict {}", verdict_label(report.verdict))
+            )
+        )),
+        (None, None) => {}
+    }
+    let data = json!({ "report": report, "export": export });
+    match (report.verdict, args.allow_degraded) {
+        (EvalVerdict::Healthy, _) | (EvalVerdict::Degraded, true) => Ok(Outcome::ok(data, human)),
+        (verdict, _) => {
+            let skipped = match args.export_gguf.is_some() {
+                true => ", export non effectué",
+                false => "",
+            };
+            Err(Outcome::fail(
+                exit::EVAL_UNHEALTHY,
+                format!("modèle {verdict:?}{skipped}").to_lowercase(),
+            )
+            .with_data(data, human))
+        }
+    }
+}
+
+fn verdict_label(verdict: EvalVerdict) -> &'static str {
+    match verdict {
+        EvalVerdict::Healthy => "HEALTHY",
+        EvalVerdict::Degraded => "DEGRADED",
+        EvalVerdict::Broken => "BROKEN",
+    }
+}
+
+const EXCERPT_CHARS: usize = 32;
+
+fn eval_text(ui: &Ui, report: &EvalReport, max_new_tokens: u32) -> String {
+    let total = report.results.len();
+    let mut loops = 0;
+    let rows: Vec<Vec<String>> = report
+        .results
+        .iter()
+        .map(|r| {
+            let (status, reason) = match &r.status {
+                PromptStatus::Pass => ("PASS", "—".to_owned()),
+                PromptStatus::LoopDetected { reason } => {
+                    loops += 1;
+                    ("LOOP", format!("{reason:?}"))
+                }
+                PromptStatus::ExpectationFailed { .. } => ("FAIL", "attente".to_owned()),
+                PromptStatus::GeneratorError { .. } => ("FAIL", "erreur".to_owned()),
+            };
+            // One line per prompt: newlines and runs of spaces collapse.
+            let flat = r
+                .output_excerpt
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let cut = crate::eval::truncate_chars(&flat, EXCERPT_CHARS);
+            let ellipsis = if cut.len() < flat.len() { "…" } else { "" };
+            vec![
+                ui::metric(ui, &r.id),
+                ui::metric(ui, status),
+                ui::metric(ui, reason),
+                ui::dim(ui, &format!("« {cut}{ellipsis} »")),
+            ]
+        })
+        .collect();
+    format!(
+        "{} {} prompts · max {} tokens\n{}\n{}{} {} · {}/{total} PASS · {loops} boucle(s)  {}\n",
+        ui::badge(ui, "EVAL"),
+        ui::metric(ui, total),
+        ui::metric(ui, max_new_tokens),
+        ui::separator(ui),
+        ui::table(ui, &["PROMPT", "STATUT", "BOUCLE", "SORTIE"], &rows),
+        ui::badge(ui, "VERDICT"),
+        ui::metric(ui, verdict_label(report.verdict)),
+        ui::metric(ui, report.passed),
+        ui::progress_bar(ui, report.passed, total, BAR_WIDTH)
+    )
+}
