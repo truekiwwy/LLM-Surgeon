@@ -11,6 +11,7 @@ pub mod hardware;
 pub mod linalg;
 pub mod mcp;
 pub mod patch;
+pub mod plugin;
 pub mod tui;
 pub mod ui;
 

@@ -101,11 +101,16 @@ pub fn encode_tensors(
 /// `<out>.leace.safetensors`, next to the direction file (same convention as the
 /// companion `<out>.stats.json`).
 pub fn leace_path(out: &Path) -> PathBuf {
+    sidecar_path(out, "leace")
+}
+
+/// `<out>.<suffix>.safetensors`: an extra file of an extraction method.
+pub fn sidecar_path(out: &Path, suffix: &str) -> PathBuf {
     let mut name = out
         .file_name()
         .map(|n| n.to_os_string())
         .unwrap_or_default();
-    name.push(".leace.safetensors");
+    name.push(format!(".{suffix}.safetensors"));
     out.with_file_name(name)
 }
 

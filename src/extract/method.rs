@@ -1,5 +1,6 @@
-//! `--method mean_diff | svd | leace`: which direction is written from the pooled
-//! activations. `mean_diff` keeps the prompt 8 path and outputs byte for byte.
+//! The built-in direction methods `mean_diff | svd | leace` (`crate::plugin::Registry`
+//! exposes them through the extension API). `mean_diff` keeps the prompt 8 outputs byte
+//! for byte.
 //!
 //! Hold-out (`--holdout-frac f`): sample `i` of each class is held out when
 //! `⌊(i+1)·f⌋ > ⌊i·f⌋` (evenly spread and deterministic; `f = 0.5` holds out the odd
@@ -9,6 +10,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use super::error::{ExtractError, Result};
 use super::leace::{self, LeaceDiagnostics, LeaceFit};
@@ -16,18 +18,12 @@ use super::svd::{svd_direction, SvdDiagnostics};
 
 pub const MIN_HOLDOUT_PER_CLASS: usize = 10;
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema, clap::ValueEnum,
-)]
-#[serde(rename_all = "snake_case")]
+/// The built-in methods; their descriptions live in `plugin::builtin`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Method {
-    /// normalize(μ₊ − μ₋).
     #[default]
-    #[value(name = "mean_diff")]
     MeanDiff,
-    /// Premier vecteur singulier droit des différences appariées.
     Svd,
-    /// Effaceur affine LEACE ; direction = a/‖a‖ (parallèle à μ₊ − μ₋).
     Leace,
 }
 
@@ -38,6 +34,12 @@ impl Method {
             Self::Svd => "svd",
             Self::Leace => "leace",
         }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        [Self::MeanDiff, Self::Svd, Self::Leace]
+            .into_iter()
+            .find(|m| m.as_str() == id)
     }
 }
 
@@ -80,6 +82,53 @@ impl MethodOptions {
             return bad("--holdout-frac doit être dans [0, 1[");
         }
         Ok(())
+    }
+
+    /// The four options as the `params` object of the extension API (`method` is chosen
+    /// by identifier, apart).
+    pub fn params(&self) -> Value {
+        json!({
+            "svd_center": self.svd_center,
+            "leace_shrinkage": self.leace_shrinkage,
+            "leace_rcond": self.leace_rcond,
+            "holdout_frac": self.holdout_frac,
+        })
+    }
+
+    /// Reverse of [`MethodOptions::params`]: `null` or a missing key keeps the default,
+    /// an unknown key or a wrong type is refused.
+    pub fn from_params(method: Method, params: &Value) -> Result<Self> {
+        #[derive(Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct Params {
+            svd_center: bool,
+            leace_shrinkage: f64,
+            leace_rcond: f64,
+            holdout_frac: f64,
+        }
+        impl Default for Params {
+            fn default() -> Self {
+                let d = MethodOptions::default();
+                Self {
+                    svd_center: d.svd_center,
+                    leace_shrinkage: d.leace_shrinkage,
+                    leace_rcond: d.leace_rcond,
+                    holdout_frac: d.holdout_frac,
+                }
+            }
+        }
+        let p = match params {
+            Value::Null => Params::default(),
+            other => Params::deserialize(other)
+                .map_err(|e| ExtractError::InvalidArgument(format!("paramètres : {e}")))?,
+        };
+        Ok(Self {
+            method,
+            svd_center: p.svd_center,
+            leace_shrinkage: p.leace_shrinkage,
+            leace_rcond: p.leace_rcond,
+            holdout_frac: p.holdout_frac,
+        })
     }
 }
 
@@ -244,6 +293,43 @@ mod tests {
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn params_round_trip_and_refuse_unknown_keys() {
+        let opts = MethodOptions {
+            method: Method::Leace,
+            svd_center: true,
+            leace_shrinkage: 0.3,
+            leace_rcond: 1e-8,
+            holdout_frac: 0.25,
+        };
+        assert_eq!(
+            MethodOptions::from_params(Method::Leace, &opts.params()).unwrap(),
+            opts
+        );
+        let svd = MethodOptions::from_params(Method::Svd, &Value::Null).unwrap();
+        assert_eq!(
+            svd,
+            MethodOptions {
+                method: Method::Svd,
+                ..MethodOptions::default()
+            }
+        );
+        for bad in [
+            json!({"svd_centre": true}),
+            json!({"svd_center": 1}),
+            json!(3),
+        ] {
+            assert!(
+                MethodOptions::from_params(Method::Svd, &bad).is_err(),
+                "{bad}"
+            );
+        }
+        for m in [Method::MeanDiff, Method::Svd, Method::Leace] {
+            assert_eq!(Method::from_id(m.as_str()), Some(m));
+        }
+        assert_eq!(Method::from_id("pca"), None);
     }
 
     #[test]

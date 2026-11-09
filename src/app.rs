@@ -20,7 +20,9 @@
 //!          -> extract -> load_prompt_texts -> core_extract_request -> extract::run_extraction
 //!          -> eval    -> load_prompts -> export_gguf (temporary f16, unless .gguf)
 //!                     -> generator_factory -> run_eval -> export_if_healthy
-//!          -> extract -> core_extract_with(args, MethodOptions) -> core_extract_method
+//!          -> extract -> core_extract_with(args, method id, params) -> core_extract_method
+//!                     -> plugin::Registry::with_builtin().get(id) -> extract::run_extraction_plugin
+//!          -> plugins -> plugins_list -> plugin::Registry::with_builtin().catalog()
 //!          -> autotune -> autotune_cli -> core_autotune -> patch::autotune::run
 //!                      -> linalg::cholesky (ridge, LOOCV) -> validate_patch -> write_atomic
 //!          -> bench   -> bench_cli (args -> *Request) -> core_bench_{logits,ppl,eval,dump}
@@ -86,7 +88,7 @@ use crate::eval::{
 };
 use crate::extract::{
     self, ExtractError, ExtractEvent, ExtractObserver, ExtractReport, ExtractRequest,
-    MethodDiagnostics, MethodOptions, PromptSet,
+    MethodDiagnostics, PromptSet,
 };
 use crate::hardware::{
     self, BudgetPolicy, HardwareBudget, HardwareError, HardwareProbe, SystemProbe, Verdict,
@@ -99,6 +101,7 @@ use crate::patch::{
     OpStats, OperationKind, PatchBackend, PatchError, PatchFile, Projection, RollbackHandle,
     ValidationIssue, ValidationOptions,
 };
+use crate::plugin::{unknown_method_message, Diagnostics, Registry, DEFAULT_METHOD};
 use crate::ui::{self, ColorMode, Ui, UiConfig};
 
 pub mod exit {
@@ -333,6 +336,7 @@ fn command_name(command: &Commands) -> &'static str {
             crate::lora::cli_args::LoraCommand::Merge(_) => "lora merge",
             crate::lora::cli_args::LoraCommand::Extract(_) => "lora extract",
         },
+        Commands::Plugins(_) => "plugins list",
         Commands::Bench(args) => match args.command {
             BenchCommand::Logits(_) => "bench logits",
             BenchCommand::Ppl(_) => "bench ppl",
@@ -352,12 +356,14 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
             let ui = io.ui;
             core_extract_with(
                 &cmd.args,
-                &cmd.method.options(),
+                &cmd.method.method,
+                &cmd.method.options().params(),
                 deps,
                 &ui,
                 &mut CliSink::new(io),
             )
         }
+        Commands::Plugins(_) => plugins_list(&io.ui),
         Commands::Autotune(args) => {
             let ui = io.ui;
             autotune_cli(args, deps, &ui, &mut CliSink::new(io))
@@ -2128,13 +2134,14 @@ pub fn core_extract(
     ui: &Ui,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
-    core_extract_with(args, &MethodOptions::default(), deps, ui, sink)
+    core_extract_with(args, DEFAULT_METHOD, &Value::Null, deps, ui, sink)
 }
 
-/// [`core_extract`] with a direction method.
+/// [`core_extract`] with a method of the built-in registry and its `params`.
 pub fn core_extract_with(
     args: &ExtractArgs,
-    method: &MethodOptions,
+    method: &str,
+    params: &Value,
     deps: &AppDeps,
     ui: &Ui,
     sink: &mut dyn ProgressSink,
@@ -2160,7 +2167,7 @@ pub fn core_extract_with(
         dtype: args.dtype,
         overwrite: args.overwrite,
     };
-    core_extract_method(&request, method, deps, ui, sink)
+    core_extract_method(&request, method, params, deps, ui, sink)
 }
 
 /// Shared by the CLI and the MCP tool. Cancellation (`deps.interrupted`) is honored
@@ -2171,25 +2178,38 @@ pub fn core_extract_request(
     ui: &Ui,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
-    core_extract_method(request, &MethodOptions::default(), deps, ui, sink)
+    core_extract_method(request, DEFAULT_METHOD, &Value::Null, deps, ui, sink)
 }
 
-/// [`core_extract_request`] with a direction method (`svd`, `leace`).
+/// [`core_extract_request`] with a method of the built-in registry (`svd`, `leace`) and
+/// its `params`. An unknown identifier is an invalid input (code 2) naming the known ones.
 pub fn core_extract_method(
     request: &ExtractRequest,
-    method: &MethodOptions,
+    method: &str,
+    params: &Value,
     deps: &AppDeps,
     ui: &Ui,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
+    let registry = Registry::with_builtin();
+    let Some(method) = registry.get(method) else {
+        let message = unknown_method_message(method, &registry.ids());
+        return Err(extract_failure(&ExtractError::InvalidArgument(message)));
+    };
     let mut observer = SinkObserver {
         sink,
         interrupted: &deps.interrupted,
         request,
     };
-    let report =
-        extract::run_extraction_method(request, method, deps.probe.as_ref(), &mut observer)
-            .map_err(|e| extract_failure(&e))?;
+    let report = extract::run_extraction_plugin(
+        request,
+        method,
+        params,
+        deps.probe.as_ref(),
+        &mut observer,
+        &deps.interrupted,
+    )
+    .map_err(|e| extract_failure(&e))?;
     let mut outcome = Outcome::ok(to_value(&report), extract_text(ui, &report));
     outcome.warnings = report.warnings.clone();
     Ok(outcome)
@@ -2268,7 +2288,7 @@ fn extract_text(ui: &Ui, report: &ExtractReport) -> String {
     if let Some(diag) = &report.method_diagnostics {
         text.push_str(&method_line(ui, diag));
     }
-    if let Some(path) = &report.leace_path {
+    for path in report.leace_path.iter().chain(&report.sidecar_paths) {
         text.push_str(&format!(
             "{} {}
 ",
@@ -2281,6 +2301,32 @@ fn extract_text(ui: &Ui, report: &ExtractReport) -> String {
         text.push('\n');
     }
     text
+}
+
+// ---------------------------------------------------------------- plugins
+
+/// `surgeon plugins list`: the catalog of the built-in registry, the same in `--json`.
+fn plugins_list(ui: &Ui) -> CoreResult {
+    let catalog = Registry::with_builtin().catalog();
+    let mut text = String::new();
+    for point in &catalog.extension_points {
+        text.push_str(&format!(
+            "{} {} · {} · API {}\n",
+            ui::badge(ui, "EXTENSION"),
+            point.id,
+            point.rust_trait,
+            catalog.api_version
+        ));
+        for m in &point.implementations {
+            text.push_str(&format!(
+                "  {} {:<10} {}\n",
+                ui::metric(ui, format!("{:<10}", m.id)),
+                m.origin.as_str(),
+                m.info.title
+            ));
+        }
+    }
+    Ok(Outcome::ok(to_value(&catalog), text))
 }
 
 // ---------------------------------------------------------------- bench
@@ -2487,17 +2533,19 @@ pub fn core_bench_dump(
 }
 
 /// `[METHOD]` line of an svd / leace extraction (mean_diff output is unchanged).
-fn method_line(ui: &Ui, diag: &MethodDiagnostics) -> String {
+fn method_line(ui: &Ui, diag: &Diagnostics) -> String {
     let opt = |v: Option<f64>| v.map_or("—".to_owned(), |x| format!("{x:.3}"));
     let body = match diag {
-        MethodDiagnostics::Svd(d) => format!(
+        // Registered methods never run here: the front-end only knows the built-in registry.
+        Diagnostics::Json(_) => return String::new(),
+        Diagnostics::Builtin(MethodDiagnostics::Svd(d)) => format!(
             "svd · {} paires · σ₁²/Σσ² {} · cos(μ₊−μ₋) {} · split-half {}",
             ui::metric(ui, d.n_pairs),
             ui::metric(ui, format!("{:.3}", d.explained_variance_ratio)),
             ui::metric(ui, opt(d.cosine_with_mean_diff)),
             ui::metric(ui, opt(d.split_half_cosine))
         ),
-        MethodDiagnostics::Leace(d) => format!(
+        Diagnostics::Builtin(MethodDiagnostics::Leace(d)) => format!(
             "leace · rang {} · λ {} · κ {} · cov(x,z) {} → {} · hors-échantillon {}",
             ui::metric(ui, d.rank),
             ui::metric(ui, d.shrinkage),

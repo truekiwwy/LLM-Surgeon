@@ -12,7 +12,8 @@
 //!             tools/call -> Session::start (reset flag, queued cancel) -> catch_unwind
 //!                -> tools::unknown_property (surgeon_bench: -32602)
 //!                -> tools::call -> sandbox -> core_check | core_inspect | core_apply | core_eval
-//!                   | core_extract_request | core_bench_{logits,ppl,eval,dump} (mode checked first)
+//!                   | core_extract_method (MethodId: built-in registry)
+//!                   | core_bench_{logits,ppl,eval,dump} (mode checked first)
 //!                   (McpProgress sink -> notifications/progress) -> envelope_of
 //!          -> ProtocolWriter (Mutex, one line + flush) -> stdout
 //! ```
@@ -27,7 +28,7 @@
 //!                       -> emit -> envelope_of (--json) | Outcome.human
 //! MCP: main -> run_with -> run_stdio -> serve -> tools::call
 //!                       -> core_check / core_inspect (Ui::off)
-//!                       -> core_apply / core_eval / core_extract_request / core_bench_* (McpProgress)
+//!                       -> core_apply / core_eval / core_extract_method / core_bench_* (McpProgress)
 //!                       -> envelope_of
 //! ```
 //!
@@ -53,8 +54,8 @@ pub use sandbox::{Sandbox, SandboxError};
 pub use server::{serve, McpConfig, MAX_LINE_BYTES};
 pub use tools::{
     patch_schema, render_schema, tool_definitions, ApplyToolArgs, AutotuneToolArgs, BenchMode,
-    BenchToolArgs, CheckToolArgs, EvalToolArgs, ExtractToolArgs, InspectToolArgs, TOOL_APPLY,
-    TOOL_AUTOTUNE, TOOL_BENCH, TOOL_CHECK, TOOL_EVAL, TOOL_EXTRACT, TOOL_INSPECT,
+    BenchToolArgs, CheckToolArgs, EvalToolArgs, ExtractToolArgs, InspectToolArgs, MethodId,
+    TOOL_APPLY, TOOL_AUTOTUNE, TOOL_BENCH, TOOL_CHECK, TOOL_EVAL, TOOL_EXTRACT, TOOL_INSPECT,
 };
 
 use crate::app::{exit, AppDeps};

@@ -1,0 +1,73 @@
+{
+  "ok": true,
+  "command": "plugins list",
+  "exit_code": 0,
+  "data": {
+    "api_version": "v0",
+    "extension_points": [
+      {
+        "id": "extraction_method",
+        "implementations": [
+          {
+            "id": "mean_diff",
+            "origin": "builtin",
+            "params": [],
+            "requires_paired": false,
+            "sidecars": [],
+            "summary": "normalize(μ₊ − μ₋).",
+            "title": "Différence des moyennes"
+          },
+          {
+            "id": "svd",
+            "origin": "builtin",
+            "params": [
+              {
+                "default": false,
+                "kind": "boolean",
+                "name": "svd_center",
+                "summary": "centre les différences appariées (paires d'ordre arbitraire)"
+              }
+            ],
+            "requires_paired": true,
+            "sidecars": [],
+            "summary": "Premier vecteur singulier droit des différences appariées.",
+            "title": "SVD des différences appariées"
+          },
+          {
+            "id": "leace",
+            "origin": "builtin",
+            "params": [
+              {
+                "default": 0.1,
+                "kind": "number",
+                "name": "leace_shrinkage",
+                "summary": "rétrécissement λ ∈ [0, 1] de Σ vers tr(Σ)/d·I (0 : pseudo-inverse)"
+              },
+              {
+                "default": 1e-10,
+                "kind": "number",
+                "name": "leace_rcond",
+                "summary": "avec λ = 0 : seuil relatif des valeurs propres conservées"
+              },
+              {
+                "default": 0.0,
+                "kind": "number",
+                "name": "holdout_frac",
+                "summary": "fraction hors-échantillon (par index) des diagnostics, 10 prompts par classe au moins"
+              }
+            ],
+            "requires_paired": false,
+            "sidecars": [
+              "leace"
+            ],
+            "summary": "Effaceur affine LEACE ; direction = a/‖a‖ (parallèle à μ₊ − μ₋).",
+            "title": "Effaceur LEACE"
+          }
+        ],
+        "rust_trait": "weight_surgeon::plugin::ExtractionMethod"
+      }
+    ]
+  },
+  "error": null,
+  "warnings": []
+}

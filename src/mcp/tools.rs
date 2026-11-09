@@ -5,10 +5,11 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use schemars::gen::SchemaSettings;
+use schemars::gen::{SchemaGenerator, SchemaSettings};
+use schemars::schema::{InstanceType, Metadata, Schema, SchemaObject, SubschemaValidation};
 use schemars::JsonSchema;
-use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::de::{self, DeserializeOwned, DeserializeSeed, EnumAccess, VariantAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Map, Value};
 
 use super::server::McpConfig;
@@ -31,6 +32,7 @@ use crate::extract::{
 };
 use crate::patch::autotune::{parse_layer_range, AutotuneRequest, L2Reg};
 use crate::patch::{LayerSelection, LayersField, PatchFile, Projection, ValidationIssue};
+use crate::plugin::{unknown_method_message, Registry, DEFAULT_METHOD};
 use crate::ui::Ui;
 
 pub const TOOL_CHECK: &str = "surgeon_check";
@@ -219,9 +221,9 @@ pub struct ExtractToolArgs {
     pub overwrite: bool,
     #[serde(default)]
     #[schemars(
-        description = "Méthode : mean_diff (défaut), svd (prompts appariés par index), leace (écrit aussi <out>.leace.safetensors pour project_out)."
+        description = "Méthode d'extraction, identifiant du registre du moteur : mean_diff (défaut), svd (prompts appariés par index), leace (écrit aussi <out>.leace.safetensors pour project_out)."
     )]
-    pub method: Option<crate::extract::Method>,
+    pub method: Option<MethodId>,
     #[serde(default)]
     #[schemars(
         description = "svd : centre les différences appariées (paires d'ordre arbitraire)."
@@ -244,6 +246,83 @@ pub struct ExtractToolArgs {
         description = "Fraction hors-échantillon (par index) pour les diagnostics ; 10 prompts par classe au moins."
     )]
     pub holdout_frac: Option<f64>,
+}
+
+/// `method` of `surgeon_extract`: an identifier of the built-in registry. Its schema lists
+/// the registry (a `oneOf` of string constants) and its deserialization follows the former
+/// `Method` enum exactly (string or single-key map, same error messages). `Serialize` lets
+/// schemars write `"default": null`, as for the enum.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub struct MethodId(pub String);
+
+impl JsonSchema for MethodId {
+    fn schema_name() -> String {
+        "Method".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        let variants = Registry::with_builtin()
+            .list()
+            .map(|(m, _)| {
+                Schema::Object(SchemaObject {
+                    metadata: Some(Box::new(Metadata {
+                        description: Some(m.describe().summary.into()),
+                        ..Metadata::default()
+                    })),
+                    instance_type: Some(InstanceType::String.into()),
+                    enum_values: Some(vec![m.id().into()]),
+                    ..SchemaObject::default()
+                })
+            })
+            .collect();
+        Schema::Object(SchemaObject {
+            subschemas: Some(Box::new(SubschemaValidation {
+                one_of: Some(variants),
+                ..SubschemaValidation::default()
+            })),
+            ..SchemaObject::default()
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for MethodId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Id;
+        impl Visitor<'_> for Id {
+            type Value = String;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("variant identifier")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<String, E> {
+                let ids = Registry::with_builtin().ids();
+                match ids.contains(&v) {
+                    true => Ok(v.to_owned()),
+                    false => Err(E::custom(unknown_method_message(v, &ids))),
+                }
+            }
+        }
+        impl<'de> DeserializeSeed<'de> for Id {
+            type Value = String;
+            fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<String, D::Error> {
+                d.deserialize_identifier(self)
+            }
+        }
+        struct Enum;
+        impl<'de> Visitor<'de> for Enum {
+            type Value = MethodId;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("enum Method")
+            }
+            fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<MethodId, A::Error> {
+                let (id, variant) = data.variant_seed(Id)?;
+                variant.unit_variant()?;
+                Ok(MethodId(id))
+            }
+        }
+        // The variant list is not used by serde_json: `Id` checks the registry.
+        deserializer.deserialize_enum("Method", &[], Enum)
+    }
 }
 
 fn default_extract_layer() -> u32 {
@@ -334,7 +413,7 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_EXTRACT,
             "Extraction de direction",
-            "Calcule un vecteur de direction (steering) v = normalize(mean(pos) - mean(neg)) à partir des activations d'une couche d'un modèle Qwen2, en Rust pur sur CPU, et l'écrit dans un .safetensors (tenseur `direction`) à utiliser comme vector_file d'un patch surgeon_apply. Renvoie des diagnostics de séparation (d′, accuracy).",
+            "Calcule un vecteur de direction (steering) à partir des activations d'une couche d'un modèle Qwen2, en Rust pur sur CPU, avec une méthode du registre du moteur (method : mean_diff par défaut, v = normalize(mean(pos) - mean(neg)) ; svd ; leace), et l'écrit dans un .safetensors (tenseur `direction`) à utiliser comme vector_file d'un patch surgeon_apply. Renvoie des diagnostics de séparation (d′, accuracy).",
             schema_value::<ExtractToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
@@ -593,14 +672,16 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         dtype: args.dtype,
         overwrite: args.overwrite,
     };
-    let method = MethodOptions {
-        method: args.method.unwrap_or_default(),
+    let params = MethodOptions {
         svd_center: args.svd_center,
         leace_shrinkage: args.leace_shrinkage.unwrap_or(DEFAULT_LEACE_SHRINKAGE),
         leace_rcond: args.leace_rcond.unwrap_or(DEFAULT_LEACE_RCOND),
         holdout_frac: args.holdout_frac.unwrap_or(0.0),
-    };
-    core_extract_method(&request, &method, ctx.deps, &Ui::off(), ctx.sink)
+        ..MethodOptions::default()
+    }
+    .params();
+    let method = args.method.map_or(DEFAULT_METHOD.to_owned(), |m| m.0);
+    core_extract_method(&request, &method, &params, ctx.deps, &Ui::off(), ctx.sink)
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

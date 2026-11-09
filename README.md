@@ -7,9 +7,13 @@
 ![no C toolchain](https://img.shields.io/badge/dependencies-no_C_compiler-success)
 ![MCP](https://img.shields.io/badge/MCP-stdio_server-purple)
 
-`surgeon` inspects, patches, evaluates and steers the MLP weights of local language models
-stored as SafeTensors. It runs on the CPU, in pure Rust, and talks to humans (colored
-terminal, dashboard) as well as to AI agents (`--json`, MCP server).
+`surgeon` is the command-line front-end of a **Surgery Engine** for local language models:
+it inspects, patches, evaluates and steers their MLP weights (SafeTensors, and GGUF patched
+in place), on the CPU, in pure Rust. The same engine is callable from an AI agent workflow
+through its MCP extension (`surgeon mcp`: typed tools, allowed directories, imposed backup)
+and the `--json` envelopes, and it accepts third-party extraction methods through a small,
+still unstable Rust API (`v0`). Vocabulary, components and extension points:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 The terminal messages of the tool are in French. Every output below is a real run on a
 tiny fake Qwen2 model (4 layers, hidden size 16), copied without ANSI codes.

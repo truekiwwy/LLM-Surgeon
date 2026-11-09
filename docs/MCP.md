@@ -1,8 +1,11 @@
 # surgeon : serveur MCP
 
-`surgeon mcp` expose la chirurgie de poids à un agent IA via le Model Context Protocol, en
-JSON-RPC 2.0 sur stdio (un message par ligne). stdout ne transporte que le protocole ; les
-journaux partent sur stderr, sans couleur.
+`surgeon mcp` est l'**extension agent (MCP)** du Surgery Engine : il rend le moteur de
+chirurgie de poids appelable par un agent IA, avec des outils typés, via le Model Context
+Protocol, en JSON-RPC 2.0 sur stdio (un message par ligne). stdout ne transporte que le
+protocole ; les journaux partent sur stderr, sans couleur. Le vocabulaire (Surgery Engine,
+CLI front-end, extension agent, extension points) est défini dans
+[docs/ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Lancement
 
@@ -33,6 +36,10 @@ Claude Code :
 ```bash
 claude mcp add surgeon -- surgeon mcp --allow-dir /chemin/vers/modeles
 ```
+
+Claude Code, en plugin : le dossier [`plugin/`](../plugin) déclare le même serveur
+(`allow_dir` demandé à l'activation) et un skill de démarche sûre ; voir
+[docs/PLUGINS.md](PLUGINS.md#plugin-claude-code-plugin).
 
 ## Outils
 
@@ -139,6 +146,13 @@ classe au moins). `data.method_diagnostics` donne les diagnostics de la méthode
 (`split_half_cosine`, `cross_cov_before`/`cross_cov_after`, `holdout_cross_cov_ratio`...).
 L'effacement LEACE n'est exact qu'en échantillon : avec n < d, seul le ratio hors
 échantillon dit s'il généralise.
+
+`method` est un identifiant du registre des méthodes d'extraction du moteur (le même que
+`surgeon extract --method` et `surgeon plugins list`). Le serveur n'utilise que le registre
+intégré : il accepte exactement `mean_diff`, `svd` et `leace`, avec le schéma et les
+messages d'erreur d'avant le registre (`unknown variant ...`, `invalid_arguments`). Une
+méthode tierce (API `v0`) s'exécute par la bibliothèque, jamais par un argument d'outil :
+voir [docs/PLUGINS.md](PLUGINS.md).
 
 L'opération de patch `project_out` applique l'effaceur aux poids de `down_proj` :
 `W ← W − alpha·a(bᵀW)`, `alpha` dans [0, 1], `vector_tensor` = `a` et `vector_tensor_b` = `b`

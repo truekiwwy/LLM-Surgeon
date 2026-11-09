@@ -1,0 +1,4410 @@
+{
+  "aliases": [],
+  "args": [
+    {
+      "action": "SetTrue",
+      "aliases": null,
+      "default_values": [
+        "false"
+      ],
+      "env": null,
+      "global": true,
+      "hidden": false,
+      "id": "json",
+      "long": "json",
+      "num_args": "0",
+      "positional": false,
+      "possible_values": [],
+      "required": false,
+      "short": null,
+      "value_names": [
+        "JSON"
+      ]
+    },
+    {
+      "action": "Count",
+      "aliases": null,
+      "default_values": [
+        "0"
+      ],
+      "env": null,
+      "global": true,
+      "hidden": false,
+      "id": "verbose",
+      "long": "verbose",
+      "num_args": "0",
+      "positional": false,
+      "possible_values": [],
+      "required": false,
+      "short": "v",
+      "value_names": [
+        "VERBOSE"
+      ]
+    },
+    {
+      "action": "Help",
+      "aliases": null,
+      "default_values": [],
+      "env": null,
+      "global": false,
+      "hidden": false,
+      "id": "help",
+      "long": "help",
+      "num_args": "0",
+      "positional": false,
+      "possible_values": [],
+      "required": false,
+      "short": "h",
+      "value_names": null
+    },
+    {
+      "action": "Version",
+      "aliases": null,
+      "default_values": [],
+      "env": null,
+      "global": false,
+      "hidden": false,
+      "id": "version",
+      "long": "version",
+      "num_args": "0",
+      "positional": false,
+      "possible_values": [],
+      "required": false,
+      "short": "V",
+      "value_names": null
+    }
+  ],
+  "hidden": false,
+  "name": "surgeon",
+  "subcommand_required": true,
+  "subcommands": [
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "model",
+          "long": "model",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "MODEL"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "policy_ram_margin_gib",
+          "long": "policy-ram-margin-gib",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "POLICY_RAM_MARGIN_GIB"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "check",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "model",
+          "long": "model",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "MODEL"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "all"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "layers",
+          "long": "layers",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "LAYERS"
+          ]
+        },
+        {
+          "action": "Append",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "projections",
+          "long": "proj",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PROJECTIONS"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "show_stats",
+          "long": "show-stats",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "SHOW_STATS"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "inspect",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "model",
+          "long": "model",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "MODEL"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "patch",
+          "long": "patch",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "PATCH"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "gguf",
+          "long": "gguf",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "GGUF"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "keep-scales"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "requant",
+          "long": "requant",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "keep-scales",
+            "recompute"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "REQUANT"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "no_verify",
+          "long": "no-verify",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "NO_VERIFY"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "force_no_backup",
+          "long": "force-no-backup",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FORCE_NO_BACKUP"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "64"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "prefetch_chunk_mib",
+          "long": "prefetch-chunk-mib",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PREFETCH_CHUNK_MIB"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "no_prefetch",
+          "long": "no-prefetch",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "NO_PREFETCH"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "dry_run",
+          "long": "dry-run",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "DRY_RUN"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "no_backup",
+          "long": "no-backup",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "NO_BACKUP"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "backup_dir",
+          "long": "backup-dir",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "BACKUP_DIR"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "1"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "scale",
+          "long": "scale",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "SCALE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "warn"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "verify_base",
+          "long": "verify-base",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "strict",
+            "warn",
+            "off"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "VERIFY_BASE"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "apply",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "model",
+          "long": "model",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "MODEL"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "prompts",
+          "long": "prompts",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "PROMPTS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "256"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "max_new_tokens",
+          "long": "max-new-tokens",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "MAX_NEW_TOKENS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "export_gguf",
+          "long": "export-gguf",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "EXPORT_GGUF"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "Q4_K_M"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "quant",
+          "long": "quant",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "QUANT"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": "LLAMA_CPP_DIR",
+          "global": false,
+          "hidden": false,
+          "id": "llama_cpp_dir",
+          "long": "llama-cpp-dir",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "LLAMA_CPP_DIR"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "allow_degraded",
+          "long": "allow-degraded",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "ALLOW_DEGRADED"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "eval",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "model",
+          "long": "model",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "MODEL"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "pos_prompts",
+          "long": "pos-prompts",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "POS_PROMPTS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "neg_prompts",
+          "long": "neg-prompts",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "NEG_PROMPTS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "20"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "layer",
+          "long": "layer",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "LAYER"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "out",
+          "long": "out",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "OUT"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "last"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "pooling",
+          "long": "pooling",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "last",
+            "mean"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "POOLING"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "resid_post"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "site",
+          "long": "site",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "resid_post",
+            "mlp_out"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "SITE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "none"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "chat_template",
+          "long": "chat-template",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "none",
+            "chatml"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "CHAT_TEMPLATE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "512"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "max_tokens",
+          "long": "max-tokens",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "MAX_TOKENS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "auto"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "dtype",
+          "long": "dtype",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "auto",
+            "f32",
+            "bf16"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "DTYPE"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "overwrite",
+          "long": "overwrite",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "OVERWRITE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "mean_diff"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "method",
+          "long": "method",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "mean_diff",
+            "svd",
+            "leace"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "METHOD"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "svd_center",
+          "long": "svd-center",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "SVD_CENTER"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0.1"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "leace_shrinkage",
+          "long": "leace-shrinkage",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "LEACE_SHRINKAGE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0.0000000001"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "leace_rcond",
+          "long": "leace-rcond",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "LEACE_RCOND"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "holdout_frac",
+          "long": "holdout-frac",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "HOLDOUT_FRAC"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "extract",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "model",
+          "long": "model",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "MODEL"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "vector",
+          "long": "vector",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "VECTOR"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "snapshot",
+          "long": "snapshot",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "SNAPSHOT"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "100x32"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "size",
+          "long": "size",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "SIZE"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "preview",
+          "long": "preview",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PREVIEW"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "preview_prompt",
+          "long": "preview-prompt",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PREVIEW_PROMPT"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "preview_alpha",
+          "long": "preview-alpha",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PREVIEW_ALPHA"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "30"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "preview_tokens",
+          "long": "preview-tokens",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PREVIEW_TOKENS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "preview_layer",
+          "long": "preview-layer",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PREVIEW_LAYER"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "chatml"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "preview_template",
+          "long": "preview-template",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "none",
+            "chatml"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PREVIEW_TEMPLATE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "-2:2"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "alpha_range",
+          "long": "alpha-range",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "ALPHA_RANGE"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "tui",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "patch"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "kind",
+          "long": "kind",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "patch",
+            "tools",
+            "surgery"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "KIND"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "schema",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "Append",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "allow_dir",
+          "long": "allow-dir",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "ALLOW_DIR"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "read_only",
+          "long": "read-only",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "READ_ONLY"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "allow_no_backup",
+          "long": "allow-no-backup",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "ALLOW_NO_BACKUP"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "mcp",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "bench",
+      "subcommand_required": true,
+      "subcommands": [
+        {
+          "aliases": [],
+          "args": [
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "before",
+              "long": "before",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "BEFORE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "after",
+              "long": "after",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "AFTER"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "tensor",
+              "long": "tensor",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "TENSOR"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "5"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "top_k",
+              "long": "top-k",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "TOP_K"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "5"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "worst",
+              "long": "worst",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "WORST"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "warn_kl",
+              "long": "warn-kl",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "WARN_KL"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "warn_top1_shift",
+              "long": "warn-top1-shift",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "WARN_TOP1_SHIFT"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "fail_on_warn",
+              "long": "fail-on-warn",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FAIL_ON_WARN"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "Count",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "verbose",
+              "long": "verbose",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "v",
+              "value_names": [
+                "VERBOSE"
+              ]
+            },
+            {
+              "action": "Help",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "h",
+              "value_names": null
+            }
+          ],
+          "hidden": false,
+          "name": "logits",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "model",
+              "long": "model",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "MODEL"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "text",
+              "long": "text",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "TEXT"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "baseline_model",
+              "long": "baseline-model",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BASELINE_MODEL"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "baseline_ppl",
+              "long": "baseline-ppl",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BASELINE_PPL"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "baseline_ppl_err",
+              "long": "baseline-ppl-err",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BASELINE_PPL_ERR"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "512"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "ctx",
+              "long": "ctx",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "CTX"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "chunks",
+              "long": "chunks",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "CHUNKS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "threads",
+              "long": "threads",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "THREADS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "n_gpu_layers",
+              "long": "n-gpu-layers",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "N_GPU_LAYERS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": "LLAMA_CPP_DIR",
+              "global": false,
+              "hidden": false,
+              "id": "llama_cpp_dir",
+              "long": "llama-cpp-dir",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "LLAMA_CPP_DIR"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "0.2"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "warn_delta",
+              "long": "warn-delta",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "WARN_DELTA"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "timeout_secs",
+              "long": "timeout-secs",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "TIMEOUT_SECS"
+              ]
+            },
+            {
+              "action": "Append",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "llama_args",
+              "long": "llama-arg",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "LLAMA_ARGS"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "fail_on_warn",
+              "long": "fail-on-warn",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FAIL_ON_WARN"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "Count",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "verbose",
+              "long": "verbose",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "v",
+              "value_names": [
+                "VERBOSE"
+              ]
+            },
+            {
+              "action": "Help",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "h",
+              "value_names": null
+            }
+          ],
+          "hidden": false,
+          "name": "ppl",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "model",
+              "long": "model",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "MODEL"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "dataset",
+              "long": "dataset",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "DATASET"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "baseline_model",
+              "long": "baseline-model",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BASELINE_MODEL"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "50"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "limit",
+              "long": "limit",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "LIMIT"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "512"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "max_new_tokens",
+              "long": "max-new-tokens",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MAX_NEW_TOKENS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "prompt_template",
+              "long": "prompt-template",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "PROMPT_TEMPLATE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "auto"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "format",
+              "long": "format",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "gsm8k",
+                "math",
+                "auto"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FORMAT"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": "LLAMA_CPP_DIR",
+              "global": false,
+              "hidden": false,
+              "id": "llama_cpp_dir",
+              "long": "llama-cpp-dir",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "LLAMA_CPP_DIR"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "timeout_secs",
+              "long": "timeout-secs",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "TIMEOUT_SECS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "min_accuracy",
+              "long": "min-accuracy",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MIN_ACCURACY"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "fail_on_warn",
+              "long": "fail-on-warn",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FAIL_ON_WARN"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "Count",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "verbose",
+              "long": "verbose",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "v",
+              "value_names": [
+                "VERBOSE"
+              ]
+            },
+            {
+              "action": "Help",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "h",
+              "value_names": null
+            }
+          ],
+          "hidden": false,
+          "name": "eval",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "model",
+              "long": "model",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "MODEL"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "prompts",
+              "long": "prompts",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "PROMPTS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "out",
+              "long": "out",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "OUT"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "auto"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "dtype",
+              "long": "dtype",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "auto",
+                "f32",
+                "bf16"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "DTYPE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "f32"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "out_dtype",
+              "long": "out-dtype",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "f32",
+                "f16"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "OUT_DTYPE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "256"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "max_tokens",
+              "long": "max-tokens",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MAX_TOKENS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "4096"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "max_total_positions",
+              "long": "max-total-positions",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MAX_TOTAL_POSITIONS"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "overwrite",
+              "long": "overwrite",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "OVERWRITE"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "Count",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "verbose",
+              "long": "verbose",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "v",
+              "value_names": [
+                "VERBOSE"
+              ]
+            },
+            {
+              "action": "Help",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "h",
+              "value_names": null
+            }
+          ],
+          "hidden": false,
+          "name": "dump",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "help",
+          "subcommand_required": false,
+          "subcommands": [
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "logits",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "ppl",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "eval",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "dump",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "help",
+              "subcommand_required": false,
+              "subcommands": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "model",
+          "long": "model",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "MODEL"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "vector",
+          "long": "vector",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "VECTOR"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "eval_dataset",
+          "long": "eval-dataset",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "EVAL_DATASET"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "target_layer_range",
+          "long": "target-layer-range",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "TARGET_LAYER_RANGE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "readout_layer",
+          "long": "readout-layer",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "READOUT_LAYER"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "down_proj"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "proj",
+          "long": "proj",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PROJ"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "suppress"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "objective",
+          "long": "objective",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "suppress",
+            "amplify",
+            "target"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "OBJECTIVE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "target_projection",
+          "long": "target-projection",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "TARGET_PROJECTION"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "1e-3"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "l2_reg",
+          "long": "l2-reg",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "L2_REG"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0.05"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "probe_alpha",
+          "long": "probe-alpha",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PROBE_ALPHA"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "1"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "alpha_max",
+          "long": "alpha-max",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "ALPHA_MAX"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0.0001"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "min_alpha",
+          "long": "min-alpha",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "MIN_ALPHA"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "2000"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "max_forwards",
+          "long": "max-forwards",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "MAX_FORWARDS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "256"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "max_tokens",
+          "long": "max-tokens",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "MAX_TOKENS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "auto"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "dtype",
+          "long": "dtype",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "auto",
+            "f32",
+            "bf16"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "DTYPE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "site",
+          "long": "site",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "resid_post",
+            "mlp_out"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "SITE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "pooling",
+          "long": "pooling",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "last",
+            "mean"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "POOLING"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "chat_template",
+          "long": "chat-template",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "none",
+            "chatml"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "CHAT_TEMPLATE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "out",
+          "long": "out",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "OUT"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "overwrite",
+          "long": "overwrite",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "OVERWRITE"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "autotune",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "base",
+          "long": "base",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "BASE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "tuned",
+          "long": "tuned",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "TUNED"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "out",
+          "long": "out",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "OUT"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "16"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "rank",
+          "long": "rank",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "RANK"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "f16"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "factor_dtype",
+          "long": "factor-dtype",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "f16",
+            "bf16",
+            "f32"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FACTOR_DTYPE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "include",
+          "long": "include",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "INCLUDE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "exclude",
+          "long": "exclude",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "EXCLUDE"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "include_embeddings",
+          "long": "include-embeddings",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "INCLUDE_EMBEDDINGS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "max_rel_error",
+          "long": "max-rel-error",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "MAX_REL_ERROR"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "warn"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "on_high_error",
+          "long": "on-high-error",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "warn",
+            "skip",
+            "full"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "ON_HIGH_ERROR"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "8"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "oversample",
+          "long": "oversample",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "OVERSAMPLE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "3"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "power_iters",
+          "long": "power-iters",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "POWER_ITERS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "seed",
+          "long": "seed",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "SEED"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "timestamp",
+          "long": "timestamp",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "TIMESTAMP"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "overwrite",
+          "long": "overwrite",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "OVERWRITE"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "diff",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "lora",
+      "subcommand_required": true,
+      "subcommands": [
+        {
+          "aliases": [],
+          "args": [
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "model",
+              "long": "model",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "MODEL"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "lora",
+              "long": "lora",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "LORA"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "alpha",
+              "long": "alpha",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "ALPHA"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "adapter_config",
+              "long": "adapter-config",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "ADAPTER_CONFIG"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "1"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "scale",
+              "long": "scale",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "SCALE"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "dry_run",
+              "long": "dry-run",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "DRY_RUN"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "no_backup",
+              "long": "no-backup",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "NO_BACKUP"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "backup_dir",
+              "long": "backup-dir",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BACKUP_DIR"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "Count",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "verbose",
+              "long": "verbose",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "v",
+              "value_names": [
+                "VERBOSE"
+              ]
+            },
+            {
+              "action": "Help",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "h",
+              "value_names": null
+            }
+          ],
+          "hidden": false,
+          "name": "merge",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "base",
+              "long": "base",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "BASE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "patched",
+              "long": "patched",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "PATCHED"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "out",
+              "long": "out",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "OUT"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "16"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "rank",
+              "long": "rank",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "RANK"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "f32"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "dtype",
+              "long": "dtype",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "f16",
+                "bf16",
+                "f32"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "DTYPE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "target_modules",
+              "long": "target-modules",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "TARGET_MODULES"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "seed",
+              "long": "seed",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "SEED"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "overwrite",
+              "long": "overwrite",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "OVERWRITE"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "Count",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "verbose",
+              "long": "verbose",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "v",
+              "value_names": [
+                "VERBOSE"
+              ]
+            },
+            {
+              "action": "Help",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "h",
+              "value_names": null
+            }
+          ],
+          "hidden": false,
+          "name": "extract",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "help",
+          "subcommand_required": false,
+          "subcommands": [
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "merge",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "extract",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "help",
+              "subcommand_required": false,
+              "subcommands": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [],
+      "hidden": false,
+      "name": "help",
+      "subcommand_required": false,
+      "subcommands": [
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "check",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "inspect",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "apply",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "eval",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "extract",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "tui",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "schema",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "mcp",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "bench",
+          "subcommand_required": false,
+          "subcommands": [
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "logits",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "ppl",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "eval",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "dump",
+              "subcommand_required": false,
+              "subcommands": []
+            }
+          ]
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "autotune",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "diff",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "lora",
+          "subcommand_required": false,
+          "subcommands": [
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "merge",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "extract",
+              "subcommand_required": false,
+              "subcommands": []
+            }
+          ]
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "help",
+          "subcommand_required": false,
+          "subcommands": []
+        }
+      ]
+    }
+  ]
+}

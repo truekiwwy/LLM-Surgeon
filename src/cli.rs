@@ -21,9 +21,10 @@
 
 use std::path::PathBuf;
 
+use clap::builder::{PossibleValue, PossibleValuesParser};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
-use crate::extract::{ChatTemplate, DTypeChoice, Pooling, Site};
+use crate::extract::{ChatTemplate, DTypeChoice, Method, MethodOptions, Pooling, Site};
 pub use crate::patch::exit_code;
 use crate::patch::{LayerSelection, Projection};
 
@@ -31,7 +32,15 @@ use crate::patch::{LayerSelection, Projection};
 #[command(
     name = "surgeon",
     version,
-    about = "Chirurgie de poids SafeTensors pilotée par patch.json",
+    about = "Surgery Engine : chirurgie des poids de LLM locaux, en terminal ou depuis un agent IA",
+    long_about = "surgeon est le front-end CLI du Surgery Engine : inspecter, modifier \
+(patch.json, .surgery, LoRA), évaluer et mesurer les poids de modèles de langage locaux \
+(SafeTensors, GGUF), en Rust pur sur CPU.\n\n\
+Le même moteur est appelable depuis un agent IA : `surgeon mcp` (extension MCP, outils \
+typés, dossiers autorisés, sauvegarde imposée) et `--json` (enveloppe stable). Les méthodes \
+d'extraction disponibles : `surgeon plugins list`.",
+    after_help = "Architecture et points d'extension : docs/ARCHITECTURE.md, docs/PLUGINS.md ; \
+serveur MCP : docs/MCP.md.",
     styles = crate::ui::clap_styles()
 )]
 pub struct Cli {
@@ -71,6 +80,21 @@ pub enum Commands {
     Diff(crate::surgery::cli_args::DiffArgs),
     /// Merge or extract a LoRA adapter.
     Lora(crate::lora::cli_args::LoraArgs),
+    /// Extension points of the engine and their registered implementations.
+    Plugins(PluginsArgs),
+}
+
+/// `surgeon plugins`: always exit code 0. Not exposed over MCP.
+#[derive(Debug, Clone, Args)]
+pub struct PluginsArgs {
+    #[command(subcommand)]
+    pub command: PluginsCommand,
+}
+
+#[derive(Debug, Clone, Copy, Subcommand)]
+pub enum PluginsCommand {
+    /// Extension points and implementations: identifier, title, origin.
+    List,
 }
 
 /// `surgeon extract`: the prompt 8 options plus the direction method (two structs because
@@ -85,9 +109,9 @@ pub struct ExtractCommand {
 
 #[derive(Debug, Clone, Args)]
 pub struct ExtractMethodArgs {
-    /// Direction method: mean_diff (default, unchanged), svd (paired prompts), leace.
-    #[arg(long, value_enum, default_value_t = crate::extract::Method::MeanDiff)]
-    pub method: crate::extract::Method,
+    /// Direction method: an identifier of the extraction registry (`surgeon plugins list`).
+    #[arg(long, default_value = crate::plugin::DEFAULT_METHOD, value_parser = method_ids())]
+    pub method: String,
     /// svd: center the paired deltas (for pairs of arbitrary order).
     #[arg(long)]
     pub svd_center: bool,
@@ -103,15 +127,28 @@ pub struct ExtractMethodArgs {
 }
 
 impl ExtractMethodArgs {
-    pub fn options(&self) -> crate::extract::MethodOptions {
-        crate::extract::MethodOptions {
-            method: self.method,
+    /// The built-in options; `method` maps the identifier, always a built-in one since the
+    /// parser only accepts those.
+    pub fn options(&self) -> MethodOptions {
+        MethodOptions {
+            method: Method::from_id(&self.method).unwrap_or_default(),
             svd_center: self.svd_center,
             leace_shrinkage: self.leace_shrinkage,
             leace_rcond: self.leace_rcond,
             holdout_frac: self.holdout_frac,
         }
     }
+}
+
+/// `--method` accepts the identifiers of the built-in registry, in its listing order (the
+/// possible values and the error message are those of the former enum).
+fn method_ids() -> PossibleValuesParser {
+    let registry = crate::plugin::Registry::with_builtin();
+    PossibleValuesParser::new(
+        registry
+            .list()
+            .map(|(m, _)| PossibleValue::new(m.id()).help(m.describe().summary)),
+    )
 }
 
 /// Exit codes: 0 ok, 1 insufficient resources or cancelled, 2 invalid arguments or files

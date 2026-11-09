@@ -1,0 +1,19 @@
+{
+  "name": "llm-surgeon",
+  "displayName": "LLM Surgeon",
+  "version": "0.1.0",
+  "description": "Surgery Engine for local LLM weights (SafeTensors, GGUF) exposed to Claude as the `surgeon mcp` server, with a skill that enforces a safe surgery workflow: check first, work on a copy, dry run before apply, keep the backup, measure before concluding.",
+  "author": {
+    "name": "truekiwwy"
+  },
+  "repository": "https://github.com/truekiwwy/LLM-Surgeon",
+  "keywords": ["llm", "safetensors", "gguf", "steering", "mcp"],
+  "userConfig": {
+    "allow_dir": {
+      "type": "directory",
+      "title": "Allowed directory",
+      "description": "The only directory the surgeon MCP server may read and write (models, prompts, directions, patches). Put copies of your models there, never the originals.",
+      "required": true
+    }
+  }
+}

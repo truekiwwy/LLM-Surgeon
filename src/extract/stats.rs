@@ -76,6 +76,13 @@ fn check_sets(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result<usize> {
 
 /// [`separation`] plus the per-prompt projections.
 pub fn separation_with_projections(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result<Separation> {
+    let unit = mean_diff_direction(pos, neg)?;
+    separation_along(pos, neg, &unit)
+}
+
+/// `normalize(mean(pos) - mean(neg))` in f64: the `mean_diff` method. `separation_along`
+/// recomputes the same means, so the statistics are those of prompt 8, bit for bit.
+pub fn mean_diff_direction(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result<Vec<f64>> {
     let dim = check_sets(pos, neg)?;
     let (mean_pos, mean_neg) = (mean(pos, dim), mean(neg, dim));
     let diff: Vec<f64> = mean_pos.iter().zip(&mean_neg).map(|(p, n)| p - n).collect();
@@ -83,8 +90,7 @@ pub fn separation_with_projections(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result
     if !norm.is_finite() || norm < MIN_DIFF_NORM {
         return Err(ExtractError::DegenerateDirection { norm });
     }
-    let unit: Vec<f64> = diff.iter().map(|d| d / norm).collect();
-    Ok(finish(pos, neg, &mean_pos, &mean_neg, norm, &unit))
+    Ok(diff.iter().map(|d| d / norm).collect())
 }
 
 /// The same diagnostics along a direction computed elsewhere (`svd`, `leace`):

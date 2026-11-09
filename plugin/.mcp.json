@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "surgeon": {
+      "command": "surgeon",
+      "args": ["mcp", "--allow-dir", "${user_config.allow_dir}"]
+    }
+  }
+}

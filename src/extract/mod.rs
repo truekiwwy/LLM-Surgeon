@@ -18,7 +18,8 @@
 //! method (MethodOptions, holdout_mask, compute) -> svd, leace
 //! svd -> linalg::gram (contrastive PCA on paired deltas)
 //! leace -> linalg::gram (Σ_λ^p y through the thin SVD of X̃/√n), svd::dot
-//! mod (run_extraction*) -> every module above
+//! mod (run_extraction*) -> every module above, plugin::ExtractionMethod
+//! plugin::Builtin (mean_diff, svd, leace) -> stats::mean_diff_direction, method::compute
 //! consumers: patch::autotune (HookedQwen2, weights, prompts), bench::dump (forward_logits)
 //! ```
 //!
@@ -34,18 +35,18 @@
 //! (b) Call graph shared by the CLI and the MCP server:
 //!
 //! ```text
-//! run_with -> dispatch -> app::core_extract_with (ExtractCommand: args + method) --+
-//! mcp::tools::extract (sandbox, inline or file prompts, method fields) -----------+
-//!   -> app::core_extract_method(req, MethodOptions)  (core_extract_request = mean_diff)
-//!   -> extract::run_extraction_method(req, opts, deps.probe, SinkObserver)
-//!      -> output::check_output -> validate_method (pairing, .leace output)
+//! run_with -> dispatch -> app::core_extract_with (args, method id, params) --------+
+//! mcp::tools::extract (sandbox, inline or file prompts, method id, params) --------+
+//!   -> app::core_extract_method(req, id, params) -> Registry::with_builtin().get(id)
+//!   -> extract::run_extraction_plugin(req, method, params, deps.probe, SinkObserver,
+//!                                     deps.interrupted)
+//!      -> output::check_output -> validate_method (params, pairing, declared sidecars)
 //!      -> config::load_config -> SafetensorsDir::open (engine maps)
 //!      -> weights::check_tensors -> plan_memory -> choose_dtype (BudgetPolicy, HardwareProbe)
 //!      -> prompts::load_tokenizer -> tokenize -> weights::load_tensors (candle)
 //!      -> HookedQwen2::from_tensors -> forward_capture per prompt -> capture::pool
-//!      -> mean_diff: stats::separation_with_projections
-//!         svd | leace: method::compute -> stats::separation_along
-//!      -> output::encode (+ encode_tensors for leace) -> write_pair_atomic | write_files_atomic
+//!      -> method.extract(ctx, ActivationSet) -> check_direction -> stats::separation_along
+//!      -> output::encode (+ encode_tensors per sidecar) -> write_pair_atomic | write_files_atomic
 //! autotune (patch::autotune) -> required_tensors, load_tensors, HookedQwen2::from_tensors
 //!   per probe, forward_capture, pool ; engine::apply_vector_shift on the stored bytes
 //! ```
@@ -76,33 +77,36 @@ mod stats;
 mod svd;
 mod weights;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use candle_core::{DType, Device, Tensor};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub use capture::{pool, Pooling};
 pub use config::{load_config, parse_config, Qwen2Config};
 pub use error::{ExtractError, Result};
 pub use hooked_qwen2::{HookedQwen2, Site};
 pub use leace::{cross_cov_norm, erased_stats, fit as leace_fit, LeaceDiagnostics, LeaceFit};
+pub(crate) use method::compute as compute_method;
 pub use method::{
     holdout_mask, Method, MethodDiagnostics, MethodOptions, MethodOutput, DEFAULT_LEACE_RCOND,
     DEFAULT_LEACE_SHRINKAGE, MIN_HOLDOUT_PER_CLASS,
 };
 pub use output::{
-    check_output, companion_path, encode, encode_tensors, leace_path, write_atomic,
+    check_output, companion_path, encode, encode_tensors, leace_path, sidecar_path, write_atomic,
     write_files_atomic, write_pair_atomic, TENSOR_NAME,
 };
 pub use prompts::{
     check_texts, load_prompt_texts, load_tokenizer, tokenize, ChatTemplate, Tokenized,
 };
 pub use stats::{
-    separation, separation_along, separation_with_projections, Separation, SeparationStats,
-    MIN_DIFF_NORM,
+    mean_diff_direction, separation, separation_along, separation_with_projections, Separation,
+    SeparationStats, MIN_DIFF_NORM,
 };
 pub use svd::{svd_direction, SvdDiagnostics};
 pub use weights::{
@@ -111,6 +115,10 @@ pub use weights::{
 };
 
 use crate::hardware::{BudgetPolicy, HardwareProbe};
+use crate::plugin::{
+    is_valid_id, ActivationSet, Builtin, Diagnostics, ExtractContext, ExtractionMethod, MethodInfo,
+    PluginError,
+};
 
 /// Fewer prompts per set make the mean, and so the direction, noisy.
 pub const MIN_RECOMMENDED_PROMPTS: usize = 8;
@@ -180,13 +188,17 @@ pub struct ExtractReport {
     pub stats: SeparationStats,
     pub warnings: Vec<String>,
     pub duration_ms: u128,
-    /// Direction method (prompt 11, additive).
-    pub method: Method,
+    /// Direction method (prompt 11, additive): its registry identifier.
+    pub method: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub method_diagnostics: Option<MethodDiagnostics>,
+    pub method_diagnostics: Option<Diagnostics>,
     /// `<out>.leace.safetensors` (a, b, mean, u_whitened) for `--method leace`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leace_path: Option<PathBuf>,
+    /// The other sidecars, `<out>.<suffix>.safetensors`, of a registered method
+    /// (`leace_path` keeps its own key).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sidecar_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -292,42 +304,59 @@ pub(crate) fn dtype_name(dtype: DType) -> &'static str {
     }
 }
 
-/// Opens the model directory and runs [`run_extraction_with`] (`mean_diff`).
+/// Opens the model directory and runs `mean_diff`.
 pub fn run_extraction(
     req: &ExtractRequest,
     probe: &dyn HardwareProbe,
     observer: &mut dyn ExtractObserver,
 ) -> Result<ExtractReport> {
-    run_extraction_method(req, &MethodOptions::default(), probe, observer)
+    let never = AtomicBool::new(false);
+    let mean_diff = Builtin(Method::MeanDiff);
+    run_extraction_plugin(req, &mean_diff, &Value::Null, probe, observer, &never)
 }
 
-/// [`run_extraction`] with a direction method.
-pub fn run_extraction_method(
+/// [`run_extraction`] with any method of the extension API and its `params` (`null`: the
+/// method's defaults). `cancel` is handed to the method and checked after it; the observer
+/// still stops the run between tensors and between prompts.
+pub fn run_extraction_plugin(
     req: &ExtractRequest,
-    opts: &MethodOptions,
+    method: &dyn ExtractionMethod,
+    params: &Value,
     probe: &dyn HardwareProbe,
     observer: &mut dyn ExtractObserver,
+    cancel: &AtomicBool,
 ) -> Result<ExtractReport> {
     validate_request(req)?;
-    validate_method(req, opts)?;
+    validate_method(req, method, params)?;
     let source = SafetensorsDir::open(&req.model_dir)?;
-    run_extraction_with_method(req, opts, &source, probe, observer)
+    run_pipeline(req, method, params, &source, probe, observer, cancel)
 }
 
-/// Checked before any computation: options, pairing for `svd`, the LEACE output.
-fn validate_method(req: &ExtractRequest, opts: &MethodOptions) -> Result<()> {
-    opts.validate()?;
-    if opts.method == Method::Svd && req.pos_prompts.len() != req.neg_prompts.len() {
+/// Checked before any computation: the parameters, pairing, the declared sidecars.
+fn validate_method(
+    req: &ExtractRequest,
+    method: &dyn ExtractionMethod,
+    params: &Value,
+) -> Result<MethodInfo> {
+    method.validate(params)?;
+    let info = method.describe();
+    if info.requires_paired && req.pos_prompts.len() != req.neg_prompts.len() {
         return Err(ExtractError::UnpairedPrompts {
             pos: req.pos_prompts.len(),
             neg: req.neg_prompts.len(),
         });
     }
-    let leace = leace_path(&req.out);
-    if opts.method == Method::Leace && leace.exists() && !req.overwrite {
-        return Err(ExtractError::OutputExists(leace));
+    for suffix in &info.sidecars {
+        if !is_valid_id(suffix) {
+            let message = format!("suffixe de fichier annexe invalide : {suffix:?}");
+            return Err(PluginError::InvalidOutput(message).into());
+        }
+        let path = sidecar_path(&req.out, suffix);
+        if path.exists() && !req.overwrite {
+            return Err(ExtractError::OutputExists(path));
+        }
     }
-    Ok(())
+    Ok(info)
 }
 
 fn validate_request(req: &ExtractRequest) -> Result<()> {
@@ -348,30 +377,41 @@ fn validate_request(req: &ExtractRequest) -> Result<()> {
     check_output(&req.out, req.overwrite)
 }
 
-/// validate -> config -> tensor index check -> resources -> tokenizer -> minimal weights
-/// -> forward pos then neg -> statistics -> atomic write. Each step fails before the next
-/// one touches anything heavier.
+/// `mean_diff` on any tensor source.
 pub fn run_extraction_with(
     req: &ExtractRequest,
     source: &dyn TensorSource,
     probe: &dyn HardwareProbe,
     observer: &mut dyn ExtractObserver,
 ) -> Result<ExtractReport> {
-    run_extraction_with_method(req, &MethodOptions::default(), source, probe, observer)
+    let never = AtomicBool::new(false);
+    let mean_diff = Builtin(Method::MeanDiff);
+    run_pipeline(
+        req,
+        &mean_diff,
+        &Value::Null,
+        source,
+        probe,
+        observer,
+        &never,
+    )
 }
 
-/// [`run_extraction_with`] with a direction method; `mean_diff` runs the prompt 8 code
-/// path unchanged.
-pub fn run_extraction_with_method(
+/// validate -> config -> tensor index check -> resources -> tokenizer -> minimal weights
+/// -> forward pos then neg -> method -> statistics -> atomic write. Each step fails before
+/// the next one touches anything heavier.
+fn run_pipeline(
     req: &ExtractRequest,
-    opts: &MethodOptions,
+    method: &dyn ExtractionMethod,
+    params: &Value,
     source: &dyn TensorSource,
     probe: &dyn HardwareProbe,
     observer: &mut dyn ExtractObserver,
+    cancel: &AtomicBool,
 ) -> Result<ExtractReport> {
     let started = Instant::now();
     validate_request(req)?;
-    validate_method(req, opts)?;
+    let info = validate_method(req, method, params)?;
     let cfg = load_config(&req.model_dir)?;
     if req.layer >= cfg.num_hidden_layers {
         return Err(ExtractError::InvalidArgument(format!(
@@ -459,13 +499,23 @@ pub fn run_extraction_with_method(
     let neg = activations(PromptSet::Neg, &neg_ids)?;
     drop(model);
 
-    let (separation, method_out) = match opts.method {
-        Method::MeanDiff => (separation_with_projections(&pos, &neg)?, None),
-        _ => {
-            let out = method::compute(&pos, &neg, opts)?;
-            (separation_along(&pos, &neg, &out.direction)?, Some(out))
-        }
+    let ctx = ExtractContext {
+        hidden_size: cfg.hidden_size,
+        layer: req.layer,
+        site: req.site,
+        pooling: req.pooling,
+        params,
     };
+    let acts = ActivationSet {
+        pos: &pos,
+        neg: &neg,
+    };
+    let out = method.extract(&ctx, &acts, cancel)?;
+    if cancel.load(Ordering::SeqCst) {
+        return Err(ExtractError::Cancelled);
+    }
+    check_direction(&out.direction, cfg.hidden_size)?;
+    let separation = separation_along(&pos, &neg, &out.direction)?;
     let Separation {
         direction,
         stats,
@@ -488,19 +538,21 @@ pub fn run_extraction_with_method(
     if stats.d_prime.is_some_and(|d| d < 1.0) {
         warnings.push("séparation faible (d′ < 1) : direction peu fiable".into());
     }
-    if let Some(out) = &method_out {
-        warnings.extend(out.warnings.iter().cloned());
-    }
+    warnings.extend(out.warnings);
 
     if observer.on_event(ExtractEvent::Writing).is_break() {
         return Err(ExtractError::Cancelled);
     }
     let mut metadata = file_metadata(req, &cfg, &dtype_used, pos.len(), neg.len(), &stats);
-    // mean_diff files stay byte-identical to prompt 8: no `method` key (absent = mean_diff).
-    if opts.method != Method::MeanDiff {
-        metadata.extend(method_metadata(opts));
-    }
-    let method_diagnostics = method_out.as_ref().and_then(|o| o.diagnostics.clone());
+    let method_meta = method_metadata(method.id(), &out.metadata)?;
+    merge_metadata(&mut metadata, &method_meta)?;
+    let method_diagnostics = out.diagnostics.map(|d| match d {
+        Diagnostics::Json(mut map) => {
+            map.insert("method".into(), method.id().into());
+            Diagnostics::Json(map)
+        }
+        builtin => builtin,
+    });
     let companion = Companion {
         schema: COMPANION_SCHEMA,
         pos_projections: &pos_projections,
@@ -520,51 +572,47 @@ pub fn run_extraction_with_method(
         serde_json::to_vec_pretty(&companion).map_err(|e| ExtractError::Compute(e.to_string()))?;
     companion_bytes.push(b'\n');
     let main_bytes = encode(&direction, &metadata)?;
-    let leace_out = match method_out.as_ref().and_then(|o| o.leace.as_ref()) {
-        None => {
-            write_pair_atomic(&req.out, &main_bytes, &companion_bytes, req.overwrite)?;
-            None
+    let provenance: BTreeMap<String, String> = [
+        ("n_pos", pos.len().to_string()),
+        ("n_neg", neg.len().to_string()),
+        ("layer", req.layer.to_string()),
+        ("site", req.site.as_str().into()),
+        ("pooling", req.pooling.as_str().into()),
+        ("model", model_name(&req.model_dir)),
+        ("surgeon_version", env!("CARGO_PKG_VERSION").into()),
+    ]
+    .map(|(k, v)| (k.to_owned(), v))
+    .into();
+    let mut sidecars: Vec<(&str, PathBuf, Vec<u8>)> = Vec::new();
+    for sidecar in &out.sidecars {
+        let header = sidecar_header(&info, sidecar, &method_meta, &provenance, &sidecars)?;
+        let tensors: Vec<(&str, &[f32])> = sidecar
+            .tensors
+            .iter()
+            .map(|(name, values)| (name.as_str(), values.as_slice()))
+            .collect();
+        let bytes = encode_tensors(&tensors, &header)?;
+        sidecars.push((
+            sidecar.suffix,
+            sidecar_path(&req.out, sidecar.suffix),
+            bytes,
+        ));
+    }
+    match sidecars.is_empty() {
+        true => write_pair_atomic(&req.out, &main_bytes, &companion_bytes, req.overwrite)?,
+        false => {
+            let companion = companion_path(&req.out);
+            let mut files: Vec<(&Path, &[u8])> =
+                vec![(&req.out, &main_bytes), (&companion, &companion_bytes)];
+            files.extend(sidecars.iter().map(|(_, p, b)| (p.as_path(), b.as_slice())));
+            write_files_atomic(&files, req.overwrite)?;
         }
-        Some(fit) => {
-            let as_f32 = |v: &[f64]| v.iter().map(|&x| x as f32).collect::<Vec<f32>>();
-            let (a, b, mean, u) = (
-                as_f32(&fit.a),
-                as_f32(&fit.b),
-                as_f32(&fit.mean),
-                as_f32(&fit.u_whitened),
-            );
-            let mut leace_meta = method_metadata(opts);
-            leace_meta.extend(
-                [
-                    ("rank", fit.rank.to_string()),
-                    ("kappa", fit.kappa.to_string()),
-                    ("bTa", fit.b_dot_a.to_string()),
-                    ("n_pos", pos.len().to_string()),
-                    ("n_neg", neg.len().to_string()),
-                    ("layer", req.layer.to_string()),
-                    ("site", req.site.as_str().into()),
-                    ("pooling", req.pooling.as_str().into()),
-                    ("model", model_name(&req.model_dir)),
-                    ("surgeon_version", env!("CARGO_PKG_VERSION").into()),
-                ]
-                .map(|(k, v)| (k.to_owned(), v)),
-            );
-            let leace_bytes = encode_tensors(
-                &[("a", &a), ("b", &b), ("mean", &mean), ("u_whitened", &u)],
-                &leace_meta,
-            )?;
-            let path = leace_path(&req.out);
-            write_files_atomic(
-                &[
-                    (&req.out, &main_bytes),
-                    (&companion_path(&req.out), &companion_bytes),
-                    (&path, &leace_bytes),
-                ],
-                req.overwrite,
-            )?;
-            Some(path)
-        }
-    };
+    }
+    let leace_out = sidecars
+        .iter()
+        .find(|s| s.0 == "leace")
+        .map(|s| s.1.clone());
+    let sidecar_paths = sidecars.into_iter().filter(|s| s.0 != "leace").map(|s| s.1);
 
     Ok(ExtractReport {
         out_path: req.out.clone(),
@@ -577,29 +625,97 @@ pub fn run_extraction_with_method(
         stats,
         warnings,
         duration_ms: started.elapsed().as_millis(),
-        method: opts.method,
+        method: method.id(),
         method_diagnostics,
         leace_path: leace_out,
+        sidecar_paths: sidecar_paths.collect(),
     })
 }
 
-/// `method` and its parameters, in the header of svd/leace files.
-fn method_metadata(opts: &MethodOptions) -> BTreeMap<String, String> {
-    let mut meta = BTreeMap::from([
-        ("method".to_owned(), opts.method.as_str().to_owned()),
-        ("holdout_frac".to_owned(), opts.holdout_frac.to_string()),
-    ]);
-    match opts.method {
-        Method::Svd => {
-            meta.insert("svd_center".into(), opts.svd_center.to_string());
-        }
-        Method::Leace => {
-            meta.insert("shrinkage".into(), opts.leace_shrinkage.to_string());
-            meta.insert("rcond".into(), opts.leace_rcond.to_string());
-        }
-        Method::MeanDiff => {}
+fn invalid_output(message: String) -> ExtractError {
+    PluginError::InvalidOutput(message).into()
+}
+
+/// `hidden_size` finite values of L2 norm 1 (within 1e-6).
+fn check_direction(direction: &[f64], hidden_size: usize) -> Result<()> {
+    if direction.len() != hidden_size {
+        let size = direction.len();
+        return Err(invalid_output(format!(
+            "direction de taille {size}, attendu {hidden_size}"
+        )));
     }
-    meta
+    let norm = direction.iter().map(|x| x * x).sum::<f64>().sqrt();
+    match direction.iter().all(|x| x.is_finite()) && (norm - 1.0).abs() <= 1e-6 {
+        true => Ok(()),
+        false => Err(invalid_output(format!(
+            "direction non unitaire ou non finie (‖v‖ = {norm})"
+        ))),
+    }
+}
+
+/// The method's header entries plus `method = <id>`, except for `mean_diff`: its files stay
+/// byte-identical to prompt 8 (no `method` key means mean_diff).
+fn method_metadata(
+    id: &'static str,
+    extra: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    if extra.contains_key("method") {
+        return Err(invalid_output(
+            "la clé `method` est écrite par le moteur".into(),
+        ));
+    }
+    let mut meta = extra.clone();
+    if id != Method::MeanDiff.as_str() {
+        meta.insert("method".into(), id.into());
+    }
+    Ok(meta)
+}
+
+/// Adds `from` to `into`, refusing a key already there.
+fn merge_metadata(
+    into: &mut BTreeMap<String, String>,
+    from: &BTreeMap<String, String>,
+) -> Result<()> {
+    for (key, value) in from {
+        if into.insert(key.clone(), value.clone()).is_some() {
+            return Err(invalid_output(format!(
+                "clé de métadonnées déjà écrite : {key}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Header of one sidecar: method metadata, provenance, then its own entries. The suffix
+/// must be declared and appear once; tensor names must be unique and non-empty.
+fn sidecar_header(
+    info: &MethodInfo,
+    sidecar: &crate::plugin::Sidecar,
+    method_meta: &BTreeMap<String, String>,
+    provenance: &BTreeMap<String, String>,
+    done: &[(&str, PathBuf, Vec<u8>)],
+) -> Result<BTreeMap<String, String>> {
+    let suffix = sidecar.suffix;
+    if !info.sidecars.contains(&suffix) || done.iter().any(|d| d.0 == suffix) {
+        return Err(invalid_output(format!(
+            "fichier annexe non déclaré ou en double : {suffix}"
+        )));
+    }
+    let mut names = BTreeSet::new();
+    let bad_name = |n: &str| n.is_empty() || n == "__metadata__";
+    if sidecar
+        .tensors
+        .iter()
+        .any(|(n, _)| bad_name(n) || !names.insert(n.as_str()))
+    {
+        return Err(invalid_output(format!(
+            "noms de tenseurs vides, réservés ou en double dans le fichier annexe {suffix}"
+        )));
+    }
+    let mut header = method_meta.clone();
+    merge_metadata(&mut header, provenance)?;
+    merge_metadata(&mut header, &sidecar.metadata)?;
+    Ok(header)
 }
 
 fn file_metadata(
@@ -658,7 +774,7 @@ struct Companion<'a> {
     hidden_size: usize,
     /// svd / leace only: absent for mean_diff, so its companion is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
-    method_diagnostics: Option<&'a MethodDiagnostics>,
+    method_diagnostics: Option<&'a Diagnostics>,
 }
 
 /// Name of the model directory (absolute form first, so `.` still gets a name).

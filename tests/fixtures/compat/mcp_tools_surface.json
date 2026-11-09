@@ -1,0 +1,1454 @@
+[
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_check"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "layers": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "pattern": "^\\s*([Aa][Ll][Ll]|\\d+\\s*-\\s*\\d+|\\d+(\\s*,\\s*\\d+)*)\\s*$",
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "minItems": 1,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "end": {
+                      "minimum": 0.0,
+                      "type": "integer"
+                    },
+                    "start": {
+                      "minimum": 0.0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "end",
+                    "start"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "max_tensors": {
+          "default": 500,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "model": {
+          "type": "string"
+        },
+        "projections": {
+          "default": null,
+          "items": {
+            "enum": [
+              "gate_proj",
+              "up_proj",
+              "down_proj"
+            ],
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "show_stats": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_inspect"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "backup_dir": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_dir": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dry_run": {
+          "default": false,
+          "type": "boolean"
+        },
+        "gguf": {
+          "default": false,
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "patch": {
+          "additionalProperties": false,
+          "properties": {
+            "backup": {
+              "default": true,
+              "type": "boolean"
+            },
+            "description": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "operations": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "alpha": {
+                    "format": "float",
+                    "maximum": 100.0,
+                    "minimum": -100.0,
+                    "type": "number"
+                  },
+                  "axis": {
+                    "default": "cols",
+                    "enum": [
+                      "rows",
+                      "cols"
+                    ],
+                    "type": "string"
+                  },
+                  "id": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "layers": {
+                    "anyOf": [
+                      {
+                        "pattern": "^\\s*([Aa][Ll][Ll]|\\d+\\s*-\\s*\\d+|\\d+(\\s*,\\s*\\d+)*)\\s*$",
+                        "type": "string"
+                      },
+                      {
+                        "items": {
+                          "minimum": 0.0,
+                          "type": "integer"
+                        },
+                        "minItems": 1,
+                        "type": "array",
+                        "uniqueItems": true
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "end": {
+                            "minimum": 0.0,
+                            "type": "integer"
+                          },
+                          "start": {
+                            "minimum": 0.0,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "end",
+                          "start"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "operation": {
+                    "enum": [
+                      "subtract",
+                      "add",
+                      "project_out"
+                    ],
+                    "type": "string"
+                  },
+                  "projections": {
+                    "items": {
+                      "enum": [
+                        "gate_proj",
+                        "up_proj",
+                        "down_proj"
+                      ],
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": true
+                  },
+                  "vector_file": {
+                    "type": "string"
+                  },
+                  "vector_tensor": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "vector_tensor_b": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "alpha",
+                  "id",
+                  "layers",
+                  "operation",
+                  "projections",
+                  "vector_file"
+                ],
+                "type": "object"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "schema_version": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "operations",
+            "schema_version"
+          ],
+          "type": "object"
+        },
+        "requant": {
+          "default": null,
+          "enum": [
+            "keep-scales",
+            "recompute"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "model",
+        "patch"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_apply"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "allow_degraded": {
+          "default": false,
+          "type": "boolean"
+        },
+        "export_gguf": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "llama_cpp_dir": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_new_tokens": {
+          "default": 256,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "model": {
+          "type": "string"
+        },
+        "prompts": {
+          "default": null,
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "expect_contains": {
+                "default": null,
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "expect_not_contains": {
+                "default": null,
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "id": {
+                "default": "",
+                "type": "string"
+              },
+              "text": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "type": "object"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "prompts_file": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quant": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_eval"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "chat_template": {
+          "default": "none",
+          "oneOf": [
+            {
+              "enum": [
+                "none"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "chatml"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "dtype": {
+          "default": "auto",
+          "oneOf": [
+            {
+              "enum": [
+                "f32",
+                "bf16"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "auto"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "holdout_frac": {
+          "default": null,
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "layer": {
+          "default": 20,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "leace_rcond": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "leace_shrinkage": {
+          "default": null,
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "max_tokens": {
+          "default": 512,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "method": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "mean_diff"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "svd"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "leace"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "model": {
+          "type": "string"
+        },
+        "neg_prompts": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "neg_prompts_file": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "out": {
+          "type": "string"
+        },
+        "overwrite": {
+          "default": false,
+          "type": "boolean"
+        },
+        "pooling": {
+          "default": "last",
+          "oneOf": [
+            {
+              "enum": [
+                "last"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "mean"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "pos_prompts": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "pos_prompts_file": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "site": {
+          "default": "resid_post",
+          "oneOf": [
+            {
+              "enum": [
+                "resid_post"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "mlp_out"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "svd_center": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "model",
+        "out"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_extract"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baseline_model": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baseline_ppl": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "baseline_ppl_err": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "before": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "chunks": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ctx": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "dataset": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dtype": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "f32",
+                    "bf16"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "auto"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "fail_on_warn": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "format": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "gsm8k"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "math"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "auto"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "limit": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "llama_cpp_dir": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_new_tokens": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tokens": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_total_positions": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min_accuracy": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mode": {
+          "oneOf": [
+            {
+              "enum": [
+                "logits"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "ppl"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "eval"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "dump"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "model": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "n_gpu_layers": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "out": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "out_dtype": {
+          "default": null,
+          "enum": [
+            "f32",
+            "f16"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overwrite": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "prompt_template": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompts": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tensor": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threads": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeout_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "top_k": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "warn_delta": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "warn_kl": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "warn_top1_shift": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "worst": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_bench"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "alpha_max": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "chat_template": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "none"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "chatml"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dtype": {
+          "default": "auto",
+          "oneOf": [
+            {
+              "enum": [
+                "f32",
+                "bf16"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "auto"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "eval_dataset": {
+          "type": "string"
+        },
+        "l2_reg": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_forwards": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tokens": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min_alpha": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "objective": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "suppress"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "amplify"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "target"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "out": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overwrite": {
+          "default": false,
+          "type": "boolean"
+        },
+        "pooling": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "last"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "mean"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "probe_alpha": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "proj": {
+          "default": null,
+          "enum": [
+            "gate_proj",
+            "up_proj",
+            "down_proj"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "readout_layer": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "site": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "resid_post"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "mlp_out"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "target_layer_range": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target_projection": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "vector": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "eval_dataset",
+        "model",
+        "vector"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_autotune"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "type": "string"
+        },
+        "exclude": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "factor_dtype": {
+          "default": null,
+          "enum": [
+            "f16",
+            "bf16",
+            "f32"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "include": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "include_embeddings": {
+          "default": false,
+          "type": "boolean"
+        },
+        "max_rel_error": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "on_high_error": {
+          "enum": [
+            "warn",
+            "skip",
+            "full"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "out": {
+          "type": "string"
+        },
+        "overwrite": {
+          "default": false,
+          "type": "boolean"
+        },
+        "rank": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "seed": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tuned": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "base",
+        "out",
+        "tuned"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_diff"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "adapter_config": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "alpha": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "backup_dir": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dry_run": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "dtype": {
+          "default": null,
+          "enum": [
+            "f16",
+            "bf16",
+            "f32"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lora": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "merge",
+            "extract"
+          ],
+          "type": "string"
+        },
+        "model": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "out": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overwrite": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "patched": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rank": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scale": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "seed": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "target_modules": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_lora"
+  }
+]
