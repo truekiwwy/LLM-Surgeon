@@ -244,3 +244,300 @@ fn nested_bench_commands_and_mcp_tool_count_are_checked() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Documentation rewrite checks: parity between the two READMEs, accuracy against the real CLI
+// and MCP tool list, coverage of every command, tool and option, and hygiene.
+// ---------------------------------------------------------------------------------------
+
+const READMES: [&str; 2] = ["README.md", "README.fr.md"];
+
+/// Fenced blocks as `(info string, lines)`; fences inside a block never nest.
+fn blocks(markdown: &str) -> Vec<(String, Vec<String>)> {
+    let mut found = Vec::new();
+    let mut current: Option<(String, Vec<String>)> = None;
+    for line in markdown.lines() {
+        match (line.trim_start().strip_prefix("```"), current.take()) {
+            (Some(info), None) => current = Some((info.trim().to_string(), Vec::new())),
+            (Some(_), Some(block)) => found.push(block),
+            (None, Some(mut block)) => {
+                block.1.push(line.to_string());
+                current = Some(block);
+            }
+            (None, None) => {}
+        }
+    }
+    assert!(current.is_none(), "unclosed code fence");
+    found
+}
+
+/// Markdown outside fenced blocks.
+fn prose(markdown: &str) -> Vec<&str> {
+    let mut inside = false;
+    let mut lines = Vec::new();
+    for line in markdown.lines() {
+        if line.trim_start().starts_with("```") {
+            inside = !inside;
+        } else if !inside {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+/// `(level, anchor)` of every heading; each one must be preceded by `<a id="..."></a>`.
+fn outline(name: &str, markdown: &str) -> Vec<(usize, String)> {
+    let mut anchor: Option<String> = None;
+    let mut found = Vec::new();
+    for line in prose(markdown) {
+        if let Some(id) = line
+            .strip_prefix("<a id=\"")
+            .and_then(|r| r.strip_suffix("\"></a>"))
+        {
+            anchor = Some(id.to_string());
+        } else if line.starts_with('#') {
+            let level = line.chars().take_while(|c| *c == '#').count();
+            let id = anchor
+                .take()
+                .unwrap_or_else(|| panic!("{name}: heading without anchor: {line}"));
+            found.push((level, id));
+        }
+    }
+    found
+}
+
+/// `(heading, body)` of every heading, fenced blocks included in the body.
+fn sections(markdown: &str) -> Vec<(String, String)> {
+    let mut inside = false;
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in markdown.lines() {
+        if line.trim_start().starts_with("```") {
+            inside = !inside;
+        }
+        if !inside && line.starts_with('#') {
+            out.push((
+                line.trim_start_matches('#').trim().to_string(),
+                String::new(),
+            ));
+        } else if let Some(last) = out.last_mut() {
+            last.1.push_str(line);
+            last.1.push('\n');
+        }
+    }
+    out
+}
+
+/// Every command path of the real CLI (`bench ppl`, `lora merge`...), parents included, with
+/// its long options (help, version and the global ones left out).
+fn command_paths(command: &clap::Command, prefix: &str, out: &mut Vec<(String, Vec<String>)>) {
+    for sub in command.get_subcommands().filter(|s| s.get_name() != "help") {
+        let path = format!("{prefix}{}", sub.get_name());
+        let options: Vec<String> = sub
+            .get_arguments()
+            .filter_map(|a| a.get_long())
+            .filter(|l| !["help", "version", "json", "verbose"].contains(l))
+            .map(|l| format!("--{l}"))
+            .collect();
+        out.push((path.clone(), options));
+        command_paths(sub, &format!("{path} "), out);
+    }
+}
+
+fn real_commands() -> Vec<(String, Vec<String>)> {
+    let mut cli = Cli::command();
+    cli.build();
+    let mut paths = Vec::new();
+    command_paths(&cli, "", &mut paths);
+    paths
+}
+
+fn tool_names() -> Vec<String> {
+    weight_surgeon::mcp::tool_definitions()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn both_readmes_have_the_same_structure() {
+    let (en, fr) = (read(READMES[0]), read(READMES[1]));
+    assert_eq!(
+        outline(READMES[0], &en),
+        outline(READMES[1], &fr),
+        "headings and anchors differ"
+    );
+    let callouts = |markdown: &str| -> Vec<&'static str> {
+        prose(markdown)
+            .iter()
+            .filter_map(|l| match *l {
+                "> **For beginners**" | "> **Pour les débutants**" => Some("beginners"),
+                "> **For experts**" | "> **Pour les experts**" => Some("experts"),
+                _ => None,
+            })
+            .collect()
+    };
+    let (callouts_en, callouts_fr) = (callouts(&en), callouts(&fr));
+    assert!(callouts_en.contains(&"beginners") && callouts_en.contains(&"experts"));
+    assert_eq!(callouts_en, callouts_fr, "beginner/expert boxes differ");
+    // Only the comments of shell blocks are translated: everything else is identical.
+    let code = |markdown: &str| -> Vec<(String, Vec<String>)> {
+        blocks(markdown)
+            .into_iter()
+            .map(|(info, lines)| {
+                let is_shell = SHELL_BLOCKS.contains(&info.as_str());
+                let lines = lines
+                    .into_iter()
+                    .filter(|l| !(is_shell && l.trim_start().starts_with('#')))
+                    .collect();
+                (info, lines)
+            })
+            .collect()
+    };
+    assert_eq!(code(&en), code(&fr), "code blocks differ");
+}
+
+#[test]
+fn both_readmes_cite_the_same_options_and_tools() {
+    let options = |name: &str| -> BTreeSet<(String, String)> {
+        shell_lines(&read(name))
+            .iter()
+            .flat_map(|l| invocations(l))
+            .flat_map(|(sub, opts)| opts.into_iter().map(move |o| (sub.clone(), o)))
+            .collect()
+    };
+    assert_eq!(options(READMES[0]), options(READMES[1]));
+    let mentioned = |name: &str| -> BTreeSet<String> {
+        let text = read(name);
+        let mut found = BTreeSet::new();
+        for (at, _) in text.match_indices("surgeon_") {
+            let word: String = text[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase() || *c == '_')
+                .collect();
+            found.insert(word.trim_end_matches('_').to_string());
+        }
+        found
+    };
+    let real: BTreeSet<String> = tool_names().into_iter().collect();
+    for name in READMES {
+        assert_eq!(
+            mentioned(name),
+            real,
+            "{name}: MCP tools cited vs tools/list"
+        );
+    }
+}
+
+#[test]
+fn every_command_and_option_is_documented_and_real() {
+    let commands = real_commands();
+    for name in READMES {
+        let markdown = read(name);
+        let mut documented = BTreeSet::new();
+        for (heading, body) in sections(&markdown) {
+            let Some(path) = heading
+                .strip_prefix("`surgeon ")
+                .and_then(|h| h.strip_suffix('`'))
+            else {
+                continue;
+            };
+            let (_, real_options) = commands
+                .iter()
+                .find(|(p, _)| p == path)
+                .unwrap_or_else(|| panic!("{name}: `surgeon {path}` is not a command"));
+            let rows: BTreeSet<String> = body
+                .lines()
+                .filter_map(|l| l.strip_prefix("| `"))
+                .filter(|r| r.starts_with("--"))
+                .map(|r| r.split('`').next().unwrap().to_string())
+                .collect();
+            for row in &rows {
+                assert!(
+                    real_options.contains(row),
+                    "{name}: `{row}` is not an option of `surgeon {path}`"
+                );
+            }
+            for option in real_options {
+                assert!(
+                    rows.contains(option),
+                    "{name}: `surgeon {path}` does not document {option}"
+                );
+            }
+            documented.insert(path.to_string());
+        }
+        for (path, _) in &commands {
+            assert!(
+                documented.contains(path),
+                "{name}: no reference card for `surgeon {path}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn quoted_options_exist_somewhere_in_the_cli() {
+    let mut known: BTreeSet<String> = real_commands().into_iter().flat_map(|(_, o)| o).collect();
+    known.extend(["--json", "--verbose", "--help", "--version"].map(String::from));
+    // Options of other tools quoted on purpose: Claude Code, cargo, llama-perplexity.
+    let foreign = [
+        "--scope",
+        "--temp",
+        "--release",
+        "--example",
+        "--path",
+        "--target",
+        "--all-targets",
+        "--batch-size",
+        "--ubatch-size",
+        "--ppl-stride",
+        "--no-mmap",
+        "--mlock",
+    ];
+    for name in READMES {
+        for line in prose(&read(name)) {
+            for token in line.split('`').skip(1).step_by(2) {
+                for word in token.split_whitespace() {
+                    let option = word.split(['=', ',', ')', '.']).next().unwrap();
+                    let plain = option.len() > 2
+                        && option.starts_with("--")
+                        && option[2..]
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit());
+                    assert!(
+                        !plain || known.contains(option) || foreign.contains(&option),
+                        "{name}: unknown option `{option}` in: {line}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn readmes_are_clean() {
+    let license_file = Path::new(env!("CARGO_MANIFEST_DIR")).join("LICENSE");
+    for name in READMES {
+        let markdown = read(name);
+        blocks(&markdown); // panics on an unclosed fence
+        let fences = markdown
+            .lines()
+            .filter(|l| l.trim_start().starts_with("```"))
+            .count();
+        assert_eq!(fences % 2, 0, "{name}: unbalanced fences");
+        for forbidden in [r"C:\Users", r"C:\surgery", "TODO", "lorem", "ollama"] {
+            assert!(
+                !markdown.to_lowercase().contains(&forbidden.to_lowercase()),
+                "{name}: contains `{forbidden}`"
+            );
+        }
+        if !license_file.exists() {
+            let lower = markdown.to_lowercase();
+            assert!(
+                !lower.contains("badge/license") && !lower.contains("badge/licence"),
+                "{name}: license badge without a LICENSE file"
+            );
+        }
+    }
+}
