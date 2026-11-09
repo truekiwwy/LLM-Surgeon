@@ -185,6 +185,11 @@ pub fn rsvd(a: &dyn RowSource, p: &RsvdParams, cancel: &AtomicBool) -> Result<Rs
             }
         }
         if live {
+            if c.sigma > f64::from(f32::MAX) {
+                return Err(SurgeryError::Failed(
+                    "rsvd : valeur singulière hors de la plage f32".into(),
+                ));
+            }
             s[t] = c.sigma as f32;
             for (dst, &x) in v[t * n..(t + 1) * n].iter_mut().zip(&c.v) {
                 *dst = (sign * x / c.sigma) as f32;

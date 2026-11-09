@@ -842,3 +842,46 @@ fn cli_json_patch_still_takes_the_legacy_path() {
     assert_eq!(code, exit::INVALID_INPUT, "{v}");
     assert_eq!(v["error"]["kind"], "invalid_patch");
 }
+
+#[test]
+fn cli_refuses_the_gguf_mode_for_a_surgery_patch() {
+    let c = cli_fixture();
+    let (code, v) = run_json(
+        &deps(),
+        &[
+            "apply",
+            "--model",
+            s(&c.model),
+            "--patch",
+            s(&c.patch),
+            "--gguf",
+        ],
+    );
+    assert_eq!(code, exit::INVALID_INPUT, "{v}");
+    assert_eq!(v["error"]["kind"], "invalid_arguments");
+    assert!(backups_in(c.dir.path()).is_empty(), "nothing was touched");
+}
+
+#[test]
+fn cli_warns_that_gguf_and_io_options_are_ignored_for_a_surgery_patch() {
+    let c = cli_fixture();
+    let (code, v) = run_json(
+        &deps(),
+        &[
+            "apply",
+            "--model",
+            s(&c.model),
+            "--patch",
+            s(&c.patch),
+            "--no-prefetch",
+        ],
+    );
+    assert_eq!(code, 0, "{v}");
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.contains("ignorées"))),
+        "{warnings:?}"
+    );
+}

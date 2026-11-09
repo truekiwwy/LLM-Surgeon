@@ -686,6 +686,141 @@ named in the marker over the model, check its SHA-256 against `original_sha256`,
 delete the marker. CI cannot validate a patched file against a real llama.cpp; check
 that it loads and run `surgeon bench ppl` before use.
 
+### 11. Ship a fine-tune as a patch (`surgeon diff`, `surgeon apply`)
+
+`surgeon diff` compares a base checkpoint with its fine-tuned version and writes the
+difference to a `.surgery` file: for each 2D tensor, a low-rank approximation `U diag(S) V` of
+`tuned - base` (randomized SVD, pure Rust), for each 1D tensor the exact delta. Both
+checkpoints must be SafeTensors (a file or a sharded directory) with identical tensor names,
+shapes and dtypes; a mismatch is an error that lists the differences. Identical tensors are
+skipped, and `embed_tokens` / `lm_head` are left out unless you ask for them.
+
+```bash
+surgeon diff --base <BASE_DIR> --tuned <TUNED_DIR> --out finetune.surgery --rank 16
+surgeon diff --base <BASE_DIR> --tuned <TUNED_DIR> --out finetune.surgery \
+    --include 'mlp' --factor-dtype bf16 --max-rel-error 0.3 --on-high-error full
+```
+
+Real output on the pair written by `cargo run --example make_fake_checkpoints -- --out <DIR>
+--kind rank --rank 4 --lora` (tensors shortened; the difference has rank 4, so the error is 0):
+
+```text
+patch écrit : finetune.surgery (0.01 MiB, factor_dtype f16, rang demandé 4)
+10 tenseur(s) dans le patch, 1 identique(s) ignoré(s), 2 filtré(s)
+  model.layers.0.self_attn.q_proj.weight · lowrank · rang 4 · erreur relative 0.0000 · énergie 1.0000
+  model.layers.0.input_layernorm.weight · full_delta · rang 0 · erreur relative 0.0000 · énergie 1.0000
+  [...]
+Note : le .surgery est une APPROXIMATION du fine-tune (erreur relative par tenseur), exacte seulement si la différence est de rang <= r. Sa taille vaut environ la somme de r(m+n) x octets par facteur : des centaines de Mo pour un 7B au rang 16.
+```
+
+The output is reproducible (same input and `--seed`, same bytes, whatever the thread count;
+a timestamp is only recorded with `--timestamp`). `--max-rel-error` with `--on-high-error
+warn|skip|full` decides what happens to a tensor the approximation reconstructs badly.
+
+`surgeon apply` detects a `.surgery` file by its `SURG` magic and adds the delta to the model
+in place, with the same backup and rollback as a JSON patch (`W <- W + scale * U diag(S) V`,
+rounded to the model dtype):
+
+```bash
+surgeon apply --model <MODEL_DIR> --patch finetune.surgery --dry-run
+surgeon apply --model <MODEL_DIR> --patch finetune.surgery --scale 0.5 --verify-base strict
+```
+
+```text
+[DRY-RUN]  model.layers.0.mlp.down_proj.weight · lowrank · rang 4 · erreur 0.0000
+[DRY-RUN]  model.layers.0.input_layernorm.weight · full_delta · rang 0 · erreur 0.0000
+[...]
+dry-run : 10 tenseur(s) vérifiés, aucun octet écrit
+```
+
+A real application ends with `[BACKUP] ... ✓ sha256 vérifié`, `[COMMIT] modèle patché` and
+`10 tenseur(s) patchés, 9124 éléments modifiés, max |delta| 0.218872`.
+
+`--verify-base strict|warn|off` compares each tensor of the model with the SHA-256 stored in the
+patch (default `warn`: apply anyway, with a warning). The binary format is specified in
+[docs/SPECIFICATION.md](docs/SPECIFICATION.md).
+
+What to expect, honestly:
+
+- A `.surgery` is an approximation of the full fine-tune. The relative error of every tensor is
+  reported by `diff`; the result is exact only when the true difference has rank at most `--rank`.
+- It is not small. Its size is about the sum of `r (m + n)` times the bytes of the factor dtype
+  over all tensors: hundreds of MB for a 7B model at rank 16, not a few MB.
+- It is not exposed through the MCP `surgeon_apply` tool (`apply` on a `.surgery` is CLI only).
+- `--gguf` is refused for a `.surgery` (it patches SafeTensors only), and the other GGUF and chunked-write options of `apply` are ignored with a warning.
+
+### 12. LoRA adapters (`surgeon lora merge`, `surgeon lora extract`)
+
+`surgeon lora merge` folds a PEFT LoRA adapter into the weights of a SafeTensors model, in
+place, with a verified backup and an automatic rollback on error or Ctrl-C:
+`W <- W + scale * (lora_alpha / r) * B A`. `lora_alpha` is read from the `adapter_config.json`
+next to the adapter (or from `--adapter-config`); `--alpha` overrides it. With neither, the
+command stops with a usage error instead of guessing. DoRA, embedding adapters,
+`fan_in_fan_out` and `rank_pattern` / `alpha_pattern` are refused explicitly.
+
+```bash
+surgeon lora merge --model <MODEL_DIR> --lora <ADAPTER_DIR>/adapter_model.safetensors --dry-run
+surgeon lora merge --model <MODEL_DIR> --lora <ADAPTER_DIR>/adapter_model.safetensors --scale 0.8
+```
+
+`surgeon lora extract` goes the other way: it approximates the difference between two
+checkpoints with a rank `r` adapter (`B = U sqrt(S)`, `A = sqrt(S) V`) and writes a PEFT-format
+`adapter_model.safetensors` plus the `adapter_config.json` next to it.
+
+```bash
+surgeon lora extract --base <BASE_DIR> --patched <TUNED_DIR> \
+    --out adapter/adapter_model.safetensors --rank 16 --dtype f32
+```
+
+Real output of the merge, then of the extraction, on the same fake pair (the adapter written by
+`--lora` has `lora_alpha = r`):
+
+```text
+[BACKUP]   <MODEL_DIR>/model.safetensors.bak-<timestamp>  ✓ sha256 vérifié
+[COMMIT]   modèle patché · 0.0 s
+6 tenseur(s) fusionnés (rang 4, échelle effective 1), max |delta| 0.218750
+
+6 tenseur(s) extraits (rang 4, f32), erreur relative moyenne 0.0000
+  adapter : ex/adapter_model.safetensors
+  config  : ex/adapter_config.json
+```
+
+`--lora` takes the adapter FILE, and the directory of `--out` must already exist. Without a
+`lora_alpha` (no `adapter_config.json` next to the adapter, no `--alpha`), the command stops:
+
+```text
+erreur : arguments invalides : lora_alpha introuvable : passez --alpha <valeur>, ou placez adapter_config.json à côté de --lora (ou donnez --adapter-config)
+```
+
+Limits: the PEFT layout is followed from its documentation but is not tested against
+HuggingFace PEFT in CI. Merging into a GGUF file is not supported. `diff` and both `lora`
+modes are also available to agents as the MCP tools `surgeon_diff` and `surgeon_lora`.
+
+### 13. Preview a steering vector live (`surgeon tui --preview`)
+
+With `--preview`, the dashboard gains a third tab that generates text from the model with the
+steering vector injected, next to the unsteered baseline, while you move a slider.
+
+```bash
+surgeon tui --model <MODEL_DIR> --vector refusal.safetensors --preview \
+    --preview-prompt "How do I pick a lock?" --preview-tokens 30 --alpha-range -2:2
+surgeon tui --model <MODEL_DIR> --vector refusal.safetensors --preview --snapshot
+```
+
+`--preview-alpha`, `--preview-layer` and `--preview-template none|chatml` set the starting
+point. The slider is relative: the injected amount is `alpha` times the mean residual norm
+measured on your prompt at the chosen layer, and both values are shown. `--snapshot --preview`
+generates synchronously and prints the tab as plain text.
+
+Limits:
+
+- It is activation steering (`h <- h + alpha_abs * v` at one layer, on every position), an
+  approximation of the weight patch, not the patch itself. Applying the patch can behave
+  differently.
+- Generation runs in pure Rust on the CPU: it is slow on a large model. The tab warns below
+  one token per second, and checks the hardware budget before loading the model.
+- Qwen2 / Qwen2.5 models only, and the preview is not exposed through MCP.
+
 ## Performance
 
 `apply` shifts with SIMD kernels chosen at run time (AVX-512F, AVX2 + F16C, NEON, else
@@ -760,18 +895,21 @@ write-back policy; rerun the example on your machine.
 | --- | --- | --- |
 | `surgeon check` | RAM and VRAM budget, verdict | nothing |
 | `surgeon inspect` | MLP tensors, optional statistics | nothing |
-| `surgeon apply` | Applies a `patch.json` in place (`--dry-run` first), `--gguf` for a quantized GGUF | model, backup |
+| `surgeon apply` | Applies a `patch.json` or a `.surgery` in place (`--dry-run` first), `--gguf` for a quantized GGUF | model, backup |
 | `surgeon eval` | Non-regression through llama.cpp, conditional GGUF export | GGUF |
 | `surgeon extract` | Steering vector from a Qwen2 layer | vector, companion `.stats.json` |
 | `surgeon bench` | Logits dumps and KL/top-k, perplexity delta, Pass@1 | logits dump (`dump` only) |
 | `surgeon autotune` | Per-layer coefficients by ridge on measured responses | patch.json (`--out` only) |
-| `surgeon tui` | Dashboard: weight inspector and steering vector viewer | nothing |
-| `surgeon schema` | JSON Schema of `patch.json`, or the MCP tool definitions | stdout only |
+| `surgeon diff` | Low-rank `.surgery` patch between two checkpoints | the `.surgery` file |
+| `surgeon lora` | `merge` a LoRA adapter into the weights, or `extract` one from two checkpoints | model, backup (`merge`) or adapter (`extract`) |
+| `surgeon tui` | Dashboard: weight inspector and steering vector viewer, live preview tab with `--preview` | nothing |
+| `surgeon schema` | JSON Schema of `patch.json`, of the `.surgery` header, or the MCP tool definitions | stdout only |
 | `surgeon mcp` | MCP server on stdio | through its tools |
 
 ```bash
 surgeon schema --kind patch
 surgeon schema --kind tools
+surgeon schema --kind surgery
 ```
 
 ## Responsible use
