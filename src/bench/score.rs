@@ -708,6 +708,24 @@ mod tests {
     }
 
     #[test]
+    fn judge_ignores_end_markers_units_and_percent() {
+        for (gold, output) in [
+            ("18", "#### 18 [end of text]"),
+            ("160", "#### 160 minutes [end of text]"),
+            ("60", "#### 60% [end of text]"),
+        ] {
+            let item = Item {
+                id: "x".into(),
+                question: "q".into(),
+                gold: gold.into(),
+            };
+            let r = judge(&item, output, false);
+            assert!(r.correct, "{output}: {r:?}");
+            assert!(!r.extracted.unwrap().contains("end of text"));
+        }
+    }
+
+    #[test]
     fn scoring_a_thousand_outputs_is_fast() {
         let item = Item {
             id: "x".into(),

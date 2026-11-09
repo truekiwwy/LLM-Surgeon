@@ -141,7 +141,32 @@ fn last_number(text: &str) -> Option<String> {
 
 type Finder = fn(&str) -> Option<String>;
 
+/// Printed by llama.cpp (`[end of text]`) or left in the stream when a stop token is not
+/// filtered; never part of an answer.
+const END_MARKERS: [&str; 6] = [
+    "[end of text]",
+    "</s>",
+    "<|im_end|>",
+    "<|endoftext|>",
+    "<|end_of_text|>",
+    "<|eot_id|>",
+];
+
+/// `output` without trailing whitespace and end-of-generation markers. Only the tail is
+/// touched, so a marker quoted inside the reasoning stays.
+fn strip_end_markers(output: &str) -> &str {
+    let mut text = output.trim_end();
+    while let Some(rest) = END_MARKERS
+        .iter()
+        .find_map(|marker| text.strip_suffix(marker))
+    {
+        text = rest.trim_end();
+    }
+    text
+}
+
 pub fn extract(output: &str) -> Option<Extracted> {
+    let output = strip_end_markers(output);
     let rules: [(Rule, Finder); 5] = [
         (Rule::Hashes, hashes),
         (Rule::Boxed, last_boxed),
@@ -211,6 +236,22 @@ mod tests {
         is("He pays 18 dollars", "18", Rule::LastNumber);
         assert_eq!(got(""), None);
         assert_eq!(got("no digits at all"), None);
+    }
+
+    #[test]
+    fn end_markers_are_not_part_of_the_answer() {
+        is("Total.\n#### 18 [end of text]", "18", Rule::Hashes);
+        is(
+            "#### 160 minutes [end of text]\n",
+            "160 minutes",
+            Rule::Hashes,
+        );
+        is("#### 60% </s>", "60%", Rule::Hashes);
+        is("The answer is 42.<|im_end|>\n", "42", Rule::Phrase);
+        is("**7** <|im_end|> [end of text]", "7", Rule::Bold);
+        // Mid-text markers are left alone.
+        is("a [end of text] b 5", "5", Rule::LastNumber);
+        assert_eq!(got("[end of text]"), None);
     }
 
     #[test]
