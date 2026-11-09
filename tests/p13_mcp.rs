@@ -1,6 +1,6 @@
 //! MCP tools `surgeon_diff` and `surgeon_lora`: tools/list and schemas, sandbox, `--read-only`,
 //! per-mode validation, then the end-to-end tests on the real diff and LoRA engines
-//! (the progress test stays ignored until `McpProgress` handles `SurgeryEvent::Tensor`).
+//! (the progress test relies on `McpProgress` handling `SurgeryEvent`, wired in `server.rs`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -852,7 +852,6 @@ fn lora_extract_writes_a_peft_adapter_that_rebuilds_the_delta() {
 }
 
 #[test]
-#[ignore = "needs the McpProgress wiring line of server.rs"]
 fn progress_notifications_follow_the_token_for_diff_and_merge() {
     let dir = tempfile::tempdir().unwrap();
     checkpoints(dir.path());
