@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
 
 use super::app::{App, Computation, Tab, MIN_HEIGHT, MIN_WIDTH};
+use super::tabs::preview;
 use super::widgets::{matrix_panel, steering_panel};
 
 pub fn view(frame: &mut Frame, app: &App) {
@@ -31,8 +32,13 @@ pub fn view(frame: &mut Frame, app: &App) {
     let selected = match app.tab {
         Tab::Inspector => 0,
         Tab::Steering => 1,
+        Tab::Preview => 2,
     };
-    let tabs = Tabs::new(["1 Inspecteur de poids", "2 Steering vector"])
+    let mut titles = vec!["1 Inspecteur de poids", "2 Steering vector"];
+    if app.preview.is_some() {
+        titles.push("3 Preview live");
+    }
+    let tabs = Tabs::new(titles)
         .select(selected)
         .style(theme.dim())
         .highlight_style(theme.selected())
@@ -47,6 +53,11 @@ pub fn view(frame: &mut Frame, app: &App) {
         (true, _) => welcome(frame, body, app),
         (false, Tab::Inspector) => matrix_panel::render_inspector(frame, body, app),
         (false, Tab::Steering) => steering_panel::render_steering(frame, body, app),
+        (false, Tab::Preview) => {
+            if let Some(state) = &app.preview {
+                preview::view(frame, body, state, theme);
+            }
+        }
     }
     status_bar(frame, status, app);
     if app.help {
@@ -94,6 +105,7 @@ fn status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let keys = match app.tab {
         Tab::Inspector => "Tab onglet · ↑↓ couche · ←→ projection · l log · ? aide · q quitter",
         Tab::Steering => "Tab onglet · ←→ défiler · +/- zoom · ↑↓ top-10 · ? aide · q quitter",
+        Tab::Preview => app.preview.as_ref().map_or("", |p| p.keys_hint()),
     };
     let state = match &app.computation {
         Computation::Running { .. } => format!("{} calcul…", app.spinner()),

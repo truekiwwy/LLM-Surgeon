@@ -11,6 +11,7 @@ use ratatui::Terminal;
 
 use super::app::{update, App, Effect, Msg};
 use super::event::EventSource;
+use super::tabs::preview::{PreviewEffect, PreviewMsg, PreviewWorker};
 use super::ui::view;
 use super::worker::Worker;
 use super::TuiError;
@@ -58,11 +59,16 @@ pub struct LoopStats {
     pub draw_time: Duration,
 }
 
-fn run_effects(effects: Vec<Effect>, worker: Option<&Worker>) {
+fn run_effects(effects: Vec<Effect>, worker: Option<&Worker>, preview: Option<&PreviewWorker>) {
     for effect in effects {
         match (effect, worker) {
             (Effect::RequestStats(request), Some(worker)) => worker.request(request),
             (Effect::RequestStats(_), None) => {}
+            (Effect::Preview(PreviewEffect::Generate(request)), _) => {
+                if let Some(preview) = preview {
+                    preview.request(request);
+                }
+            }
         }
     }
 }
@@ -74,8 +80,19 @@ pub fn run_loop<B: Backend>(
     events: &mut dyn EventSource,
     worker: Option<&Worker>,
 ) -> Result<LoopStats, TuiError> {
+    run_loop_with(terminal, app, events, worker, None)
+}
+
+/// [`run_loop`] with the generation worker of the preview tab.
+pub fn run_loop_with<B: Backend>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+    events: &mut dyn EventSource,
+    worker: Option<&Worker>,
+    preview: Option<&PreviewWorker>,
+) -> Result<LoopStats, TuiError> {
     let mut stats = LoopStats::default();
-    run_effects(app.start(), worker);
+    run_effects(app.start(), worker, preview);
     loop {
         while let Some(reply) = worker.and_then(Worker::try_recv) {
             let msg = Msg::StatsReady {
@@ -83,7 +100,11 @@ pub fn run_loop<B: Backend>(
                 key: reply.key,
                 result: reply.result,
             };
-            run_effects(update(app, msg), worker);
+            run_effects(update(app, msg), worker, preview);
+        }
+        while let Some(event) = preview.and_then(PreviewWorker::try_recv) {
+            let msg = Msg::Preview(PreviewMsg::Worker(event));
+            run_effects(update(app, msg), worker, preview);
         }
         if app.dirty {
             let started = Instant::now();
@@ -109,7 +130,7 @@ pub fn run_loop<B: Backend>(
                 Msg::Tick
             }
         };
-        run_effects(update(app, msg), worker);
+        run_effects(update(app, msg), worker, preview);
     }
 }
 
@@ -123,6 +144,19 @@ pub fn run_session<B: Backend>(
 ) -> Result<LoopStats, TuiError> {
     let _restore = Restore::new(guard);
     run_loop(terminal, app, events, worker)
+}
+
+/// [`run_session`] with the generation worker of the preview tab.
+pub fn run_session_with<B: Backend>(
+    guard: &mut dyn TerminalGuard,
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+    events: &mut dyn EventSource,
+    worker: Option<&Worker>,
+    preview: Option<&PreviewWorker>,
+) -> Result<LoopStats, TuiError> {
+    let _restore = Restore::new(guard);
+    run_loop_with(terminal, app, events, worker, preview)
 }
 
 /// One frame as plain text (no ANSI at all): trailing spaces trimmed, one line per row.
