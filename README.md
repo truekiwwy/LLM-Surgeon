@@ -747,6 +747,7 @@ What to expect, honestly:
 - It is not small. Its size is about the sum of `r (m + n)` times the bytes of the factor dtype
   over all tensors: hundreds of MB for a 7B model at rank 16, not a few MB.
 - It is not exposed through the MCP `surgeon_apply` tool (`apply` on a `.surgery` is CLI only).
+- `--gguf` is refused for a `.surgery` (it patches SafeTensors only), and the other GGUF and chunked-write options of `apply` are ignored with a warning.
 
 ### 12. LoRA adapters (`surgeon lora merge`, `surgeon lora extract`)
 
@@ -900,6 +901,8 @@ write-back policy; rerun the example on your machine.
 | `surgeon bench` | Logits dumps and KL/top-k, perplexity delta, Pass@1 | logits dump (`dump` only) |
 | `surgeon autotune` | Per-layer coefficients by ridge on measured responses | patch.json (`--out` only) |
 | `surgeon diff` | Low-rank `.surgery` patch between two checkpoints | the `.surgery` file |
+| `surgeon lora` | `merge` a LoRA adapter into the weights, or `extract` one from two checkpoints | model, backup (`merge`) or adapter (`extract`) |
+| `surgeon tui` | Dashboard: weight inspector and steering vector viewer, live preview tab with `--preview` | nothing |
 | `surgeon schema` | JSON Schema of `patch.json`, of the `.surgery` header, or the MCP tool definitions | stdout only |
 | `surgeon mcp` | MCP server on stdio | through its tools |
 

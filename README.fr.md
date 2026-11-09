@@ -761,6 +761,7 @@ dans [docs/SPECIFICATION.md](docs/SPECIFICATION.md).
   des facteurs sur tous les tenseurs : des centaines de Mo pour un 7B à rang 16, pas quelques Mo.
 - Il n'est pas exposé par l'outil MCP `surgeon_apply` (`apply` sur un `.surgery` est réservé à
   la ligne de commande).
+- `--gguf` est refusé pour un `.surgery` (il ne patche que des SafeTensors), et les autres options GGUF et d'écriture par blocs de `apply` sont ignorées avec un avertissement.
 
 ### 12. Adaptateurs LoRA (`surgeon lora merge`, `surgeon lora extract`)
 
@@ -917,6 +918,8 @@ relancez l'exemple sur votre machine.
 | `surgeon bench` | Dumps de logits et KL/top-k, delta de perplexité, Pass@1 | dump de logits (`dump` seulement) |
 | `surgeon autotune` | Coefficients par couche par ridge sur des réponses mesurées | patch.json (`--out` seulement) |
 | `surgeon diff` | Patch `.surgery` de bas rang entre deux checkpoints | le fichier `.surgery` |
+| `surgeon lora` | `merge` d'un adaptateur LoRA dans les poids, ou `extract` depuis deux checkpoints | modèle, sauvegarde (`merge`) ou adaptateur (`extract`) |
+| `surgeon tui` | Tableau de bord : inspecteur de poids et visualiseur de vecteur, onglet de prévisualisation avec `--preview` | rien |
 | `surgeon schema` | JSON Schema de `patch.json`, de l'en-tête `.surgery`, ou définitions des outils MCP | stdout seulement |
 | `surgeon mcp` | Serveur MCP sur stdio | via ses outils |
 
