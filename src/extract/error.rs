@@ -56,6 +56,11 @@ pub enum ExtractError {
 
     #[error("extraction annulée, aucun fichier écrit")]
     Cancelled,
+
+    #[error(
+        "méthode svd : prompts non appariés ({pos} positifs, {neg} négatifs) ; il en faut autant, appariés par index"
+    )]
+    UnpairedPrompts { pos: usize, neg: usize },
 }
 
 impl ExtractError {
@@ -63,6 +68,7 @@ impl ExtractError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::InvalidArgument(_) | Self::Prompts { .. } => "invalid_input",
+            Self::UnpairedPrompts { .. } => "unpaired_prompts",
             Self::OutputExists(_) => "output_exists",
             Self::InsufficientResources(_) => "insufficient_resources",
             Self::UnsupportedArchitecture { .. } => "unsupported_architecture",

@@ -5,6 +5,7 @@ pub mod engine;
 pub mod eval;
 pub mod extract;
 pub mod hardware;
+pub mod linalg;
 pub mod mcp;
 pub mod patch;
 pub mod tui;

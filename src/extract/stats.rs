@@ -63,8 +63,7 @@ pub fn separation(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result<(Vec<f32>, Separ
     separation_with_projections(pos, neg).map(|s| (s.direction, s.stats))
 }
 
-/// [`separation`] plus the per-prompt projections.
-pub fn separation_with_projections(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result<Separation> {
+fn check_sets(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result<usize> {
     let dim = pos.first().map(Vec::len).unwrap_or(0);
     if pos.is_empty() || neg.is_empty() || pos.iter().chain(neg).any(|v| v.len() != dim) || dim == 0
     {
@@ -72,6 +71,12 @@ pub fn separation_with_projections(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result
             "ensembles d'activations vides ou de tailles différentes".into(),
         ));
     }
+    Ok(dim)
+}
+
+/// [`separation`] plus the per-prompt projections.
+pub fn separation_with_projections(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result<Separation> {
+    let dim = check_sets(pos, neg)?;
     let (mean_pos, mean_neg) = (mean(pos, dim), mean(neg, dim));
     let diff: Vec<f64> = mean_pos.iter().zip(&mean_neg).map(|(p, n)| p - n).collect();
     let norm = dot(&diff, &diff).sqrt();
@@ -79,17 +84,44 @@ pub fn separation_with_projections(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result
         return Err(ExtractError::DegenerateDirection { norm });
     }
     let unit: Vec<f64> = diff.iter().map(|d| d / norm).collect();
+    Ok(finish(pos, neg, &mean_pos, &mean_neg, norm, &unit))
+}
 
+/// The same diagnostics along a direction computed elsewhere (`svd`, `leace`):
+/// `raw_diff_norm` and `cosine_means` still describe the two means, the projections, d′
+/// and the threshold use `unit`.
+pub fn separation_along(pos: &[Vec<f64>], neg: &[Vec<f64>], unit: &[f64]) -> Result<Separation> {
+    let dim = check_sets(pos, neg)?;
+    if unit.len() != dim {
+        return Err(ExtractError::Compute(format!(
+            "direction de taille {} pour des activations de taille {dim}",
+            unit.len()
+        )));
+    }
+    let (mean_pos, mean_neg) = (mean(pos, dim), mean(neg, dim));
+    let diff: Vec<f64> = mean_pos.iter().zip(&mean_neg).map(|(p, n)| p - n).collect();
+    let norm = dot(&diff, &diff).sqrt();
+    Ok(finish(pos, neg, &mean_pos, &mean_neg, norm, unit))
+}
+
+fn finish(
+    pos: &[Vec<f64>],
+    neg: &[Vec<f64>],
+    mean_pos: &[f64],
+    mean_neg: &[f64],
+    norm: f64,
+    unit: &[f64],
+) -> Separation {
     let (norm_pos, norm_neg) = (
-        dot(&mean_pos, &mean_pos).sqrt(),
-        dot(&mean_neg, &mean_neg).sqrt(),
+        dot(mean_pos, mean_pos).sqrt(),
+        dot(mean_neg, mean_neg).sqrt(),
     );
     let cosine_means = match norm_pos * norm_neg {
-        n if n > 0.0 => dot(&mean_pos, &mean_neg) / n,
+        n if n > 0.0 => dot(mean_pos, mean_neg) / n,
         _ => 0.0,
     };
-    let proj_pos: Vec<f64> = pos.iter().map(|v| dot(v, &unit)).collect();
-    let proj_neg: Vec<f64> = neg.iter().map(|v| dot(v, &unit)).collect();
+    let proj_pos: Vec<f64> = pos.iter().map(|v| dot(v, unit)).collect();
+    let proj_neg: Vec<f64> = neg.iter().map(|v| dot(v, unit)).collect();
     let pos_mean_proj = proj_pos.iter().sum::<f64>() / proj_pos.len() as f64;
     let neg_mean_proj = proj_neg.iter().sum::<f64>() / proj_neg.len() as f64;
     let pooled_sd =
@@ -106,12 +138,12 @@ pub fn separation_with_projections(pos: &[Vec<f64>], neg: &[Vec<f64>]) -> Result
         threshold_accuracy,
         threshold,
     };
-    Ok(Separation {
+    Separation {
         direction: unit.iter().map(|&u| u as f32).collect(),
         stats,
         pos_projections: proj_pos,
         neg_projections: proj_neg,
-    })
+    }
 }
 
 /// Sweeps every cut between sorted projections: classify `> cut` as positive.

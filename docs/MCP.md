@@ -14,7 +14,7 @@ surgeon mcp --allow-dir /modeles --allow-dir /directions --read-only
 | Option | Effet |
 | --- | --- |
 | `--allow-dir <dossier>` | Dossier autorisé, répétable. Défaut : `$SURGEON_MCP_ALLOW_DIRS` (séparateur du système : `;` sous Windows, `:` ailleurs), sinon le dossier courant. |
-| `--read-only` | Refuse `surgeon_apply`, `surgeon_extract`, `export_gguf` et `surgeon_bench` en mode `dump` (`error.kind = "read_only"`). |
+| `--read-only` | Refuse `surgeon_apply`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en mode `dump` et `surgeon_autotune` avec `out` (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out` reste permis. |
 | `--allow-no-backup` | Respecte `backup: false` dans un patch. Sans cette option, la sauvegarde est imposée. |
 
 `$LLAMA_CPP_DIR`, défini par l'opérateur, sert de dossier llama.cpp par défaut pour
@@ -44,6 +44,7 @@ claude mcp add surgeon -- surgeon mcp --allow-dir /chemin/vers/modeles
 | `surgeon_eval` | Non-régression (boucles, attentes) et export GGUF conditionnel | écrit le GGUF |
 | `surgeon_extract` | Vecteur de direction depuis une couche Qwen2 (Rust pur, CPU) | écrit le `.safetensors`, idempotent |
 | `surgeon_bench` | Mesure d'une chirurgie : `mode` `dump`, `logits`, `ppl` ou `eval` | non destructif, idempotent |
+| `surgeon_autotune` | Coefficients α par couche ajustés par ridge, patch.json en sortie | non destructif, idempotent ; écrit `out` seulement s'il est fourni |
 
 Les schémas exacts : `surgeon schema --kind tools`. Le format du patch :
 `surgeon schema` (JSON Schema draft-07, sans `$ref`).
@@ -125,11 +126,45 @@ Recette d'un agent :
 {"name": "surgeon_bench", "arguments": {"mode": "logits", "before": "before.safetensors", "after": "after.safetensors", "warn_kl": 0.05}}
 ```
 
+## Méthodes d'extraction, `project_out` et `surgeon_autotune`
+
+`surgeon_extract` accepte `method` (`mean_diff` par défaut, sorties inchangées ; `svd` exige
+autant de prompts positifs que négatifs, appariés par index, sinon `unpaired_prompts` ;
+`leace` écrit en plus `<out>.leace.safetensors` avec les tenseurs `a`, `b`, `mean`,
+`u_whitened`), `svd_center`, `leace_shrinkage` (défaut 0.1, 0 = pseudo-inverse),
+`leace_rcond` (défaut 1e-10) et `holdout_frac` (diagnostic hors échantillon, 10 prompts par
+classe au moins). `data.method_diagnostics` donne les diagnostics de la méthode
+(`split_half_cosine`, `cross_cov_before`/`cross_cov_after`, `holdout_cross_cov_ratio`...).
+L'effacement LEACE n'est exact qu'en échantillon : avec n < d, seul le ratio hors
+échantillon dit s'il généralise.
+
+L'opération de patch `project_out` applique l'effaceur aux poids de `down_proj` :
+`W ← W − alpha·a(bᵀW)`, `alpha` dans [0, 1], `vector_tensor` = `a` et `vector_tensor_b` = `b`
+(obligatoires), pas d'`axis` autre que le défaut :
+
+```json
+{"id": "erase", "layers": "18-22", "projections": ["down_proj"], "operation": "project_out",
+ "vector_file": "refusal.safetensors.leace.safetensors", "vector_tensor": "a",
+ "vector_tensor_b": "b", "alpha": 1.0}
+```
+
+`surgeon_autotune` (`model`, `vector`, `eval_dataset` requis ; `target_layer_range` "A-B",
+`readout_layer`, `proj`, `objective` `suppress`/`amplify`/`target`, `target_projection`,
+`l2_reg` nombre ou "auto", `probe_alpha`, `alpha_max`, `min_alpha`, `max_forwards`,
+`max_tokens`, `dtype`, `site`, `pooling`, `chat_template`, `out`, `overwrite`) mesure en
+mémoire la réponse de la projection lue à la couche de lecture quand chaque couche candidate
+est décalée, ajuste les α par ridge (λ fixe ou LOOCV), applique tous les α ensemble pour
+vérifier, et renvoie le patch dans `data.patch` (écrit dans `out` seulement si fourni,
+validé par `validate_patch` avant). Les couches au-delà de la lecture sont exclues avec un
+avertissement ; `max_forwards` est vérifié avant tout calcul. Il ne mesure pas les effets
+secondaires : enchaîner avec `surgeon_bench` sur une copie.
+
 ## Garde-fous
 
 - **Chemins confinés** : chaque chemin (modèle, prompts, `vector_file`, `backup_dir`,
-  `export_gguf`, `llama_cpp_dir`, `base_dir`, `out` de l'extraction, et pour
-  `surgeon_bench` `before`, `after`, `text`, `dataset`, `prompts`, `baseline_model`, `out`)
+  `export_gguf`, `llama_cpp_dir`, `base_dir`, `out` de l'extraction, pour `surgeon_bench`
+  `before`, `after`, `text`, `dataset`, `prompts`, `baseline_model`, `out`, et pour
+  `surgeon_autotune` `vector`, `eval_dataset`, `out`)
   est résolu par le système (liens symboliques, `..`) et doit tomber sous un dossier
   autorisé, sinon `error.kind = "path_not_allowed"`, sans révéler la cible.
 - **Sauvegarde imposée** avant toute écriture, vérifiée par SHA-256 ; une sauvegarde ratée
@@ -141,7 +176,7 @@ Recette d'un agent :
   (apply), par prompt (eval), ou une pour les poids puis une par prompt (extract) ; pour
   `surgeon_bench`, par prompt (`dump`), par bloc de 64 positions (`logits`), par chunk de
   llama-perplexity (`ppl`, `total` absent tant qu'il n'est pas annoncé) et par question
-  (`eval`).
+  (`eval`) ; pour `surgeon_autotune`, une par forward.
 - **Annulation de `surgeon_bench`** : `notifications/cancelled` tue et attend le processus
   llama.cpp en cours (aucun zombie) ; un dump annulé ne laisse aucun fichier.
 - **Extraction sans écriture partielle** : fichiers temporaires puis `rename`, vecteur et

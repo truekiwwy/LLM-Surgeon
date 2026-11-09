@@ -44,6 +44,7 @@
 mod error;
 mod index;
 mod mmap_file;
+mod project;
 mod selector;
 mod shift;
 pub mod stats;
@@ -53,6 +54,7 @@ mod test_support;
 pub use error::{EngineError, Result};
 pub use index::{DType, ModelIndex, TensorInfo};
 pub use mmap_file::{load_direction_vector, read_index, ReadOnlyModel, TensorView, WritableModel};
+pub use project::project_out_tensor;
 pub use selector::{find_mlp_tensors, parse_layer_index, LayerSpec, MlpProj};
 pub use shift::{apply_vector_shift, BroadcastAxis, ShiftOp, ShiftStats};
 

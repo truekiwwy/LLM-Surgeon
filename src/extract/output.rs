@@ -55,12 +55,28 @@ pub fn check_output(out: &Path, overwrite: bool) -> Result<()> {
 /// the same file. (The `safetensors` serializer keeps metadata in a `HashMap`, whose order
 /// changes from one run to the next.) The result is re-read by the `safetensors` crate.
 pub fn encode(direction: &[f32], metadata: &BTreeMap<String, String>) -> Result<Vec<u8>> {
-    let data: Vec<u8> = direction.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let header = serde_json::json!({
-        "__metadata__": metadata,
-        TENSOR_NAME: { "dtype": "F32", "shape": [direction.len()], "data_offsets": [0, data.len()] },
-    });
-    let mut header = header.to_string();
+    encode_tensors(&[(TENSOR_NAME, direction)], metadata)
+}
+
+/// Several 1D F32 tensors with a sorted header, laid out in the given order; re-read by
+/// the `safetensors` crate before being returned. One tensor gives the bytes `encode`
+/// always produced.
+pub fn encode_tensors(
+    tensors: &[(&str, &[f32])],
+    metadata: &BTreeMap<String, String>,
+) -> Result<Vec<u8>> {
+    let mut header = serde_json::Map::new();
+    header.insert("__metadata__".into(), serde_json::json!(metadata));
+    let mut data: Vec<u8> = Vec::new();
+    for (name, values) in tensors {
+        let start = data.len();
+        data.extend(values.iter().flat_map(|v| v.to_le_bytes()));
+        header.insert(
+            (*name).to_owned(),
+            serde_json::json!({ "dtype": "F32", "shape": [values.len()], "data_offsets": [start, data.len()] }),
+        );
+    }
+    let mut header = serde_json::Value::Object(header).to_string();
     // Data starts on an 8-byte boundary, as the safetensors writer does.
     while !(8 + header.len()).is_multiple_of(8) {
         header.push(' ');
@@ -71,13 +87,26 @@ pub fn encode(direction: &[f32], metadata: &BTreeMap<String, String>) -> Result<
 
     let parsed = safetensors::SafeTensors::deserialize(&bytes)
         .map_err(|e| ExtractError::Compute(format!("fichier produit illisible : {e}")))?;
-    let view = parsed
-        .tensor(TENSOR_NAME)
-        .map_err(|e| ExtractError::Compute(e.to_string()))?;
-    if view.shape() != [direction.len()] || view.dtype() != safetensors::Dtype::F32 {
-        return Err(ExtractError::Compute("tenseur direction incohérent".into()));
+    for (name, values) in tensors {
+        let view = parsed
+            .tensor(name)
+            .map_err(|e| ExtractError::Compute(e.to_string()))?;
+        if view.shape() != [values.len()] || view.dtype() != safetensors::Dtype::F32 {
+            return Err(ExtractError::Compute(format!("tenseur {name} incohérent")));
+        }
     }
     Ok(bytes)
+}
+
+/// `<out>.leace.safetensors`, next to the direction file (same convention as the
+/// companion `<out>.stats.json`).
+pub fn leace_path(out: &Path) -> PathBuf {
+    let mut name = out
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".leace.safetensors");
+    out.with_file_name(name)
 }
 
 fn io_error(path: &Path, e: std::io::Error) -> ExtractError {
@@ -122,32 +151,45 @@ pub fn write_pair_atomic(
     overwrite: bool,
 ) -> Result<()> {
     let companion_out = companion_path(out);
-    let temp_main = write_temp(out, bytes)?;
-    let temp_companion = match write_temp(&companion_out, companion) {
-        Ok(t) => t,
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp_main);
-            return Err(e);
+    write_files_atomic(&[(out, bytes), (&companion_out, companion)], overwrite)
+}
+
+/// Every file or none: all temporaries are written first, existing targets refused unless
+/// `overwrite`, then renamed from the last to the first (the main file lands last); if a
+/// rename fails, the files already renamed are removed again. A failure never leaves a
+/// temporary behind.
+pub fn write_files_atomic(files: &[(&Path, &[u8])], overwrite: bool) -> Result<()> {
+    let mut temps: Vec<PathBuf> = Vec::with_capacity(files.len());
+    let cleanup = |temps: &[PathBuf]| {
+        for t in temps {
+            let _ = std::fs::remove_file(t);
         }
     };
-    let cleanup = || {
-        let _ = std::fs::remove_file(&temp_main);
-        let _ = std::fs::remove_file(&temp_companion);
-    };
-    for target in [out, companion_out.as_path()] {
+    for (target, bytes) in files {
+        match write_temp(target, bytes) {
+            Ok(t) => temps.push(t),
+            Err(e) => {
+                cleanup(&temps);
+                return Err(e);
+            }
+        }
+    }
+    for (target, _) in files {
         if target.exists() && !overwrite {
-            cleanup();
+            cleanup(&temps);
             return Err(ExtractError::OutputExists(target.to_path_buf()));
         }
     }
-    if let Err(e) = std::fs::rename(&temp_companion, &companion_out) {
-        cleanup();
-        return Err(io_error(&companion_out, e));
-    }
-    if let Err(e) = std::fs::rename(&temp_main, out) {
-        cleanup();
-        let _ = std::fs::remove_file(&companion_out);
-        return Err(io_error(out, e));
+    let mut renamed: Vec<&Path> = Vec::with_capacity(files.len());
+    for ((target, _), temp) in files.iter().zip(&temps).rev() {
+        if let Err(e) = std::fs::rename(temp, target) {
+            cleanup(&temps);
+            for done in &renamed {
+                let _ = std::fs::remove_file(done);
+            }
+            return Err(io_error(target, e));
+        }
+        renamed.push(target);
     }
     Ok(())
 }

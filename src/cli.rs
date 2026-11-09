@@ -56,7 +56,7 @@ pub enum Commands {
     /// Evaluate a model on prompts.
     Eval(EvalArgs),
     /// Extract a steering vector from a Qwen2 layer (pure Rust, CPU).
-    Extract(ExtractArgs),
+    Extract(ExtractCommand),
     /// Terminal dashboard: MLP weight inspector and steering vector viewer.
     Tui(TuiArgs),
     /// Print the JSON Schema of patch.json, or the MCP tool definitions (raw JSON).
@@ -65,6 +65,110 @@ pub enum Commands {
     Mcp(McpArgs),
     /// Measure a surgery: logits shift, perplexity delta, Pass@1, logits dumps.
     Bench(BenchArgs),
+    /// Fit per-layer steering coefficients by ridge regression on measured responses.
+    Autotune(AutotuneArgs),
+}
+
+/// `surgeon extract`: the prompt 8 options plus the direction method (two structs because
+/// `ExtractArgs` is built field by field by callers).
+#[derive(Debug, Clone, Args)]
+pub struct ExtractCommand {
+    #[command(flatten)]
+    pub args: ExtractArgs,
+    #[command(flatten)]
+    pub method: ExtractMethodArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ExtractMethodArgs {
+    /// Direction method: mean_diff (default, unchanged), svd (paired prompts), leace.
+    #[arg(long, value_enum, default_value_t = crate::extract::Method::MeanDiff)]
+    pub method: crate::extract::Method,
+    /// svd: center the paired deltas (for pairs of arbitrary order).
+    #[arg(long)]
+    pub svd_center: bool,
+    /// leace: shrinkage λ in [0, 1] of Σ toward tr(Σ)/d·I (0: pseudo-inverse).
+    #[arg(long, default_value_t = crate::extract::DEFAULT_LEACE_SHRINKAGE)]
+    pub leace_shrinkage: f64,
+    /// leace with shrinkage 0: relative threshold of the kept eigenvalues of Σ.
+    #[arg(long, default_value_t = crate::extract::DEFAULT_LEACE_RCOND)]
+    pub leace_rcond: f64,
+    /// Held-out fraction (by index) for out-of-sample diagnostics (10+ prompts per set).
+    #[arg(long, default_value_t = 0.0)]
+    pub holdout_frac: f64,
+}
+
+impl ExtractMethodArgs {
+    pub fn options(&self) -> crate::extract::MethodOptions {
+        crate::extract::MethodOptions {
+            method: self.method,
+            svd_center: self.svd_center,
+            leace_shrinkage: self.leace_shrinkage,
+            leace_rcond: self.leace_rcond,
+            holdout_frac: self.holdout_frac,
+        }
+    }
+}
+
+/// Exit codes: 0 ok, 1 insufficient resources or cancelled, 2 invalid arguments or files
+/// (existing --out included), 7 autotune failed (singular or ill-conditioned system, model
+/// error), 70 internal.
+#[derive(Debug, Clone, Args)]
+pub struct AutotuneArgs {
+    /// Qwen2 directory (config.json, tokenizer.json, *.safetensors).
+    #[arg(long)]
+    pub model: PathBuf,
+    /// Direction file from `surgeon extract` (tensor `direction` and its metadata).
+    #[arg(long)]
+    pub vector: PathBuf,
+    /// JSON array (or JSONL) of strings or of {"text", "target"?}.
+    #[arg(long)]
+    pub eval_dataset: PathBuf,
+    /// Candidate layers "A-B" (default: 0 up to the readout layer).
+    #[arg(long, value_parser = crate::patch::autotune::parse_layer_range)]
+    pub target_layer_range: Option<(usize, usize)>,
+    /// Layer whose activation is read (default: the vector's layer).
+    #[arg(long)]
+    pub readout_layer: Option<usize>,
+    #[arg(long, default_value = "down_proj")]
+    pub proj: Projection,
+    #[arg(long, value_enum, default_value_t = crate::patch::autotune::Objective::Suppress)]
+    pub objective: crate::patch::autotune::Objective,
+    /// Target projection (required by --objective target, overrides the vector's means).
+    #[arg(long)]
+    pub target_projection: Option<f64>,
+    /// Ridge λ > 0, or auto (LOOCV over 1e-6..1e2).
+    #[arg(long, default_value = "1e-3")]
+    pub l2_reg: crate::patch::autotune::L2Reg,
+    /// Finite-difference step δ of the response measure.
+    #[arg(long, default_value_t = 0.05)]
+    pub probe_alpha: f64,
+    #[arg(long, default_value_t = 1.0)]
+    pub alpha_max: f64,
+    /// Coefficients smaller than this are dropped.
+    #[arg(long, default_value_t = 1e-4)]
+    pub min_alpha: f64,
+    /// Refuses the run, before any computation, above this many forwards.
+    #[arg(long, default_value_t = 2000)]
+    pub max_forwards: usize,
+    #[arg(long, default_value_t = 256)]
+    pub max_tokens: usize,
+    #[arg(long, value_enum, default_value_t = DTypeChoice::Auto)]
+    pub dtype: DTypeChoice,
+    /// Override of the vector's site.
+    #[arg(long, value_enum)]
+    pub site: Option<Site>,
+    /// Override of the vector's pooling.
+    #[arg(long, value_enum)]
+    pub pooling: Option<Pooling>,
+    /// Override of the vector's chat template.
+    #[arg(long, value_enum)]
+    pub chat_template: Option<ChatTemplate>,
+    /// patch.json to write (validated first); without it the patch is only in the report.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    #[arg(long)]
+    pub overwrite: bool,
 }
 
 /// Exit codes: 0 ok (warnings included), 1 insufficient resources, llama.cpp binary not
@@ -574,6 +678,93 @@ mod tests {
             &["bench"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn extract_methods_and_autotune_parse_with_defaults() {
+        let base = [
+            "extract",
+            "--model",
+            "m",
+            "--pos-prompts",
+            "p",
+            "--neg-prompts",
+            "n",
+            "--out",
+            "o.safetensors",
+        ];
+        let Commands::Extract(cmd) = parse(&base).unwrap().command else {
+            panic!()
+        };
+        assert_eq!(
+            cmd.method.options(),
+            crate::extract::MethodOptions::default()
+        );
+        assert_eq!(cmd.args.layer, 20, "prompt 8 options unchanged");
+        let mut svd = base.to_vec();
+        svd.extend([
+            "--method",
+            "leace",
+            "--leace-shrinkage",
+            "0",
+            "--holdout-frac",
+            "0.5",
+        ]);
+        let Commands::Extract(cmd) = parse(&svd).unwrap().command else {
+            panic!()
+        };
+        let opts = cmd.method.options();
+        assert_eq!(opts.method, crate::extract::Method::Leace);
+        assert_eq!((opts.leace_shrinkage, opts.holdout_frac), (0.0, 0.5));
+        let mut bad = base.to_vec();
+        bad.extend(["--method", "pca"]);
+        assert!(parse(&bad).is_err());
+
+        let tune = [
+            "autotune",
+            "--model",
+            "m",
+            "--vector",
+            "v.safetensors",
+            "--eval-dataset",
+            "e.json",
+        ];
+        let Commands::Autotune(a) = parse(&tune).unwrap().command else {
+            panic!()
+        };
+        assert_eq!(a.proj, Projection::Down);
+        assert_eq!(a.l2_reg, crate::patch::autotune::L2Reg::Fixed(1e-3));
+        assert_eq!(
+            (a.probe_alpha, a.alpha_max, a.max_forwards),
+            (0.05, 1.0, 2000)
+        );
+        assert_eq!(a.target_layer_range, None);
+        let mut more = tune.to_vec();
+        more.extend([
+            "--target-layer-range",
+            "3-7",
+            "--l2-reg",
+            "auto",
+            "--objective",
+            "amplify",
+            "--proj",
+            "up",
+        ]);
+        let Commands::Autotune(a) = parse(&more).unwrap().command else {
+            panic!()
+        };
+        assert_eq!(a.target_layer_range, Some((3, 7)));
+        assert_eq!(a.l2_reg, crate::patch::autotune::L2Reg::Auto);
+        assert_eq!(a.proj, Projection::Up);
+        for wrong in [
+            ["--target-layer-range", "7-3"],
+            ["--l2-reg", "-1"],
+            ["--objective", "boost"],
+        ] {
+            let mut args = tune.to_vec();
+            args.extend(wrong);
+            assert!(parse(&args).is_err(), "{wrong:?}");
         }
     }
 

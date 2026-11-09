@@ -1267,7 +1267,10 @@ fn schema_mirrors_serde_and_validation() {
     assert_eq!(ops["minItems"], 1);
     let op = &ops["items"]["properties"];
     assert_eq!(ops["items"]["additionalProperties"], false);
-    assert_eq!(op["operation"]["enum"], json!(["subtract", "add"]));
+    assert_eq!(
+        op["operation"]["enum"],
+        json!(["subtract", "add", "project_out"])
+    );
     assert_eq!(
         op["projections"]["items"]["enum"],
         json!(["gate_proj", "up_proj", "down_proj"])
@@ -1501,7 +1504,7 @@ fn mcp_full_session_is_pure_json_rpc() {
         .as_str()
         .unwrap()
         .contains("sauvegarde"));
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 7);
     let (is_error, env) = envelope(&responses, 3);
     assert!(!is_error, "{env}");
     assert_eq!(env["command"], "check");
@@ -2127,7 +2130,8 @@ fn schema_tools_kind_equals_tools_list() {
             "surgeon_apply",
             "surgeon_eval",
             "surgeon_extract",
-            "surgeon_bench"
+            "surgeon_bench",
+            "surgeon_autotune"
         ]
     );
     for tool in exported.as_array().unwrap() {
@@ -3058,7 +3062,7 @@ fn mcp_extract_tool_end_to_end() {
             .as_array()
             .unwrap()
             .len(),
-        6
+        7
     );
     let (is_error, env) = envelope(&responses, 2);
     assert!(!is_error, "{env}");
@@ -3164,7 +3168,7 @@ fn mcp_binary_extract_speaks_only_json_rpc() {
             .as_array()
             .unwrap()
             .len(),
-        6
+        7
     );
     assert!(!envelope(&responses, 2).0, "{out}");
     assert!(f.dir.path().join("bin.safetensors").exists());
@@ -5193,5 +5197,638 @@ fn make_large_logits_dumps() {
             out.write_all(&o.to_le_bytes()).unwrap();
         }
         out.flush().unwrap();
+    }
+}
+
+// ------------------------------------------------------------------ prompt 11: methods, project_out, autotune
+
+fn tensor_names(path: &Path) -> Vec<String> {
+    let bytes = std::fs::read(path).unwrap();
+    let st = safetensors::SafeTensors::deserialize(&bytes).unwrap();
+    let mut names: Vec<String> = st.names().into_iter().map(str::to_owned).collect();
+    names.sort();
+    names
+}
+
+fn leace_of(out: &Path) -> PathBuf {
+    let mut name = out.file_name().unwrap().to_os_string();
+    name.push(".leace.safetensors");
+    out.with_file_name(name)
+}
+
+#[test]
+fn extract_svd_writes_one_direction_and_method_diagnostics() {
+    let f = extract_fixture("F32", false);
+    let out = f.dir.path().join("svd.safetensors");
+    let (code, v) = run_args(&deps(), &f.args("svd.safetensors", &["--method", "svd"]));
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["data"]["method"], "svd");
+    let diag = &v["data"]["method_diagnostics"];
+    assert_eq!(diag["method"], "svd");
+    assert_eq!(diag["n_pairs"], 6);
+    assert!(diag["split_half_cosine"].as_f64().unwrap().abs() <= 1.0);
+    assert_eq!(tensor_names(&out), ["direction"]);
+    let (direction, meta) = read_direction(&out);
+    let norm: f32 = direction.iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!((norm - 1.0).abs() < 1e-6);
+    assert_eq!(meta["method"], "svd");
+    assert_eq!(meta["svd_center"], "false");
+    let companion: Value =
+        serde_json::from_str(&std::fs::read_to_string(ex::companion_path(&out)).unwrap()).unwrap();
+    assert_eq!(companion["method_diagnostics"]["method"], "svd");
+    assert!(v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("paires")));
+
+    // mean_diff stays as in prompt 8: no method key, no diagnostics in the companion.
+    let (code, _) = run_args(&deps(), &f.args("md.safetensors", &[]));
+    assert_eq!(code, 0);
+    let (_, meta) = read_direction(&f.dir.path().join("md.safetensors"));
+    assert!(!meta.contains_key("method"));
+    let md_companion =
+        std::fs::read_to_string(ex::companion_path(&f.dir.path().join("md.safetensors"))).unwrap();
+    assert!(!md_companion.contains("method_diagnostics"));
+
+    let five: Vec<String> = ex::load_prompt_texts(&f.neg).unwrap()[..5].to_vec();
+    let short = f.dir.path().join("neg5.json");
+    std::fs::write(&short, serde_json::to_string(&five).unwrap()).unwrap();
+    let mut args = f.args("u.safetensors", &["--method", "svd"]);
+    let at = args.iter().position(|a| a == "--neg-prompts").unwrap();
+    args[at + 1] = s(&short).to_owned();
+    let (code, v) = run_args(&deps(), &args);
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert_eq!(v["error"]["kind"], "unpaired_prompts");
+}
+
+#[test]
+fn extract_leace_writes_the_eraser_atomically_and_deterministically() {
+    let f = extract_fixture("F32", false);
+    let out = f.dir.path().join("e.safetensors");
+    let args = f.args(
+        "e.safetensors",
+        &["--method", "leace", "--holdout-frac", "0.5"],
+    );
+    let (code, v) = run_args(&deps(), &args);
+    assert_eq!(code, 0, "{v}");
+    let diag = &v["data"]["method_diagnostics"];
+    assert_eq!(diag["method"], "leace");
+    assert!((diag["b_dot_a"].as_f64().unwrap() - 1.0).abs() < 1e-6);
+    assert!(
+        diag["cross_cov_after"].as_f64().unwrap()
+            < 1e-6 * diag["cross_cov_before"].as_f64().unwrap()
+    );
+    assert!(
+        diag["holdout_cross_cov_ratio"].is_null(),
+        "6 prompts per set: disabled"
+    );
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(warnings
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("--holdout-frac ignoré")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("généralise")));
+    assert_eq!(tensor_names(&out), ["direction"]);
+    let leace = leace_of(&out);
+    assert_eq!(v["data"]["leace_path"], s(&leace));
+    assert_eq!(tensor_names(&leace), ["a", "b", "mean", "u_whitened"]);
+    let bytes = std::fs::read(&leace).unwrap();
+    let (_, meta) = safetensors::SafeTensors::read_metadata(&bytes).unwrap();
+    let meta = meta.metadata().clone().unwrap();
+    for key in [
+        "shrinkage",
+        "rank",
+        "kappa",
+        "n_pos",
+        "n_neg",
+        "layer",
+        "site",
+        "pooling",
+        "bTa",
+        "method",
+    ] {
+        assert!(meta.contains_key(key), "{key}");
+    }
+    let a = weight_surgeon::engine::load_direction_vector(&leace, Some("a")).unwrap();
+    let (direction, _) = read_direction(&out);
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let cos: f32 = a.iter().zip(&direction).map(|(x, y)| x * y).sum::<f32>() / na;
+    assert!(cos > 0.9999, "direction = a/‖a‖: {cos}");
+
+    let (main_before, leace_before) = (std::fs::read(&out).unwrap(), bytes);
+    let (code, v) = run_args(&deps(), &args);
+    assert_eq!(
+        code,
+        exit::INVALID_INPUT,
+        "existing outputs need --overwrite"
+    );
+    assert_eq!(v["error"]["kind"], "output_exists");
+    let mut again = args.clone();
+    again.push("--overwrite".into());
+    assert_eq!(run_args(&deps(), &again).0, 0);
+    assert_eq!(std::fs::read(&out).unwrap(), main_before, "byte for byte");
+    assert_eq!(std::fs::read(&leace).unwrap(), leace_before);
+
+    std::fs::remove_file(&out).unwrap();
+    std::fs::remove_file(ex::companion_path(&out)).unwrap();
+    let (code, _) = run_args(&deps(), &args);
+    assert_eq!(
+        code,
+        exit::INVALID_INPUT,
+        "a leftover .leace.safetensors alone also blocks"
+    );
+
+    let cancelled = deps();
+    cancelled.interrupted.store(true, Ordering::SeqCst);
+    let other = f.args("c.safetensors", &["--method", "leace"]);
+    let (code, v) = run_args(&cancelled, &other);
+    assert_eq!(code, exit::GENERAL);
+    assert_eq!(v["error"]["kind"], "cancelled");
+    let leftovers: Vec<String> = std::fs::read_dir(f.dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with("c.") || n.starts_with(".c.") || n.contains(".tmp-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+fn project_patch(dir: &Path, leace: &Path, edit: impl Fn(&mut Value)) -> PathBuf {
+    let mut op = json!({"id": "erase", "layers": "1", "projections": ["down_proj"],
+        "operation": "project_out", "vector_file": s(leace), "vector_tensor": "a",
+        "vector_tensor_b": "b", "alpha": 1.0});
+    edit(&mut op);
+    let path = dir.join("project.json");
+    std::fs::write(
+        &path,
+        json!({"schema_version": 1, "backup": false, "operations": [op]}).to_string(),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn project_out_applies_the_leace_eraser_exactly_and_is_validated() {
+    let f = extract_fixture("F32", false);
+    let out = f.dir.path().join("e.safetensors");
+    assert_eq!(
+        run_args(&deps(), &f.args("e.safetensors", &["--method", "leace"])).0,
+        0
+    );
+    let leace = leace_of(&out);
+    let weights = f.model.join("model.safetensors");
+    let down = "model.layers.1.mlp.down_proj.weight";
+    let before = read_f32(&weights, down);
+    let a = weight_surgeon::engine::load_direction_vector(&leace, Some("a")).unwrap();
+    let b = weight_surgeon::engine::load_direction_vector(&leace, Some("b")).unwrap();
+    let mut reference: Vec<u8> = before.iter().flat_map(|v| v.to_le_bytes()).collect();
+    weight_surgeon::engine::project_out_tensor(
+        &mut reference,
+        weight_surgeon::engine::DType::F32,
+        &[HIDDEN, INTER],
+        &a,
+        &b,
+        1.0,
+    )
+    .unwrap();
+
+    for (edit, needle) in [
+        (json!({"projections": ["gate_proj"]}), "down_proj"),
+        (json!({"axis": "rows"}), "axis"),
+        (json!({"alpha": 1.5}), "[0, 1]"),
+        (json!({"vector_tensor_b": null}), "vector_tensor_b"),
+    ] {
+        let patch = project_patch(f.dir.path(), &leace, |op| {
+            for (k, v) in edit.as_object().unwrap() {
+                op[k] = v.clone();
+            }
+        });
+        let (code, v) = run_json(
+            &deps(),
+            &[
+                "apply",
+                "--model",
+                s(&weights),
+                "--patch",
+                s(&patch),
+                "--dry-run",
+            ],
+        );
+        assert_eq!(code, exit::INVALID_INPUT, "{edit}");
+        assert!(
+            v["error"]["message"].as_str().unwrap().contains(needle),
+            "{edit}: {v}"
+        );
+    }
+
+    let patch = project_patch(f.dir.path(), &leace, |_| {});
+    let (code, out_text, err) = run(
+        &deps(),
+        &[
+            "apply",
+            "--model",
+            s(&weights),
+            "--patch",
+            s(&patch),
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out_text.contains("[PROJECT]"), "{out_text}");
+    let after: Vec<u8> = read_f32(&weights, down)
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    assert_eq!(after, reference, "bytes equal the engine reference");
+    let gate = "model.layers.1.mlp.gate_proj.weight";
+    assert_eq!(
+        read_f32(&weights, gate),
+        read_f32(&f.model.join("model.safetensors"), gate)
+    );
+
+    let schema: Value =
+        serde_json::from_str(&weight_surgeon::mcp::render_schema(SchemaKind::Patch)).unwrap();
+    let op = &schema["properties"]["operations"]["items"]["properties"];
+    assert!(op["operation"]["enum"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("project_out")));
+    assert!(op.get("vector_tensor_b").is_some());
+}
+
+/// Readouts s_i = <pool(h_i^R), v> of a model directory, computed from the public API.
+fn readouts(model: &Path, v: &[f32], prompts: &[String], layer: usize) -> Vec<f64> {
+    let cfg = ex::load_config(model).unwrap();
+    let src = SafetensorsDir::open(model).unwrap();
+    let required = ex::required_tensors(&cfg, layer);
+    let device = candle_core::Device::Cpu;
+    let tensors = ex::load_tensors(
+        &src,
+        &required,
+        candle_core::DType::F32,
+        &device,
+        &mut |_, _| Flow::Continue(()),
+    )
+    .unwrap();
+    let hooked =
+        ex::HookedQwen2::from_tensors(tensors, &cfg, layer, candle_core::DType::F32, &device)
+            .unwrap();
+    let tokenizer = ex::load_tokenizer(model).unwrap();
+    prompts
+        .iter()
+        .map(|p| {
+            let ids = ex::tokenize(&tokenizer, p, 256).unwrap().ids;
+            let input = candle_core::Tensor::new(ids.as_slice(), &device)
+                .unwrap()
+                .unsqueeze(0)
+                .unwrap();
+            let act = hooked.forward_capture(&input, ex::Site::ResidPost).unwrap();
+            let pooled = ex::pool(&act, ex::Pooling::Last, "p").unwrap();
+            pooled.iter().zip(v).map(|(a, b)| a * f64::from(*b)).sum()
+        })
+        .collect()
+}
+
+struct AutotuneFixture {
+    f: ExtractFixture,
+    vector: PathBuf,
+}
+
+fn autotune_fixture(dtype: &str) -> AutotuneFixture {
+    let f = extract_fixture(dtype, false);
+    assert_eq!(run_args(&deps(), &f.args("v.safetensors", &[])).0, 0);
+    let vector = f.dir.path().join("v.safetensors");
+    AutotuneFixture { f, vector }
+}
+
+impl AutotuneFixture {
+    fn args(&self, extra: &[&str]) -> Vec<String> {
+        let mut args: Vec<String> = [
+            "autotune",
+            "--model",
+            s(&self.f.model),
+            "--vector",
+            s(&self.vector),
+            "--eval-dataset",
+            s(&self.f.pos),
+            "--target-layer-range",
+            "0-3",
+        ]
+        .map(String::from)
+        .to_vec();
+        args.extend(extra.iter().map(|a| a.to_string()));
+        args
+    }
+}
+
+#[test]
+fn autotune_response_matches_patching_each_layer_on_disk() {
+    let t = autotune_fixture("BF16");
+    let (code, v) = run_args(&deps(), &t.args(&[]));
+    assert_eq!(code, 0, "{v}");
+    let d = &v["data"];
+    assert_eq!(d["readout_layer"], 2);
+    assert_eq!(d["layers"], json!([0, 1, 2]));
+    assert_eq!(d["excluded_layers"], json!([3]));
+    assert_eq!(d["forwards"], 6 * 5 + 6 * 3);
+    assert!(v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("exclues")));
+
+    let prompts = ex::load_prompt_texts(&t.f.pos).unwrap();
+    let (direction, _) = read_direction(&t.vector);
+    let s0 = readouts(&t.f.model, &direction, &prompts, 2);
+    for (col, layer) in [0usize, 1, 2].into_iter().enumerate() {
+        let copy = t.f.dir.path().join(format!("copy-{layer}"));
+        std::fs::create_dir_all(&copy).unwrap();
+        for entry in std::fs::read_dir(&t.f.model).unwrap() {
+            let p = entry.unwrap().path();
+            std::fs::copy(&p, copy.join(p.file_name().unwrap())).unwrap();
+        }
+        let patch = copy.join("p.json");
+        let op = json!({"id": "probe", "layers": [layer], "projections": ["down_proj"],
+            "operation": "subtract", "vector_file": s(&t.vector), "vector_tensor": "direction",
+            "alpha": 0.05, "axis": "cols"});
+        std::fs::write(
+            &patch,
+            json!({"schema_version": 1, "backup": false, "operations": [op]}).to_string(),
+        )
+        .unwrap();
+        let (code, _) = run_json(
+            &deps(),
+            &[
+                "apply",
+                "--model",
+                s(&copy.join("model.safetensors")),
+                "--patch",
+                s(&patch),
+                "--no-backup",
+            ],
+        );
+        assert_eq!(code, 0);
+        let s = readouts(&copy, &direction, &prompts, 2);
+        for i in 0..prompts.len() {
+            let manual = (s[i] - s0[i]) / 0.05;
+            let reported = d["response_matrix"][i][col].as_f64().unwrap();
+            assert!(
+                (manual - reported).abs() < 1e-6,
+                "layer {layer} prompt {i}: {manual} vs {reported}"
+            );
+        }
+    }
+}
+
+#[test]
+fn autotune_patch_is_valid_deterministic_and_guarded() {
+    let t = autotune_fixture("F32");
+    let dir = t.f.dir.path();
+    let (pa, pb) = (dir.join("a.json"), dir.join("b.json"));
+    let (code, v) = run_args(&deps(), &t.args(&["--out", s(&pa), "--l2-reg", "auto"]));
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["data"]["lambda_grid"].as_array().unwrap().len(), 17);
+    assert_eq!(v["data"]["out"], s(&pa));
+    assert_eq!(
+        run_args(&deps(), &t.args(&["--out", s(&pb), "--l2-reg", "auto"])).0,
+        0
+    );
+    assert_eq!(
+        std::fs::read(&pa).unwrap(),
+        std::fs::read(&pb).unwrap(),
+        "byte for byte"
+    );
+    let patch: Value = serde_json::from_str(&std::fs::read_to_string(&pa).unwrap()).unwrap();
+    let op = &patch["operations"][0];
+    assert!(op["id"].as_str().unwrap().starts_with("autotune-L"));
+    assert_eq!(
+        (op["operation"].as_str(), op["axis"].as_str()),
+        (Some("subtract"), Some("cols"))
+    );
+    assert_eq!(op["vector_tensor"], "direction");
+    assert_eq!(patch["backup"], true);
+    let parsed = parse_patch(&patch.to_string()).unwrap();
+    assert!(validate_patch(&parsed, dir, &ValidationOptions::default()).is_ok());
+    let weights = t.f.model.join("model.safetensors");
+    assert_eq!(
+        run_json(
+            &deps(),
+            &[
+                "apply",
+                "--model",
+                s(&weights),
+                "--patch",
+                s(&pa),
+                "--dry-run"
+            ]
+        )
+        .0,
+        0
+    );
+
+    let (code, v) = run_args(&deps(), &t.args(&["--out", s(&pa)]));
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert_eq!(v["error"]["kind"], "output_exists");
+    let (code, v) = run_args(&deps(), &t.args(&["--max-forwards", "10"]));
+    assert_eq!(code, exit::INVALID_INPUT);
+    assert!(v["error"]["message"].as_str().unwrap().contains("forwards"));
+    let mut poor = deps();
+    poor.probe = Box::new(FakeProbe { available: 0 });
+    let (code, v) = run_args(&poor, &t.args(&[]));
+    assert_eq!(code, exit::GENERAL);
+    assert_eq!(v["error"]["kind"], "insufficient_resources");
+    let cancelled = deps();
+    cancelled.interrupted.store(true, Ordering::SeqCst);
+    let pc = dir.join("c.json");
+    let (code, v) = run_args(&cancelled, &t.args(&["--out", s(&pc)]));
+    assert_eq!(code, exit::GENERAL);
+    assert_eq!(v["error"]["kind"], "cancelled");
+    assert!(!pc.exists());
+    let (code, _) = run_args(&deps(), &t.args(&["--objective", "target"]));
+    assert_eq!(
+        code,
+        exit::INVALID_INPUT,
+        "target needs --target-projection"
+    );
+}
+
+#[test]
+fn autotune_objectives_and_per_prompt_targets() {
+    let t = autotune_fixture("F32");
+    let (_, meta) = read_direction(&t.vector);
+    let mean = |key: &str| meta[key].parse::<f64>().unwrap();
+    let target_of = |extra: &[&str], dataset: Option<&Path>| -> f64 {
+        let mut args = t.args(extra);
+        if let Some(p) = dataset {
+            let at = args.iter().position(|a| a == "--eval-dataset").unwrap();
+            args[at + 1] = s(p).to_owned();
+        }
+        let (code, v) = run_args(&deps(), &args);
+        assert_eq!(code, 0, "{v}");
+        v["data"]["target_mean"].as_f64().unwrap()
+    };
+    assert!((target_of(&[], None) - mean("neg_mean_proj")).abs() < 1e-9);
+    assert!((target_of(&["--objective", "amplify"], None) - mean("pos_mean_proj")).abs() < 1e-9);
+    assert_eq!(
+        target_of(
+            &["--objective", "target", "--target-projection", "0.5"],
+            None
+        ),
+        0.5
+    );
+    let prompts = ex::load_prompt_texts(&t.f.pos).unwrap();
+    let with_targets: Vec<Value> = prompts
+        .iter()
+        .map(|p| json!({"text": p, "target": 1.25}))
+        .collect();
+    let ds = t.f.dir.path().join("targets.json");
+    std::fs::write(&ds, serde_json::to_string(&with_targets).unwrap()).unwrap();
+    assert_eq!(target_of(&[], Some(&ds)), 1.25, "per-prompt targets win");
+}
+
+#[test]
+fn autotune_human_output_and_strict_json_on_the_binary() {
+    let t = autotune_fixture("F32");
+    let deps = ui_deps(ColorMode::TrueColor, false);
+    let args: Vec<String> = t.args(&[]);
+    let (code, out, err) = run_args_raw(&deps, &args);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\x1b[38;2;65;105;225m"));
+    let text = strip_ansi(&out);
+    let badges: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|w| w.starts_with('['))
+        .collect();
+    assert_eq!(
+        badges,
+        ["[AUTOTUNE]", "[RESPONSE]", "[RIDGE]", "[VERDICT]"],
+        "{text}"
+    );
+    assert!(text.contains("patch dans data.patch"));
+
+    let output = binary()
+        .arg("--json")
+        .args(&args)
+        .env("CLICOLOR_FORCE", "1")
+        .env("COLORTERM", "truecolor")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout.lines().count(), 1);
+    assert!(!stdout.contains('\x1b') && !String::from_utf8_lossy(&output.stderr).contains('\x1b'));
+    let v: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["command"], "autotune");
+    assert!(v["data"]["patch"].is_object());
+}
+
+#[test]
+fn mcp_extract_methods_and_autotune_tool() {
+    let t = autotune_fixture("F32");
+    let root = t.f.dir.path();
+    let pos = ex::load_prompt_texts(&t.f.pos).unwrap();
+    let neg = ex::load_prompt_texts(&t.f.neg).unwrap();
+    let base = json!({"model": "qwen2-mini", "vector": "v.safetensors", "eval_dataset": "pos.json", "target_layer_range": "0-2"});
+    let mut with_out = base.clone();
+    with_out["out"] = json!("tuned.json");
+    let mut outside = base.clone();
+    outside["vector"] = json!("../v.safetensors");
+    let progress_call = rpc(
+        json!(5),
+        "tools/call",
+        json!({"name": "surgeon_autotune", "arguments": base, "_meta": {"progressToken": "t"}}),
+    );
+    let lines = [
+        init("2025-06-18"),
+        call(
+            1,
+            "surgeon_extract",
+            json!({"model": "qwen2-mini", "pos_prompts": pos, "neg_prompts": neg, "layer": 2, "out": "m.safetensors", "method": "svd"}),
+        ),
+        call(2, "surgeon_autotune", base.clone()),
+        call(3, "surgeon_autotune", with_out),
+        call(4, "surgeon_autotune", outside),
+        progress_call,
+    ];
+    let responses = session(&deps(), &mcp_cfg(root), &lines);
+    let (is_error, env) = envelope(&responses, 1);
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["method"], "svd");
+    let (is_error, env) = envelope(&responses, 2);
+    assert!(!is_error, "{env}");
+    assert_eq!(env["command"], "autotune");
+    assert!(env["data"]["patch"].is_object() && env["data"]["out"].is_null());
+    let (is_error, env) = envelope(&responses, 3);
+    assert!(!is_error, "{env}");
+    assert!(root.join("tuned.json").exists());
+    assert_eq!(
+        envelope(&responses, 4).1["error"]["kind"],
+        "path_not_allowed"
+    );
+    let forwards = envelope(&responses, 5).1["data"]["forwards"]
+        .as_u64()
+        .unwrap();
+    let ticks = responses
+        .iter()
+        .filter(|r| r["method"] == "notifications/progress" && r["params"]["progressToken"] == "t")
+        .count();
+    assert_eq!(ticks as u64, forwards);
+
+    let mut read_only_out = base.clone();
+    read_only_out["out"] = json!("ro.json");
+    let read_only = McpConfig::new(&[root.to_path_buf()], true, false).unwrap();
+    let cancel =
+        json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 3}})
+            .to_string();
+    let responses = session(
+        &deps(),
+        &read_only,
+        &[
+            init("2025-06-18"),
+            call(1, "surgeon_autotune", read_only_out),
+            call(2, "surgeon_autotune", base.clone()),
+            cancel,
+            call(3, "surgeon_autotune", base),
+        ],
+    );
+    assert_eq!(envelope(&responses, 1).1["error"]["kind"], "read_only");
+    assert!(!root.join("ro.json").exists());
+    assert!(
+        !envelope(&responses, 2).0,
+        "computing without out stays allowed"
+    );
+    assert_eq!(envelope(&responses, 3).1["error"]["kind"], "cancelled");
+}
+
+#[test]
+fn linalg_module_has_no_print_and_no_unsafe() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/linalg");
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(!source.contains("unsafe"), "{}: unsafe", path.display());
+        let code = source.split("#[cfg(test)]").next().unwrap();
+        for (n, line) in code.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for banned in [
+                "println!(",
+                "print!(",
+                "eprintln!(",
+                "eprint!(",
+                ".unwrap()",
+                ".expect(",
+                "panic!(",
+            ] {
+                assert!(
+                    !line.contains(banned),
+                    "{}:{}: {banned}",
+                    path.display(),
+                    n + 1
+                );
+            }
+        }
     }
 }

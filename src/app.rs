@@ -20,6 +20,9 @@
 //!          -> extract -> load_prompt_texts -> core_extract_request -> extract::run_extraction
 //!          -> eval    -> load_prompts -> export_gguf (temporary f16, unless .gguf)
 //!                     -> generator_factory -> run_eval -> export_if_healthy
+//!          -> extract -> core_extract_with(args, MethodOptions) -> core_extract_method
+//!          -> autotune -> autotune_cli -> core_autotune -> patch::autotune::run
+//!                      -> linalg::cholesky (ridge, LOOCV) -> validate_patch -> write_atomic
 //!          -> bench   -> bench_cli (args -> *Request) -> core_bench_{logits,ppl,eval,dump}
 //!                     -> bench::{logits_metrics, ppl_runner, score, dump}::run (see `bench/mod.rs`)
 //! Every human byte goes through `ui::*` (output audit in `ui.rs`); `--json` builds
@@ -67,8 +70,8 @@ use crate::bench::report::{self as bench_report, BenchRun};
 use crate::bench::score::EvalRequest;
 use crate::bench::{self, BenchError};
 use crate::cli::{
-    ApplyArgs, BenchArgs, BenchCommand, CheckArgs, Cli, Commands, EvalArgs, ExtractArgs,
-    InspectArgs,
+    ApplyArgs, AutotuneArgs, BenchArgs, BenchCommand, CheckArgs, Cli, Commands, EvalArgs,
+    ExtractArgs, InspectArgs,
 };
 use crate::engine::stats::TensorStats;
 use crate::engine::{
@@ -82,11 +85,13 @@ use crate::eval::{
     ALLOWED_QUANTS, LLAMA_DIR_REQUIRED,
 };
 use crate::extract::{
-    self, ExtractError, ExtractEvent, ExtractObserver, ExtractReport, ExtractRequest, PromptSet,
+    self, ExtractError, ExtractEvent, ExtractObserver, ExtractReport, ExtractRequest,
+    MethodDiagnostics, MethodOptions, PromptSet,
 };
 use crate::hardware::{
     self, BudgetPolicy, HardwareBudget, HardwareError, HardwareProbe, SystemProbe, Verdict,
 };
+use crate::patch::autotune::{self, AutotuneError, AutotuneEvent, AutotuneRequest, AutotuneRun};
 use crate::patch::{
     self, apply_patch, load_patch, validate_patch, ApplyReport, Axis, BackupSet, LayerSelection,
     OpStats, OperationKind, PatchBackend, PatchError, PatchFile, Projection, RollbackHandle,
@@ -320,6 +325,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Schema(_) => "schema",
         Commands::Tui(_) => "tui",
         Commands::Mcp(_) => "mcp",
+        Commands::Autotune(_) => "autotune",
         Commands::Bench(args) => match args.command {
             BenchCommand::Logits(_) => "bench logits",
             BenchCommand::Ppl(_) => "bench ppl",
@@ -335,9 +341,19 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         Commands::Inspect(args) => core_inspect(args, deps, &io.ui),
         Commands::Apply(args) => apply(args, deps, io),
         Commands::Eval(args) => eval(args, deps, &io.ui),
-        Commands::Extract(args) => {
+        Commands::Extract(cmd) => {
             let ui = io.ui;
-            core_extract(args, deps, &ui, &mut CliSink::new(io))
+            core_extract_with(
+                &cmd.args,
+                &cmd.method.options(),
+                deps,
+                &ui,
+                &mut CliSink::new(io),
+            )
+        }
+        Commands::Autotune(args) => {
+            let ui = io.ui;
+            autotune_cli(args, deps, &ui, &mut CliSink::new(io))
         }
         Commands::Bench(args) => bench_cli(args, deps, io),
         // Routed by run_with before dispatch: they have no envelope.
@@ -770,12 +786,12 @@ impl From<Projection> for MlpProj {
     }
 }
 
-impl From<OperationKind> for ShiftOp {
-    fn from(op: OperationKind) -> Self {
-        match op {
-            OperationKind::Subtract => ShiftOp::Subtract,
-            OperationKind::Add => ShiftOp::Add,
-        }
+/// `project_out` is not a shift: it goes through `PatchBackend::project_out_tensor`.
+fn shift_op(op: OperationKind) -> Option<ShiftOp> {
+    match op {
+        OperationKind::Subtract => Some(ShiftOp::Subtract),
+        OperationKind::Add => Some(ShiftOp::Add),
+        OperationKind::ProjectOut => None,
     }
 }
 
@@ -883,9 +899,32 @@ impl PatchBackend for EngineBackend {
         let shard = self
             .shard_of(tensor_name)
             .ok_or_else(|| backend_error(EngineError::TensorNotFound(tensor_name.into())))?;
+        let op = shift_op(op).ok_or_else(|| {
+            PatchError::Backend("project_out passe par project_out_tensor".into())
+        })?;
         self.shards[shard]
             .1
-            .shift_tensor(tensor_name, direction, alpha, op.into(), axis.into())
+            .shift_tensor(tensor_name, direction, alpha, op, axis.into())
+            .map(OpStats::from)
+            .map_err(backend_error)
+    }
+
+    fn project_out_tensor(
+        &mut self,
+        tensor_name: &str,
+        a: &[f32],
+        b: &[f32],
+        alpha: f32,
+    ) -> patch::Result<OpStats> {
+        if self.interrupted.load(Ordering::SeqCst) {
+            return Err(PatchError::Backend(INTERRUPTED.into()));
+        }
+        let shard = self
+            .shard_of(tensor_name)
+            .ok_or_else(|| backend_error(EngineError::TensorNotFound(tensor_name.into())))?;
+        self.shards[shard]
+            .1
+            .project_out_tensor(tensor_name, a, b, alpha)
             .map(OpStats::from)
             .map_err(backend_error)
     }
@@ -929,6 +968,12 @@ pub enum ProgressEvent {
         overall_total: usize,
     },
     OpDone {
+        op_id: String,
+        max_delta: f32,
+        tensors: usize,
+    },
+    /// A `project_out` operation finished (same fields as `OpDone`).
+    ProjectDone {
         op_id: String,
         max_delta: f32,
         tensors: usize,
@@ -983,6 +1028,13 @@ pub enum ProgressEvent {
         done: usize,
         total: usize,
     },
+    /// `autotune`: forwards done out of the planned total.
+    AutotuneForward {
+        done: usize,
+        total: usize,
+    },
+    /// `autotune`: responses measured, ridge being solved.
+    AutotuneSolve,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1009,6 +1061,8 @@ struct ObservedBackend<'a, B: PatchBackend> {
     inner: &'a mut B,
     sink: &'a mut dyn ProgressSink,
     op_ids: Vec<String>,
+    /// Per operation: `project_out` (shown as `[PROJECT]`) rather than a shift.
+    projects: Vec<bool>,
     totals: RefCell<Vec<usize>>,
     op: usize,
     done: usize,
@@ -1019,11 +1073,20 @@ struct ObservedBackend<'a, B: PatchBackend> {
 const BAR_WIDTH: usize = 20;
 
 impl<'a, B: PatchBackend> ObservedBackend<'a, B> {
-    fn new(inner: &'a mut B, sink: &'a mut dyn ProgressSink, op_ids: Vec<String>) -> Self {
+    fn new(
+        inner: &'a mut B,
+        sink: &'a mut dyn ProgressSink,
+        ops: Vec<(String, OperationKind)>,
+    ) -> Self {
+        let projects = ops
+            .iter()
+            .map(|(_, kind)| *kind == OperationKind::ProjectOut)
+            .collect();
         Self {
             inner,
             sink,
-            op_ids,
+            op_ids: ops.into_iter().map(|(id, _)| id).collect(),
+            projects,
             totals: RefCell::new(Vec::new()),
             op: 0,
             done: 0,
@@ -1038,6 +1101,42 @@ impl<'a, B: PatchBackend> ObservedBackend<'a, B> {
 
     fn total(&self) -> usize {
         self.totals.borrow().get(self.op).copied().unwrap_or(0)
+    }
+
+    /// One tensor done: progress, then the end of its operation.
+    fn track(&mut self, tensor_name: &str, stats: OpStats) -> OpStats {
+        self.done += 1;
+        self.overall_done += 1;
+        self.max_delta = self.max_delta.max(stats.max_abs_delta);
+        let overall_total = self.totals.borrow().iter().sum();
+        self.sink.event(ProgressEvent::Shift {
+            op_id: self.op_id(),
+            tensor: tensor_name.to_owned(),
+            done: self.done,
+            total: self.total(),
+            overall_done: self.overall_done,
+            overall_total,
+        });
+        if self.done >= self.total() {
+            let (op_id, max_delta, tensors) = (self.op_id(), self.max_delta, self.done);
+            self.sink
+                .event(match self.projects.get(self.op).copied().unwrap_or(false) {
+                    true => ProgressEvent::ProjectDone {
+                        op_id,
+                        max_delta,
+                        tensors,
+                    },
+                    false => ProgressEvent::OpDone {
+                        op_id,
+                        max_delta,
+                        tensors,
+                    },
+                });
+            self.op += 1;
+            self.done = 0;
+            self.max_delta = 0.0;
+        }
+        stats
     }
 }
 
@@ -1067,29 +1166,18 @@ impl<B: PatchBackend> PatchBackend for ObservedBackend<'_, B> {
         let stats = self
             .inner
             .shift_tensor(tensor_name, direction, alpha, op, axis)?;
-        self.done += 1;
-        self.overall_done += 1;
-        self.max_delta = self.max_delta.max(stats.max_abs_delta);
-        let overall_total = self.totals.borrow().iter().sum();
-        self.sink.event(ProgressEvent::Shift {
-            op_id: self.op_id(),
-            tensor: tensor_name.to_owned(),
-            done: self.done,
-            total: self.total(),
-            overall_done: self.overall_done,
-            overall_total,
-        });
-        if self.done >= self.total() {
-            self.sink.event(ProgressEvent::OpDone {
-                op_id: self.op_id(),
-                max_delta: self.max_delta,
-                tensors: self.done,
-            });
-            self.op += 1;
-            self.done = 0;
-            self.max_delta = 0.0;
-        }
-        Ok(stats)
+        Ok(self.track(tensor_name, stats))
+    }
+
+    fn project_out_tensor(
+        &mut self,
+        tensor_name: &str,
+        a: &[f32],
+        b: &[f32],
+        alpha: f32,
+    ) -> patch::Result<OpStats> {
+        let stats = self.inner.project_out_tensor(tensor_name, a, b, alpha)?;
+        Ok(self.track(tensor_name, stats))
     }
 
     fn flush(&mut self) -> patch::Result<()> {
@@ -1229,6 +1317,9 @@ impl ProgressSink for CliSink<'_, '_> {
             }
             ProgressEvent::BenchPplChunk { done, total } => Some(("ppl", *done, *total)),
             ProgressEvent::BenchEvalQuestion { done, total } => Some(("eval", *done, Some(*total))),
+            ProgressEvent::AutotuneForward { done, total } => {
+                Some(("autotune", *done, Some(*total)))
+            }
             _ => None,
         };
         if let Some((label, done, total)) = bench {
@@ -1296,6 +1387,17 @@ impl ProgressSink for CliSink<'_, '_> {
                 ui::metric(&ui, format!("{max_delta:.4}")),
                 ui::metric(&ui, tensors)
             )),
+            ProgressEvent::ProjectDone {
+                op_id,
+                max_delta,
+                tensors,
+            } => self.io.line(&format!(
+                "{} {} terminée · effacement a(bᵀW) · Δmax {} · {} tenseurs",
+                ui::badge(&ui, "PROJECT"),
+                ui::metric(&ui, op_id),
+                ui::metric(&ui, format!("{max_delta:.4}")),
+                ui::metric(&ui, tensors)
+            )),
             ProgressEvent::Commit { seconds } => self.io.line(&format!(
                 "{} {} · {}",
                 ui::badge(&ui, "COMMIT"),
@@ -1347,7 +1449,9 @@ impl ProgressSink for CliSink<'_, '_> {
             | ProgressEvent::BenchDumpPrompt { .. }
             | ProgressEvent::BenchLogitsBlock { .. }
             | ProgressEvent::BenchPplChunk { .. }
-            | ProgressEvent::BenchEvalQuestion { .. } => {}
+            | ProgressEvent::BenchEvalQuestion { .. }
+            | ProgressEvent::AutotuneForward { .. }
+            | ProgressEvent::AutotuneSolve => {}
         }
     }
 }
@@ -1502,11 +1606,15 @@ pub fn core_apply(
     }
 
     let started = Instant::now();
-    let op_ids = patch.operations.iter().map(|op| op.id.clone()).collect();
+    let ops = patch
+        .operations
+        .iter()
+        .map(|op| (op.id.clone(), op.kind))
+        .collect();
     let guard = backup.as_mut().map(|b| b as &mut dyn RollbackHandle);
     let result = apply_patch(
         &patch,
-        &mut ObservedBackend::new(&mut backend, sink, op_ids),
+        &mut ObservedBackend::new(&mut backend, sink, ops),
         guard,
         false,
     );
@@ -1790,9 +1898,20 @@ fn eval_text(ui: &Ui, report: &EvalReport, max_new_tokens: u32) -> String {
 
 // ---------------------------------------------------------------- extract
 
-/// CLI entry: reads the two prompt files, then [`core_extract_request`].
+/// CLI entry: reads the two prompt files, then [`core_extract_request`] (`mean_diff`).
 pub fn core_extract(
     args: &ExtractArgs,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    core_extract_with(args, &MethodOptions::default(), deps, ui, sink)
+}
+
+/// [`core_extract`] with a direction method.
+pub fn core_extract_with(
+    args: &ExtractArgs,
+    method: &MethodOptions,
     deps: &AppDeps,
     ui: &Ui,
     sink: &mut dyn ProgressSink,
@@ -1818,7 +1937,7 @@ pub fn core_extract(
         dtype: args.dtype,
         overwrite: args.overwrite,
     };
-    core_extract_request(&request, deps, ui, sink)
+    core_extract_method(&request, method, deps, ui, sink)
 }
 
 /// Shared by the CLI and the MCP tool. Cancellation (`deps.interrupted`) is honored
@@ -1829,13 +1948,25 @@ pub fn core_extract_request(
     ui: &Ui,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
+    core_extract_method(request, &MethodOptions::default(), deps, ui, sink)
+}
+
+/// [`core_extract_request`] with a direction method (`svd`, `leace`).
+pub fn core_extract_method(
+    request: &ExtractRequest,
+    method: &MethodOptions,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
     let mut observer = SinkObserver {
         sink,
         interrupted: &deps.interrupted,
         request,
     };
-    let report = extract::run_extraction(request, deps.probe.as_ref(), &mut observer)
-        .map_err(|e| extract_failure(&e))?;
+    let report =
+        extract::run_extraction_method(request, method, deps.probe.as_ref(), &mut observer)
+            .map_err(|e| extract_failure(&e))?;
     let mut outcome = Outcome::ok(to_value(&report), extract_text(ui, &report));
     outcome.warnings = report.warnings.clone();
     Ok(outcome)
@@ -1845,7 +1976,8 @@ fn extract_failure(e: &ExtractError) -> Outcome {
     let code = match e {
         ExtractError::InvalidArgument(_)
         | ExtractError::Prompts { .. }
-        | ExtractError::OutputExists(_) => exit::INVALID_INPUT,
+        | ExtractError::OutputExists(_)
+        | ExtractError::UnpairedPrompts { .. } => exit::INVALID_INPUT,
         ExtractError::InsufficientResources(_) | ExtractError::Cancelled => exit::GENERAL,
         _ => exit::EXTRACT_FAILED,
     };
@@ -1910,6 +2042,17 @@ fn extract_text(ui: &Ui, report: &ExtractReport) -> String {
         ui::badge(ui, "WRITE"),
         ui::path(ui, &report.out_path),
     );
+    if let Some(diag) = &report.method_diagnostics {
+        text.push_str(&method_line(ui, diag));
+    }
+    if let Some(path) = &report.leace_path {
+        text.push_str(&format!(
+            "{} {}
+",
+            ui::badge(ui, "WRITE"),
+            ui::path(ui, path)
+        ));
+    }
     for w in &report.warnings {
         text.push_str(&warning_line(ui, w));
         text.push('\n');
@@ -2118,4 +2261,169 @@ pub fn core_bench_dump(
     )
     .map_err(|e| bench_failure(&e))?;
     bench_outcome(&run, false, bench_report::dump_text(ui, &run))
+}
+
+/// `[METHOD]` line of an svd / leace extraction (mean_diff output is unchanged).
+fn method_line(ui: &Ui, diag: &MethodDiagnostics) -> String {
+    let opt = |v: Option<f64>| v.map_or("—".to_owned(), |x| format!("{x:.3}"));
+    let body = match diag {
+        MethodDiagnostics::Svd(d) => format!(
+            "svd · {} paires · σ₁²/Σσ² {} · cos(μ₊−μ₋) {} · split-half {}",
+            ui::metric(ui, d.n_pairs),
+            ui::metric(ui, format!("{:.3}", d.explained_variance_ratio)),
+            ui::metric(ui, opt(d.cosine_with_mean_diff)),
+            ui::metric(ui, opt(d.split_half_cosine))
+        ),
+        MethodDiagnostics::Leace(d) => format!(
+            "leace · rang {} · λ {} · κ {} · cov(x,z) {} → {} · hors-échantillon {}",
+            ui::metric(ui, d.rank),
+            ui::metric(ui, d.shrinkage),
+            ui::metric(ui, format!("{:.3e}", d.kappa)),
+            ui::metric(ui, format!("{:.3e}", d.cross_cov_before)),
+            ui::metric(ui, format!("{:.3e}", d.cross_cov_after)),
+            ui::metric(ui, opt(d.holdout_cross_cov_ratio))
+        ),
+    };
+    format!("{} {body}\n", ui::badge(ui, "METHOD"))
+}
+
+// ---------------------------------------------------------------- autotune
+
+fn autotune_failure(e: &AutotuneError) -> Outcome {
+    let code = match e {
+        AutotuneError::InvalidArgument(_)
+        | AutotuneError::Input { .. }
+        | AutotuneError::OutputExists(_) => exit::INVALID_INPUT,
+        AutotuneError::InsufficientResources(_) | AutotuneError::Cancelled => exit::GENERAL,
+        AutotuneError::Model(_)
+        | AutotuneError::Solve(_)
+        | AutotuneError::Compute(_)
+        | AutotuneError::Io { .. } => exit::EXTRACT_FAILED,
+    };
+    Outcome::fail(code, e).with_kind(e.kind())
+}
+
+fn autotune_cli(
+    args: &AutotuneArgs,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let request = AutotuneRequest {
+        model: args.model.clone(),
+        vector: args.vector.clone(),
+        eval_dataset: args.eval_dataset.clone(),
+        layer_range: args.target_layer_range,
+        readout_layer: args.readout_layer,
+        proj: args.proj,
+        objective: args.objective,
+        target_projection: args.target_projection,
+        l2_reg: args.l2_reg,
+        probe_alpha: args.probe_alpha,
+        alpha_max: args.alpha_max,
+        min_alpha: args.min_alpha,
+        max_forwards: args.max_forwards,
+        max_tokens: args.max_tokens,
+        dtype: args.dtype,
+        site: args.site,
+        pooling: args.pooling,
+        chat_template: args.chat_template,
+        out: args.out.clone(),
+        overwrite: args.overwrite,
+    };
+    core_autotune(&request, deps, ui, sink)
+}
+
+/// Shared by the CLI and the MCP tool; cancellation is checked before every forward and
+/// nothing is written then.
+pub fn core_autotune(
+    request: &AutotuneRequest,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let run = autotune::run(
+        request,
+        deps.probe.as_ref(),
+        &deps.interrupted,
+        &mut |event| match event {
+            AutotuneEvent::Planned { .. } => {}
+            AutotuneEvent::Forward { done, total } => {
+                sink.event(ProgressEvent::AutotuneForward { done, total })
+            }
+            AutotuneEvent::Solve => sink.event(ProgressEvent::AutotuneSolve),
+        },
+    )
+    .map_err(|e| autotune_failure(&e))?;
+    let mut outcome = Outcome::ok(to_value(&run.report), autotune_text(ui, &run));
+    outcome.warnings = run.warnings.clone();
+    Ok(outcome)
+}
+
+fn autotune_text(ui: &Ui, run: &AutotuneRun) -> String {
+    let r = &run.report;
+    let opt = |v: Option<f64>| v.map_or("—".to_owned(), |x| format!("{x:.4}"));
+    let alphas: Vec<String> = r
+        .alphas
+        .iter()
+        .map(|a| match a.dropped {
+            true => format!("L{} —", a.layer),
+            false => format!("L{} {:+.4}", a.layer, a.alpha),
+        })
+        .collect();
+    let worst_linearity = r
+        .linearity
+        .iter()
+        .map(|c| c.relative_deviation)
+        .fold(0.0f64, f64::max);
+    let mut lines = vec![
+        format!(
+            "{} lecture L{} · {} · {} · {} prompts · {} couches · {} forwards",
+            ui::badge(ui, "AUTOTUNE"),
+            ui::metric(ui, r.readout_layer),
+            ui::metric(ui, r.site.as_str()),
+            ui::metric(ui, r.pooling.as_str()),
+            ui::metric(ui, r.n_prompts),
+            ui::metric(ui, r.layers.len()),
+            ui::metric(ui, r.forwards)
+        ),
+        format!(
+            "{} δ {} · s⁰ moyen {} → cible {} · linéarité (écart max) {}",
+            ui::badge(ui, "RESPONSE"),
+            ui::metric(ui, r.probe_alpha),
+            ui::metric(ui, format!("{:.4}", r.baseline_mean)),
+            ui::metric(ui, format!("{:.4}", r.target_mean)),
+            ui::metric(ui, format!("{:.1} %", worst_linearity * 100.0))
+        ),
+        format!(
+            "{} λ {} · R² {} · RMSE {} · LOO {} · κ {} · ‖α‖ {}",
+            ui::badge(ui, "RIDGE"),
+            ui::metric(ui, format!("{:.1e}", r.ridge.lambda)),
+            ui::metric(ui, opt(r.ridge.r2)),
+            ui::metric(ui, format!("{:.4}", r.ridge.rmse)),
+            ui::metric(ui, opt(r.ridge.loocv_rmse)),
+            ui::metric(ui, format!("{:.2e}", r.ridge.cond_estimate)),
+            ui::metric(ui, format!("{:.4}", r.ridge.alpha_norm))
+        ),
+        format!("  {}", ui::dim(ui, &format!("α : {}", alphas.join(" · ")))),
+        format!(
+            "{} décalage prévu {} · mesuré {} · écart à la cible {} → {}",
+            ui::badge(ui, "VERDICT"),
+            ui::metric(ui, format!("{:+.4}", r.validation.predicted_mean_shift)),
+            ui::metric(ui, format!("{:+.4}", r.validation.actual_mean_shift)),
+            ui::metric(ui, format!("{:.4}", r.validation.target_rmse_before)),
+            ui::metric(ui, format!("{:.4}", r.validation.target_rmse_after))
+        ),
+    ];
+    lines.push(match (&r.out, &r.patch) {
+        (Some(out), _) => format!("{} {}", ui::badge(ui, "WRITE"), ui::path(ui, out)),
+        (None, Some(_)) => format!(
+            "  {}",
+            ui::dim(ui, "patch dans data.patch (--out pour l'écrire)")
+        ),
+        (None, None) => format!("  {}", ui::dim(ui, "aucun patch produit")),
+    });
+    lines.extend(run.warnings.iter().map(|w| warning_line(ui, w)));
+    lines.push(format!("  {}", ui::dim(ui, &r.recommendation)));
+    lines.join("\n") + "\n"
 }

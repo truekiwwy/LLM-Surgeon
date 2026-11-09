@@ -40,6 +40,7 @@ Huit piliers, un seul binaire :
 | Évaluation | `src/eval` | Détection de boucles et attentes via llama.cpp, export GGUF seulement si le modèle est sain. |
 | Extraction | `src/extract` | Vecteur de steering depuis une couche Qwen2, écriture atomique plus un fichier compagnon de statistiques. |
 | Mesure | `src/bench` | Dumps de logits et écarts KL/top-k, delta de perplexité, Pass@1 ; rapports déterministes. |
+| Algèbre linéaire | `src/linalg` | Jacobi, SVD fine par Gram, Cholesky : Rust pur, f64, indépendant du nombre de threads. |
 | Tableau de bord | `src/tui` | État de style Elm, rendu pur, worker en arrière-plan avec annulation. |
 | Agents | `src/mcp` | Serveur MCP sur stdio, chemins confinés aux dossiers autorisés. |
 
@@ -365,8 +366,9 @@ indisponibles.
 
 ### 7. Le confier à un agent IA (MCP)
 
-`surgeon mcp` sert six outils sur stdio (`surgeon_check`, `surgeon_inspect`,
-`surgeon_apply`, `surgeon_eval`, `surgeon_extract`, `surgeon_bench`). Chaque chemin doit
+`surgeon mcp` sert sept outils sur stdio (`surgeon_check`, `surgeon_inspect`,
+`surgeon_apply`, `surgeon_eval`, `surgeon_extract`, `surgeon_bench`, `surgeon_autotune`).
+Chaque chemin doit
 tomber sous un dossier autorisé, et une sauvegarde vérifiée est imposée avant toute
 écriture. Le tableau de bord n'est pas exposé en MCP.
 
@@ -503,6 +505,132 @@ Un avertissement ne change jamais le code de sortie, sauf un seuil (`--warn-kl`,
 4096 positions × 151 936 tokens prend 5,3 s avec 49 Mio de mémoire privée (les dumps sont
 mappés en mémoire) ; noter 1 000 sorties d'eval prend 5 ms.
 
+### 9. Representation engineering : `extract --method`, `project_out`, `autotune`
+
+La théorie d'abord, avec les formules exactes du code (toute l'algèbre linéaire est en Rust
+pur, en f64, dans `src/linalg` : Jacobi cyclique, SVD fine par la matrice de Gram, Cholesky).
+
+- **`mean_diff`** (défaut, inchangé) : `v = normalize(μ₊ − μ₋)` sur les activations poolées.
+- **`svd`** (PCA contrastive) : prompts appariés par index (sinon `unpaired_prompts`, code
+  2), `ΔX_i = x⁺_i − x⁻_i`, `v` = premier vecteur singulier droit de ΔX, c'est-à-dire le
+  vecteur propre dominant de `(1/N) ΔXᵀΔX`, orienté pour que `⟨v, μ₊ − μ₋⟩ ≥ 0`. ΔX n'est PAS
+  centrée par défaut : centrer retire le delta moyen, qui est l'axe du concept lui-même.
+  `--svd-center` sert aux paires d'ordre arbitraire (signes aléatoires). Diagnostics :
+  σ₁..σ₅, `σ₁²/Σσ²`, cosinus avec `μ₊ − μ₋`, cosinus split-half (paires paires contre
+  impaires) ; avertissement si `σ₂/σ₁ > 0.9` ou moins de 8 paires.
+- **`leace`** : `r(x) = x − a bᵀ(x − μ)` avec `Σ_λ = (1−λ)Σ + λ·tr(Σ)/d·I`,
+  `w = Σ_λ^{-1/2}(μ₊ − μ₋)`, `u = w/‖w‖`, `a = Σ_λ^{1/2}u` (parallèle à `μ₊ − μ₋`),
+  `b = Σ_λ^{-1/2}u` (parallèle à `Σ_λ⁻¹(μ₊ − μ₋)`), `bᵀa = 1`. `Σ^{-1/2}μ_Δ` seul n'est que la
+  direction blanchie `w` : l'effaceur a besoin de `a` (où écrire) et de `b` (quoi lire).
+  `Σ_λ^p` est appliquée via la SVD fine des données centrées, jamais comme matrice d×d ;
+  `--leace-shrinkage 0` donne la pseudo-inverse sur le sous-espace des données
+  (`--leace-rcond`). La `direction` écrite vaut `a/‖a‖`, donc la direction `mean_diff` ; `a`,
+  `b`, `mean` et `u_whitened` vont dans `<out>.leace.safetensors`.
+- **Limites honnêtes de LEACE** : la covariance croisée `cov(r(x), z)` s'annule en
+  échantillon pour tout `Σ_λ` défini positif ; « aucun prédicteur linéaire ne fait mieux
+  qu'une constante » est une garantie de population. Avec n < d, un classifieur peut encore
+  séparer l'échantillon effacé : seul `--holdout-frac` (réajustement sur le reste, mesure sur
+  les prompts retenus) dit si l'effacement généralise. Effacer un concept de tout le flux
+  résiduel demanderait l'effaceur sur toutes les écritures dans ce flux ; patcher les poids
+  d'une couche n'en donne pas la garantie.
+- **`project_out`** (opération de patch) : `W' = W − α·a(bᵀW)` sur `down_proj`
+  (`[hidden, intermediate]`, qui écrit dans le flux résiduel), `α ∈ [0, 1]` (1 = effacement
+  complet de ce que cette matrice écrit selon `b`). `o_proj` et les embeddings écrivent aussi
+  dans le flux et ne sont pas couverts.
+- **`autotune`** : le naïf `min ‖Y − Σ α_l W_l v_l‖²` laisse `Y` et `W_l v_l` indéfinis. La
+  lecture est `s_i = ⟨pool(h_i^R), v⟩` à la couche R (site, pooling et gabarit du vecteur),
+  la cible `y_i = t_i − s_i⁰` (`neg_mean_proj` pour `suppress`, `pos_mean_proj` pour
+  `amplify`, `--target-projection`, ou un `target` par prompt), la réponse
+  `F_il = (s_i(δ_l) − s_i⁰)/δ` mesurée en mémoire avec le décalage du moteur sur les octets
+  stockés (arrondi bf16 compris), puis `α = (FᵀF + λI)⁻¹Fᵀy` par Cholesky, avec `λ` fixe ou
+  choisi par LOOCV en forme fermée (`e_i/(1 − h_ii)`, 17 points de 1e-6 à 1e2). Le R² est
+  non centré (`1 − Σe²/Σy²`, il n'y a pas d'intercept). Les `α` ajustés sont appliqués
+  ensemble et mesurés à nouveau. Les effets secondaires ne sont pas mesurés : lancer
+  `surgeon bench` ensuite.
+
+Exécutions réelles sur le mini Qwen2 factice (6 prompts par ensemble, hidden size 16) :
+
+```bash
+surgeon extract --model qwen2-mini --pos-prompts pos.json --neg-prompts neg.json --layer 2 --method svd --out svd.safetensors
+surgeon extract --model qwen2-mini --pos-prompts pos.json --neg-prompts neg.json --layer 2 --method leace --out erase.safetensors
+```
+
+```text
+[VERDICT]  d′ 1.21 · accuracy 83% · ‖Δ‖ 3.378
+[WRITE]    svd.safetensors
+[METHOD]   svd · 6 paires · σ₁²/Σσ² 0.393 · cos(μ₊−μ₋) 0.812 · split-half 0.412
+  ! seulement 6 paires (au moins 8 recommandées) : direction SVD peu fiable
+[VERDICT]  d′ 2.23 · accuracy 92% · ‖Δ‖ 3.378
+[WRITE]    erase.safetensors
+[METHOD]   leace · rang 11 · λ 0.1 · κ 5.033e1 · cov(x,z) 8.444e-1 → 9.449e-16 · hors-échantillon —
+[WRITE]    erase.safetensors.leace.safetensors
+  ! n = 12 ≤ d = 16 : la covariance croisée s'annule en échantillon, mais un classifieur linéaire peut encore séparer ; seul holdout_cross_cov_ratio dit si l'effacement généralise
+```
+
+Le d′ de `leace` (2.23) est celui de `mean_diff` : même direction, comme le dit la théorie.
+Application de l'effaceur sur une copie (`project.json` nomme les tenseurs `a` et `b` du
+fichier `.leace`) :
+
+```json
+{"schema_version": 1, "backup": false, "operations": [{"id": "erase-L1", "layers": "1", "projections": ["down_proj"], "operation": "project_out", "vector_file": "erase.safetensors.leace.safetensors", "vector_tensor": "a", "vector_tensor_b": "b", "alpha": 1.0}]}
+```
+
+```bash
+surgeon apply --model qwen2-erased/model.safetensors --patch project.json --no-backup
+surgeon autotune --model qwen2-mini --vector md.safetensors --eval-dataset pos.json --target-layer-range 0-3 --l2-reg auto --out tuned.json
+```
+
+```text
+[PROJECT]  erase-L1 terminée · effacement a(bᵀW) · Δmax 0.3463 · 1 tenseurs
+[AUTOTUNE] lecture L2 · resid_post · last · 6 prompts · 3 couches · 48 forwards
+[RESPONSE] δ 0.05 · s⁰ moyen 1.2984 → cible -2.0793 · linéarité (écart max) 1.8 %
+[RIDGE]    λ 1.0e2 · R² 0.0120 · RMSE 3.6374 · LOO 4.1374 · κ 1.32e0 · ‖α‖ 0.0658
+  α : L0 +0.0183 · L1 -0.0596 · L2 -0.0210
+[VERDICT]  décalage prévu -0.0371 · mesuré -0.0354 · écart à la cible 3.6594 → 3.6390
+[WRITE]    tuned.json
+  ! couches [3] au-delà de la lecture (couche 2) : sans effet sur elle, exclues
+```
+
+Sur ce mini-modèle aléatoire, les réponses ne se généralisent pas d'un prompt à l'autre :
+la LOOCV choisit le λ le plus fort et l'ajustement explique 1 % du décalage. C'est la réponse
+honnête, et le décalage mesuré (−0.0354) colle à la prédiction (−0.0371). `tuned.json` est un
+patch ordinaire (`backup: true`, un `subtract` par couche) pour `surgeon apply`.
+
+Comparaison des trois méthodes sur données SYNTHÉTIQUES (`cargo run --release --example
+bench_directions`) : direction t plantée, composante « syntaxe » partagée par chaque paire,
+bruit anisotrope, force du concept `s = 0.5·√d` (« faible » : `0.15·√d`), graine fixe ; les
+temps sont indicatifs. Aucun gain sur de vrais modèles n'est affirmé.
+
+| scénario (synthétique) | paires N | d | méthode | cos(v, t) | split-half | cos(b, W⁻¹t) | temps (ms) |
+|---|---:|---:|---|---:|---:|---:|---:|
+| standard | 8 | 64 | mean_diff | 0.568 | 0.304 | — | 0.0 |
+| standard | 8 | 64 | svd | 0.549 | -0.084 | — | 0.5 |
+| standard | 8 | 64 | leace | 0.568 | 0.304 | 0.360 | 0.2 |
+| standard | 32 | 64 | mean_diff | 0.889 | 0.689 | — | 0.0 |
+| standard | 32 | 64 | svd | 0.828 | 0.497 | — | 1.0 |
+| standard | 32 | 64 | leace | 0.889 | 0.689 | 0.597 | 4.1 |
+| standard | 128 | 64 | mean_diff | 0.968 | 0.803 | — | 0.0 |
+| standard | 128 | 64 | svd | 0.935 | 0.786 | — | 12.4 |
+| standard | 128 | 64 | leace | 0.968 | 0.803 | 0.863 | 3.4 |
+| standard | 32 | 1024 | mean_diff | 0.835 | 0.615 | — | 0.1 |
+| standard | 32 | 1024 | svd | 0.842 | 0.622 | — | 2.7 |
+| standard | 32 | 1024 | leace | 0.835 | 0.615 | 0.462 | 6.6 |
+| standard | 128 | 1024 | mean_diff | 0.956 | 0.818 | — | 0.2 |
+| standard | 128 | 1024 | svd | 0.957 | 0.821 | — | 61.0 |
+| standard | 128 | 1024 | leace | 0.956 | 0.818 | 0.370 | 681.3 |
+| faible | 32 | 1024 | mean_diff | 0.476 | 0.130 | — | 0.1 |
+| faible | 32 | 1024 | svd | 0.406 | 0.054 | — | 2.5 |
+| faible | 32 | 1024 | leace | 0.476 | 0.130 | 0.280 | 6.0 |
+| faible | 128 | 1024 | mean_diff | 0.699 | 0.359 | — | 0.3 |
+| faible | 128 | 1024 | svd | 0.655 | 0.211 | — | 98.2 |
+| faible | 128 | 1024 | leace | 0.699 | 0.359 | 0.454 | 914.4 |
+
+Ce que montre ce tableau synthétique : l'appariement annule déjà la composante « syntaxe »
+partagée pour `mean_diff`, et la SVD non centrée est tirée vers les axes les plus bruités :
+`svd` ne bat donc pas `mean_diff` ici (égalité à d = 1024). La direction `leace` est celle de
+`mean_diff` par construction ; sa direction de lecture `b` s'approche de l'optimum `W⁻¹t`
+quand N ≫ d et en reste loin quand n < d (le rétrécissement domine).
+
 ## Codes de sortie
 
 | Code | Signification |
@@ -514,7 +642,7 @@ mappés en mémoire) ; noter 1 000 sorties d'eval prend 5 ms.
 | 4 | Critique : rollback raté, ou pas de sauvegarde et modèle laissé partiellement patché |
 | 5 | `eval` : modèle malade (boucles, attentes non tenues) ; pas d'export |
 | 6 | `eval` : échec de l'export GGUF |
-| 7 | `extract` : config, tokenizer ou poids invalides, direction dégénérée, NaN/Inf |
+| 7 | `extract` ou `autotune` : config, tokenizer ou poids invalides, direction dégénérée, NaN/Inf, système singulier ou mal conditionné |
 | 8 | `bench` : échec du bench (processus llama.cpp, sortie illisible, dumps incompatibles, génération) |
 | 9 | `bench --fail-on-warn` : un seuil a été dépassé (le rapport est dans `data`) |
 | 70 | Erreur interne (panic), signalée après restauration du terminal |
@@ -529,6 +657,7 @@ mappés en mémoire) ; noter 1 000 sorties d'eval prend 5 ms.
 | `surgeon eval` | Non-régression via llama.cpp, export GGUF conditionnel | GGUF |
 | `surgeon extract` | Vecteur de steering depuis une couche Qwen2 | vecteur, compagnon `.stats.json` |
 | `surgeon bench` | Dumps de logits et KL/top-k, delta de perplexité, Pass@1 | dump de logits (`dump` seulement) |
+| `surgeon autotune` | Coefficients par couche par ridge sur des réponses mesurées | patch.json (`--out` seulement) |
 | `surgeon tui` | Tableau de bord : inspecteur de poids et visualiseur de vecteur | rien |
 | `surgeon schema` | JSON Schema de `patch.json`, ou définitions des outils MCP | stdout seulement |
 | `surgeon mcp` | Serveur MCP sur stdio | via ses outils |
@@ -560,6 +689,11 @@ ne distribuez pas un modèle dont vous avez retiré les garde-fous.
   [67,0 % ; 88,8 %], seules les fortes régressions sont concluantes.
 - Les dumps `.pt` sont lus au mieux : archives `torch.save` non compressées, tenseurs
   contigus seulement.
+- `extract --method svd|leace` et `autotune` reposent sur Jacobi, limité à 1024 sur le petit
+  côté (prompts ou hidden size). L'effacement LEACE n'est exact qu'en échantillon ; avec
+  n < d, regarder `holdout_cross_cov_ratio`. `project_out` ne couvre que `down_proj` et
+  n'efface donc pas un concept de tout le flux résiduel. `autotune` ajuste et mesure sur les
+  mêmes prompts et ne mesure pas les effets secondaires.
 - Seules les projections MLP (`gate_proj`, `up_proj`, `down_proj`) sont couvertes.
 - Le tableau de bord exige un terminal interactif d'au moins 80×24, avec stdin, stdout et
   stderr qui y sont rattachés ; sinon, utilisez `--snapshot`.
@@ -608,9 +742,10 @@ README existe. Les commits suivent `type: description` (`feat`, `fix`, `refactor
 │   ├── eval/              exécution llama.cpp, détecteur de boucles, export GGUF
 │   ├── extract/           passe avant Qwen2, vecteur de steering, fichier compagnon
 │   ├── bench/             dumps de logits et KL, perplexité, Pass@1 (GSM8K/MATH)
+│   ├── linalg/            Jacobi, SVD par Gram, itération de puissance, Cholesky (Rust pur)
 │   ├── mcp/               serveur JSON-RPC, outils, sandbox
 │   └── tui/               tableau de bord : app, worker, terminal, thème, widgets/
-├── examples/fake_llama.rs faux binaires llama.cpp pour les tests de bench
+├── examples/              fake_llama.rs (faux llama.cpp), bench_directions.rs (synthétique)
 └── tests/
     ├── integration.rs     parcours de bout en bout et tests du binaire
     ├── deps_purity.rs     aucun compilateur C dans l'arbre des dépendances

@@ -13,9 +13,9 @@ use serde_json::{json, Map, Value};
 
 use super::server::McpConfig;
 use crate::app::{
-    core_apply, core_bench_dump, core_bench_eval, core_bench_logits, core_bench_ppl, core_check,
-    core_eval, core_extract_request, core_inspect, envelope_of, exit, AppDeps, ApplyRequest,
-    CoreResult, Outcome, ProgressSink,
+    core_apply, core_autotune, core_bench_dump, core_bench_eval, core_bench_logits, core_bench_ppl,
+    core_check, core_eval, core_extract_method, core_inspect, envelope_of, exit, AppDeps,
+    ApplyRequest, CoreResult, Outcome, ProgressSink,
 };
 use crate::bench;
 use crate::bench::dump::DumpRequest;
@@ -25,7 +25,11 @@ use crate::bench::prompt::Template;
 use crate::bench::score::EvalRequest;
 use crate::cli::{CheckArgs, EvalArgs, InspectArgs, SchemaKind};
 use crate::eval::{load_prompts, EvalPrompt};
-use crate::extract::{self, ChatTemplate, DTypeChoice, ExtractRequest, Pooling, Site};
+use crate::extract::{
+    self, ChatTemplate, DTypeChoice, ExtractRequest, MethodOptions, Pooling, Site,
+    DEFAULT_LEACE_RCOND, DEFAULT_LEACE_SHRINKAGE,
+};
+use crate::patch::autotune::{parse_layer_range, AutotuneRequest, L2Reg};
 use crate::patch::{LayerSelection, LayersField, PatchFile, Projection, ValidationIssue};
 use crate::ui::Ui;
 
@@ -35,13 +39,15 @@ pub const TOOL_APPLY: &str = "surgeon_apply";
 pub const TOOL_EVAL: &str = "surgeon_eval";
 pub const TOOL_EXTRACT: &str = "surgeon_extract";
 pub const TOOL_BENCH: &str = "surgeon_bench";
-const TOOLS: [&str; 6] = [
+pub const TOOL_AUTOTUNE: &str = "surgeon_autotune";
+const TOOLS: [&str; 7] = [
     TOOL_CHECK,
     TOOL_INSPECT,
     TOOL_APPLY,
     TOOL_EVAL,
     TOOL_EXTRACT,
     TOOL_BENCH,
+    TOOL_AUTOTUNE,
 ];
 
 const DEFAULT_MAX_TENSORS: u32 = 500;
@@ -203,6 +209,33 @@ pub struct ExtractToolArgs {
     #[serde(default)]
     #[schemars(description = "Remplace un fichier out existant (sinon erreur).")]
     pub overwrite: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Méthode : mean_diff (défaut), svd (prompts appariés par index), leace (écrit aussi <out>.leace.safetensors pour project_out)."
+    )]
+    pub method: Option<crate::extract::Method>,
+    #[serde(default)]
+    #[schemars(
+        description = "svd : centre les différences appariées (paires d'ordre arbitraire)."
+    )]
+    pub svd_center: bool,
+    #[serde(default)]
+    #[schemars(
+        range(min = 0.0, max = 1.0),
+        description = "leace : rétrécissement λ de Σ vers tr(Σ)/d·I, défaut 0.1 (0 : pseudo-inverse)."
+    )]
+    pub leace_shrinkage: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        description = "leace avec λ = 0 : seuil relatif des valeurs propres conservées (défaut 1e-10)."
+    )]
+    pub leace_rcond: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 0.0, max = 1.0),
+        description = "Fraction hors-échantillon (par index) pour les diagnostics ; 10 prompts par classe au moins."
+    )]
+    pub holdout_frac: Option<f64>,
 }
 
 fn default_extract_layer() -> u32 {
@@ -296,6 +329,13 @@ pub fn tool_definitions() -> Value {
             schema_value::<BenchToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
+        tool(
+            TOOL_AUTOTUNE,
+            "Réglage des coefficients par couche",
+            "Mesure en mémoire la réponse de la projection d'une couche de lecture sur le vecteur quand chaque couche candidate est décalée (différences finies, arrondi au dtype comme sur disque), ajuste les α par régression ridge (λ fixe ou LOOCV), valide en appliquant tous les α ensemble, et produit un patch.json compatible surgeon_apply (écrit seulement si out est fourni). Ne mesure pas les effets secondaires : utiliser surgeon_bench ensuite.",
+            schema_value::<AutotuneToolArgs>(),
+            json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
+        ),
     ]))
 }
 
@@ -329,6 +369,7 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         TOOL_APPLY => ("apply", apply(arguments, ctx)),
         TOOL_EVAL => ("eval", eval(arguments, ctx)),
         TOOL_BENCH => (bench_command(&arguments), bench(arguments, ctx)),
+        TOOL_AUTOTUNE => ("autotune", autotune(arguments, ctx)),
         _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);
@@ -526,7 +567,131 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         dtype: args.dtype,
         overwrite: args.overwrite,
     };
-    core_extract_request(&request, ctx.deps, &Ui::off(), ctx.sink)
+    let method = MethodOptions {
+        method: args.method.unwrap_or_default(),
+        svd_center: args.svd_center,
+        leace_shrinkage: args.leace_shrinkage.unwrap_or(DEFAULT_LEACE_SHRINKAGE),
+        leace_rcond: args.leace_rcond.unwrap_or(DEFAULT_LEACE_RCOND),
+        holdout_frac: args.holdout_frac.unwrap_or(0.0),
+    };
+    core_extract_method(&request, &method, ctx.deps, &Ui::off(), ctx.sink)
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(
+    description = "Arguments de surgeon_autotune : coefficients α par couche ajustés par ridge sur des réponses mesurées en mémoire."
+)]
+pub struct AutotuneToolArgs {
+    #[schemars(description = "Dossier du modèle Qwen2, dans un dossier autorisé.")]
+    pub model: PathBuf,
+    #[schemars(
+        description = "Fichier direction de surgeon_extract (tenseur direction et métadonnées)."
+    )]
+    pub vector: PathBuf,
+    #[schemars(description = "Tableau JSON (ou JSONL) de chaînes ou d'objets {text, target?}.")]
+    pub eval_dataset: PathBuf,
+    #[serde(default)]
+    #[schemars(
+        description = "Couches candidates \"A-B\" ; défaut : 0 jusqu'à la couche de lecture."
+    )]
+    pub target_layer_range: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Couche lue ; défaut : la couche du vecteur.")]
+    pub readout_layer: Option<u32>,
+    #[serde(default)]
+    #[schemars(description = "Projection décalée ; défaut down_proj.")]
+    pub proj: Option<Projection>,
+    #[serde(default)]
+    pub objective: Option<crate::patch::autotune::Objective>,
+    #[serde(default)]
+    #[schemars(description = "Projection cible (obligatoire avec objective target).")]
+    pub target_projection: Option<f64>,
+    #[serde(default)]
+    #[schemars(description = "λ > 0, ou \"auto\" (LOOCV sur 1e-6..1e2) ; défaut 1e-3.")]
+    pub l2_reg: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Pas δ des différences finies, défaut 0.05.")]
+    pub probe_alpha: Option<f64>,
+    #[serde(default)]
+    #[schemars(description = "Écrêtage |α| ≤ alpha_max, défaut 1.")]
+    pub alpha_max: Option<f64>,
+    #[serde(default)]
+    #[schemars(description = "Couches à |α| < min_alpha retirées, défaut 1e-4.")]
+    pub min_alpha: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "Plafond de forwards vérifié avant calcul, défaut 2000."
+    )]
+    pub max_forwards: Option<u32>,
+    #[serde(default)]
+    #[schemars(range(min = 1), description = "Troncature par prompt, défaut 256.")]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub dtype: DTypeChoice,
+    #[serde(default)]
+    pub site: Option<Site>,
+    #[serde(default)]
+    pub pooling: Option<Pooling>,
+    #[serde(default)]
+    pub chat_template: Option<ChatTemplate>,
+    #[serde(default)]
+    #[schemars(
+        description = "patch.json à écrire (refusé en --read-only) ; sans out, le patch est seulement dans data.patch."
+    )]
+    pub out: Option<PathBuf>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
+    let args: AutotuneToolArgs = parse(arguments)?;
+    if ctx.cfg.read_only && args.out.is_some() {
+        return Err(invalid(
+            "read_only",
+            "serveur lancé avec --read-only : surgeon_autotune peut calculer mais pas écrire out",
+        ));
+    }
+    let root = ctx.cfg.sandbox.base().to_path_buf();
+    let bad = |m: String| invalid("invalid_arguments", m);
+    let request = AutotuneRequest {
+        model: sandboxed(ctx, "model", &args.model, &root)?,
+        vector: sandboxed(ctx, "vector", &args.vector, &root)?,
+        eval_dataset: sandboxed(ctx, "eval_dataset", &args.eval_dataset, &root)?,
+        layer_range: args
+            .target_layer_range
+            .as_deref()
+            .map(parse_layer_range)
+            .transpose()
+            .map_err(&bad)?,
+        readout_layer: args.readout_layer.map(|r| r as usize),
+        proj: args.proj.unwrap_or(Projection::Down),
+        objective: args.objective.unwrap_or_default(),
+        target_projection: args.target_projection,
+        l2_reg: args
+            .l2_reg
+            .as_deref()
+            .unwrap_or("1e-3")
+            .parse::<L2Reg>()
+            .map_err(&bad)?,
+        probe_alpha: args.probe_alpha.unwrap_or(0.05),
+        alpha_max: args.alpha_max.unwrap_or(1.0),
+        min_alpha: args.min_alpha.unwrap_or(1e-4),
+        max_forwards: args.max_forwards.map_or(2000, |m| m as usize),
+        max_tokens: args.max_tokens.map_or(256, |m| m as usize),
+        dtype: args.dtype,
+        site: args.site,
+        pooling: args.pooling,
+        chat_template: args.chat_template,
+        out: args
+            .out
+            .as_ref()
+            .map(|o| sandboxed(ctx, "out", o, &root))
+            .transpose()?,
+        overwrite: args.overwrite,
+    };
+    core_autotune(&request, ctx.deps, &Ui::off(), ctx.sink)
 }
 
 /// Exactly one of the inline list or the (sandboxed) file.

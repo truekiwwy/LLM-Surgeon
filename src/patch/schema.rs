@@ -75,9 +75,15 @@ pub struct Operation {
         description = "Nom du tenseur à lire dans un .safetensors qui en contient plusieurs ; interdit avec un .json."
     )]
     pub vector_tensor: Option<String>,
+    /// `project_out` only: the read direction `b` (`vector_tensor` is then `a`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "project_out uniquement (obligatoire) : tenseur b du fichier .leace.safetensors (vector_tensor désigne alors a)."
+    )]
+    pub vector_tensor_b: Option<String>,
     #[schemars(
         range(min = -100.0, max = 100.0),
-        description = "Intensité du décalage W ∓= alpha·v, dans [-100, 100] ; |alpha| > 5 déclenche un avertissement."
+        description = "Intensité du décalage W ∓= alpha·v, dans [-100, 100] ; |alpha| > 5 déclenche un avertissement. project_out : force dans [0, 1] (1 = effacement complet)."
     )]
     pub alpha: f32,
     #[serde(default)]
@@ -103,10 +109,15 @@ fn projections_schema(gen: &mut SchemaGenerator) -> Schema {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
-#[schemars(description = "subtract retire alpha·v des poids, add l'ajoute.")]
+#[schemars(
+    description = "subtract retire alpha·v des poids, add l'ajoute ; project_out applique l'effaceur LEACE W ← W − alpha·a(bᵀW) (down_proj seulement)."
+)]
 pub enum OperationKind {
     Subtract,
     Add,
+    // A plain comment: a doc comment on a variant would turn the schema enum into a oneOf.
+    #[serde(rename = "project_out")]
+    ProjectOut,
 }
 
 /// Declaration order is the canonical order (gate, up, down).

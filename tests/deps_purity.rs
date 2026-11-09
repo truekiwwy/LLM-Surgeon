@@ -1,7 +1,7 @@
 //! The extraction stack stays pure Rust: no C/C++ build step, no GPU SDK, no Oniguruma.
 //! Reads `Cargo.lock`, which lists every platform and the dev-dependencies too.
 
-const FORBIDDEN: [&str; 18] = [
+const FORBIDDEN: [&str; 23] = [
     "onig_sys",
     "onig",
     "cmake",
@@ -21,6 +21,12 @@ const FORBIDDEN: [&str; 18] = [
     "libz-sys",
     "libz-ng-sys",
     "lzma-sys",
+    // BLAS / LAPACK backends (Fortran or C): linalg is pure Rust.
+    "openblas-src",
+    "blas-src",
+    "lapack-src",
+    "netlib-src",
+    "cblas-sys",
 ];
 
 /// `(name, dependencies)` of every `[[package]]` entry.

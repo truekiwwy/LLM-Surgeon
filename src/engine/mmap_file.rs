@@ -6,6 +6,7 @@ use memmap2::{Mmap, MmapMut, MmapOptions};
 
 use super::error::{EngineError, Result};
 use super::index::{parse_index, ModelIndex, TensorInfo};
+use super::project::project_out_tensor;
 use super::shift::{apply_vector_shift, decode_f32, BroadcastAxis, ShiftOp, ShiftStats};
 
 #[derive(Debug, Clone, Copy)]
@@ -131,6 +132,19 @@ impl WritableModel {
             op,
             axis,
         )
+    }
+
+    /// `W ← W − α a (bᵀ W)`, see [`project_out_tensor`].
+    pub fn project_out_tensor(
+        &mut self,
+        name: &str,
+        a: &[f32],
+        b: &[f32],
+        alpha: f32,
+    ) -> Result<ShiftStats> {
+        let info = self.index.get(name)?;
+        let bytes = &mut self.mmap[info.byte_start..info.byte_end];
+        project_out_tensor(bytes, info.dtype.clone(), &info.shape, a, b, alpha)
     }
 
     pub fn flush(&self) -> Result<()> {

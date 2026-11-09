@@ -51,9 +51,9 @@ pub use protocol::{
 pub use sandbox::{Sandbox, SandboxError};
 pub use server::{serve, McpConfig, MAX_LINE_BYTES};
 pub use tools::{
-    patch_schema, render_schema, tool_definitions, ApplyToolArgs, BenchMode, BenchToolArgs,
-    CheckToolArgs, EvalToolArgs, ExtractToolArgs, InspectToolArgs, TOOL_APPLY, TOOL_BENCH,
-    TOOL_CHECK, TOOL_EVAL, TOOL_EXTRACT, TOOL_INSPECT,
+    patch_schema, render_schema, tool_definitions, ApplyToolArgs, AutotuneToolArgs, BenchMode,
+    BenchToolArgs, CheckToolArgs, EvalToolArgs, ExtractToolArgs, InspectToolArgs, TOOL_APPLY,
+    TOOL_AUTOTUNE, TOOL_BENCH, TOOL_CHECK, TOOL_EVAL, TOOL_EXTRACT, TOOL_INSPECT,
 };
 
 use crate::app::{exit, AppDeps};

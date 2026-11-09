@@ -41,16 +41,16 @@ impl ShiftStats {
 }
 
 // Little-endian byte arrays, never pointer casts: tensor data has no alignment guarantee.
-fn bf16_load(b: [u8; 2]) -> f32 {
+pub(super) fn bf16_load(b: [u8; 2]) -> f32 {
     bf16::from_le_bytes(b).to_f32()
 }
-fn bf16_store(x: f32) -> [u8; 2] {
+pub(super) fn bf16_store(x: f32) -> [u8; 2] {
     bf16::from_f32(x).to_le_bytes() // round to nearest, ties to even
 }
-fn f16_load(b: [u8; 2]) -> f32 {
+pub(super) fn f16_load(b: [u8; 2]) -> f32 {
     f16::from_le_bytes(b).to_f32()
 }
-fn f16_store(x: f32) -> [u8; 2] {
+pub(super) fn f16_store(x: f32) -> [u8; 2] {
     f16::from_f32(x).to_le_bytes()
 }
 
@@ -170,7 +170,7 @@ where
 }
 
 #[inline]
-fn shift_cells<const N: usize>(
+pub(super) fn shift_cells<const N: usize>(
     cells: &mut [[u8; N]],
     deltas: impl Iterator<Item = f32>,
     load: &impl Fn([u8; N]) -> f32,
