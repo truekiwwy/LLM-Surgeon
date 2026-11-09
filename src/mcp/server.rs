@@ -24,16 +24,20 @@ use crate::extract::PromptSet;
 /// A larger incoming line is answered with -32600 and skipped up to the next newline.
 pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 
-const INSTRUCTIONS: &str = "surgeon modifie les poids MLP de modèles SafeTensors. \
-Outils : surgeon_check (budget RAM/VRAM), surgeon_inspect (couches et matrices MLP), \
-surgeon_apply (applique un patch EN PLACE ; faire d'abord dry_run: true), surgeon_eval \
-(non-régression et export GGUF), surgeon_extract (vecteur de direction depuis une couche \
-Qwen2, à donner ensuite comme vector_file d'un patch), surgeon_bench (mesure d'une \
-chirurgie : mode dump, logits, ppl ou eval ; appliquer d'abord sur une copie du modèle), \
-surgeon_autotune (coefficients par couche ajustés par ridge, patch.json en sortie). \
-Garde-fous : chemins limités aux dossiers autorisés, \
-sauvegarde vérifiée imposée avant écriture, rollback automatique sur erreur ou annulation. \
-Le format du patch est le schéma de l'argument patch de surgeon_apply.";
+const INSTRUCTIONS: &str = "surgeon est l'extension MCP du Surgery Engine : un moteur de \
+chirurgie des poids de modèles de langage locaux (SafeTensors, GGUF), appelable par un agent \
+avec des outils typés. Outils : surgeon_check (budget RAM/VRAM), surgeon_inspect (couches et \
+matrices MLP), surgeon_apply (applique un patch EN PLACE ; faire d'abord dry_run: true), \
+surgeon_eval (non-régression et export GGUF), surgeon_extract (vecteur de direction depuis \
+une couche Qwen2 ; method est un identifiant du registre du moteur : mean_diff, svd, leace), \
+surgeon_bench (mesure d'une chirurgie : mode dump, logits, ppl ou eval), surgeon_autotune \
+(coefficients par couche ajustés par ridge, patch.json en sortie), surgeon_diff (patch \
+.surgery de faible rang entre deux checkpoints), surgeon_lora (fusion ou extraction d'un \
+adaptateur LoRA). Démarche sûre : surgeon_check d'abord, travailler sur une copie du modèle, \
+dry_run avant tout apply, garder la sauvegarde, mesurer avec surgeon_bench avant de conclure. \
+Garde-fous : chemins limités aux dossiers autorisés, sauvegarde vérifiée imposée avant \
+écriture, rollback automatique sur erreur ou annulation. Le format du patch est le schéma de \
+l'argument patch de surgeon_apply.";
 
 #[derive(Debug, Clone)]
 pub struct McpConfig {
