@@ -312,17 +312,9 @@ mod tests {
         for dtype in [DType::BF16, DType::F16, DType::F32] {
             let mut bytes = encode(&dtype, &w);
             let old = decode(&dtype, &bytes);
-            let stats = apply_lowrank_rows(
-                &mut bytes,
-                dtype.clone(),
-                rows,
-                cols,
-                &u,
-                &v,
-                r,
-                &never(),
-            )
-            .unwrap();
+            let stats =
+                apply_lowrank_rows(&mut bytes, dtype.clone(), rows, cols, &u, &v, r, &never())
+                    .unwrap();
             let new = decode(&dtype, &bytes);
             let mut modified = 0;
             for i in 0..rows {
@@ -484,8 +476,6 @@ mod tests {
         .unwrap();
         assert_eq!(decode(&DType::BF16, &bytes), [1.5, 2.0, 2.0]);
         assert_eq!(stats.elements_modified, 2);
-        assert!(
-            apply_full_delta(&mut bytes, DType::BF16, 1, 3, &[0.0; 2], 1.0, &never()).is_err()
-        );
+        assert!(apply_full_delta(&mut bytes, DType::BF16, 1, 3, &[0.0; 2], 1.0, &never()).is_err());
     }
 }

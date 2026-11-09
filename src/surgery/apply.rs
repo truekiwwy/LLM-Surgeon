@@ -14,12 +14,11 @@ use std::time::Instant;
 
 use serde::Serialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use super::cli_args::VerifyBase;
 use super::error::{Result, SurgeryError};
 use super::events::{SinkObserver, SurgeryEvent, SurgeryObserver};
-use super::format::{FormatError, TensorEntry, TensorKind};
+use super::format::{sha256_hex, FormatError, TensorEntry, TensorKind};
 use super::lowrank::{apply_full_delta, apply_lowrank_rows};
 use super::reader::{is_surgery_file, SurgeryReader};
 use super::target::{resolve_shards, Target};
@@ -101,13 +100,6 @@ fn cancelled(req: &SurgeryApplyRequest) -> bool {
     req.cancel.load(Ordering::SeqCst)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 /// `(rows, cols)` of the row-major view the kernel works on. Low-rank tensors must be 2D;
 /// a dense delta is any tensor (1D = one row, ND = leading dimensions folded into rows).
 fn dims(entry: &TensorEntry) -> std::result::Result<(usize, usize), String> {
@@ -147,13 +139,20 @@ fn prepare(req: &SurgeryApplyRequest, obs: &mut dyn SurgeryObserver) -> Result<P
                 "{} : forme {:?} dans le modèle, {:?} dans le patch",
                 entry.name, info.shape, entry.shape
             ));
-        } else if !info.dtype.to_string().eq_ignore_ascii_case(&entry.target_dtype) {
+        } else if !info
+            .dtype
+            .to_string()
+            .eq_ignore_ascii_case(&entry.target_dtype)
+        {
             problems.push(format!(
                 "{} : dtype {} dans le modèle, {} dans le patch",
                 entry.name, info.dtype, entry.target_dtype
             ));
         } else if info.dtype.size_of().is_none() {
-            problems.push(format!("{} : dtype {} non supporté", entry.name, info.dtype));
+            problems.push(format!(
+                "{} : dtype {} non supporté",
+                entry.name, info.dtype
+            ));
         } else {
             match dims(entry) {
                 Ok((rows, cols)) => items.push(Item {
@@ -308,11 +307,10 @@ fn write_all(
                     .into());
                 }
                 // Scale and singular values folded into U, the kernel only sees U_scaled.
-                let u_scaled: Vec<f32> = f
-                    .u
-                    .chunks_exact(r.max(1))
-                    .flat_map(|row| row.iter().zip(&f.s).map(|(u, s)| u * (s * scale)))
-                    .collect();
+                let u_scaled: Vec<f32> =
+                    f.u.chunks_exact(r.max(1))
+                        .flat_map(|row| row.iter().zip(&f.s).map(|(u, s)| u * (s * scale)))
+                        .collect();
                 let bytes = target.tensor_bytes_mut(&e.name)?;
                 apply_lowrank_rows(
                     bytes,
