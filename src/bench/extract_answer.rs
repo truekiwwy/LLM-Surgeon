@@ -4,7 +4,7 @@
 //! 1. `hashes`: `#### X`, last non-empty occurrence (rest of its line);
 //! 2. `boxed`: `\boxed{X}`, last balanced occurrence (nested and escaped braces handled
 //!    by a small parser);
-//! 3. `bold`: last `**X**` segment;
+//! 3. `bold`: last `**X**` segment holding at least one ASCII digit;
 //! 4. `phrase`: last "the answer is X" / "final answer: X" / "réponse finale : X"
 //!    (case-insensitive); a leading number is kept alone, otherwise the rest of the line;
 //! 5. `last_number`: the last number of the text.
@@ -114,7 +114,8 @@ fn bold(text: &str) -> Option<String> {
     bold_re()?
         .captures_iter(text)
         .filter_map(|c| Some(c.get(1)?.as_str().trim().to_owned()))
-        .filter(|s| !s.is_empty())
+        // Skips digit-free headings (`**Verification:**`) so later rules still get a chance.
+        .filter(|s| s.chars().any(|c| c.is_ascii_digit()))
         .last()
 }
 
@@ -252,6 +253,14 @@ mod tests {
         // Mid-text markers are left alone.
         is("a [end of text] b 5", "5", Rule::LastNumber);
         assert_eq!(got("[end of text]"), None);
+    }
+
+    #[test]
+    fn bold_without_digit_is_skipped() {
+        is("**12** apples.\n**Verification:** done", "12", Rule::Bold);
+        is("**Note:** 5 + 7 = 12", "12", Rule::LastNumber);
+        is("**Verification:** the answer is 9.", "9", Rule::Phrase);
+        assert_eq!(got("**Note:** none"), None);
     }
 
     #[test]
