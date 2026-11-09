@@ -259,7 +259,12 @@ fn main() -> Res<()> {
         let w: Vec<f64> = if is_norm {
             rng.grid(n, 1.0 / 64.0, 6).iter().map(|x| 1.0 + x).collect()
         } else {
+            // Odd multiples of 1/128: base + B*A is never exactly 0 (a tiny reconstruction error
+            // could then show up as a different value).
             rng.grid(n, 1.0 / 64.0, 32)
+                .iter()
+                .map(|x| x + 1.0 / 128.0)
+                .collect()
         };
         let new: Vec<f64> = if spec.name == "model.norm.weight" {
             w.clone()
