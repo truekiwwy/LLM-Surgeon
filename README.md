@@ -362,8 +362,8 @@ projections are unavailable.
 
 ### 7. Hand it to an AI agent (MCP)
 
-`surgeon mcp` serves seven tools on stdio (`surgeon_check`, `surgeon_inspect`,
-`surgeon_apply`, `surgeon_eval`, `surgeon_extract`, `surgeon_bench`, `surgeon_autotune`).
+`surgeon mcp` serves nine tools on stdio (`surgeon_check`, `surgeon_inspect`,
+`surgeon_apply`, `surgeon_eval`, `surgeon_extract`, `surgeon_bench`, `surgeon_autotune`, `surgeon_diff`, `surgeon_lora`).
 Every path must fall
 under an allowed directory, and a verified backup is imposed before any write. The dashboard
 is not exposed through MCP.

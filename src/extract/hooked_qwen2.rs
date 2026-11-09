@@ -164,6 +164,60 @@ impl Attention {
             .reshape((b_sz, q_len, self.hidden_size))?
             .apply(&self.o_proj)
     }
+
+    /// [`Self::forward`] with a KV cache: the new keys/values (after RoPE, before
+    /// `repeat_kv`) are appended to `cache` along the sequence axis and attention runs
+    /// over the whole cached sequence. `rope` covers the new positions only.
+    fn forward_cached(
+        &self,
+        xs: &Tensor,
+        rope: &(Tensor, Tensor),
+        mask: Option<&Tensor>,
+        cache: &mut Option<(Tensor, Tensor)>,
+    ) -> candle_core::Result<Tensor> {
+        let (b_sz, q_len, _) = xs.dims3()?;
+        let q = self
+            .q_proj
+            .forward(xs)?
+            .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let k = self
+            .k_proj
+            .forward(xs)?
+            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let v = self
+            .v_proj
+            .forward(xs)?
+            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let (cos, sin) = rope;
+        let q = candle_nn::rotary_emb::rope(&q.contiguous()?, cos, sin)?;
+        let k = candle_nn::rotary_emb::rope(&k.contiguous()?, cos, sin)?;
+        let v = v.contiguous()?;
+        let (k, v) = match cache.take() {
+            None => (k, v),
+            Some((past_k, past_v)) => (
+                Tensor::cat(&[&past_k, &k], 2)?,
+                Tensor::cat(&[&past_v, &v], 2)?,
+            ),
+        };
+        *cache = Some((k.clone(), v.clone()));
+        let k = repeat_kv(k, self.num_kv_groups)?.contiguous()?;
+        let v = repeat_kv(v, self.num_kv_groups)?.contiguous()?;
+        let scale = 1f64 / f64::sqrt(self.head_dim as f64);
+        let weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+        let weights = match mask {
+            None => weights,
+            Some(mask) => weights.broadcast_add(mask)?,
+        };
+        let weights = candle_nn::ops::softmax_last_dim(&weights)?;
+        weights
+            .matmul(&v)?
+            .transpose(1, 2)?
+            .reshape((b_sz, q_len, self.hidden_size))?
+            .apply(&self.o_proj)
+    }
 }
 
 struct DecoderLayer {
@@ -204,6 +258,43 @@ impl DecoderLayer {
         let xs = (xs + residual)?;
         let mlp_out = xs.apply(&self.post_attention_layernorm)?.apply(&self.mlp)?;
         Ok(((&xs + &mlp_out)?, mlp_out))
+    }
+
+    /// Residual stream after the layer, attention through the KV cache.
+    fn forward_cached(
+        &self,
+        xs: &Tensor,
+        rope: &(Tensor, Tensor),
+        mask: Option<&Tensor>,
+        cache: &mut Option<(Tensor, Tensor)>,
+    ) -> candle_core::Result<Tensor> {
+        let residual = xs;
+        let xs = self.input_layernorm.forward(xs)?;
+        let xs = self.self_attn.forward_cached(&xs, rope, mask, cache)?;
+        let xs = (xs + residual)?;
+        let mlp_out = xs.apply(&self.post_attention_layernorm)?.apply(&self.mlp)?;
+        &xs + &mlp_out
+    }
+}
+
+/// Per-layer keys and values of the tokens already processed (batch of one).
+pub(super) struct KvCache {
+    layers: Vec<Option<(Tensor, Tensor)>>,
+}
+
+impl KvCache {
+    pub(super) fn new(num_layers: usize) -> Self {
+        Self {
+            layers: vec![None; num_layers],
+        }
+    }
+
+    /// Cached sequence length (layer 0 always runs first, so it is never behind).
+    pub(super) fn len(&self) -> usize {
+        match self.layers.first() {
+            Some(Some((k, _))) => k.dim(2).unwrap_or(0),
+            _ => 0,
+        }
     }
 }
 
@@ -394,6 +485,95 @@ impl HookedQwen2 {
         let hidden = self.run(input_ids, |_, _, _| {})?;
         let logits = hidden.apply(&head.norm)?.apply(&head.lm_head)?;
         Ok(logits.squeeze(0)?.to_dtype(DType::F32)?)
+    }
+
+    /// Causal mask for `q_len` new tokens after `offset` cached ones, with the same
+    /// sliding window as [`Self::causal_mask`]; `None` when nothing is masked (a single
+    /// token inside the window), as in [`Self::run`].
+    fn mask_at(&self, offset: usize, q_len: usize) -> candle_core::Result<Option<Tensor>> {
+        let window = self.sliding_window;
+        if q_len == 1 && offset <= window {
+            return Ok(None);
+        }
+        let kv_len = offset + q_len;
+        let mask: Vec<f32> = (0..q_len)
+            .flat_map(|i| {
+                (0..kv_len).map(move |j| {
+                    if j > offset + i || j + window < offset + i {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.
+                    }
+                })
+            })
+            .collect();
+        let mask = Tensor::from_slice(&mask, (q_len, kv_len), &self.device)?
+            .expand((1, 1, q_len, kv_len))?
+            .to_dtype(self.dtype)?;
+        Ok(Some(mask))
+    }
+
+    /// Layers `0..n_layers` on `input_ids` (`[1, new_tokens]`) continuing `cache`: RoPE
+    /// offset = cached length, causal mask only when several tokens come in.
+    /// `after_layer(i, resid)` sees and may replace the residual stream after layer `i`
+    /// (steering, capture) and may abort with an error (cancellation). Returns the stream
+    /// after the last executed layer.
+    pub(super) fn forward_cached(
+        &self,
+        input_ids: &Tensor,
+        cache: &mut KvCache,
+        n_layers: usize,
+        after_layer: &mut dyn FnMut(usize, Tensor) -> Result<Tensor>,
+    ) -> Result<Tensor> {
+        let (batch, q_len) = input_ids.dims2()?;
+        if batch != 1 || q_len == 0 {
+            return Err(ExtractError::InvalidArgument(
+                "forward_cached : un lot de une séquence non vide attendu".into(),
+            ));
+        }
+        if cache.layers.len() != self.layers.len() || n_layers == 0 || n_layers > self.layers.len()
+        {
+            return Err(ExtractError::InvalidArgument(format!(
+                "forward_cached : {n_layers} couche(s) demandée(s), cache de {} sur {}",
+                cache.layers.len(),
+                self.layers.len()
+            )));
+        }
+        let offset = cache.len();
+        let mask = self.mask_at(offset, q_len)?;
+        // Same values as the full pass: sin/cos of the first offset + q_len positions.
+        let (cos, sin) = self.rope(offset + q_len)?;
+        let rope = (
+            cos.narrow(0, offset, q_len)?.contiguous()?,
+            sin.narrow(0, offset, q_len)?.contiguous()?,
+        );
+        let mut xs = self.embed_tokens.forward(input_ids)?;
+        for (i, (layer, slot)) in self
+            .layers
+            .iter()
+            .zip(&mut cache.layers)
+            .take(n_layers)
+            .enumerate()
+        {
+            xs = layer.forward_cached(&xs, &rope, mask.as_ref(), slot)?;
+            xs = after_layer(i, xs)?;
+        }
+        Ok(xs)
+    }
+
+    /// Logits (f32, `vocab` entries) of the last position of `hidden` (`[1, seq, hidden]`),
+    /// final norm and `lm_head` included. Needs [`Self::from_tensors_full`].
+    pub(super) fn logits_last(&self, hidden: &Tensor) -> Result<Vec<f32>> {
+        let head = self.head.as_ref().ok_or_else(|| {
+            ExtractError::Compute("modèle chargé sans norme finale ni lm_head".into())
+        })?;
+        let (_, seq, _) = hidden.dims3()?;
+        let last = hidden.narrow(1, seq - 1, 1)?;
+        let logits = last.apply(&head.norm)?.apply(&head.lm_head)?;
+        Ok(logits
+            .flatten_all()?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?)
     }
 
     pub fn dtype(&self) -> DType {

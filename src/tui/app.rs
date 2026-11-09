@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicBool;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde::Deserialize;
 
+use super::tabs::preview::{self, PreviewEffect, PreviewMsg, PreviewState};
 use super::theme::Theme;
 use super::worker::{StatsKey, StatsRequest, TensorEntry};
 use super::TuiError;
@@ -29,6 +30,7 @@ const PAGE: usize = 10;
 pub enum Tab {
     Inspector,
     Steering,
+    Preview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,11 +56,13 @@ pub enum Msg {
         key: StatsKey,
         result: Result<TensorStats, String>,
     },
+    Preview(PreviewMsg),
 }
 
 #[derive(Debug, Clone)]
 pub enum Effect {
     RequestStats(StatsRequest),
+    Preview(PreviewEffect),
 }
 
 /// MLP layout of the model, from the index only.
@@ -236,6 +240,8 @@ pub struct App {
     pub bins: usize,
     /// Tensors already computed: `true` when they hold NaN/Inf (⚠ in the layer list).
     pub flagged: HashMap<StatsKey, bool>,
+    /// Third tab (`--preview`); `None` keeps the two-tab behaviour.
+    pub preview: Option<PreviewState>,
 }
 
 impl App {
@@ -268,6 +274,7 @@ impl App {
             theme,
             bins: DEFAULT_BINS,
             flagged: HashMap::new(),
+            preview: None,
         };
         if let Some(proj) = app.first_available(0) {
             app.selection.proj = proj;
@@ -277,7 +284,9 @@ impl App {
 
     /// Request for the initial selection.
     pub fn start(&mut self) -> Vec<Effect> {
-        self.request_selection()
+        let mut effects = self.request_selection();
+        effects.extend(self.preview_start());
+        effects
     }
 
     pub fn current_entry(&self) -> Option<&TensorEntry> {
@@ -320,6 +329,7 @@ impl App {
         match self.tab {
             Tab::Inspector => self.current_stats().is_some_and(|s| s.non_finite > 0),
             Tab::Steering => self.vector.as_ref().is_some_and(|v| v.stats.non_finite > 0),
+            Tab::Preview => false,
         }
     }
 
@@ -383,6 +393,50 @@ impl App {
     }
 }
 
+impl App {
+    /// Tab / Shift+Tab: the third tab only exists with `--preview`.
+    fn cycle_tab(&mut self, forward: bool) {
+        let tabs: &[Tab] = match self.preview {
+            Some(_) => &[Tab::Inspector, Tab::Steering, Tab::Preview],
+            None => &[Tab::Inspector, Tab::Steering],
+        };
+        let at = tabs.iter().position(|&t| t == self.tab).unwrap_or(0);
+        let step = if forward { 1 } else { tabs.len() - 1 };
+        self.tab = tabs[(at + step) % tabs.len()];
+    }
+
+    fn preview_update(&mut self, msg: PreviewMsg) -> Vec<Effect> {
+        match &mut self.preview {
+            Some(state) => preview::update(state, msg)
+                .into_iter()
+                .map(Effect::Preview)
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    fn preview_start(&mut self) -> Vec<Effect> {
+        let effects = match &mut self.preview {
+            Some(state) => state.start(),
+            None => Vec::new(),
+        };
+        effects.into_iter().map(Effect::Preview).collect()
+    }
+
+    /// Debounce and spinner of the preview; redraws only when the tab shows a change.
+    fn preview_tick(&mut self) -> Vec<Effect> {
+        let effects = self.preview_update(PreviewMsg::Tick);
+        let animated = self.preview.as_ref().is_some_and(|p| p.busy())
+            && self.ticks.is_multiple_of(SPINNER_TICKS);
+        self.dirty |= self.tab == Tab::Preview && (animated || !effects.is_empty());
+        effects
+    }
+
+    fn preview_input_focused(&self) -> bool {
+        self.tab == Tab::Preview && self.preview.as_ref().is_some_and(|p| p.input_focus)
+    }
+}
+
 /// Windows reports Press and Release: only Press counts, plus Repeat for held keys that
 /// move (arrows, pages).
 pub fn accepted(key: &KeyEvent) -> bool {
@@ -410,6 +464,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
         app.should_quit = true;
         return Vec::new();
     }
+    // The prompt of the third tab takes every key but Tab: letters are text there.
+    if app.preview_input_focused() && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+        app.dirty = true;
+        return app.preview_update(PreviewMsg::Key(key));
+    }
     match key.code {
         KeyCode::Char('q') => {
             app.should_quit = true;
@@ -436,10 +495,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
     match key.code {
         _ if app.help => return Vec::new(),
         KeyCode::Tab | KeyCode::BackTab => {
-            app.tab = match app.tab {
-                Tab::Inspector => Tab::Steering,
-                Tab::Steering => Tab::Inspector,
-            };
+            app.cycle_tab(key.code == KeyCode::Tab);
             return Vec::new();
         }
         _ => {}
@@ -472,6 +528,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Effect> {
             }
             Vec::new()
         }
+        Tab::Preview => app.preview_update(PreviewMsg::Key(key)),
     }
 }
 
@@ -489,7 +546,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             let spinner_step = app.ticks.is_multiple_of(SPINNER_TICKS)
                 && matches!(app.computation, Computation::Running { .. });
             app.dirty |= blink_flip || spinner_step;
-            Vec::new()
+            app.preview_tick()
         }
         Msg::StatsReady {
             generation,
@@ -506,6 +563,10 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
                 app.dirty = true;
             }
             Vec::new()
+        }
+        Msg::Preview(msg) => {
+            app.dirty = true;
+            app.preview_update(msg)
         }
     }
 }

@@ -328,6 +328,11 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Tui(_) => "tui",
         Commands::Mcp(_) => "mcp",
         Commands::Autotune(_) => "autotune",
+        Commands::Diff(_) => "diff",
+        Commands::Lora(args) => match args.command {
+            crate::lora::cli_args::LoraCommand::Merge(_) => "lora merge",
+            crate::lora::cli_args::LoraCommand::Extract(_) => "lora extract",
+        },
         Commands::Bench(args) => match args.command {
             BenchCommand::Logits(_) => "bench logits",
             BenchCommand::Ppl(_) => "bench ppl",
@@ -358,6 +363,8 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
             autotune_cli(args, deps, &ui, &mut CliSink::new(io))
         }
         Commands::Bench(args) => bench_cli(args, deps, io),
+        Commands::Diff(args) => crate::surgery::core_diff(args, deps, &mut CliSink::new(io)),
+        Commands::Lora(args) => crate::lora::core_lora(args, deps, &mut CliSink::new(io)),
         // Routed by run_with before dispatch: they have no envelope.
         Commands::Schema(_) | Commands::Mcp(_) | Commands::Tui(_) => Err(Outcome::fail(
             exit::INTERNAL,
@@ -418,7 +425,7 @@ pub fn envelope_of<'a>(command: Option<&'a str>, outcome: &'a Outcome) -> Envelo
 }
 
 impl Outcome {
-    fn ok(data: Value, human: String) -> Self {
+    pub fn ok(data: Value, human: String) -> Self {
         Self {
             exit_code: exit::OK,
             data,
@@ -1064,6 +1071,8 @@ pub enum ProgressEvent {
     },
     /// `autotune`: responses measured, ridge being solved.
     AutotuneSolve,
+    /// `.surgery` and LoRA engines (diff, apply, merge, extract).
+    Surgery(crate::surgery::SurgeryEvent),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1339,6 +1348,16 @@ impl ProgressSink for CliSink<'_, '_> {
         {
             return self.progress(op_id, tensor, *done, *total);
         }
+        if let ProgressEvent::Surgery(ev) = &event {
+            if let Some((label, name, done, total)) = crate::surgery::events::counter(ev) {
+                return self.progress(label, name, done, total);
+            }
+            self.clear_progress();
+            if let Some(line) = crate::surgery::events::render(&ui, ev) {
+                self.io.line(&line);
+            }
+            return;
+        }
         let bench = match &event {
             ProgressEvent::BenchDumpPrompt { done, total } => Some(("dump", *done, Some(*total))),
             ProgressEvent::BenchLogitsBlock { done, total } => {
@@ -1480,7 +1499,8 @@ impl ProgressSink for CliSink<'_, '_> {
             | ProgressEvent::BenchPplChunk { .. }
             | ProgressEvent::BenchEvalQuestion { .. }
             | ProgressEvent::AutotuneForward { .. }
-            | ProgressEvent::AutotuneSolve => {}
+            | ProgressEvent::AutotuneSolve
+            | ProgressEvent::Surgery(_) => {}
         }
     }
 }
@@ -1542,6 +1562,10 @@ pub struct ApplyRequest {
 }
 
 fn apply(args: &ApplyArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
+    // A `.surgery` file (SURG magic) is handled by its own engine; patch.json falls through.
+    if let Some(outcome) = crate::surgery::try_apply(args, deps, &mut CliSink::new(io))? {
+        return Ok(outcome);
+    }
     let request = ApplyRequest {
         model: args.model.clone(),
         patch: load_patch(&args.patch)?,

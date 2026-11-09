@@ -294,6 +294,14 @@ fn tool(name: &str, title: &str, description: &str, input: Value, annotations: V
 
 /// Exactly the `tools` array of `tools/list`, and the output of `surgeon schema --kind tools`.
 pub fn tool_definitions() -> Value {
+    let mut tools = base_tool_definitions();
+    if let Some(list) = tools.as_array_mut() {
+        list.extend(super::tools_p13::definitions());
+    }
+    sorted(tools)
+}
+
+fn base_tool_definitions() -> Value {
     sorted(json!([
         tool(
             TOOL_CHECK,
@@ -352,6 +360,7 @@ pub fn render_schema(kind: SchemaKind) -> String {
     let value = match kind {
         SchemaKind::Patch => patch_schema(),
         SchemaKind::Tools => tool_definitions(),
+        SchemaKind::Surgery => crate::surgery::schema::header_schema(),
     };
     let mut text = serde_json::to_string_pretty(&value).unwrap_or_default();
     text.push('\n');
@@ -359,7 +368,7 @@ pub fn render_schema(kind: SchemaKind) -> String {
 }
 
 pub(crate) fn is_known(name: &str) -> bool {
-    TOOLS.contains(&name)
+    TOOLS.contains(&name) || super::tools_p13::NAMES.contains(&name)
 }
 
 pub(crate) struct ToolContext<'a> {
@@ -378,6 +387,9 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         TOOL_EVAL => ("eval", eval(arguments, ctx)),
         TOOL_BENCH => (bench_command(&arguments), bench(arguments, ctx)),
         TOOL_AUTOTUNE => ("autotune", autotune(arguments, ctx)),
+        super::tools_p13::TOOL_DIFF | super::tools_p13::TOOL_LORA => {
+            super::tools_p13::call(name, arguments, ctx)
+        }
         _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);

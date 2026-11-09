@@ -34,6 +34,8 @@
 
 pub mod app;
 pub mod event;
+pub mod preview_args;
+pub mod tabs;
 pub mod terminal;
 pub mod theme;
 pub mod ui;
@@ -125,6 +127,9 @@ pub fn run_cli(
         return exit::INVALID_INPUT;
     }
     let theme = Theme::new(deps.ui.out);
+    if args.preview.preview {
+        return tabs::preview::cli::run(args, deps, theme, out, err);
+    }
     if args.snapshot {
         return match snapshot(args, theme) {
             Ok(text) => {

@@ -21,6 +21,7 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 ctrlc = "3.5.2"
 half = { version = "2.7.1", features = ["std"] }
 memmap2 = "0.9.12"
+miniz_oxide = "0.8"
 nvml-wrapper = "0.13.0"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
 rayon = "1.12.0"

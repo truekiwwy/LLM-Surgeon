@@ -26,6 +26,7 @@ pub mod cholesky;
 pub mod gram;
 pub mod jacobi;
 pub mod power;
+pub mod qr;
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum LinalgError {

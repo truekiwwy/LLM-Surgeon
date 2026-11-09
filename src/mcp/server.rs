@@ -424,6 +424,10 @@ impl<W: Write> ProgressSink for McpProgress<'_, W> {
                 ..
             } => (overall_done, overall_total, format!("{op_id} · {tensor}")),
             ProgressEvent::EvalPrompt { id, done, total } => (done, total, format!("prompt {id}")),
+            // Only the per-tensor counter: hashing and verification restart from zero.
+            ProgressEvent::Surgery(crate::surgery::SurgeryEvent::Tensor { done, total, name }) => {
+                (done, total, format!("{name} ({done}/{total})"))
+            }
             ProgressEvent::BenchDumpPrompt { done, total } => {
                 (done, total, format!("prompt {done}/{total}"))
             }
