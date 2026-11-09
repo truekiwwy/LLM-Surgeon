@@ -91,7 +91,9 @@ use crate::extract::{
 use crate::hardware::{
     self, BudgetPolicy, HardwareBudget, HardwareError, HardwareProbe, SystemProbe, Verdict,
 };
+use crate::kernel::{self, IoConfig, IoMeter, KernelChoice, Level};
 use crate::patch::autotune::{self, AutotuneError, AutotuneEvent, AutotuneRequest, AutotuneRun};
+use crate::patch::gguf::{self, GgufApplyArgs, GgufApplyError, Requant};
 use crate::patch::{
     self, apply_patch, load_patch, validate_patch, ApplyReport, Axis, BackupSet, LayerSelection,
     OpStats, OperationKind, PatchBackend, PatchError, PatchFile, Projection, RollbackHandle,
@@ -636,6 +638,18 @@ struct InspectedTensor {
 
 /// MLP tensor topology (and streamed statistics); human text only when `ui` is not `Off`.
 pub fn core_inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
+    if gguf::is_gguf(&args.model) {
+        let shown = gguf::report::inspect(
+            &args.model,
+            &args.layers,
+            &args.projections,
+            args.show_stats,
+            ui,
+        );
+        return shown
+            .map(|(data, human)| Outcome::ok(data, human))
+            .map_err(|e| Outcome::fail(exit::GENERAL, e).with_kind("invalid_gguf"));
+    }
     let shards = hardware::compute_model_size(&args.model)?.shard_files;
     let layers = LayerSpec::from(&args.layers);
     let projs: Vec<MlpProj> = match args.projections.is_empty() {
@@ -851,6 +865,21 @@ impl EngineBackend {
             .into_iter()
             .map(|i| self.shards[i].0.clone())
             .collect()
+    }
+
+    /// Chunking / prefetch of every shard; the Ctrl-C flag is also checked between chunks.
+    pub fn set_io(&mut self, io: IoConfig) {
+        for (_, model) in &mut self.shards {
+            model.set_io(io, Some(Arc::clone(&self.interrupted)));
+        }
+    }
+
+    pub fn io_counters(&self) -> kernel::IoCounters {
+        let mut total = kernel::IoCounters::default();
+        for (_, model) in &self.shards {
+            total.merge(model.io_counters());
+        }
+        total
     }
 }
 
@@ -1523,13 +1552,24 @@ fn apply(args: &ApplyArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
         no_backup: args.no_backup,
         backup_dir: args.backup_dir.clone(),
     };
-    core_apply(&request, deps, &mut CliSink::new(io))
+    let ui = io.ui;
+    core_apply_routed(&request, &args.gguf, deps, &ui, &mut CliSink::new(io))
 }
 
 /// validate -> budget (warning only) -> open shards -> dry-run preflight -> backup of the
 /// touched shards -> apply_patch (rollback on error, NaN, Ctrl-C or cancellation).
 pub fn core_apply(
     request: &ApplyRequest,
+    deps: &AppDeps,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    core_apply_io(request, IoConfig::default(), deps, sink)
+}
+
+/// [`core_apply`] with explicit chunking / prefetch; a real run reports `data.io`.
+fn core_apply_io(
+    request: &ApplyRequest,
+    io: IoConfig,
     deps: &AppDeps,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
@@ -1562,6 +1602,7 @@ pub fn core_apply(
     }
 
     let mut backend = EngineBackend::open(&shards, Arc::clone(&deps.interrupted))?;
+    backend.set_io(io);
     let preview = apply_patch(&patch, &mut backend, None, true)?;
     if request.dry_run {
         for op in &preview.operations {
@@ -1612,6 +1653,11 @@ pub fn core_apply(
         .map(|op| (op.id.clone(), op.kind))
         .collect();
     let guard = backup.as_mut().map(|b| b as &mut dyn RollbackHandle);
+    let kernel = kernel::from_env();
+    if let Some(w) = &kernel.warning {
+        sink.event(ProgressEvent::Warn(w.clone()));
+    }
+    let meter = IoMeter::start();
     let result = apply_patch(
         &patch,
         &mut ObservedBackend::new(&mut backend, sink, ops),
@@ -1623,7 +1669,10 @@ pub fn core_apply(
             sink.event(ProgressEvent::Commit {
                 seconds: started.elapsed().as_secs_f64(),
             });
-            Ok(apply_outcome(&report, &backup_files, &warnings))
+            let io_report = meter.finish(kernel, io, backend.io_counters());
+            let mut outcome = apply_outcome(&report, &backup_files, &warnings);
+            outcome.data["io"] = json!(io_report);
+            Ok(outcome)
         }
         Err(e) => {
             if let Some(outcome) = rollback_outcome(&e, &backup_files) {
@@ -1643,6 +1692,156 @@ fn apply_outcome(report: &ApplyReport, backups: &[PathBuf], warnings: &[String])
     );
     outcome.warnings = warnings.to_vec();
     outcome
+}
+
+// ---------------------------------------------------------------- apply: chunked I/O and GGUF
+
+/// `apply` routing on the file's magic: a GGUF only with `--gguf` (re-rounding is lossy,
+/// never a surprise), SafeTensors with the chunking options.
+pub fn core_apply_routed(
+    request: &ApplyRequest,
+    opts: &GgufApplyArgs,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let usage = |msg: String| Outcome::fail(exit::INVALID_INPUT, msg).with_kind("invalid_input");
+    match (opts.gguf, gguf::is_gguf(&request.model)) {
+        (true, true) => core_apply_gguf(request, opts, deps, ui, sink),
+        (false, true) => Err(usage(format!(
+            "{} est un fichier GGUF : relancez avec --gguf (re-quantification en place, avec \
+             perte ; voir --requant)",
+            request.model.display()
+        ))),
+        (true, false) => Err(usage(format!(
+            "--gguf : {} n'est pas un fichier GGUF (magie « GGUF » absente)",
+            request.model.display()
+        ))),
+        (false, false)
+            if opts.force_no_backup || opts.no_verify || opts.requant != Requant::KeepScales =>
+        {
+            Err(usage(
+                "--requant, --no-verify et --force-no-backup ne s'appliquent qu'avec --gguf".into(),
+            ))
+        }
+        (false, false) => core_apply_io(request, opts.io(), deps, sink),
+    }
+}
+
+/// `apply --gguf`: validation, then `patch::gguf::apply_gguf` (backup, crash marker,
+/// chunked write, read-back check, rollback). `data.gguf` holds the per-tensor fidelity.
+fn core_apply_gguf(
+    request: &ApplyRequest,
+    opts: &GgufApplyArgs,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    if request.no_backup {
+        return Err(Outcome::fail(
+            exit::INVALID_INPUT,
+            "--no-backup est refusé avec --gguf : la copie de sauvegarde est obligatoire \
+             (--force-no-backup pour s'en passer, un échec laisserait alors le fichier modifié)",
+        )
+        .with_kind("invalid_input"));
+    }
+    let validation = ValidationOptions {
+        no_backup: opts.force_no_backup,
+        ..Default::default()
+    };
+    let patch = validate_patch(&request.patch, &request.base_dir, &validation)?;
+    sink.event(ProgressEvent::ApplyStart {
+        patch: request.patch_label.clone(),
+        operations: patch.operations.len(),
+    });
+    let model = std::path::absolute(&request.model).map_err(|e| {
+        Outcome::fail(exit::GENERAL, format!("{} : {e}", request.model.display()))
+            .with_kind("model_error")
+    })?;
+    let mut warnings: Vec<String> = patch.warnings.iter().map(ToString::to_string).collect();
+    if opts.force_no_backup && !request.dry_run {
+        warnings.push("--force-no-backup : aucune copie, un échec laisse le GGUF modifié".into());
+    }
+    for w in &warnings {
+        sink.event(ProgressEvent::Warn(w.clone()));
+    }
+
+    let ops: Vec<(String, OperationKind)> = patch
+        .operations
+        .iter()
+        .map(|op| (op.id.clone(), op.kind))
+        .collect();
+    let options = opts.options(request.backup_dir.clone());
+    let dry_run = request.dry_run;
+    let started = Instant::now();
+    let meter = IoMeter::start();
+    let result = gguf::apply_gguf(
+        &model,
+        &patch,
+        &options,
+        dry_run,
+        Arc::clone(&deps.interrupted),
+        &mut |backend, guard| {
+            if let Some(path) = guard.as_ref().and_then(|g| g.backup_path()) {
+                sink.event(ProgressEvent::Backup { path });
+            }
+            match dry_run {
+                true => apply_patch(&patch, backend, None, false),
+                false => apply_patch(
+                    &patch,
+                    &mut ObservedBackend::new(backend, &mut *sink, ops.clone()),
+                    guard,
+                    false,
+                ),
+            }
+        },
+    );
+    let run = match result {
+        Ok(run) => run,
+        Err(GgufApplyError::Patch(e)) => return Err(e.into()),
+        Err(e) => {
+            let code = match &e {
+                GgufApplyError::Usage(_) | GgufApplyError::Mapping(_) => exit::INVALID_INPUT,
+                _ => exit::GENERAL,
+            };
+            let kind = e.kind().unwrap_or("execution_failed");
+            return Err(Outcome::fail(code, e).with_kind(kind));
+        }
+    };
+    for t in &run.tensors {
+        if let Some(w) = &t.warning {
+            warnings.push(format!("{} : {w}", t.name));
+            sink.event(ProgressEvent::Warn(format!("{} : {w}", t.name)));
+        }
+    }
+    match dry_run {
+        true => {
+            for op in &run.report.operations {
+                sink.event(ProgressEvent::DryRun {
+                    op_id: op.id.clone(),
+                    tensors: op.tensors.iter().map(|t| t.name.clone()).collect(),
+                    vector_len: op.vector_len,
+                });
+            }
+        }
+        false => sink.event(ProgressEvent::Commit {
+            seconds: started.elapsed().as_secs_f64(),
+        }),
+    }
+    let backups: Vec<PathBuf> = run.backup.iter().cloned().collect();
+    let mut outcome = apply_outcome(&run.report, &backups, &warnings);
+    outcome.data["gguf"] = json!(run);
+    if !dry_run {
+        // Dequantize / requantize is scalar code (rows in parallel), not the SIMD kernels.
+        let kernel = KernelChoice {
+            level: Level::Scalar,
+            requested: None,
+            warning: None,
+        };
+        outcome.data["io"] = json!(meter.finish(kernel, options.io, run.io));
+    }
+    outcome.human = gguf::report::apply_text(ui, &model, &run, dry_run, opts.no_verify);
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------- eval

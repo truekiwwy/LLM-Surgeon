@@ -13,9 +13,9 @@ use serde_json::{json, Map, Value};
 
 use super::server::McpConfig;
 use crate::app::{
-    core_apply, core_autotune, core_bench_dump, core_bench_eval, core_bench_logits, core_bench_ppl,
-    core_check, core_eval, core_extract_method, core_inspect, envelope_of, exit, AppDeps,
-    ApplyRequest, CoreResult, Outcome, ProgressSink,
+    core_apply_routed, core_autotune, core_bench_dump, core_bench_eval, core_bench_logits,
+    core_bench_ppl, core_check, core_eval, core_extract_method, core_inspect, envelope_of, exit,
+    AppDeps, ApplyRequest, CoreResult, Outcome, ProgressSink,
 };
 use crate::bench;
 use crate::bench::dump::DumpRequest;
@@ -115,6 +115,14 @@ pub struct ApplyToolArgs {
         description = "Dossier de résolution des vector_file relatifs ; défaut : le premier dossier autorisé."
     )]
     pub base_dir: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "Modèle .gguf patché en place (re-quantification avec perte, backup toujours créé). Requis pour un .gguf."
+    )]
+    pub gguf: bool,
+    #[serde(default)]
+    #[schemars(description = "GGUF : keep-scales (défaut) ou recompute.")]
+    pub requant: Option<crate::patch::gguf::Requant>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -481,7 +489,13 @@ fn apply(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         no_backup: false,
         backup_dir,
     };
-    core_apply(&request, ctx.deps, ctx.sink)
+    // GGUF: same guards, and never --force-no-backup from an agent.
+    let gguf = crate::patch::gguf::GgufApplyArgs {
+        gguf: args.gguf,
+        requant: args.requant.unwrap_or_default(),
+        ..Default::default()
+    };
+    core_apply_routed(&request, &gguf, ctx.deps, &Ui::off(), ctx.sink)
 }
 
 fn eval(arguments: Value, ctx: &mut ToolContext) -> CoreResult {

@@ -2505,6 +2505,7 @@ dependencies = [
  "ctrlc",
  "half",
  "jsonschema",
+ "libc",
  "memmap2",
  "nvml-wrapper",
  "ratatui",
@@ -2520,6 +2521,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokenizers",
  "unicode-width",
+ "windows-sys",
 ]
 
 [[package]]

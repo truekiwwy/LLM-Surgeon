@@ -7,7 +7,10 @@ use memmap2::{Mmap, MmapMut, MmapOptions};
 use super::error::{EngineError, Result};
 use super::index::{parse_index, ModelIndex, TensorInfo};
 use super::project::project_out_tensor;
-use super::shift::{apply_vector_shift, decode_f32, BroadcastAxis, ShiftOp, ShiftStats};
+use super::shift::{decode_f32, BroadcastAxis, ShiftOp, ShiftPlan, ShiftStats};
+use crate::kernel::{ChunkFailure, ChunkedPatcher, IoConfig, IoCounters, KernelConfig, OsHints};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TensorView<'a> {
@@ -87,6 +90,10 @@ pub struct WritableModel {
     path: PathBuf,
     mmap: MmapMut,
     index: ModelIndex,
+    io: IoConfig,
+    kernel: KernelConfig,
+    counters: IoCounters,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 impl WritableModel {
@@ -101,11 +108,33 @@ impl WritableModel {
             path: path.to_path_buf(),
             mmap,
             index,
+            io: IoConfig::default(),
+            kernel: KernelConfig::from_env(),
+            counters: IoCounters::default(),
+            cancel: None,
         })
     }
 
     pub fn index(&self) -> &ModelIndex {
         &self.index
+    }
+
+    /// Chunking / prefetch of [`Self::shift_tensor`], and a flag checked between chunks
+    /// (raised: the shift stops with an `EngineError::Io` of kind `Interrupted`, the tensor
+    /// possibly half-shifted, so the caller must hold a backup).
+    pub fn set_io(&mut self, io: IoConfig, cancel: Option<Arc<AtomicBool>>) {
+        self.io = io;
+        self.cancel = cancel;
+    }
+
+    /// Kernel level used by [`Self::shift_tensor`] (default: `SURGEON_KERNEL` or best).
+    pub fn set_kernel(&mut self, kernel: KernelConfig) {
+        self.kernel = kernel;
+    }
+
+    /// Chunks, bytes and hints of every shift since `open`.
+    pub fn io_counters(&self) -> IoCounters {
+        self.counters
     }
 
     pub fn tensor_bytes_mut(&mut self, name: &str) -> Result<&mut [u8]> {
@@ -122,16 +151,50 @@ impl WritableModel {
         axis: BroadcastAxis,
     ) -> Result<ShiftStats> {
         let info = self.index.get(name)?;
-        let bytes = &mut self.mmap[info.byte_start..info.byte_end];
-        apply_vector_shift(
-            bytes,
+        let range = info.byte_start..info.byte_end;
+        let Some(plan) = ShiftPlan::new(
+            range.len(),
             info.dtype.clone(),
             &info.shape,
             direction,
             alpha,
             op,
             axis,
-        )
+        )?
+        else {
+            return Ok(ShiftStats::default());
+        };
+        let cancel = self.cancel.clone();
+        let cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst));
+        let kernel = self.kernel;
+        let mut stats = ShiftStats::default();
+        let counters = ChunkedPatcher::new(self.io)
+            .run(
+                &mut self.mmap,
+                range,
+                plan.row_bytes(),
+                &mut OsHints,
+                &cancelled,
+                |chunk, first_row| {
+                    stats = stats.merge(plan.run(chunk, first_row, &kernel)?);
+                    Ok(())
+                },
+            )
+            .map_err(|failure| match failure {
+                ChunkFailure::Cancelled { .. } => EngineError::io(
+                    &self.path,
+                    &std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "interrompu entre deux blocs (tenseur possiblement partiel)",
+                    ),
+                ),
+                ChunkFailure::Work(e) => e,
+                ChunkFailure::InvalidRange => EngineError::DataSizeMismatch {
+                    path: self.path.clone(),
+                },
+            })?;
+        self.counters.merge(counters);
+        Ok(stats)
     }
 
     /// `W ← W − α a (bᵀ W)`, see [`project_out_tensor`].

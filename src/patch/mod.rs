@@ -31,6 +31,7 @@ pub mod autotune;
 mod backup;
 mod error;
 mod executor;
+pub mod gguf;
 mod schema;
 mod validate;
 

@@ -40,6 +40,8 @@ Huit piliers, un seul binaire :
 | Évaluation | `src/eval` | Détection de boucles et attentes via llama.cpp, export GGUF seulement si le modèle est sain. |
 | Extraction | `src/extract` | Vecteur de steering depuis une couche Qwen2, écriture atomique plus un fichier compagnon de statistiques. |
 | Mesure | `src/bench` | Dumps de logits et écarts KL/top-k, delta de perplexité, Pass@1 ; rapports déterministes. |
+| Noyaux et E/S | `src/kernel` | Noyaux SIMD de décalage (AVX2, AVX-512, NEON) identiques au bit près au chemin scalaire ; écriture par blocs avec prefetch de l'OS. |
+| GGUF en place | `src/patch/gguf` | Cibles Q8_0, Q4_K, Q6_K, F16, BF16, F32 : backup, marqueur de crash, hachage de l'en-tête, relecture, rollback. |
 | Algèbre linéaire | `src/linalg` | Jacobi, SVD fine par Gram, Cholesky : Rust pur, f64, indépendant du nombre de threads. |
 | Tableau de bord | `src/tui` | État de style Elm, rendu pur, worker en arrière-plan avec annulation. |
 | Agents | `src/mcp` | Serveur MCP sur stdio, chemins confinés aux dossiers autorisés. |
@@ -631,6 +633,125 @@ partagée pour `mean_diff`, et la SVD non centrée est tirée vers les axes les 
 `mean_diff` par construction ; sa direction de lecture `b` s'approche de l'optimum `W⁻¹t`
 quand N ≫ d et en reste loin quand n < d (le rétrécissement domine).
 
+### 10. Patcher un GGUF quantifié en place (`apply --gguf`)
+
+Le même `patch.json` (même schéma, `vector_file` toujours un vecteur SafeTensors ou JSON)
+s'applique directement à un GGUF mono-fichier. Les noms suivent llama.cpp : `{gate,up,down}_proj`
+de la couche `i` devient `blk.{i}.ffn_{gate,up,down}.weight` ; `ne[0]` est la dimension des
+colonnes, donc `rows` / `cols` gardent leur sens SafeTensors. Un `.gguf` donné sans `--gguf`
+est refusé : la re-quantification perd de l'information et n'arrive jamais par surprise.
+
+```bash
+surgeon inspect --model qwen2.5-7b-q4_k_m.gguf
+surgeon apply --gguf --model qwen2.5-7b-q4_k_m.gguf --patch patch.json --dry-run
+surgeon apply --gguf --model qwen2.5-7b-q4_k_m.gguf --patch patch.json
+surgeon apply --gguf --requant recompute --model qwen2.5-7b-q4_k_m.gguf --patch patch.json
+```
+
+Types de cibles supportés : F32, F16, BF16, Q8_0, Q4_K, Q6_K. Un fichier « Q4_K_M » mélange les
+types par tenseur (`ffn_down` est souvent en Q6_K) ; les tenseurs non ciblés peuvent être de
+n'importe quel type, une cible d'un autre type est refusée avec `unsupported_quant_type`.
+
+| `--requant` | Ce qui change dans un bloc | À utiliser pour |
+| --- | --- | --- |
+| `keep-scales` (défaut) | Seuls les entiers des éléments dont la valeur patchée diffère ; `d`, `dmin` et les sous-échelles restent identiques à l'octet ; les valeurs hors grille sont écrêtées et comptées | les petits décalages (environ un pas de quantification) |
+| `recompute` | De nouvelles échelles pour chaque bloc touché (Q8_0 : `quantize_row_q8_0_ref` ; Q4_K/Q6_K : min/max avec échelles arrondies vers le haut, sans écrêtage) | les décalages forts ; ce n'est pas l'algorithme itératif de `llama-quantize`, sans matrice d'importance |
+
+Chaque tenseur reçoit un rapport de fidélité (`data.gguf.tensors[]`) : `intended_shift_norm`
+(‖α·v‖), `realized_shift_norm` (‖déquant(après) − déquant(avant)‖), `realized_over_intended`,
+`correlation_intended_realized`, `unchanged_fraction`, `saturated_elements`, `nmse_vs_exact`.
+Un rapport sous 0,5 ou une corrélation sous 0,8 signifie que le décalage est plus petit qu'un
+demi-pas et qu'il a disparu ou est devenu du bruit : augmentez alpha, ou patchez le SafeTensors
+puis re-quantifiez avec llama.cpp. Un écrêtage au-delà de 0,1 % d'un tenseur suggère
+`--requant recompute`. Mesuré sur des poids N(0, 0,02²), v ~ N(0, 1) : erreur du tenseur patché
+divisée par l'erreur d'une quantification fraîche des mêmes poids exacts (`tests/p12_gguf.rs` ;
+synthétique, pas un vrai modèle) :
+
+| alpha | Q4_K keep-scales | Q8_0 keep-scales | Q6_K keep-scales | recompute (tous) |
+| ---: | ---: | ---: | ---: | ---: |
+| 0,0003 | 0,28 | 1,17 | 1,01 | 1,00 |
+| 0,001 | 0,67 | 2,81 | 1,25 | 1,00 |
+| 0,003 | 1,14 | 19,5 | 3,2 | 1,00 |
+| 0,01 | 3,45 | 349 | 46 | 1,00 |
+
+Q8_0 n'a aucune marge (`d = amax / 127`) : tout décalage qui pousse la plus grande valeur d'un
+bloc vers l'extérieur est écrêté. Rien ici ne prouve qu'un patch faible est préservé : validez
+avec `surgeon bench ppl` (et `surgeon bench eval`) contre le fichier d'origine.
+
+Sûreté d'une écriture en place sur un fichier de plusieurs dizaines de Go :
+
+1. tout est vérifié avant d'écrire (cibles, types, blocs entiers, longueurs de vecteur, espace
+   disque libre pour la copie) ;
+2. une copie complète est faite et son SHA-256 vérifié (`--no-backup` est refusé ; seul
+   `--force-no-backup` s'en passe, et un échec laisse alors le fichier modifié) ;
+3. un marqueur de crash `<modèle>.surgeon-inprogress` (chemin du backup, SHA-256 de l'original,
+   horodatage) est écrit avant le premier octet ;
+4. les tenseurs sont écrits bloc par bloc, chaque bloc calculé et contrôlé (échelles et valeurs
+   finies) d'abord dans une copie ; l'en-tête, les métadonnées et la table des tenseurs ne sont
+   jamais réécrits (leur SHA-256 est comparé avant et après) ;
+5. après le flush, une seconde projection mémoire relit chaque tenseur patché et le compare au
+   SHA-256 calculé pendant l'écriture (`--no-verify` saute cette étape) ;
+6. toute erreur restaure le backup ; le marqueur est supprimé après le commit ou le rollback.
+
+Si le marqueur est encore là (crash, coupure de courant), `apply` refuse de démarrer : copiez le
+backup indiqué dans le marqueur sur le modèle, vérifiez son SHA-256 contre `original_sha256`,
+puis supprimez le marqueur. La CI ne peut pas valider un fichier patché contre un vrai
+llama.cpp : vérifiez qu'il se charge et lancez `surgeon bench ppl` avant de l'utiliser.
+
+## Performance
+
+`apply` décale les poids avec des noyaux SIMD choisis à l'exécution (AVX-512F, AVX2 + F16C,
+NEON, sinon scalaire), forçables par `SURGEON_KERNEL=scalar|avx2|avx512|neon` (un niveau
+indisponible se replie avec un avertissement). Chaque niveau écrit les mêmes octets que le
+chemin scalaire, ties RNE, sous-normaux et NaN compris ; pas de FMA (une addition par élément,
+la multiplication `alpha * v` est faite une fois par élément du vecteur). Les tenseurs sont
+écrits par blocs (`--prefetch-chunk-mib`, 64 par défaut) avec des indications à l'OS (`madvise`
+sous Unix, `PrefetchVirtualMemory` sous Windows) et un flush asynchrone du bloc précédent ;
+`--no-prefetch` désactive les deux. `data.io` rapporte octets, blocs, indications échouées,
+durée, débit et défauts de page.
+
+```bash
+cargo run --release --example bench_kernels
+SURGEON_KERNEL=scalar surgeon --json apply --model qwen2-mini --patch patch.json
+```
+
+Mesuré avec `examples/bench_kernels.rs` sur un Intel Core i5-12400F (6 cœurs / 12 threads,
+AVX2 + F16C, sans AVX-512), 16 Go de RAM, Windows 11 Pro, SSD NVMe Samsung 990 EVO, 12 threads
+rayon. En mémoire, tampon de 1 Gio, 4096 colonnes, meilleur de 3 (`memcpy` parallèle du même
+tampon : 18 565 Mio/s ; un thread : 14 951 Mio/s) :
+
+| niveau | dtype | axe `rows` Mio/s | axe `cols` Mio/s | vs memcpy parallèle |
+| --- | --- | ---: | ---: | ---: |
+| scalar | bf16 | 4 186 | 4 103 | 0,22 |
+| scalar | f16 | 2 740 | 2 825 | 0,15 |
+| scalar | f32 | 13 368 | 13 301 | 0,72 |
+| avx2 | bf16 | 18 270 | 18 117 | 0,98 |
+| avx2 | f16 | 18 389 | 18 108 | 0,99 |
+| avx2 | f32 | 17 669 | 17 602 | 0,95 |
+
+AVX-512 et NEON compilent (vérifié avec `cargo check --target aarch64-unknown-linux-gnu` et
+`aarch64-apple-darwin`) mais n'ont pas tourné sur cette machine. Les 2³² motifs f32 se
+convertissent en bf16 et f16 exactement comme avec `half` au niveau AVX2 (test ignoré, 1,6 s
+en release).
+
+De bout en bout, `shift_tensor` + `flush` sur un fichier SafeTensors bf16 de 2 Gio déjà dans le
+cache de pages (le cache froid demande `posix_fadvise`, Linux uniquement) :
+
+| prefetch | calcul s | flush s | total Mio/s | défauts de page |
+| --- | ---: | ---: | ---: | ---: |
+| oui (run 1) | 8,21 | 0,41 | 237 | 525 573 |
+| non (run 2) | 0,26 | 11,21 | 178 | 525 582 |
+| oui (run 3) | 9,73 | 0,40 | 202 | 525 572 |
+| non (run 4) | 0,26 | 11,00 | 182 | 525 572 |
+
+Sur cette machine, c'est l'écriture des pages sales (environ 200 Mio/s à travers le fichier
+mappé) qui domine, pas les noyaux : le flush par bloc ne fait que déplacer ce coût dans la
+boucle (1,1 à 1,3x au total). Le prefetch ne supprime pas les défauts de page sous Windows (un
+défaut mineur par page de 4 Kio dans les deux cas). L'E/S directe (`O_DIRECT`) n'est pas
+implémentée : elle contourne le cache de pages dont une projection mémoire est faite. Ces
+chiffres dépendent du disque, du cache de pages et de la politique d'écriture différée de l'OS ;
+relancez l'exemple sur votre machine.
+
 ## Codes de sortie
 
 | Code | Signification |
@@ -653,7 +774,7 @@ quand N ≫ d et en reste loin quand n < d (le rétrécissement domine).
 | --- | --- | --- |
 | `surgeon check` | Budget RAM et VRAM, verdict | rien |
 | `surgeon inspect` | Tenseurs MLP, statistiques en option | rien |
-| `surgeon apply` | Applique un `patch.json` en place (`--dry-run` d'abord) | modèle, sauvegarde |
+| `surgeon apply` | Applique un `patch.json` en place (`--dry-run` d'abord), `--gguf` pour un GGUF quantifié | modèle, sauvegarde |
 | `surgeon eval` | Non-régression via llama.cpp, export GGUF conditionnel | GGUF |
 | `surgeon extract` | Vecteur de steering depuis une couche Qwen2 | vecteur, compagnon `.stats.json` |
 | `surgeon bench` | Dumps de logits et KL/top-k, delta de perplexité, Pass@1 | dump de logits (`dump` seulement) |
@@ -695,6 +816,14 @@ ne distribuez pas un modèle dont vous avez retiré les garde-fous.
   n'efface donc pas un concept de tout le flux résiduel. `autotune` ajuste et mesure sur les
   mêmes prompts et ne mesure pas les effets secondaires.
 - Seules les projections MLP (`gate_proj`, `up_proj`, `down_proj`) sont couvertes.
+- `apply --gguf` : GGUF mono-fichier et little-endian uniquement ; cibles F32, F16, BF16,
+  Q8_0, Q4_K et Q6_K ; pas de matrice d'importance ; un décalage sous le demi-pas est
+  perdu, un décalage au-delà de la plage d'un bloc est écrêté (`keep-scales`) ; pas validé
+  contre un vrai llama.cpp par la suite de tests. La re-quantification GGUF est scalaire
+  (lignes en parallèle).
+- La vitesse de bout en bout d'`apply` est limitée par l'écriture différée du fichier
+  mappé par l'OS, pas par les noyaux (voir Performance) ; le prefetch ne supprime pas les
+  défauts de page sous Windows.
 - Le tableau de bord exige un terminal interactif d'au moins 80×24, avec stdin, stdout et
   stderr qui y sont rattachés ; sinon, utilisez `--snapshot`.
 - Les messages du terminal sont en français.
@@ -707,6 +836,7 @@ ne distribuez pas un modèle dont vous avez retiré les garde-fous.
 | --- | --- |
 | `` `surgeon tui` nécessite un terminal interactif `` | Lancez-le dans un vrai terminal, ou ajoutez `--snapshot`. |
 | `dossier de backup inexistant` | Créez d'abord le dossier de `--backup-dir`. |
+| `une application précédente a été interrompue` (`apply --gguf`) | Copiez le backup indiqué dans `<modèle>.surgeon-inprogress` sur le modèle, vérifiez son SHA-256, supprimez le marqueur. |
 | `--llama-cpp-dir (ou LLAMA_CPP_DIR) requis` | Compilez llama.cpp et passez son dossier. |
 | Avertissement `NVML indisponible` | Sans gravité : les GPU NVIDIA sont ignorés et le modèle est prévu en RAM. |
 | `cargo install` échoue avec « Accès refusé » sous Windows | Un `surgeon.exe` tourne encore : fermez-le, ou renommez-le en `surgeon.old.exe`, puis réinstallez. |

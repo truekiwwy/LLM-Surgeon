@@ -18,18 +18,20 @@
 //! byte_start = 8 + header_len + data_offsets.0
 //! ```
 //!
-//! Call graph, extracted with graphify (AST) and checked by hand. Module edges form a DAG
-//! with no dependency on other project modules:
+//! Call graph, extracted with graphify (AST) and checked by hand. Module edges form a DAG;
+//! the only project dependency is `kernel` (SIMD kernels, chunked writer):
 //!
 //! ```text
-//! modules:  mmap_file -> index, shift, error ; selector -> index ; shift -> index, error
-//!           index -> error ; mod (TensorShifter) -> mmap_file, shift
+//! modules:  mmap_file -> index, shift, error, kernel ; selector -> index
+//!           shift -> index, error, kernel ; index -> error ; mod (TensorShifter) -> mmap_file
 //!
 //! read_index              -> ReadOnlyModel::open -> open_checked, mmap, parse_index
 //! parse_index             -> safetensors::read_metadata, map_err
 //! WritableModel::open     -> open_checked, mmap_mut, parse_index
-//! TensorShifter::shift    -> WritableModel::shift_tensor -> ModelIndex::get, apply_vector_shift
-//! apply_vector_shift      -> (validation) -> shift_rows (rayon) -> shift_cells
+//! TensorShifter::shift    -> WritableModel::shift_tensor -> ModelIndex::get, ShiftPlan::new
+//!                            -> kernel::ChunkedPatcher::run -> ShiftPlan::run (per chunk)
+//! apply_vector_shift      -> ShiftPlan::new (validation) -> ShiftPlan::run
+//!                            -> kernel::shift_rows (rayon, SIMD level) -> kernel::simd
 //! load_direction_vector   -> ReadOnlyModel::open | serde_json, decode_f32
 //! find_mlp_tensors        -> parse_mlp, LayerSpec::contains
 //! ```
@@ -56,7 +58,7 @@ pub use index::{DType, ModelIndex, TensorInfo};
 pub use mmap_file::{load_direction_vector, read_index, ReadOnlyModel, TensorView, WritableModel};
 pub use project::project_out_tensor;
 pub use selector::{find_mlp_tensors, parse_layer_index, LayerSpec, MlpProj};
-pub use shift::{apply_vector_shift, BroadcastAxis, ShiftOp, ShiftStats};
+pub use shift::{apply_vector_shift, apply_vector_shift_with, BroadcastAxis, ShiftOp, ShiftStats};
 
 /// Hook for the patch module: anything that can shift a named tensor in place.
 pub trait TensorShifter {

@@ -353,6 +353,9 @@ pub struct ApplyArgs {
     pub model: PathBuf,
     #[arg(long)]
     pub patch: PathBuf,
+    /// GGUF and chunked-write options.
+    #[command(flatten)]
+    pub gguf: crate::patch::gguf::GgufApplyArgs,
     #[arg(long)]
     pub dry_run: bool,
     /// Refused by validation when the patch sets `backup: true`.

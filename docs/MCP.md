@@ -40,7 +40,7 @@ claude mcp add surgeon -- surgeon mcp --allow-dir /chemin/vers/modeles
 | --- | --- | --- |
 | `surgeon_check` | Budget RAM/VRAM du modèle | lecture seule |
 | `surgeon_inspect` | Couches et matrices MLP, statistiques en option, `max_tensors` (défaut 500) | lecture seule |
-| `surgeon_apply` | Applique un patch en place (`dry_run` pour vérifier d'abord) | destructif |
+| `surgeon_apply` | Applique un patch en place (`dry_run` pour vérifier d'abord) ; `gguf: true` pour un GGUF quantifié | destructif |
 | `surgeon_eval` | Non-régression (boucles, attentes) et export GGUF conditionnel | écrit le GGUF |
 | `surgeon_extract` | Vecteur de direction depuis une couche Qwen2 (Rust pur, CPU) | écrit le `.safetensors`, idempotent |
 | `surgeon_bench` | Mesure d'une chirurgie : `mode` `dump`, `logits`, `ppl` ou `eval` | non destructif, idempotent |
@@ -158,6 +158,48 @@ vérifier, et renvoie le patch dans `data.patch` (écrit dans `out` seulement si
 validé par `validate_patch` avant). Les couches au-delà de la lecture sont exclues avec un
 avertissement ; `max_forwards` est vérifié avant tout calcul. Il ne mesure pas les effets
 secondaires : enchaîner avec `surgeon_bench` sur une copie.
+
+## GGUF quantifié (`surgeon_apply` avec `gguf: true`)
+
+`surgeon_inspect` accepte un `.gguf` : `data.format = "gguf"`, et pour chaque tenseur MLP
+(`blk.{i}.ffn_{gate,up,down}.weight`) son `ggml_type`, sa forme `[lignes, colonnes]`, sa
+taille et `patchable` (F32, F16, BF16, Q8_0, Q4_K, Q6_K).
+
+`surgeon_apply` gagne deux champs, le nombre d'outils ne change pas :
+
+| Champ | Défaut | Rôle |
+| --- | --- | --- |
+| `gguf` | `false` | Obligatoire pour un `.gguf` : sans lui, `error.kind = "invalid_input"` (la re-quantification perd de l'information, jamais par surprise). |
+| `requant` | `keep-scales` | `keep-scales` garde `d`, `dmin` et les sous-échelles ; `recompute` recalcule les échelles des blocs touchés. |
+
+```json
+{"name": "surgeon_apply", "arguments": {"model": "qwen2.5-7b-q4_k_m.gguf",
+  "patch": {"schema_version": 1, "operations": [{"id": "d", "layers": "10-14",
+  "projections": ["down_proj"], "operation": "subtract", "vector_file": "v.safetensors",
+  "alpha": 0.5, "axis": "cols"}]}, "gguf": true, "dry_run": true}}
+```
+
+Mêmes garde-fous que pour les SafeTensors, en plus stricts :
+- la sauvegarde est **toujours** créée, même avec `backup: false` et `--allow-no-backup` ;
+- un marqueur `<modèle>.surgeon-inprogress` existe pendant l'écriture ; s'il est trouvé au
+  départ, `error.kind = "apply_in_progress"` (restaurer le backup qu'il désigne) ;
+- l'en-tête est haché avant et après, puis chaque tenseur patché est relu ;
+- `--read-only` refuse l'outil, et `dry_run` calcule toutes les métriques sans écrire.
+
+Erreurs propres au GGUF :
+
+| `error.kind` | Signification |
+| --- | --- |
+| `unsupported_quant_type` | Une cible n'est pas en F32, F16, BF16, Q8_0, Q4_K ni Q6_K. |
+| `invalid_gguf` | Fichier illisible, tronqué, big-endian ou multi-parties. |
+| `invalid_target` | Cible non 2D, ou colonnes non multiples du bloc. |
+
+`data.gguf.tensors[]` donne la fidélité par tenseur (`realized_over_intended`,
+`correlation_intended_realized`, `unchanged_fraction`, `saturated_elements`,
+`nmse_vs_exact`, `warning`), et `data.io` donne les blocs écrits, le débit et les défauts de
+page (absent en `dry_run`). Un `warning` signale un patch perdu sous le demi-pas, ou des
+valeurs écrêtées : il faut alors réessayer avec `requant: "recompute"`, puis valider avec
+`surgeon_bench` (`ppl`) contre le fichier d'origine.
 
 ## Garde-fous
 

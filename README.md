@@ -39,6 +39,8 @@ Eight pillars, one binary:
 | Evaluation | `src/eval` | Loop detection and expectations through llama.cpp, GGUF export only when healthy. |
 | Extraction | `src/extract` | Steering vector from a Qwen2 layer, atomic output plus a companion stats file. |
 | Measurement | `src/bench` | Logits dumps and KL/top-k shifts, perplexity delta, Pass@1; deterministic reports. |
+| Kernels and I/O | `src/kernel` | SIMD shift kernels (AVX2, AVX-512, NEON) bit-identical to the scalar path; chunked writes with OS prefetch. |
+| GGUF in place | `src/patch/gguf` | Q8_0, Q4_K, Q6_K, F16, BF16, F32 targets: backup, crash marker, header hash, read-back check, rollback. |
 | Linear algebra | `src/linalg` | Jacobi, thin SVD through the Gram matrix, Cholesky: pure Rust, f64, thread-count independent. |
 | Dashboard | `src/tui` | Elm-style state, pure rendering, background worker with cancellation. |
 | Agents | `src/mcp` | MCP server on stdio, paths confined to allowed directories. |
@@ -619,6 +621,123 @@ not beat `mean_diff` here (they tie at d = 1024). The `leace` direction is the `
 one by construction; its read direction `b` approaches the optimal `W⁻¹t` when N ≫ d and
 stays far from it when n < d (shrinkage dominates).
 
+### 10. Patch a quantized GGUF in place (`apply --gguf`)
+
+The same `patch.json` (same schema, `vector_file` still a SafeTensors or JSON vector) can be
+applied directly to a single-file GGUF. Target names follow llama.cpp:
+`{gate,up,down}_proj` of layer `i` is `blk.{i}.ffn_{gate,up,down}.weight`; `ne[0]` is the
+column dimension, so `rows` / `cols` keep their SafeTensors meaning. A `.gguf` given without
+`--gguf` is refused: re-rounding is lossy and never happens by surprise.
+
+```bash
+surgeon inspect --model qwen2.5-7b-q4_k_m.gguf
+surgeon apply --gguf --model qwen2.5-7b-q4_k_m.gguf --patch patch.json --dry-run
+surgeon apply --gguf --model qwen2.5-7b-q4_k_m.gguf --patch patch.json
+surgeon apply --gguf --requant recompute --model qwen2.5-7b-q4_k_m.gguf --patch patch.json
+```
+
+Supported target types: F32, F16, BF16, Q8_0, Q4_K, Q6_K. A "Q4_K_M" file mixes types per
+tensor (`ffn_down` is often Q6_K); untouched tensors may have any type, a target of another
+type is refused with `unsupported_quant_type`.
+
+| `--requant` | What changes in a block | Use it when |
+| --- | --- | --- |
+| `keep-scales` (default) | Only the integers of the elements whose patched value differs; `d`, `dmin` and sub-block scales are kept byte for byte; values past the grid are clipped and counted | small shifts (about one quantization step) |
+| `recompute` | New scales for every touched block (Q8_0: `quantize_row_q8_0_ref`; Q4_K/Q6_K: min/max with scales rounded up, no clipping) | strong shifts; not the iterative `llama-quantize`, no importance matrix |
+
+Every tensor gets a fidelity report (`data.gguf.tensors[]`): `intended_shift_norm`
+(‖α·v‖), `realized_shift_norm` (‖dequant(after) − dequant(before)‖),
+`realized_over_intended`, `correlation_intended_realized`, `unchanged_fraction`,
+`saturated_elements`, `nmse_vs_exact`. A ratio under 0.5 or a correlation under 0.8 means
+the shift is smaller than half a step and was lost or turned into noise: raise alpha, or
+patch the SafeTensors and re-quantize with llama.cpp. Clipping above 0.1 % of a tensor
+suggests `--requant recompute`. Measured on N(0, 0.02²) weights, v ~ N(0, 1), error of the
+patched tensor divided by the error of a fresh quantization of the same exact weights
+(`tests/p12_gguf.rs`; synthetic, not a real model):
+
+| alpha | Q4_K keep-scales | Q8_0 keep-scales | Q6_K keep-scales | recompute (all) |
+| ---: | ---: | ---: | ---: | ---: |
+| 0.0003 | 0.28 | 1.17 | 1.01 | 1.00 |
+| 0.001 | 0.67 | 2.81 | 1.25 | 1.00 |
+| 0.003 | 1.14 | 19.5 | 3.2 | 1.00 |
+| 0.01 | 3.45 | 349 | 46 | 1.00 |
+
+Q8_0 has no headroom (`d = amax / 127`): any shift pushing a block's largest value outward
+is clipped. Nothing here proves a weak patch is preserved: validate with
+`surgeon bench ppl` (and `surgeon bench eval`) against the original file.
+
+Safety of an in-place write on a file of tens of GB:
+
+1. everything is checked before writing (targets, types, whole blocks, vector lengths,
+   free disk space for the copy);
+2. a full backup is made and its SHA-256 verified (`--no-backup` is refused; only
+   `--force-no-backup` skips it, and a failure then leaves the file modified);
+3. a crash marker `<model>.surgeon-inprogress` (backup path, original SHA-256, time) is
+   written before the first byte;
+4. tensors are written chunk by chunk, each chunk computed and checked (finite scales and
+   values) in a copy first; the header, metadata and tensor table are never rewritten
+   (their SHA-256 is compared before and after);
+5. after the flush, a second mapping re-reads every patched tensor and compares it to the
+   SHA-256 computed while writing (`--no-verify` skips this);
+6. any error restores the backup; the marker is removed after the commit or the rollback.
+
+If the marker is still there (crash, power loss), `apply` refuses to run: copy the backup
+named in the marker over the model, check its SHA-256 against `original_sha256`, then
+delete the marker. CI cannot validate a patched file against a real llama.cpp; check
+that it loads and run `surgeon bench ppl` before use.
+
+## Performance
+
+`apply` shifts with SIMD kernels chosen at run time (AVX-512F, AVX2 + F16C, NEON, else
+scalar), overridden by `SURGEON_KERNEL=scalar|avx2|avx512|neon` (an unavailable level falls
+back with a warning). Every level writes the same bytes as the scalar path, including RNE
+ties, subnormals and NaN; no FMA (one addition per element, the multiplication `alpha * v`
+is done once per vector element). The tensors are written by chunks
+(`--prefetch-chunk-mib`, default 64) with OS hints (`madvise` on Unix,
+`PrefetchVirtualMemory` on Windows) and an asynchronous flush of the previous chunk;
+`--no-prefetch` turns both off. `data.io` reports bytes, chunks, failed hints, time,
+throughput and page faults.
+
+```bash
+cargo run --release --example bench_kernels
+SURGEON_KERNEL=scalar surgeon --json apply --model qwen2-mini --patch patch.json
+```
+
+Measured with `examples/bench_kernels.rs` on an Intel Core i5-12400F (6 cores / 12
+threads, AVX2 + F16C, no AVX-512), 16 GB RAM, Windows 11 Pro, Samsung 990 EVO NVMe SSD,
+12 rayon threads. In memory, 1 GiB buffer, 4096 columns, best of 3 (parallel `memcpy` of
+the same buffer: 18 565 MiB/s; one thread: 14 951 MiB/s):
+
+| level | dtype | axis `rows` MiB/s | axis `cols` MiB/s | vs parallel memcpy |
+| --- | --- | ---: | ---: | ---: |
+| scalar | bf16 | 4 186 | 4 103 | 0.22 |
+| scalar | f16 | 2 740 | 2 825 | 0.15 |
+| scalar | f32 | 13 368 | 13 301 | 0.72 |
+| avx2 | bf16 | 18 270 | 18 117 | 0.98 |
+| avx2 | f16 | 18 389 | 18 108 | 0.99 |
+| avx2 | f32 | 17 669 | 17 602 | 0.95 |
+
+AVX-512 and NEON compile (checked with `cargo check --target aarch64-unknown-linux-gnu` and
+`aarch64-apple-darwin`) but did not run on this machine. All 2³² f32 patterns convert to
+bf16 and f16 exactly as `half` does at the AVX2 level (ignored test, 1.6 s in release).
+
+End to end, `shift_tensor` + `flush` on a 2 GiB bf16 SafeTensors file already in the page
+cache (cold cache needs `posix_fadvise`, Linux only):
+
+| prefetch | compute s | flush s | total MiB/s | page faults |
+| --- | ---: | ---: | ---: | ---: |
+| on (run 1) | 8.21 | 0.41 | 237 | 525 573 |
+| off (run 2) | 0.26 | 11.21 | 178 | 525 582 |
+| on (run 3) | 9.73 | 0.40 | 202 | 525 572 |
+| off (run 4) | 0.26 | 11.00 | 182 | 525 572 |
+
+On this machine the write-back of dirty pages dominates (about 200 MiB/s through the mapped
+file), not the kernels: the per-chunk flush only moves that cost into the loop (1.1 to 1.3x
+overall). Prefetch does not remove page faults on Windows (one soft fault per 4 KiB page
+either way). Direct I/O (`O_DIRECT`) is not implemented: it bypasses the page cache that a
+memory mapping is made of. These numbers depend on the disk, the page cache and the OS
+write-back policy; rerun the example on your machine.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -641,7 +760,7 @@ stays far from it when n < d (shrinkage dominates).
 | --- | --- | --- |
 | `surgeon check` | RAM and VRAM budget, verdict | nothing |
 | `surgeon inspect` | MLP tensors, optional statistics | nothing |
-| `surgeon apply` | Applies a `patch.json` in place (`--dry-run` first) | model, backup |
+| `surgeon apply` | Applies a `patch.json` in place (`--dry-run` first), `--gguf` for a quantized GGUF | model, backup |
 | `surgeon eval` | Non-regression through llama.cpp, conditional GGUF export | GGUF |
 | `surgeon extract` | Steering vector from a Qwen2 layer | vector, companion `.stats.json` |
 | `surgeon bench` | Logits dumps and KL/top-k, perplexity delta, Pass@1 | logits dump (`dump` only) |
@@ -680,6 +799,12 @@ license allows modification, keep the backups, measure the effect with `surgeon 
   not erase a concept from the whole residual stream. `autotune` fits and measures on the
   same prompts and does not measure side effects.
 - Only the MLP projections (`gate_proj`, `up_proj`, `down_proj`) are covered.
+- `apply --gguf`: single-file, little-endian GGUF only; F32, F16, BF16, Q8_0, Q4_K and Q6_K
+  targets; no importance matrix; a shift under half a quantization step is lost, a
+  shift past the block range is clipped (`keep-scales`); not validated against a real
+  llama.cpp by the test suite. The GGUF requantization is scalar (rows in parallel).
+- End-to-end `apply` speed is bound by the OS write-back of the mapped file, not by the
+  kernels (see Performance); prefetch does not remove page faults on Windows.
 - The dashboard needs an interactive terminal of at least 80×24, with stdin, stdout and
   stderr attached to it; otherwise use `--snapshot`.
 - Terminal messages are in French.
@@ -692,6 +817,7 @@ license allows modification, keep the backups, measure the effect with `surgeon 
 | --- | --- |
 | `` `surgeon tui` nécessite un terminal interactif `` | Run it in a real terminal, or add `--snapshot`. |
 | `dossier de backup inexistant` | Create the `--backup-dir` folder first. |
+| `une application précédente a été interrompue` (`apply --gguf`) | Copy the backup named in `<model>.surgeon-inprogress` over the model, check its SHA-256, delete the marker. |
 | `--llama-cpp-dir (ou LLAMA_CPP_DIR) requis` | Build llama.cpp and pass its folder. |
 | `NVML indisponible` warning | Harmless: NVIDIA GPUs are ignored and the model is planned for RAM. |
 | `cargo install` fails with "Access denied" on Windows | A `surgeon.exe` is still running: close it, or rename it to `surgeon.old.exe`, then reinstall. |
