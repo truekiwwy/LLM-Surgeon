@@ -3,3 +3,6 @@ target/
 # Graphify visual artifacts
 graph.html/
 graphify-out/
+
+# Scratch folder of the README quick start
+/demo/
