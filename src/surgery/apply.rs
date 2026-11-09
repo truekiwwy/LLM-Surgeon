@@ -254,7 +254,7 @@ fn execute(
         &mut report.tensors,
     )
     .and_then(|()| target.flush());
-    // The mappings flush on drop: a rollback must restore after them, not before.
+    // Unmap before a rollback: the restore (rename or in-place copy) must not race a live mapping.
     drop(target);
     match written {
         Ok(()) => {

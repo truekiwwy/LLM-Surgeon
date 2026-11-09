@@ -8,8 +8,8 @@
 //! 3. [`Target::info`] / [`Target::tensor_bytes_mut`] address a tensor by name, whatever its
 //!    shard; [`Target::shards_holding`] lists the shards to hand to
 //!    `patch::BackupSet::create_many_in`.
-//! 4. Drop the `Target` BEFORE a rollback: the mappings flush on drop, and a restore must
-//!    land after them. [`Target::flush`] makes the writes durable before a commit.
+//! 4. Drop the `Target` BEFORE a rollback: a restore must not race a live mapping (drop does not
+//!    flush, only [`Target::flush`] does, and a restore overwrites those writes anyway).
 
 use std::path::{Path, PathBuf};
 
