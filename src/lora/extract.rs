@@ -30,7 +30,7 @@ use crate::surgery::error::{Result, SurgeryError};
 use crate::surgery::events::{SinkObserver, SurgeryEvent, SurgeryObserver};
 use crate::surgery::format::FactorDtype;
 use crate::surgery::rsvd::{rsvd, RowSource, Rsvd, RsvdParams};
-use crate::surgery::target::resolve_shards;
+use crate::surgery::target::{ensure_not_input, resolve_shards};
 
 /// Attention q/k/v/o projections and MLP gate/up/down weights of the decoder layers.
 const DEFAULT_TARGETS: &str =
@@ -291,6 +291,9 @@ pub fn run_extract(
             "le dossier de --out n'existe pas : {}",
             out.display()
         )));
+    }
+    for target in [out, &config_path] {
+        ensure_not_input(target, &[&args.base, &args.patched])?;
     }
     if !args.overwrite {
         if let Some(existing) = [out, &config_path].into_iter().find(|p| p.exists()) {

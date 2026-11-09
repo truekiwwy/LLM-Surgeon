@@ -29,7 +29,7 @@ use super::format::{
     sha256_hex, Compression, CompressionAlgo, FactorDtype, LowRankFactors, MAX_RANK,
 };
 use super::rsvd::{rsvd, RowSource, RsvdParams};
-use super::target::resolve_shards;
+use super::target::{ensure_not_input, resolve_shards};
 use super::writer::{HeaderInit, SurgeryWriter, TensorMeta, WriteSummary};
 use crate::app::{exit, AppDeps, CoreResult, Outcome, ProgressEvent, ProgressSink};
 use crate::engine::{DType, ReadOnlyModel, TensorView};
@@ -346,6 +346,15 @@ pub fn run_diff(
             args.out.display()
         )));
     }
+
+    let parent = args.out.parent().filter(|p| !p.as_os_str().is_empty());
+    if !parent.unwrap_or(Path::new(".")).is_dir() {
+        return Err(SurgeryError::Usage(format!(
+            "le dossier de --out n'existe pas : {}",
+            args.out.display()
+        )));
+    }
+    ensure_not_input(&args.out, &[&args.base, &args.tuned])?;
 
     let base = Checkpoint::open(&args.base)?;
     let tuned = Checkpoint::open(&args.tuned)?;

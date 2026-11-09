@@ -30,6 +30,26 @@ pub fn resolve_shards(model: &Path) -> Result<Vec<PathBuf>> {
     }
 }
 
+/// Refuses an output path that is one of the checkpoint files the same command reads:
+/// `--overwrite` would otherwise destroy the input.
+pub fn ensure_not_input(out: &Path, inputs: &[&Path]) -> Result<()> {
+    let resolved = |p: &Path| std::fs::canonicalize(p).or_else(|_| std::path::absolute(p));
+    let Ok(out_abs) = resolved(out) else {
+        return Ok(());
+    };
+    for input in inputs {
+        for shard in resolve_shards(input)? {
+            if resolved(&shard).is_ok_and(|s| s == out_abs) {
+                return Err(SurgeryError::Usage(format!(
+                    "--out {} est un fichier du checkpoint en entrée",
+                    out.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The shards of a model, mapped read-write.
 pub struct Target {
     shards: Vec<(PathBuf, WritableModel)>,
@@ -127,5 +147,19 @@ mod tests {
         );
         assert_eq!(target.shards_holding(["z", "x"]), shards);
         assert!(resolve_shards(&dir.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn output_equal_to_an_input_shard_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.safetensors");
+        write_st(&base, &["x"]);
+        let err = ensure_not_input(&base, &[&base]).unwrap_err();
+        assert!(matches!(err, SurgeryError::Usage(_)), "{err:?}");
+        // a different path, existing or not, is fine
+        ensure_not_input(&dir.path().join("out.surgery"), &[&base]).unwrap();
+        // a directory input refuses its own shard files
+        let shard = dir.path().join("base.safetensors");
+        assert!(ensure_not_input(&shard, &[dir.path()]).is_err());
     }
 }
