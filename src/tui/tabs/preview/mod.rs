@@ -153,7 +153,8 @@ impl PreviewState {
     pub fn new(config: PreviewConfig, clock: Arc<dyn Clock>) -> Self {
         let alpha = config
             .alpha
-            .clamp(config.alpha_range.0, config.alpha_range.1);
+            .max(config.alpha_range.0)
+            .min(config.alpha_range.1);
         Self {
             editor: LineEditor::new(&config.prompt),
             input_focus: false,
@@ -223,7 +224,10 @@ impl PreviewState {
     }
 
     fn set_alpha(&mut self, alpha: f64) {
-        let alpha = round2(alpha).clamp(self.alpha_range.0, self.alpha_range.1);
+        // max/min, not clamp: a public config with an inverted or NaN range must not panic.
+        let alpha = round2(alpha)
+            .max(self.alpha_range.0)
+            .min(self.alpha_range.1);
         if alpha != self.alpha {
             self.alpha = alpha;
             self.due_ms = Some(self.clock.now_ms() + DEBOUNCE_MS);

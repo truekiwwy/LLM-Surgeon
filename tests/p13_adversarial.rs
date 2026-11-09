@@ -1727,7 +1727,6 @@ fn rsvd_survives_extreme_magnitudes() {
 }
 
 #[test]
-#[ignore = "BUG: rsvd returns Ok with an infinite singular value (rsvd.rs:188 sigma as f32) when sigma exceeds f32::MAX"]
 fn rsvd_entries_near_f32_max_give_a_finite_result_or_a_typed_error() {
     // sigma = 3e38 * sqrt(m n) does not fit an f32: the factors cannot be delivered, but the
     // answer must not be Ok with an infinite singular value or a NaN error.
