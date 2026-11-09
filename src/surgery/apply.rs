@@ -25,6 +25,7 @@ use super::target::{resolve_shards, Target};
 use crate::app::{exit, AppDeps, Outcome, ProgressEvent, ProgressSink, RollbackOutcome};
 use crate::cli::ApplyArgs;
 use crate::engine::DType;
+use crate::patch::gguf::GgufApplyArgs;
 use crate::patch::{BackupSet, RollbackHandle};
 
 #[derive(Debug, Clone)]
@@ -75,6 +76,9 @@ struct Prepared {
     items: Vec<Item>,
     warnings: Vec<String>,
 }
+
+/// Options of the GGUF and chunked-write modes have no meaning for a .surgery patch.
+const IGNORED_GGUF_OPTIONS: &str = "les options GGUF et d'écriture par blocs (--requant, --no-verify, --force-no-backup, --prefetch-chunk-mib, --no-prefetch) sont ignorées pour un patch .surgery";
 
 fn kind_name(kind: TensorKind) -> &'static str {
     match kind {
@@ -405,6 +409,13 @@ pub fn try_apply(
     if !is_surgery_file(&args.patch) {
         return Ok(None);
     }
+    // A .surgery patches SafeTensors weights: the GGUF mode cannot apply to it.
+    if args.gguf.gguf {
+        return Err(SurgeryError::Usage(
+            "--gguf ne s'applique pas à un patch .surgery (il modifie des SafeTensors)".into(),
+        )
+        .into());
+    }
     cli_apply(args, deps, sink).map(Some)
 }
 
@@ -425,7 +436,10 @@ fn cli_apply(
         sink: &mut *sink,
         cancel: &deps.interrupted,
     };
-    let prepared = prepare(&req, &mut obs)?;
+    let mut prepared = prepare(&req, &mut obs)?;
+    if args.gguf != GgufApplyArgs::default() {
+        prepared.warnings.push(IGNORED_GGUF_OPTIONS.to_owned());
+    }
     for w in &prepared.warnings {
         sink.event(ProgressEvent::Warn(w.clone()));
     }
