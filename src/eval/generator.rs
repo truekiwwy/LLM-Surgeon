@@ -2,14 +2,14 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use super::command::{drain_tail, last_lines, spawn_error};
+use super::command::{drain_tail, last_lines, spawn_error, ChildGuard};
 use super::error::{EvalError, Result};
 
 const STDERR_TAIL_BYTES: usize = 64 * 1024;
@@ -27,6 +27,12 @@ pub trait TextGenerator {
         max_new_tokens: u32,
         on_chunk: &mut dyn FnMut(&str) -> ControlFlow<()>,
     ) -> Result<GenerationOutcome>;
+
+    /// Switches to greedy, seeded decoding (call once, before the first `generate`).
+    /// Returns false when the generator has no sampling to configure (mocks, scripts).
+    fn configure(&mut self, _decoding: &Decoding) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -52,14 +58,12 @@ pub struct LlamaCliGenerator {
     pub timeout: Duration,
 }
 
-/// Kills and reaps the child on every exit path, so no zombie survives an early return.
-struct ChildGuard(Child);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
+/// Deterministic decoding requested by `surgeon bench eval`, passed as structured flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Decoding {
+    pub seed: u32,
+    /// Per generation; `None` keeps the generator's own timeout.
+    pub timeout: Option<Duration>,
 }
 
 impl LlamaCliGenerator {
@@ -85,6 +89,17 @@ impl TextGenerator for LlamaCliGenerator {
         on_chunk: &mut dyn FnMut(&str) -> ControlFlow<()>,
     ) -> Result<GenerationOutcome> {
         stream_child(self.command(prompt, max_new_tokens), self.timeout, on_chunk)
+    }
+
+    /// `--temp 0 --top-k 1 --seed N`: same model, prompt and build give the same text.
+    fn configure(&mut self, decoding: &Decoding) -> bool {
+        let seed = decoding.seed.to_string();
+        self.extra_args
+            .extend(["--temp", "0", "--top-k", "1", "--seed", &seed].map(String::from));
+        if let Some(timeout) = decoding.timeout {
+            self.timeout = timeout;
+        }
+        true
     }
 }
 

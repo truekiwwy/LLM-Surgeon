@@ -56,13 +56,272 @@ pub enum Commands {
     /// Evaluate a model on prompts.
     Eval(EvalArgs),
     /// Extract a steering vector from a Qwen2 layer (pure Rust, CPU).
-    Extract(ExtractArgs),
+    Extract(ExtractCommand),
     /// Terminal dashboard: MLP weight inspector and steering vector viewer.
     Tui(TuiArgs),
     /// Print the JSON Schema of patch.json, or the MCP tool definitions (raw JSON).
     Schema(SchemaArgs),
     /// Run the MCP (Model Context Protocol) server on stdio.
     Mcp(McpArgs),
+    /// Measure a surgery: logits shift, perplexity delta, Pass@1, logits dumps.
+    Bench(BenchArgs),
+    /// Fit per-layer steering coefficients by ridge regression on measured responses.
+    Autotune(AutotuneArgs),
+}
+
+/// `surgeon extract`: the prompt 8 options plus the direction method (two structs because
+/// `ExtractArgs` is built field by field by callers).
+#[derive(Debug, Clone, Args)]
+pub struct ExtractCommand {
+    #[command(flatten)]
+    pub args: ExtractArgs,
+    #[command(flatten)]
+    pub method: ExtractMethodArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ExtractMethodArgs {
+    /// Direction method: mean_diff (default, unchanged), svd (paired prompts), leace.
+    #[arg(long, value_enum, default_value_t = crate::extract::Method::MeanDiff)]
+    pub method: crate::extract::Method,
+    /// svd: center the paired deltas (for pairs of arbitrary order).
+    #[arg(long)]
+    pub svd_center: bool,
+    /// leace: shrinkage λ in [0, 1] of Σ toward tr(Σ)/d·I (0: pseudo-inverse).
+    #[arg(long, default_value_t = crate::extract::DEFAULT_LEACE_SHRINKAGE)]
+    pub leace_shrinkage: f64,
+    /// leace with shrinkage 0: relative threshold of the kept eigenvalues of Σ.
+    #[arg(long, default_value_t = crate::extract::DEFAULT_LEACE_RCOND)]
+    pub leace_rcond: f64,
+    /// Held-out fraction (by index) for out-of-sample diagnostics (10+ prompts per set).
+    #[arg(long, default_value_t = 0.0)]
+    pub holdout_frac: f64,
+}
+
+impl ExtractMethodArgs {
+    pub fn options(&self) -> crate::extract::MethodOptions {
+        crate::extract::MethodOptions {
+            method: self.method,
+            svd_center: self.svd_center,
+            leace_shrinkage: self.leace_shrinkage,
+            leace_rcond: self.leace_rcond,
+            holdout_frac: self.holdout_frac,
+        }
+    }
+}
+
+/// Exit codes: 0 ok, 1 insufficient resources or cancelled, 2 invalid arguments or files
+/// (existing --out included), 7 autotune failed (singular or ill-conditioned system, model
+/// error), 70 internal.
+#[derive(Debug, Clone, Args)]
+pub struct AutotuneArgs {
+    /// Qwen2 directory (config.json, tokenizer.json, *.safetensors).
+    #[arg(long)]
+    pub model: PathBuf,
+    /// Direction file from `surgeon extract` (tensor `direction` and its metadata).
+    #[arg(long)]
+    pub vector: PathBuf,
+    /// JSON array (or JSONL) of strings or of {"text", "target"?}.
+    #[arg(long)]
+    pub eval_dataset: PathBuf,
+    /// Candidate layers "A-B" (default: 0 up to the readout layer).
+    #[arg(long, value_parser = crate::patch::autotune::parse_layer_range)]
+    pub target_layer_range: Option<(usize, usize)>,
+    /// Layer whose activation is read (default: the vector's layer).
+    #[arg(long)]
+    pub readout_layer: Option<usize>,
+    #[arg(long, default_value = "down_proj")]
+    pub proj: Projection,
+    #[arg(long, value_enum, default_value_t = crate::patch::autotune::Objective::Suppress)]
+    pub objective: crate::patch::autotune::Objective,
+    /// Target projection (required by --objective target, overrides the vector's means).
+    #[arg(long)]
+    pub target_projection: Option<f64>,
+    /// Ridge λ > 0, or auto (LOOCV over 1e-6..1e2).
+    #[arg(long, default_value = "1e-3")]
+    pub l2_reg: crate::patch::autotune::L2Reg,
+    /// Finite-difference step δ of the response measure.
+    #[arg(long, default_value_t = 0.05)]
+    pub probe_alpha: f64,
+    #[arg(long, default_value_t = 1.0)]
+    pub alpha_max: f64,
+    /// Coefficients smaller than this are dropped.
+    #[arg(long, default_value_t = 1e-4)]
+    pub min_alpha: f64,
+    /// Refuses the run, before any computation, above this many forwards.
+    #[arg(long, default_value_t = 2000)]
+    pub max_forwards: usize,
+    #[arg(long, default_value_t = 256)]
+    pub max_tokens: usize,
+    #[arg(long, value_enum, default_value_t = DTypeChoice::Auto)]
+    pub dtype: DTypeChoice,
+    /// Override of the vector's site.
+    #[arg(long, value_enum)]
+    pub site: Option<Site>,
+    /// Override of the vector's pooling.
+    #[arg(long, value_enum)]
+    pub pooling: Option<Pooling>,
+    /// Override of the vector's chat template.
+    #[arg(long, value_enum)]
+    pub chat_template: Option<ChatTemplate>,
+    /// patch.json to write (validated first); without it the patch is only in the report.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    #[arg(long)]
+    pub overwrite: bool,
+}
+
+/// Exit codes: 0 ok (warnings included), 1 insufficient resources, llama.cpp binary not
+/// found or cancelled, 2 invalid arguments or files, 8 bench failed (process, unreadable
+/// output, incompatible shapes, generation), 9 threshold exceeded with `--fail-on-warn`,
+/// 70 internal.
+#[derive(Debug, Clone, Args)]
+pub struct BenchArgs {
+    #[command(subcommand)]
+    pub command: BenchCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum BenchCommand {
+    /// Compare two logits dumps: KL(before‖after), cosine, top-1 / top-k shifts.
+    Logits(BenchLogitsArgs),
+    /// Perplexity of a GGUF (or SafeTensors, converted) with llama-perplexity.
+    Ppl(BenchPplArgs),
+    /// Exact-match Pass@1 on a GSM8K / MATH style dataset (greedy, llama.cpp).
+    Eval(BenchEvalArgs),
+    /// Write the logits of a Qwen2 model on prompts (pure Rust, CPU).
+    Dump(BenchDumpArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchLogitsArgs {
+    /// Reference dump (.safetensors, .npy, .pt/.pth).
+    #[arg(long)]
+    pub before: PathBuf,
+    /// Dump to compare, same shape.
+    #[arg(long)]
+    pub after: PathBuf,
+    /// Tensor to read (default: `logits`).
+    #[arg(long)]
+    pub tensor: Option<String>,
+    /// Size of the compared top-k sets.
+    #[arg(long, default_value_t = crate::bench::DEFAULT_TOP_K)]
+    pub top_k: usize,
+    /// Prompts listed in worst_prompts (needs prompt_offsets).
+    #[arg(long, default_value_t = crate::bench::DEFAULT_WORST)]
+    pub worst: usize,
+    /// Warn when the mean KL is strictly above this value.
+    #[arg(long)]
+    pub warn_kl: Option<f64>,
+    /// Warn when the top-1 shift rate (0..1) is strictly above this value.
+    #[arg(long)]
+    pub warn_top1_shift: Option<f64>,
+    /// Exit with code 9 when a threshold is exceeded.
+    #[arg(long)]
+    pub fail_on_warn: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchPplArgs {
+    /// .gguf, or a SafeTensors directory converted to a temporary GGUF.
+    #[arg(long)]
+    pub model: PathBuf,
+    /// Text file evaluated by llama-perplexity.
+    #[arg(long)]
+    pub text: PathBuf,
+    /// Reference model, measured first.
+    #[arg(long, conflicts_with = "baseline_ppl")]
+    pub baseline_model: Option<PathBuf>,
+    /// Reference perplexity, already known.
+    #[arg(long)]
+    pub baseline_ppl: Option<f64>,
+    /// Uncertainty (±) of --baseline-ppl.
+    #[arg(long, requires = "baseline_ppl")]
+    pub baseline_ppl_err: Option<f64>,
+    #[arg(long, default_value_t = crate::bench::DEFAULT_CTX)]
+    pub ctx: u32,
+    #[arg(long)]
+    pub chunks: Option<u32>,
+    #[arg(long)]
+    pub threads: Option<u32>,
+    /// Layers offloaded to the GPU (0: CPU only, reproducible).
+    #[arg(long, default_value_t = 0)]
+    pub n_gpu_layers: u32,
+    #[arg(long, env = "LLAMA_CPP_DIR")]
+    pub llama_cpp_dir: Option<PathBuf>,
+    /// Warn when the rounded delta is strictly above this value.
+    #[arg(long, default_value_t = crate::bench::DEFAULT_WARN_DELTA)]
+    pub warn_delta: f64,
+    /// Per llama-perplexity run.
+    #[arg(long)]
+    pub timeout_secs: Option<u64>,
+    /// Extra llama-perplexity flag from a whitelist: --batch-size=N, --ubatch-size=N,
+    /// --ppl-stride=N, --seed=N, -b=N, -ub=N, --no-mmap, --mlock. Repeatable.
+    #[arg(long = "llama-arg", allow_hyphen_values = true)]
+    pub llama_args: Vec<String>,
+    /// Exit with code 9 when the delta exceeds --warn-delta.
+    #[arg(long)]
+    pub fail_on_warn: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchEvalArgs {
+    /// .gguf, or a SafeTensors directory converted to a temporary GGUF.
+    #[arg(long)]
+    pub model: PathBuf,
+    /// JSON array (or JSONL) of {question|problem, answer|solution, id?}.
+    #[arg(long)]
+    pub dataset: PathBuf,
+    /// Reference model on the same questions (paired comparison).
+    #[arg(long)]
+    pub baseline_model: Option<PathBuf>,
+    /// First N entries, in file order.
+    #[arg(long, default_value_t = crate::bench::DEFAULT_LIMIT)]
+    pub limit: usize,
+    #[arg(long, default_value_t = crate::bench::DEFAULT_MAX_NEW_TOKENS)]
+    pub max_new_tokens: u32,
+    /// Template with {question}, or @FILE.
+    #[arg(long)]
+    pub prompt_template: Option<String>,
+    #[arg(long, value_enum, default_value_t = crate::bench::dataset::DatasetFormat::Auto)]
+    pub format: crate::bench::dataset::DatasetFormat,
+    #[arg(long, env = "LLAMA_CPP_DIR")]
+    pub llama_cpp_dir: Option<PathBuf>,
+    /// Per question; a timeout counts the question wrong.
+    #[arg(long)]
+    pub timeout_secs: Option<u64>,
+    /// Warn when the accuracy (0..1) is strictly below this value.
+    #[arg(long)]
+    pub min_accuracy: Option<f64>,
+    /// Exit with code 9 when the accuracy is below --min-accuracy.
+    #[arg(long)]
+    pub fail_on_warn: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchDumpArgs {
+    /// Qwen2 directory (config.json, tokenizer.json, *.safetensors).
+    #[arg(long)]
+    pub model: PathBuf,
+    /// JSON array of strings or of {"text": ...}, JSONL, or plain text.
+    #[arg(long)]
+    pub prompts: PathBuf,
+    /// Output .safetensors (tensors `logits` and `prompt_offsets`).
+    #[arg(long)]
+    pub out: PathBuf,
+    #[arg(long, value_enum, default_value_t = DTypeChoice::Auto)]
+    pub dtype: DTypeChoice,
+    #[arg(long, value_enum, default_value_t = crate::bench::dump::OutDtype::F32)]
+    pub out_dtype: crate::bench::dump::OutDtype,
+    /// Prompts are truncated on the right beyond this many tokens.
+    #[arg(long, default_value_t = crate::bench::DEFAULT_DUMP_MAX_TOKENS)]
+    pub max_tokens: usize,
+    /// Refuses the dump, before any computation, above this many positions.
+    #[arg(long, default_value_t = crate::bench::DEFAULT_MAX_TOTAL_POSITIONS)]
+    pub max_total_positions: usize,
+    /// Replace an existing --out.
+    #[arg(long)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -94,6 +353,9 @@ pub struct ApplyArgs {
     pub model: PathBuf,
     #[arg(long)]
     pub patch: PathBuf,
+    /// GGUF and chunked-write options.
+    #[command(flatten)]
+    pub gguf: crate::patch::gguf::GgufApplyArgs,
     #[arg(long)]
     pub dry_run: bool,
     /// Refused by validation when the patch sets `backup: true`.
@@ -331,6 +593,182 @@ mod tests {
             "p"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn bench_subcommands_defaults_requirements_and_conflicts() {
+        let bench = |args: &[&str]| -> BenchCommand {
+            let mut argv = vec!["bench"];
+            argv.extend_from_slice(args);
+            match parse(&argv).unwrap().command {
+                Commands::Bench(b) => b.command,
+                other => panic!("{other:?}"),
+            }
+        };
+        let BenchCommand::Logits(l) = bench(&["logits", "--before", "a", "--after", "b"]) else {
+            panic!()
+        };
+        assert_eq!(
+            (l.top_k, l.worst, l.warn_kl, l.fail_on_warn),
+            (5, 5, None, false)
+        );
+        let BenchCommand::Ppl(p) = bench(&["ppl", "--model", "m.gguf", "--text", "t.txt"]) else {
+            panic!()
+        };
+        assert_eq!((p.ctx, p.n_gpu_layers, p.warn_delta), (512, 0, 0.2));
+        assert!(p.baseline_model.is_none() && p.llama_args.is_empty());
+        let BenchCommand::Ppl(p) = bench(&[
+            "ppl",
+            "--model",
+            "m",
+            "--text",
+            "t",
+            "--llama-arg",
+            "--batch-size=64",
+        ]) else {
+            panic!()
+        };
+        assert_eq!(p.llama_args, ["--batch-size=64"]);
+        let BenchCommand::Eval(e) = bench(&["eval", "--model", "m", "--dataset", "d.json"]) else {
+            panic!()
+        };
+        assert_eq!((e.limit, e.max_new_tokens), (50, 512));
+        assert_eq!(e.format, crate::bench::dataset::DatasetFormat::Auto);
+        let BenchCommand::Dump(d) =
+            bench(&["dump", "--model", "m", "--prompts", "p", "--out", "o"])
+        else {
+            panic!()
+        };
+        assert_eq!((d.max_tokens, d.max_total_positions), (256, 4096));
+        assert_eq!(d.out_dtype, crate::bench::dump::OutDtype::F32);
+
+        for bad in [
+            &["bench", "logits", "--before", "a"][..],
+            &["bench", "ppl", "--model", "m"],
+            &["bench", "dump", "--model", "m", "--prompts", "p"],
+            &[
+                "bench",
+                "ppl",
+                "--model",
+                "m",
+                "--text",
+                "t",
+                "--baseline-model",
+                "b",
+                "--baseline-ppl",
+                "7",
+            ],
+            &[
+                "bench",
+                "ppl",
+                "--model",
+                "m",
+                "--text",
+                "t",
+                "--baseline-ppl-err",
+                "0.1",
+            ],
+            &[
+                "bench",
+                "eval",
+                "--model",
+                "m",
+                "--dataset",
+                "d",
+                "--format",
+                "mmlu",
+            ],
+            &["bench"],
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn extract_methods_and_autotune_parse_with_defaults() {
+        let base = [
+            "extract",
+            "--model",
+            "m",
+            "--pos-prompts",
+            "p",
+            "--neg-prompts",
+            "n",
+            "--out",
+            "o.safetensors",
+        ];
+        let Commands::Extract(cmd) = parse(&base).unwrap().command else {
+            panic!()
+        };
+        assert_eq!(
+            cmd.method.options(),
+            crate::extract::MethodOptions::default()
+        );
+        assert_eq!(cmd.args.layer, 20, "prompt 8 options unchanged");
+        let mut svd = base.to_vec();
+        svd.extend([
+            "--method",
+            "leace",
+            "--leace-shrinkage",
+            "0",
+            "--holdout-frac",
+            "0.5",
+        ]);
+        let Commands::Extract(cmd) = parse(&svd).unwrap().command else {
+            panic!()
+        };
+        let opts = cmd.method.options();
+        assert_eq!(opts.method, crate::extract::Method::Leace);
+        assert_eq!((opts.leace_shrinkage, opts.holdout_frac), (0.0, 0.5));
+        let mut bad = base.to_vec();
+        bad.extend(["--method", "pca"]);
+        assert!(parse(&bad).is_err());
+
+        let tune = [
+            "autotune",
+            "--model",
+            "m",
+            "--vector",
+            "v.safetensors",
+            "--eval-dataset",
+            "e.json",
+        ];
+        let Commands::Autotune(a) = parse(&tune).unwrap().command else {
+            panic!()
+        };
+        assert_eq!(a.proj, Projection::Down);
+        assert_eq!(a.l2_reg, crate::patch::autotune::L2Reg::Fixed(1e-3));
+        assert_eq!(
+            (a.probe_alpha, a.alpha_max, a.max_forwards),
+            (0.05, 1.0, 2000)
+        );
+        assert_eq!(a.target_layer_range, None);
+        let mut more = tune.to_vec();
+        more.extend([
+            "--target-layer-range",
+            "3-7",
+            "--l2-reg",
+            "auto",
+            "--objective",
+            "amplify",
+            "--proj",
+            "up",
+        ]);
+        let Commands::Autotune(a) = parse(&more).unwrap().command else {
+            panic!()
+        };
+        assert_eq!(a.target_layer_range, Some((3, 7)));
+        assert_eq!(a.l2_reg, crate::patch::autotune::L2Reg::Auto);
+        assert_eq!(a.proj, Projection::Up);
+        for wrong in [
+            ["--target-layer-range", "7-3"],
+            ["--l2-reg", "-1"],
+            ["--objective", "boost"],
+        ] {
+            let mut args = tune.to_vec();
+            args.extend(wrong);
+            assert!(parse(&args).is_err(), "{wrong:?}");
+        }
     }
 
     /// `--no-backup` parses, but validation refuses it against `backup: true`.

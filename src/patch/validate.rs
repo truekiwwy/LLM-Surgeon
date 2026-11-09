@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::error::{PatchError, Result, ValidationIssue};
-use super::schema::{Axis, LayerSelection, OperationKind, PatchFile, Projection};
+use super::schema::{Axis, LayerSelection, Operation, OperationKind, PatchFile, Projection};
 
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 pub const MAX_ABS_ALPHA: f32 = 100.0;
@@ -46,9 +46,31 @@ pub struct ValidatedOperation {
     pub kind: OperationKind,
     /// Resolved against the patch directory.
     pub vector_file: PathBuf,
-    pub vector_tensor: Option<String>,
+    /// Tensor(s) read in `vector_file`; `None`: its only tensor.
+    pub vector_tensor: Option<VectorTensor>,
     pub alpha: f32,
     pub axis: Axis,
+}
+
+/// Which tensors of `vector_file` an operation reads. (Carried in `vector_tensor` rather
+/// than a new field: `ValidatedOperation` is built field by field by the prompt 2 tests.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum VectorTensor {
+    /// `vector_tensor` of add / subtract.
+    Named(String),
+    /// `vector_tensor` (a) and `vector_tensor_b` (b) of project_out.
+    Pair { a: String, b: String },
+}
+
+impl VectorTensor {
+    /// The direction of add / subtract, or `a` of project_out.
+    pub fn direction(&self) -> &str {
+        match self {
+            Self::Named(name) => name,
+            Self::Pair { a, .. } => a,
+        }
+    }
 }
 
 /// Checks everything and reports every problem at once, so an agent fixes its patch in one
@@ -100,6 +122,15 @@ pub fn validate_patch(
             seen_ids.insert(&op.id, i);
         }
 
+        let project_out = op.operation == OperationKind::ProjectOut;
+        if project_out {
+            check_project_out(op, &mut |field, message| issue(at(field), message));
+        } else if op.vector_tensor_b.is_some() {
+            issue(
+                at("vector_tensor_b"),
+                "vector_tensor_b ne s'applique qu'à operation = project_out".into(),
+            );
+        }
         if !(op.alpha.is_finite() && op.alpha.abs() <= MAX_ABS_ALPHA) {
             issue(
                 at("alpha"),
@@ -178,7 +209,14 @@ pub fn validate_patch(
                 projections: op.projections.clone(),
                 kind: op.operation,
                 vector_file,
-                vector_tensor: op.vector_tensor.clone(),
+                vector_tensor: match (&op.vector_tensor, &op.vector_tensor_b) {
+                    (Some(a), Some(b)) if project_out => Some(VectorTensor::Pair {
+                        a: a.clone(),
+                        b: b.clone(),
+                    }),
+                    (Some(name), _) => Some(VectorTensor::Named(name.clone())),
+                    (None, _) => None,
+                },
                 alpha: op.alpha,
                 axis: op.axis,
             });
@@ -194,6 +232,40 @@ pub fn validate_patch(
         operations,
         warnings,
     })
+}
+
+/// project_out: strength in [0, 1], down_proj only (it writes into the residual stream,
+/// the space of a and b), both tensors named in a .safetensors, and no axis other than
+/// the default `cols` (serde cannot tell an explicit `"cols"` from an absent axis; `cols`
+/// is also the matching convention: a and b have the length of the rows).
+fn check_project_out(op: &Operation, issue: &mut dyn FnMut(&str, String)) {
+    if !(op.alpha.is_finite() && (0.0..=1.0).contains(&op.alpha)) {
+        issue(
+            "alpha",
+            format!(
+                "project_out : alpha est une force dans [0, 1], reçu {}",
+                op.alpha
+            ),
+        );
+    }
+    if op.projections != [Projection::Down] {
+        issue(
+            "projections",
+            "project_out ne s'applique qu'à [\"down_proj\"] : seule cette matrice écrit dans le flux résiduel où vivent a et b (o_proj et les embeddings ne sont pas couverts)".into(),
+        );
+    }
+    if op.axis != Axis::Cols {
+        issue(
+            "axis",
+            "axis n'a pas de sens pour project_out (a et b ont la taille des lignes) : retirer le champ".into(),
+        );
+    }
+    if op.vector_tensor.is_none() || op.vector_tensor_b.is_none() {
+        issue(
+            "vector_tensor_b",
+            "project_out exige vector_tensor (a) et vector_tensor_b (b), par exemple \"a\" et \"b\" d'un .leace.safetensors".into(),
+        );
+    }
 }
 
 #[cfg(test)]

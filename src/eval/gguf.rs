@@ -237,6 +237,87 @@ fn run_step(
     Ok(())
 }
 
+/// Message of the error returned when a conversion is needed without llama.cpp.
+pub const LLAMA_DIR_REQUIRED: &str =
+    "--llama-cpp-dir (ou LLAMA_CPP_DIR) requis pour convertir en GGUF";
+
+/// A GGUF llama.cpp can read: the model itself, or a temporary f16 conversion that is
+/// deleted when this value drops (errors and panics included).
+#[derive(Debug)]
+pub struct GgufModel {
+    path: PathBuf,
+    temporary: bool,
+}
+
+impl GgufModel {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn is_temporary(&self) -> bool {
+        self.temporary
+    }
+}
+
+impl Drop for GgufModel {
+    fn drop(&mut self) {
+        if self.temporary {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+pub fn is_gguf(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"))
+}
+
+/// The SafeTensors directory of a model: itself, or the parent of a single file.
+pub fn model_dir(model: &Path) -> PathBuf {
+    match model.is_dir() {
+        true => model.to_path_buf(),
+        false => model
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
+    }
+}
+
+/// `.gguf` as is; otherwise one unquantized f16 conversion to
+/// `<model dir>/.weight-surgeon-<tag>-<pid>.gguf`, next to the model because an f16 copy
+/// can be tens of GB, often too big for the temporary directory. Without `llama_cpp_dir`
+/// the conversion is refused with [`LLAMA_DIR_REQUIRED`].
+pub fn ensure_gguf(
+    model: &Path,
+    llama_cpp_dir: Option<&Path>,
+    tag: &str,
+    runner: &dyn CommandRunner,
+) -> Result<GgufModel> {
+    if is_gguf(model) {
+        return Ok(GgufModel {
+            path: model.to_path_buf(),
+            temporary: false,
+        });
+    }
+    let llama_cpp_dir =
+        llama_cpp_dir.ok_or_else(|| EvalError::InvalidConfig(LLAMA_DIR_REQUIRED.into()))?;
+    let model_dir = model_dir(model);
+    let file = GgufModel {
+        path: model_dir.join(format!(".weight-surgeon-{tag}-{}.gguf", std::process::id())),
+        temporary: true,
+    };
+    let cfg = GgufExportConfig {
+        llama_cpp_dir: llama_cpp_dir.to_path_buf(),
+        model_dir,
+        output_gguf: file.path.clone(),
+        quant: None,
+        intermediate_type: "f16".into(),
+        python_bin: if cfg!(windows) { "python" } else { "python3" }.into(),
+        keep_intermediate: false,
+    };
+    export_gguf(&cfg, runner)?;
+    Ok(file)
+}
+
 fn verify_gguf(path: &Path) -> Result<u64> {
     let invalid = |reason: &str| EvalError::InvalidGguf {
         path: path.to_path_buf(),

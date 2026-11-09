@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{PatchError, Result};
 use super::schema::{Axis, LayerSelection, OperationKind, Projection};
-use super::validate::ValidatedPatch;
+use super::validate::{ValidatedPatch, VectorTensor};
 
 /// What the executor needs from the tensor engine. The integration implements it on top of
 /// `engine` and converts its errors with `PatchError::Backend(e.to_string())`.
@@ -23,6 +23,18 @@ pub trait PatchBackend {
         op: OperationKind,
         axis: Axis,
     ) -> Result<OpStats>;
+    /// `W ← W − α a (bᵀ W)` (`project_out`). Backends without it refuse the operation.
+    fn project_out_tensor(
+        &mut self,
+        tensor_name: &str,
+        _a: &[f32],
+        _b: &[f32],
+        _alpha: f32,
+    ) -> Result<OpStats> {
+        Err(PatchError::Backend(format!(
+            "{tensor_name} : project_out non supporté par ce backend"
+        )))
+    }
     fn flush(&mut self) -> Result<()>;
 }
 
@@ -101,9 +113,31 @@ pub fn apply_patch(
             )));
         }
         let vector = backend
-            .load_vector(&op.vector_file, op.vector_tensor.as_deref())
+            .load_vector(
+                &op.vector_file,
+                op.vector_tensor.as_ref().map(VectorTensor::direction),
+            )
             .map_err(|e| untouched(e.to_string()))?;
-        plans.push((op, targets, vector));
+        let read = match (&op.kind, &op.vector_tensor) {
+            (OperationKind::ProjectOut, Some(VectorTensor::Pair { b, .. })) => {
+                let b = backend
+                    .load_vector(&op.vector_file, Some(b))
+                    .map_err(|e| untouched(e.to_string()))?;
+                if b.len() != vector.len() {
+                    return Err(untouched(format!(
+                        "a et b de tailles différentes ({} et {})",
+                        vector.len(),
+                        b.len()
+                    )));
+                }
+                Some(b)
+            }
+            (OperationKind::ProjectOut, _) => {
+                return Err(untouched("project_out sans vecteur b".into()));
+            }
+            _ => None,
+        };
+        plans.push((op, targets, vector, read));
     }
 
     let mut report = ApplyReport {
@@ -116,7 +150,7 @@ pub fn apply_patch(
     if dry_run {
         report.operations = plans
             .into_iter()
-            .map(|(op, targets, vector)| OperationReport {
+            .map(|(op, targets, vector, _)| OperationReport {
                 id: op.id.clone(),
                 vector_len: vector.len(),
                 tensors: targets
@@ -131,17 +165,19 @@ pub fn apply_patch(
         return Ok(report);
     }
 
-    for (op, targets, vector) in plans {
+    for (op, targets, vector, read) in plans {
         let mut tensors = Vec::with_capacity(targets.len());
         for name in targets {
-            let shifted = backend
-                .shift_tensor(&name, &vector, op.alpha, op.kind, op.axis)
-                .and_then(|stats| match stats.nan_or_inf_produced {
-                    0 => Ok(stats),
-                    n => Err(PatchError::Backend(format!(
-                        "{n} valeurs NaN/Inf produites"
-                    ))),
-                });
+            let shifted = match &read {
+                Some(b) => backend.project_out_tensor(&name, &vector, b, op.alpha),
+                None => backend.shift_tensor(&name, &vector, op.alpha, op.kind, op.axis),
+            }
+            .and_then(|stats| match stats.nan_or_inf_produced {
+                0 => Ok(stats),
+                n => Err(PatchError::Backend(format!(
+                    "{n} valeurs NaN/Inf produites"
+                ))),
+            });
             match shifted {
                 Ok(stats) => tensors.push(TensorReport {
                     name,
@@ -196,7 +232,7 @@ mod tests {
     use super::*;
     use crate::patch::backup::BackupGuard;
     use crate::patch::error::exit_code;
-    use crate::patch::validate::ValidatedOperation;
+    use crate::patch::validate::{ValidatedOperation, VectorTensor};
     use std::fs;
 
     /// Writes one byte per shifted tensor into a real file, so rollbacks are observable.
@@ -434,5 +470,113 @@ mod tests {
             }
         ));
         assert!(backend.calls.is_empty());
+    }
+
+    /// project_out through a backend that does not support it, and one that produces NaN.
+    struct ProjectBackend {
+        file: PathBuf,
+        nan: bool,
+        loaded: Vec<Option<String>>,
+    }
+
+    impl PatchBackend for ProjectBackend {
+        fn resolve_targets(&self, _: &LayerSelection, _: &[Projection]) -> Result<Vec<String>> {
+            Ok(vec!["t0".into(), "t1".into()])
+        }
+        fn load_vector(&self, _: &Path, tensor: Option<&str>) -> Result<Vec<f32>> {
+            Ok(match tensor {
+                Some("b") => vec![0.5; 4],
+                _ => vec![1.0; 4],
+            })
+        }
+        fn shift_tensor(
+            &mut self,
+            _: &str,
+            _: &[f32],
+            _: f32,
+            _: OperationKind,
+            _: Axis,
+        ) -> Result<OpStats> {
+            Err(PatchError::Backend("shift inattendu".into()))
+        }
+        fn project_out_tensor(
+            &mut self,
+            name: &str,
+            a: &[f32],
+            b: &[f32],
+            _: f32,
+        ) -> Result<OpStats> {
+            assert_eq!((a[0], b[0]), (1.0, 0.5), "a and b from their own tensors");
+            self.loaded.push(Some(name.to_owned()));
+            fs::write(&self.file, [0xFF; 16]).unwrap();
+            Ok(OpStats {
+                max_abs_delta: 0.1,
+                elements_modified: 4,
+                nan_or_inf_produced: u64::from(self.nan),
+            })
+        }
+        fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn project_patch() -> ValidatedPatch {
+        let mut p = patch(&["erase"]);
+        p.operations[0].kind = OperationKind::ProjectOut;
+        p.operations[0].vector_tensor = Some(VectorTensor::Pair {
+            a: "a".into(),
+            b: "b".into(),
+        });
+        p
+    }
+
+    #[test]
+    fn project_out_runs_through_its_own_backend_method_and_rolls_back_on_nan() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = model(dir.path());
+        let mut ok = ProjectBackend {
+            file: file.clone(),
+            nan: false,
+            loaded: Vec::new(),
+        };
+        let report = apply_patch(&project_patch(), &mut ok, None, false).unwrap();
+        assert_eq!(report.operations[0].tensors.len(), 2);
+        assert_eq!(ok.loaded.len(), 2);
+
+        fs::write(&file, [0u8; 16]).unwrap();
+        let mut bad = ProjectBackend {
+            file: file.clone(),
+            nan: true,
+            loaded: Vec::new(),
+        };
+        let mut guard = BackupGuard::create(&file, None).unwrap();
+        let err = apply_patch(&project_patch(), &mut bad, Some(&mut guard), false).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PatchError::ExecutionFailed {
+                    rolled_back: true,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(fs::read(&file).unwrap(), [0u8; 16], "restored");
+
+        // The prompt 2 mock has no project_out: refused at the first tensor, rolled back.
+        let mut legacy = MockBackend::new(&file);
+        let mut guard = BackupGuard::create(&file, None).unwrap();
+        let err = apply_patch(&project_patch(), &mut legacy, Some(&mut guard), false).unwrap_err();
+        assert!(
+            err.to_string().contains("project_out non supporté"),
+            "{err}"
+        );
+        assert!(matches!(
+            err,
+            PatchError::ExecutionFailed {
+                rolled_back: true,
+                ..
+            }
+        ));
     }
 }

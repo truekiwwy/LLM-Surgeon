@@ -1,0 +1,223 @@
+//! Final answer of a model output. Rules in priority order, the first one that finds a
+//! non-empty candidate wins:
+//!
+//! 1. `hashes`: `#### X`, last non-empty occurrence (rest of its line);
+//! 2. `boxed`: `\boxed{X}`, last balanced occurrence (nested and escaped braces handled
+//!    by a small parser);
+//! 3. `bold`: last `**X**` segment;
+//! 4. `phrase`: last "the answer is X" / "final answer: X" / "réponse finale : X"
+//!    (case-insensitive); a leading number is kept alone, otherwise the rest of the line;
+//! 5. `last_number`: the last number of the text.
+//!
+//! The regexes run on the `regex` crate (linear time, no backtracking).
+
+use std::sync::OnceLock;
+
+use regex::Regex;
+use schemars::JsonSchema;
+use serde::Serialize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Rule {
+    Hashes,
+    Boxed,
+    Bold,
+    Phrase,
+    LastNumber,
+}
+
+impl Rule {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hashes => "hashes",
+            Self::Boxed => "boxed",
+            Self::Bold => "bold",
+            Self::Phrase => "phrase",
+            Self::LastNumber => "last_number",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Extracted {
+    pub answer: String,
+    pub rule: Rule,
+}
+
+fn cached(cell: &'static OnceLock<Option<Regex>>, pattern: &str) -> Option<&'static Regex> {
+    cell.get_or_init(|| Regex::new(pattern).ok()).as_ref()
+}
+
+fn bold_re() -> Option<&'static Regex> {
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
+    cached(&RE, r"\*\*([^*\n]+)\*\*")
+}
+
+fn phrase_re() -> Option<&'static Regex> {
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
+    cached(
+        &RE,
+        r"(?i)(?:the\s+(?:final\s+)?answer\s+is|final\s+answer\s*(?:is)?\s*:|réponse\s+finale\s*(?:est)?\s*:|la\s+réponse\s+est)\s*:?\s*([^\n]*)",
+    )
+}
+
+/// Thousands groups first (`1,234.5`), else a plain or decimal-comma number with an
+/// optional exponent (`1,8e1`).
+pub(crate) fn number_re() -> Option<&'static Regex> {
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
+    cached(
+        &RE,
+        r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?",
+    )
+}
+
+/// Content of the brace group opening at `open` (index of `{`), escaped braces skipped.
+fn balanced(text: &str, open: usize) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut chars = text[open..].char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(&text[open + 1..open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Content of the last balanced `\boxed{...}`.
+pub fn last_boxed(text: &str) -> Option<String> {
+    text.rmatch_indices("\\boxed{")
+        .find_map(|(at, m)| balanced(text, at + m.len() - 1))
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+fn hashes(text: &str) -> Option<String> {
+    text.rmatch_indices("####").find_map(|(at, m)| {
+        let rest = text[at + m.len()..].lines().next().unwrap_or("");
+        let answer = rest.trim().trim_start_matches('#').trim();
+        (!answer.is_empty()).then(|| answer.to_owned())
+    })
+}
+
+fn bold(text: &str) -> Option<String> {
+    bold_re()?
+        .captures_iter(text)
+        .filter_map(|c| Some(c.get(1)?.as_str().trim().to_owned()))
+        .filter(|s| !s.is_empty())
+        .last()
+}
+
+fn phrase(text: &str) -> Option<String> {
+    let rest = phrase_re()?
+        .captures_iter(text)
+        .filter_map(|c| Some(c.get(1)?.as_str().trim().to_owned()))
+        .filter(|s| !s.is_empty())
+        .last()?;
+    let stripped = rest.trim_start_matches(['$', '\\', ' ']);
+    let leading = number_re()?
+        .find(stripped)
+        .filter(|m| m.start() == 0)
+        .map(|m| m.as_str().to_owned());
+    Some(leading.unwrap_or_else(|| rest.trim_end_matches('.').trim().to_owned()))
+}
+
+fn last_number(text: &str) -> Option<String> {
+    number_re()?
+        .find_iter(text)
+        .last()
+        .map(|m| m.as_str().to_owned())
+}
+
+type Finder = fn(&str) -> Option<String>;
+
+pub fn extract(output: &str) -> Option<Extracted> {
+    let rules: [(Rule, Finder); 5] = [
+        (Rule::Hashes, hashes),
+        (Rule::Boxed, last_boxed),
+        (Rule::Bold, bold),
+        (Rule::Phrase, phrase),
+        (Rule::LastNumber, last_number),
+    ];
+    rules.iter().find_map(|(rule, find)| {
+        find(output).map(|answer| Extracted {
+            answer,
+            rule: *rule,
+        })
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn got(output: &str) -> Option<(String, Rule)> {
+        extract(output).map(|e| (e.answer, e.rule))
+    }
+
+    fn is(output: &str, answer: &str, rule: Rule) {
+        assert_eq!(got(output), Some((answer.to_owned(), rule)), "{output:?}");
+    }
+
+    #[test]
+    fn extraction_table() {
+        is("Adding up: 10 + 8 = 18.\n#### 18", "18", Rule::Hashes);
+        is("first #### 3\nthen #### 18\n####", "18", Rule::Hashes);
+        is(
+            "So $x = \\boxed{\\frac{1}{2}}$.",
+            "\\frac{1}{2}",
+            Rule::Boxed,
+        );
+        is(
+            "\\boxed{\\left(1,2\\right)}",
+            "\\left(1,2\\right)",
+            Rule::Boxed,
+        );
+        is(
+            "\\boxed{\\frac{\\sqrt{\\frac{a}{b}}}{2}}",
+            "\\frac{\\sqrt{\\frac{a}{b}}}{2}",
+            Rule::Boxed,
+        );
+        is(
+            "\\boxed{1} then \\boxed{\\{1,2\\}}",
+            "\\{1,2\\}",
+            Rule::Boxed,
+        );
+        is("unbalanced \\boxed{3} and \\boxed{4", "3", Rule::Boxed);
+        is("The result is **42**.", "42", Rule::Bold);
+        is("**Step 1** ... **Step 2** gives **7**", "7", Rule::Bold);
+        is("The answer is $1,234.50.", "1,234.50", Rule::Phrase);
+        is("Final answer: 12 apples", "12", Rule::Phrase);
+        is("Donc la réponse finale : 12", "12", Rule::Phrase);
+        is("the answer is blue.", "blue", Rule::Phrase);
+        is("I got 3, then 5, finally 9 cookies", "9", Rule::LastNumber);
+        is(
+            "The temperature drops to -4 degrees",
+            "-4",
+            Rule::LastNumber,
+        );
+        is("Avogadro is about 6.02e23", "6.02e23", Rule::LastNumber);
+        is("It grew by 50%", "50", Rule::LastNumber);
+        is("He pays 18 dollars", "18", Rule::LastNumber);
+        assert_eq!(got(""), None);
+        assert_eq!(got("no digits at all"), None);
+    }
+
+    #[test]
+    fn priority_between_rules() {
+        is("**5** but #### 6", "6", Rule::Hashes);
+        is("the answer is 3, **4**, \\boxed{5}", "5", Rule::Boxed);
+        is("the answer is 3 but **4**", "4", Rule::Bold);
+        is("The answer is 8. Checking: 2 * 4 = 8, 9", "8", Rule::Phrase);
+    }
+}

@@ -20,6 +20,11 @@
 //!          -> extract -> load_prompt_texts -> core_extract_request -> extract::run_extraction
 //!          -> eval    -> load_prompts -> export_gguf (temporary f16, unless .gguf)
 //!                     -> generator_factory -> run_eval -> export_if_healthy
+//!          -> extract -> core_extract_with(args, MethodOptions) -> core_extract_method
+//!          -> autotune -> autotune_cli -> core_autotune -> patch::autotune::run
+//!                      -> linalg::cholesky (ridge, LOOCV) -> validate_patch -> write_atomic
+//!          -> bench   -> bench_cli (args -> *Request) -> core_bench_{logits,ppl,eval,dump}
+//!                     -> bench::{logits_metrics, ppl_runner, score, dump}::run (see `bench/mod.rs`)
 //! Every human byte goes through `ui::*` (output audit in `ui.rs`); `--json` builds
 //! `Ui::off()` for both streams, so no rendering reaches stdout or stderr.
 //! emit -> JSON envelope | human text (write errors ignored: closed pipe never panics)
@@ -28,7 +33,7 @@
 //! Exit codes: 0 ok, 1 general error, 2 invalid CLI/patch/input, 3 execution failed and
 //! model intact (rolled back or never touched), 4 CRITICAL (rollback failed, or model left
 //! modified without backup), 5 eval degraded/broken, 6 GGUF export failed, 7 extraction
-//! failed, 70 internal.
+//! failed, 8 bench failed, 9 bench threshold exceeded under `--fail-on-warn`, 70 internal.
 //!
 //! Deviations from the assembly spec, adapted to the real signatures:
 //! - One `EngineBackend` owns 1..N `WritableModel`s: a single file is a 1-shard model, so a
@@ -57,24 +62,38 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::cli::{ApplyArgs, CheckArgs, Cli, Commands, EvalArgs, ExtractArgs, InspectArgs};
+use crate::bench::dump::DumpRequest;
+use crate::bench::logits_metrics::LogitsRequest;
+use crate::bench::ppl_runner::{PplBaseline, PplRequest};
+use crate::bench::prompt::Template;
+use crate::bench::report::{self as bench_report, BenchRun};
+use crate::bench::score::EvalRequest;
+use crate::bench::{self, BenchError};
+use crate::cli::{
+    ApplyArgs, AutotuneArgs, BenchArgs, BenchCommand, CheckArgs, Cli, Commands, EvalArgs,
+    ExtractArgs, InspectArgs,
+};
 use crate::engine::stats::TensorStats;
 use crate::engine::{
     self, BroadcastAxis, DType, EngineError, LayerSpec, MlpProj, ReadOnlyModel, ShiftOp,
     ShiftStats, WritableModel,
 };
 use crate::eval::{
-    export_gguf, export_if_healthy, load_prompts, locate_binary, run_eval, CommandRunner,
+    ensure_gguf, export_if_healthy, is_gguf, load_prompts, locate_binary, run_eval, CommandRunner,
     EvalConfig, EvalError, EvalPrompt, EvalReport, EvalVerdict, GenerationOutcome,
     GgufExportConfig, LlamaCliGenerator, PromptStatus, SystemCommandRunner, TextGenerator,
-    ALLOWED_QUANTS,
+    ALLOWED_QUANTS, LLAMA_DIR_REQUIRED,
 };
 use crate::extract::{
-    self, ExtractError, ExtractEvent, ExtractObserver, ExtractReport, ExtractRequest, PromptSet,
+    self, ExtractError, ExtractEvent, ExtractObserver, ExtractReport, ExtractRequest,
+    MethodDiagnostics, MethodOptions, PromptSet,
 };
 use crate::hardware::{
     self, BudgetPolicy, HardwareBudget, HardwareError, HardwareProbe, SystemProbe, Verdict,
 };
+use crate::kernel::{self, IoConfig, IoMeter, KernelChoice, Level};
+use crate::patch::autotune::{self, AutotuneError, AutotuneEvent, AutotuneRequest, AutotuneRun};
+use crate::patch::gguf::{self, GgufApplyArgs, GgufApplyError, Requant};
 use crate::patch::{
     self, apply_patch, load_patch, validate_patch, ApplyReport, Axis, BackupSet, LayerSelection,
     OpStats, OperationKind, PatchBackend, PatchError, PatchFile, Projection, RollbackHandle,
@@ -94,6 +113,10 @@ pub mod exit {
     pub const EXPORT_FAILED: i32 = 6;
     /// `extract`: config, tokenizer or weights invalid, degenerate direction, NaN/Inf.
     pub const EXTRACT_FAILED: i32 = 7;
+    /// `bench`: process failed, unreadable output, incompatible shapes, generation failed.
+    pub const BENCH_FAILED: i32 = 8;
+    /// `bench --fail-on-warn`: a threshold was exceeded (the report is still in `data`).
+    pub const THRESHOLD_EXCEEDED: i32 = 9;
     pub const INTERNAL: i32 = 70;
 }
 
@@ -304,6 +327,13 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Schema(_) => "schema",
         Commands::Tui(_) => "tui",
         Commands::Mcp(_) => "mcp",
+        Commands::Autotune(_) => "autotune",
+        Commands::Bench(args) => match args.command {
+            BenchCommand::Logits(_) => "bench logits",
+            BenchCommand::Ppl(_) => "bench ppl",
+            BenchCommand::Eval(_) => "bench eval",
+            BenchCommand::Dump(_) => "bench dump",
+        },
     }
 }
 
@@ -313,10 +343,21 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         Commands::Inspect(args) => core_inspect(args, deps, &io.ui),
         Commands::Apply(args) => apply(args, deps, io),
         Commands::Eval(args) => eval(args, deps, &io.ui),
-        Commands::Extract(args) => {
+        Commands::Extract(cmd) => {
             let ui = io.ui;
-            core_extract(args, deps, &ui, &mut CliSink::new(io))
+            core_extract_with(
+                &cmd.args,
+                &cmd.method.options(),
+                deps,
+                &ui,
+                &mut CliSink::new(io),
+            )
         }
+        Commands::Autotune(args) => {
+            let ui = io.ui;
+            autotune_cli(args, deps, &ui, &mut CliSink::new(io))
+        }
+        Commands::Bench(args) => bench_cli(args, deps, io),
         // Routed by run_with before dispatch: they have no envelope.
         Commands::Schema(_) | Commands::Mcp(_) | Commands::Tui(_) => Err(Outcome::fail(
             exit::INTERNAL,
@@ -597,6 +638,18 @@ struct InspectedTensor {
 
 /// MLP tensor topology (and streamed statistics); human text only when `ui` is not `Off`.
 pub fn core_inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
+    if gguf::is_gguf(&args.model) {
+        let shown = gguf::report::inspect(
+            &args.model,
+            &args.layers,
+            &args.projections,
+            args.show_stats,
+            ui,
+        );
+        return shown
+            .map(|(data, human)| Outcome::ok(data, human))
+            .map_err(|e| Outcome::fail(exit::GENERAL, e).with_kind("invalid_gguf"));
+    }
     let shards = hardware::compute_model_size(&args.model)?.shard_files;
     let layers = LayerSpec::from(&args.layers);
     let projs: Vec<MlpProj> = match args.projections.is_empty() {
@@ -747,12 +800,12 @@ impl From<Projection> for MlpProj {
     }
 }
 
-impl From<OperationKind> for ShiftOp {
-    fn from(op: OperationKind) -> Self {
-        match op {
-            OperationKind::Subtract => ShiftOp::Subtract,
-            OperationKind::Add => ShiftOp::Add,
-        }
+/// `project_out` is not a shift: it goes through `PatchBackend::project_out_tensor`.
+fn shift_op(op: OperationKind) -> Option<ShiftOp> {
+    match op {
+        OperationKind::Subtract => Some(ShiftOp::Subtract),
+        OperationKind::Add => Some(ShiftOp::Add),
+        OperationKind::ProjectOut => None,
     }
 }
 
@@ -813,6 +866,21 @@ impl EngineBackend {
             .map(|i| self.shards[i].0.clone())
             .collect()
     }
+
+    /// Chunking / prefetch of every shard; the Ctrl-C flag is also checked between chunks.
+    pub fn set_io(&mut self, io: IoConfig) {
+        for (_, model) in &mut self.shards {
+            model.set_io(io, Some(Arc::clone(&self.interrupted)));
+        }
+    }
+
+    pub fn io_counters(&self) -> kernel::IoCounters {
+        let mut total = kernel::IoCounters::default();
+        for (_, model) in &self.shards {
+            total.merge(model.io_counters());
+        }
+        total
+    }
 }
 
 impl PatchBackend for EngineBackend {
@@ -860,9 +928,32 @@ impl PatchBackend for EngineBackend {
         let shard = self
             .shard_of(tensor_name)
             .ok_or_else(|| backend_error(EngineError::TensorNotFound(tensor_name.into())))?;
+        let op = shift_op(op).ok_or_else(|| {
+            PatchError::Backend("project_out passe par project_out_tensor".into())
+        })?;
         self.shards[shard]
             .1
-            .shift_tensor(tensor_name, direction, alpha, op.into(), axis.into())
+            .shift_tensor(tensor_name, direction, alpha, op, axis.into())
+            .map(OpStats::from)
+            .map_err(backend_error)
+    }
+
+    fn project_out_tensor(
+        &mut self,
+        tensor_name: &str,
+        a: &[f32],
+        b: &[f32],
+        alpha: f32,
+    ) -> patch::Result<OpStats> {
+        if self.interrupted.load(Ordering::SeqCst) {
+            return Err(PatchError::Backend(INTERRUPTED.into()));
+        }
+        let shard = self
+            .shard_of(tensor_name)
+            .ok_or_else(|| backend_error(EngineError::TensorNotFound(tensor_name.into())))?;
+        self.shards[shard]
+            .1
+            .project_out_tensor(tensor_name, a, b, alpha)
             .map(OpStats::from)
             .map_err(backend_error)
     }
@@ -910,6 +1001,12 @@ pub enum ProgressEvent {
         max_delta: f32,
         tensors: usize,
     },
+    /// A `project_out` operation finished (same fields as `OpDone`).
+    ProjectDone {
+        op_id: String,
+        max_delta: f32,
+        tensors: usize,
+    },
     Commit {
         seconds: f64,
     },
@@ -940,6 +1037,33 @@ pub enum ProgressEvent {
         total: usize,
     },
     ExtractWriting,
+    /// `bench dump`: prompts forwarded and written.
+    BenchDumpPrompt {
+        done: usize,
+        total: usize,
+    },
+    /// `bench logits`: blocks of positions compared.
+    BenchLogitsBlock {
+        done: usize,
+        total: usize,
+    },
+    /// `bench ppl`: chunks evaluated by llama-perplexity (total when announced).
+    BenchPplChunk {
+        done: usize,
+        total: Option<usize>,
+    },
+    /// `bench eval`: questions answered (per model when a baseline runs first).
+    BenchEvalQuestion {
+        done: usize,
+        total: usize,
+    },
+    /// `autotune`: forwards done out of the planned total.
+    AutotuneForward {
+        done: usize,
+        total: usize,
+    },
+    /// `autotune`: responses measured, ridge being solved.
+    AutotuneSolve,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -966,6 +1090,8 @@ struct ObservedBackend<'a, B: PatchBackend> {
     inner: &'a mut B,
     sink: &'a mut dyn ProgressSink,
     op_ids: Vec<String>,
+    /// Per operation: `project_out` (shown as `[PROJECT]`) rather than a shift.
+    projects: Vec<bool>,
     totals: RefCell<Vec<usize>>,
     op: usize,
     done: usize,
@@ -976,11 +1102,20 @@ struct ObservedBackend<'a, B: PatchBackend> {
 const BAR_WIDTH: usize = 20;
 
 impl<'a, B: PatchBackend> ObservedBackend<'a, B> {
-    fn new(inner: &'a mut B, sink: &'a mut dyn ProgressSink, op_ids: Vec<String>) -> Self {
+    fn new(
+        inner: &'a mut B,
+        sink: &'a mut dyn ProgressSink,
+        ops: Vec<(String, OperationKind)>,
+    ) -> Self {
+        let projects = ops
+            .iter()
+            .map(|(_, kind)| *kind == OperationKind::ProjectOut)
+            .collect();
         Self {
             inner,
             sink,
-            op_ids,
+            op_ids: ops.into_iter().map(|(id, _)| id).collect(),
+            projects,
             totals: RefCell::new(Vec::new()),
             op: 0,
             done: 0,
@@ -995,6 +1130,42 @@ impl<'a, B: PatchBackend> ObservedBackend<'a, B> {
 
     fn total(&self) -> usize {
         self.totals.borrow().get(self.op).copied().unwrap_or(0)
+    }
+
+    /// One tensor done: progress, then the end of its operation.
+    fn track(&mut self, tensor_name: &str, stats: OpStats) -> OpStats {
+        self.done += 1;
+        self.overall_done += 1;
+        self.max_delta = self.max_delta.max(stats.max_abs_delta);
+        let overall_total = self.totals.borrow().iter().sum();
+        self.sink.event(ProgressEvent::Shift {
+            op_id: self.op_id(),
+            tensor: tensor_name.to_owned(),
+            done: self.done,
+            total: self.total(),
+            overall_done: self.overall_done,
+            overall_total,
+        });
+        if self.done >= self.total() {
+            let (op_id, max_delta, tensors) = (self.op_id(), self.max_delta, self.done);
+            self.sink
+                .event(match self.projects.get(self.op).copied().unwrap_or(false) {
+                    true => ProgressEvent::ProjectDone {
+                        op_id,
+                        max_delta,
+                        tensors,
+                    },
+                    false => ProgressEvent::OpDone {
+                        op_id,
+                        max_delta,
+                        tensors,
+                    },
+                });
+            self.op += 1;
+            self.done = 0;
+            self.max_delta = 0.0;
+        }
+        stats
     }
 }
 
@@ -1024,29 +1195,18 @@ impl<B: PatchBackend> PatchBackend for ObservedBackend<'_, B> {
         let stats = self
             .inner
             .shift_tensor(tensor_name, direction, alpha, op, axis)?;
-        self.done += 1;
-        self.overall_done += 1;
-        self.max_delta = self.max_delta.max(stats.max_abs_delta);
-        let overall_total = self.totals.borrow().iter().sum();
-        self.sink.event(ProgressEvent::Shift {
-            op_id: self.op_id(),
-            tensor: tensor_name.to_owned(),
-            done: self.done,
-            total: self.total(),
-            overall_done: self.overall_done,
-            overall_total,
-        });
-        if self.done >= self.total() {
-            self.sink.event(ProgressEvent::OpDone {
-                op_id: self.op_id(),
-                max_delta: self.max_delta,
-                tensors: self.done,
-            });
-            self.op += 1;
-            self.done = 0;
-            self.max_delta = 0.0;
-        }
-        Ok(stats)
+        Ok(self.track(tensor_name, stats))
+    }
+
+    fn project_out_tensor(
+        &mut self,
+        tensor_name: &str,
+        a: &[f32],
+        b: &[f32],
+        alpha: f32,
+    ) -> patch::Result<OpStats> {
+        let stats = self.inner.project_out_tensor(tensor_name, a, b, alpha)?;
+        Ok(self.track(tensor_name, stats))
     }
 
     fn flush(&mut self) -> patch::Result<()> {
@@ -1118,6 +1278,27 @@ impl<'a, 'io> CliSink<'a, 'io> {
         }
     }
 
+    /// `[BENCH]  ppl 12/40  ████░░░░`, in place on an interactive stderr only.
+    fn bench_progress(&mut self, label: &str, done: usize, total: Option<usize>) {
+        let ui = self.io.err_ui;
+        let line = match total {
+            Some(total) => format!(
+                "{} {} {}  {}",
+                ui::badge(&ui, "BENCH"),
+                ui::metric(&ui, label),
+                ui::metric(&ui, format!("{done}/{total}")),
+                ui::progress_bar(&ui, done, total, BAR_WIDTH)
+            ),
+            None => format!(
+                "{} {} {}",
+                ui::badge(&ui, "BENCH"),
+                ui::metric(&ui, label),
+                ui::metric(&ui, done)
+            ),
+        };
+        self.draw(&line);
+    }
+
     /// In-place line on an interactive stderr only.
     fn draw(&mut self, line: &str) {
         if !self.io.err_is_tty || self.io.err_ui.is_off() {
@@ -1157,6 +1338,21 @@ impl ProgressSink for CliSink<'_, '_> {
         } = &event
         {
             return self.progress(op_id, tensor, *done, *total);
+        }
+        let bench = match &event {
+            ProgressEvent::BenchDumpPrompt { done, total } => Some(("dump", *done, Some(*total))),
+            ProgressEvent::BenchLogitsBlock { done, total } => {
+                Some(("logits", *done, Some(*total)))
+            }
+            ProgressEvent::BenchPplChunk { done, total } => Some(("ppl", *done, *total)),
+            ProgressEvent::BenchEvalQuestion { done, total } => Some(("eval", *done, Some(*total))),
+            ProgressEvent::AutotuneForward { done, total } => {
+                Some(("autotune", *done, Some(*total)))
+            }
+            _ => None,
+        };
+        if let Some((label, done, total)) = bench {
+            return self.bench_progress(label, done, total);
         }
         match &event {
             ProgressEvent::ExtractPrompt { set, done, .. } => {
@@ -1220,6 +1416,17 @@ impl ProgressSink for CliSink<'_, '_> {
                 ui::metric(&ui, format!("{max_delta:.4}")),
                 ui::metric(&ui, tensors)
             )),
+            ProgressEvent::ProjectDone {
+                op_id,
+                max_delta,
+                tensors,
+            } => self.io.line(&format!(
+                "{} {} terminée · effacement a(bᵀW) · Δmax {} · {} tenseurs",
+                ui::badge(&ui, "PROJECT"),
+                ui::metric(&ui, op_id),
+                ui::metric(&ui, format!("{max_delta:.4}")),
+                ui::metric(&ui, tensors)
+            )),
             ProgressEvent::Commit { seconds } => self.io.line(&format!(
                 "{} {} · {}",
                 ui::badge(&ui, "COMMIT"),
@@ -1267,7 +1474,13 @@ impl ProgressSink for CliSink<'_, '_> {
             }
             ProgressEvent::Shift { .. }
             | ProgressEvent::EvalPrompt { .. }
-            | ProgressEvent::ExtractWriting => {}
+            | ProgressEvent::ExtractWriting
+            | ProgressEvent::BenchDumpPrompt { .. }
+            | ProgressEvent::BenchLogitsBlock { .. }
+            | ProgressEvent::BenchPplChunk { .. }
+            | ProgressEvent::BenchEvalQuestion { .. }
+            | ProgressEvent::AutotuneForward { .. }
+            | ProgressEvent::AutotuneSolve => {}
         }
     }
 }
@@ -1339,13 +1552,24 @@ fn apply(args: &ApplyArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
         no_backup: args.no_backup,
         backup_dir: args.backup_dir.clone(),
     };
-    core_apply(&request, deps, &mut CliSink::new(io))
+    let ui = io.ui;
+    core_apply_routed(&request, &args.gguf, deps, &ui, &mut CliSink::new(io))
 }
 
 /// validate -> budget (warning only) -> open shards -> dry-run preflight -> backup of the
 /// touched shards -> apply_patch (rollback on error, NaN, Ctrl-C or cancellation).
 pub fn core_apply(
     request: &ApplyRequest,
+    deps: &AppDeps,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    core_apply_io(request, IoConfig::default(), deps, sink)
+}
+
+/// [`core_apply`] with explicit chunking / prefetch; a real run reports `data.io`.
+fn core_apply_io(
+    request: &ApplyRequest,
+    io: IoConfig,
     deps: &AppDeps,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
@@ -1378,6 +1602,7 @@ pub fn core_apply(
     }
 
     let mut backend = EngineBackend::open(&shards, Arc::clone(&deps.interrupted))?;
+    backend.set_io(io);
     let preview = apply_patch(&patch, &mut backend, None, true)?;
     if request.dry_run {
         for op in &preview.operations {
@@ -1422,11 +1647,20 @@ pub fn core_apply(
     }
 
     let started = Instant::now();
-    let op_ids = patch.operations.iter().map(|op| op.id.clone()).collect();
+    let ops = patch
+        .operations
+        .iter()
+        .map(|op| (op.id.clone(), op.kind))
+        .collect();
     let guard = backup.as_mut().map(|b| b as &mut dyn RollbackHandle);
+    let kernel = kernel::from_env();
+    if let Some(w) = &kernel.warning {
+        sink.event(ProgressEvent::Warn(w.clone()));
+    }
+    let meter = IoMeter::start();
     let result = apply_patch(
         &patch,
-        &mut ObservedBackend::new(&mut backend, sink, op_ids),
+        &mut ObservedBackend::new(&mut backend, sink, ops),
         guard,
         false,
     );
@@ -1435,7 +1669,10 @@ pub fn core_apply(
             sink.event(ProgressEvent::Commit {
                 seconds: started.elapsed().as_secs_f64(),
             });
-            Ok(apply_outcome(&report, &backup_files, &warnings))
+            let io_report = meter.finish(kernel, io, backend.io_counters());
+            let mut outcome = apply_outcome(&report, &backup_files, &warnings);
+            outcome.data["io"] = json!(io_report);
+            Ok(outcome)
         }
         Err(e) => {
             if let Some(outcome) = rollback_outcome(&e, &backup_files) {
@@ -1455,6 +1692,156 @@ fn apply_outcome(report: &ApplyReport, backups: &[PathBuf], warnings: &[String])
     );
     outcome.warnings = warnings.to_vec();
     outcome
+}
+
+// ---------------------------------------------------------------- apply: chunked I/O and GGUF
+
+/// `apply` routing on the file's magic: a GGUF only with `--gguf` (re-rounding is lossy,
+/// never a surprise), SafeTensors with the chunking options.
+pub fn core_apply_routed(
+    request: &ApplyRequest,
+    opts: &GgufApplyArgs,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let usage = |msg: String| Outcome::fail(exit::INVALID_INPUT, msg).with_kind("invalid_input");
+    match (opts.gguf, gguf::is_gguf(&request.model)) {
+        (true, true) => core_apply_gguf(request, opts, deps, ui, sink),
+        (false, true) => Err(usage(format!(
+            "{} est un fichier GGUF : relancez avec --gguf (re-quantification en place, avec \
+             perte ; voir --requant)",
+            request.model.display()
+        ))),
+        (true, false) => Err(usage(format!(
+            "--gguf : {} n'est pas un fichier GGUF (magie « GGUF » absente)",
+            request.model.display()
+        ))),
+        (false, false)
+            if opts.force_no_backup || opts.no_verify || opts.requant != Requant::KeepScales =>
+        {
+            Err(usage(
+                "--requant, --no-verify et --force-no-backup ne s'appliquent qu'avec --gguf".into(),
+            ))
+        }
+        (false, false) => core_apply_io(request, opts.io(), deps, sink),
+    }
+}
+
+/// `apply --gguf`: validation, then `patch::gguf::apply_gguf` (backup, crash marker,
+/// chunked write, read-back check, rollback). `data.gguf` holds the per-tensor fidelity.
+fn core_apply_gguf(
+    request: &ApplyRequest,
+    opts: &GgufApplyArgs,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    if request.no_backup {
+        return Err(Outcome::fail(
+            exit::INVALID_INPUT,
+            "--no-backup est refusé avec --gguf : la copie de sauvegarde est obligatoire \
+             (--force-no-backup pour s'en passer, un échec laisserait alors le fichier modifié)",
+        )
+        .with_kind("invalid_input"));
+    }
+    let validation = ValidationOptions {
+        no_backup: opts.force_no_backup,
+        ..Default::default()
+    };
+    let patch = validate_patch(&request.patch, &request.base_dir, &validation)?;
+    sink.event(ProgressEvent::ApplyStart {
+        patch: request.patch_label.clone(),
+        operations: patch.operations.len(),
+    });
+    let model = std::path::absolute(&request.model).map_err(|e| {
+        Outcome::fail(exit::GENERAL, format!("{} : {e}", request.model.display()))
+            .with_kind("model_error")
+    })?;
+    let mut warnings: Vec<String> = patch.warnings.iter().map(ToString::to_string).collect();
+    if opts.force_no_backup && !request.dry_run {
+        warnings.push("--force-no-backup : aucune copie, un échec laisse le GGUF modifié".into());
+    }
+    for w in &warnings {
+        sink.event(ProgressEvent::Warn(w.clone()));
+    }
+
+    let ops: Vec<(String, OperationKind)> = patch
+        .operations
+        .iter()
+        .map(|op| (op.id.clone(), op.kind))
+        .collect();
+    let options = opts.options(request.backup_dir.clone());
+    let dry_run = request.dry_run;
+    let started = Instant::now();
+    let meter = IoMeter::start();
+    let result = gguf::apply_gguf(
+        &model,
+        &patch,
+        &options,
+        dry_run,
+        Arc::clone(&deps.interrupted),
+        &mut |backend, guard| {
+            if let Some(path) = guard.as_ref().and_then(|g| g.backup_path()) {
+                sink.event(ProgressEvent::Backup { path });
+            }
+            match dry_run {
+                true => apply_patch(&patch, backend, None, false),
+                false => apply_patch(
+                    &patch,
+                    &mut ObservedBackend::new(backend, &mut *sink, ops.clone()),
+                    guard,
+                    false,
+                ),
+            }
+        },
+    );
+    let run = match result {
+        Ok(run) => run,
+        Err(GgufApplyError::Patch(e)) => return Err(e.into()),
+        Err(e) => {
+            let code = match &e {
+                GgufApplyError::Usage(_) | GgufApplyError::Mapping(_) => exit::INVALID_INPUT,
+                _ => exit::GENERAL,
+            };
+            let kind = e.kind().unwrap_or("execution_failed");
+            return Err(Outcome::fail(code, e).with_kind(kind));
+        }
+    };
+    for t in &run.tensors {
+        if let Some(w) = &t.warning {
+            warnings.push(format!("{} : {w}", t.name));
+            sink.event(ProgressEvent::Warn(format!("{} : {w}", t.name)));
+        }
+    }
+    match dry_run {
+        true => {
+            for op in &run.report.operations {
+                sink.event(ProgressEvent::DryRun {
+                    op_id: op.id.clone(),
+                    tensors: op.tensors.iter().map(|t| t.name.clone()).collect(),
+                    vector_len: op.vector_len,
+                });
+            }
+        }
+        false => sink.event(ProgressEvent::Commit {
+            seconds: started.elapsed().as_secs_f64(),
+        }),
+    }
+    let backups: Vec<PathBuf> = run.backup.iter().cloned().collect();
+    let mut outcome = apply_outcome(&run.report, &backups, &warnings);
+    outcome.data["gguf"] = json!(run);
+    if !dry_run {
+        // Dequantize / requantize is scalar code (rows in parallel), not the SIMD kernels.
+        let kernel = KernelChoice {
+            level: Level::Scalar,
+            requested: None,
+            warning: None,
+        };
+        outcome.data["io"] = json!(meter.finish(kernel, options.io, run.io));
+    }
+    outcome.human = gguf::report::apply_text(ui, &model, &run, dry_run, opts.no_verify);
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------- eval
@@ -1501,15 +1888,6 @@ impl TextGenerator for Interruptible<'_> {
     }
 }
 
-/// Deletes the temporary GGUF on every path, including errors and panics.
-struct TempFile(PathBuf);
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 fn eval(args: &EvalArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
     let prompts = load_prompts(&args.prompts)
         .map_err(|e| Outcome::fail(exit::INVALID_INPUT, e).with_kind("invalid_input"))?;
@@ -1543,26 +1921,16 @@ pub fn core_eval(
             EvalError::InvalidQuant(args.quant.clone()).to_string(),
         ));
     }
-    let is_gguf = args
-        .model
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
-    if is_gguf && args.export_gguf.is_some() {
+    if is_gguf(&args.model) && args.export_gguf.is_some() {
         return Err(invalid(
             "--export-gguf convertit depuis SafeTensors : impossible depuis un .gguf".into(),
         ));
     }
-    let model_dir = match args.model.is_dir() {
-        true => args.model.clone(),
-        false => args
-            .model
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
-    };
+    let model_dir = crate::eval::model_dir(&args.model);
     let llama_dir = || {
-        args.llama_cpp_dir.clone().ok_or_else(|| {
-            invalid("--llama-cpp-dir (ou LLAMA_CPP_DIR) requis pour convertir en GGUF".into())
-        })
+        args.llama_cpp_dir
+            .clone()
+            .ok_or_else(|| invalid(LLAMA_DIR_REQUIRED.into()))
     };
     let export_cfg =
         |llama_cpp_dir: PathBuf, output_gguf: PathBuf, quant: Option<String>| GgufExportConfig {
@@ -1579,29 +1947,22 @@ pub fn core_eval(
         None => None,
     };
 
-    let mut temp = None;
-    let gguf = match is_gguf {
-        true => args.model.clone(),
-        false => {
-            // Next to the model: an f16 copy can be tens of GB, often too big for /tmp.
-            let file = TempFile(
-                model_dir.join(format!(".weight-surgeon-eval-{}.gguf", std::process::id())),
-            );
-            let cfg = export_cfg(llama_dir()?, file.0.clone(), None);
-            export_gguf(&cfg, deps.runner.as_ref()).map_err(|e| {
-                Outcome::fail(
-                    exit::GENERAL,
-                    format!("conversion GGUF pour l'évaluation : {e}"),
-                )
-                .with_kind("eval_failed")
-            })?;
-            let path = file.0.clone();
-            temp = Some(file);
-            path
-        }
-    };
+    let gguf = ensure_gguf(
+        &args.model,
+        args.llama_cpp_dir.as_deref(),
+        "eval",
+        deps.runner.as_ref(),
+    )
+    .map_err(|e| match e {
+        EvalError::InvalidConfig(m) if m == LLAMA_DIR_REQUIRED => invalid(m),
+        e => Outcome::fail(
+            exit::GENERAL,
+            format!("conversion GGUF pour l'évaluation : {e}"),
+        )
+        .with_kind("eval_failed"),
+    })?;
 
-    let generator = (deps.generator_factory)(&gguf, args)
+    let generator = (deps.generator_factory)(gguf.path(), args)
         .map_err(|e| Outcome::fail(exit::GENERAL, e).with_kind("eval_failed"))?;
     let mut generator = Interruptible {
         inner: generator,
@@ -1618,7 +1979,7 @@ pub fn core_eval(
         .map_err(|e| Outcome::fail(exit::GENERAL, e).with_kind("eval_failed"))?;
     drop(generator);
     // Freed before the final conversion, which needs the disk space again.
-    drop(temp);
+    drop(gguf);
 
     let human = eval_text(ui, &report, args.max_new_tokens);
     if deps.interrupted.load(Ordering::SeqCst) {
@@ -1736,9 +2097,20 @@ fn eval_text(ui: &Ui, report: &EvalReport, max_new_tokens: u32) -> String {
 
 // ---------------------------------------------------------------- extract
 
-/// CLI entry: reads the two prompt files, then [`core_extract_request`].
+/// CLI entry: reads the two prompt files, then [`core_extract_request`] (`mean_diff`).
 pub fn core_extract(
     args: &ExtractArgs,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    core_extract_with(args, &MethodOptions::default(), deps, ui, sink)
+}
+
+/// [`core_extract`] with a direction method.
+pub fn core_extract_with(
+    args: &ExtractArgs,
+    method: &MethodOptions,
     deps: &AppDeps,
     ui: &Ui,
     sink: &mut dyn ProgressSink,
@@ -1764,7 +2136,7 @@ pub fn core_extract(
         dtype: args.dtype,
         overwrite: args.overwrite,
     };
-    core_extract_request(&request, deps, ui, sink)
+    core_extract_method(&request, method, deps, ui, sink)
 }
 
 /// Shared by the CLI and the MCP tool. Cancellation (`deps.interrupted`) is honored
@@ -1775,13 +2147,25 @@ pub fn core_extract_request(
     ui: &Ui,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
+    core_extract_method(request, &MethodOptions::default(), deps, ui, sink)
+}
+
+/// [`core_extract_request`] with a direction method (`svd`, `leace`).
+pub fn core_extract_method(
+    request: &ExtractRequest,
+    method: &MethodOptions,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
     let mut observer = SinkObserver {
         sink,
         interrupted: &deps.interrupted,
         request,
     };
-    let report = extract::run_extraction(request, deps.probe.as_ref(), &mut observer)
-        .map_err(|e| extract_failure(&e))?;
+    let report =
+        extract::run_extraction_method(request, method, deps.probe.as_ref(), &mut observer)
+            .map_err(|e| extract_failure(&e))?;
     let mut outcome = Outcome::ok(to_value(&report), extract_text(ui, &report));
     outcome.warnings = report.warnings.clone();
     Ok(outcome)
@@ -1791,7 +2175,8 @@ fn extract_failure(e: &ExtractError) -> Outcome {
     let code = match e {
         ExtractError::InvalidArgument(_)
         | ExtractError::Prompts { .. }
-        | ExtractError::OutputExists(_) => exit::INVALID_INPUT,
+        | ExtractError::OutputExists(_)
+        | ExtractError::UnpairedPrompts { .. } => exit::INVALID_INPUT,
         ExtractError::InsufficientResources(_) | ExtractError::Cancelled => exit::GENERAL,
         _ => exit::EXTRACT_FAILED,
     };
@@ -1856,9 +2241,388 @@ fn extract_text(ui: &Ui, report: &ExtractReport) -> String {
         ui::badge(ui, "WRITE"),
         ui::path(ui, &report.out_path),
     );
+    if let Some(diag) = &report.method_diagnostics {
+        text.push_str(&method_line(ui, diag));
+    }
+    if let Some(path) = &report.leace_path {
+        text.push_str(&format!(
+            "{} {}
+",
+            ui::badge(ui, "WRITE"),
+            ui::path(ui, path)
+        ));
+    }
     for w in &report.warnings {
         text.push_str(&warning_line(ui, w));
         text.push('\n');
     }
     text
+}
+
+// ---------------------------------------------------------------- bench
+
+/// Usage and file errors are code 2; resources, missing binaries and cancellations 1;
+/// everything that failed while running the bench 8.
+fn bench_failure(e: &BenchError) -> Outcome {
+    let code = match e {
+        BenchError::InvalidArgument(_)
+        | BenchError::Input { .. }
+        | BenchError::OutputExists(_)
+        | BenchError::Model(_) => exit::INVALID_INPUT,
+        BenchError::InsufficientResources(_)
+        | BenchError::BinaryNotFound(_)
+        | BenchError::Cancelled => exit::GENERAL,
+        _ => exit::BENCH_FAILED,
+    };
+    Outcome::fail(code, e).with_kind(e.kind())
+}
+
+/// Warnings never change the exit code, except threshold ones under `--fail-on-warn`
+/// (code 9, the report still in `data`).
+fn bench_outcome<R: Serialize>(run: &BenchRun<R>, fail_on_warn: bool, human: String) -> CoreResult {
+    let data = to_value(&run.report);
+    if fail_on_warn && !run.threshold_warnings.is_empty() {
+        let mut failed = Outcome::fail(
+            exit::THRESHOLD_EXCEEDED,
+            format!("seuil dépassé : {}", run.threshold_warnings.join(" ; ")),
+        )
+        .with_kind("threshold_exceeded")
+        .with_data(data, human);
+        failed.warnings = run.warnings.clone();
+        return Err(failed);
+    }
+    let mut outcome = Outcome::ok(data, human);
+    outcome.warnings = run.warnings.clone();
+    Ok(outcome)
+}
+
+fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
+    let ui = io.ui;
+    let mut sink = CliSink::new(io);
+    let invalid = |e: BenchError| bench_failure(&e);
+    let timeout = |secs: Option<u64>| match secs {
+        Some(0) => Err(invalid(BenchError::InvalidArgument(
+            "--timeout-secs doit être >= 1".into(),
+        ))),
+        other => Ok(other.map(Duration::from_secs)),
+    };
+    match &args.command {
+        BenchCommand::Logits(a) => {
+            let req = LogitsRequest {
+                before: a.before.clone(),
+                after: a.after.clone(),
+                tensor: a.tensor.clone(),
+                top_k: a.top_k,
+                worst: a.worst,
+                warn_kl: a.warn_kl,
+                warn_top1_shift: a.warn_top1_shift,
+            };
+            core_bench_logits(&req, a.fail_on_warn, deps, &ui, &mut sink)
+        }
+        BenchCommand::Ppl(a) => {
+            let baseline = match (&a.baseline_model, a.baseline_ppl) {
+                (Some(model), _) => Some(PplBaseline::Model(model.clone())),
+                (None, Some(ppl)) => Some(PplBaseline::Value {
+                    ppl,
+                    err: a.baseline_ppl_err,
+                }),
+                (None, None) => None,
+            };
+            let req = PplRequest {
+                model: a.model.clone(),
+                text: a.text.clone(),
+                baseline,
+                ctx: a.ctx,
+                chunks: a.chunks,
+                threads: a.threads,
+                n_gpu_layers: a.n_gpu_layers,
+                llama_cpp_dir: a.llama_cpp_dir.clone(),
+                warn_delta: a.warn_delta,
+                timeout: timeout(a.timeout_secs)?,
+                llama_args: bench::ppl_runner::validate_llama_args(&a.llama_args)
+                    .map_err(invalid)?,
+            };
+            core_bench_ppl(&req, a.fail_on_warn, deps, &ui, &mut sink)
+        }
+        BenchCommand::Eval(a) => {
+            let req = EvalRequest {
+                model: a.model.clone(),
+                dataset: a.dataset.clone(),
+                baseline_model: a.baseline_model.clone(),
+                limit: a.limit,
+                max_new_tokens: a.max_new_tokens,
+                template: Template::from_cli(a.prompt_template.as_deref()).map_err(invalid)?,
+                format: a.format,
+                llama_cpp_dir: a.llama_cpp_dir.clone(),
+                timeout: timeout(a.timeout_secs)?,
+                min_accuracy: a.min_accuracy,
+            };
+            core_bench_eval(&req, a.fail_on_warn, deps, &ui, &mut sink)
+        }
+        BenchCommand::Dump(a) => {
+            let prompts = extract::load_prompt_texts(&a.prompts)
+                .map_err(|m| invalid(BenchError::input(&a.prompts, m)))?;
+            let req = DumpRequest {
+                model: a.model.clone(),
+                prompts,
+                out: a.out.clone(),
+                dtype: a.dtype,
+                out_dtype: a.out_dtype,
+                max_tokens: a.max_tokens,
+                max_total_positions: a.max_total_positions,
+                overwrite: a.overwrite,
+            };
+            core_bench_dump(&req, deps, &ui, &mut sink)
+        }
+    }
+}
+
+/// Shared by the CLI and the MCP tool; cancellation checked before each block.
+pub fn core_bench_logits(
+    req: &LogitsRequest,
+    fail_on_warn: bool,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let run = bench::logits_metrics::run(
+        req,
+        deps.probe.as_ref(),
+        &deps.interrupted,
+        &mut |done, total| sink.event(ProgressEvent::BenchLogitsBlock { done, total }),
+    )
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, fail_on_warn, bench_report::logits_text(ui, &run))
+}
+
+/// Shared by the CLI and the MCP tool; cancellation kills llama-perplexity.
+pub fn core_bench_ppl(
+    req: &PplRequest,
+    fail_on_warn: bool,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let run = bench::ppl_runner::run(
+        req,
+        deps.runner.as_ref(),
+        &deps.interrupted,
+        &mut |done, total| sink.event(ProgressEvent::BenchPplChunk { done, total }),
+    )
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, fail_on_warn, bench_report::ppl_text(ui, &run))
+}
+
+/// Shared by the CLI and the MCP tool. Generators come from `deps.generator_factory`, set
+/// to greedy seeded decoding; cancellation stops the running generation.
+pub fn core_bench_eval(
+    req: &EvalRequest,
+    fail_on_warn: bool,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let mut make = |gguf: &Path| -> bench::Result<Box<dyn TextGenerator>> {
+        let args = EvalArgs {
+            model: gguf.to_path_buf(),
+            prompts: PathBuf::new(),
+            max_new_tokens: req.max_new_tokens,
+            export_gguf: None,
+            quant: "Q4_K_M".into(),
+            llama_cpp_dir: req.llama_cpp_dir.clone(),
+            allow_degraded: false,
+        };
+        (deps.generator_factory)(gguf, &args).map_err(BenchError::from)
+    };
+    let run = bench::score::run(
+        req,
+        deps.runner.as_ref(),
+        &mut make,
+        &deps.interrupted,
+        &mut |done, total| sink.event(ProgressEvent::BenchEvalQuestion { done, total }),
+    )
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, fail_on_warn, bench_report::eval_text(ui, &run))
+}
+
+/// Shared by the CLI and the MCP tool; nothing is written unless the whole dump succeeds.
+pub fn core_bench_dump(
+    req: &DumpRequest,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let run = bench::dump::run(
+        req,
+        deps.probe.as_ref(),
+        &deps.interrupted,
+        &mut |done, total| sink.event(ProgressEvent::BenchDumpPrompt { done, total }),
+    )
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, false, bench_report::dump_text(ui, &run))
+}
+
+/// `[METHOD]` line of an svd / leace extraction (mean_diff output is unchanged).
+fn method_line(ui: &Ui, diag: &MethodDiagnostics) -> String {
+    let opt = |v: Option<f64>| v.map_or("—".to_owned(), |x| format!("{x:.3}"));
+    let body = match diag {
+        MethodDiagnostics::Svd(d) => format!(
+            "svd · {} paires · σ₁²/Σσ² {} · cos(μ₊−μ₋) {} · split-half {}",
+            ui::metric(ui, d.n_pairs),
+            ui::metric(ui, format!("{:.3}", d.explained_variance_ratio)),
+            ui::metric(ui, opt(d.cosine_with_mean_diff)),
+            ui::metric(ui, opt(d.split_half_cosine))
+        ),
+        MethodDiagnostics::Leace(d) => format!(
+            "leace · rang {} · λ {} · κ {} · cov(x,z) {} → {} · hors-échantillon {}",
+            ui::metric(ui, d.rank),
+            ui::metric(ui, d.shrinkage),
+            ui::metric(ui, format!("{:.3e}", d.kappa)),
+            ui::metric(ui, format!("{:.3e}", d.cross_cov_before)),
+            ui::metric(ui, format!("{:.3e}", d.cross_cov_after)),
+            ui::metric(ui, opt(d.holdout_cross_cov_ratio))
+        ),
+    };
+    format!("{} {body}\n", ui::badge(ui, "METHOD"))
+}
+
+// ---------------------------------------------------------------- autotune
+
+fn autotune_failure(e: &AutotuneError) -> Outcome {
+    let code = match e {
+        AutotuneError::InvalidArgument(_)
+        | AutotuneError::Input { .. }
+        | AutotuneError::OutputExists(_) => exit::INVALID_INPUT,
+        AutotuneError::InsufficientResources(_) | AutotuneError::Cancelled => exit::GENERAL,
+        AutotuneError::Model(_)
+        | AutotuneError::Solve(_)
+        | AutotuneError::Compute(_)
+        | AutotuneError::Io { .. } => exit::EXTRACT_FAILED,
+    };
+    Outcome::fail(code, e).with_kind(e.kind())
+}
+
+fn autotune_cli(
+    args: &AutotuneArgs,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let request = AutotuneRequest {
+        model: args.model.clone(),
+        vector: args.vector.clone(),
+        eval_dataset: args.eval_dataset.clone(),
+        layer_range: args.target_layer_range,
+        readout_layer: args.readout_layer,
+        proj: args.proj,
+        objective: args.objective,
+        target_projection: args.target_projection,
+        l2_reg: args.l2_reg,
+        probe_alpha: args.probe_alpha,
+        alpha_max: args.alpha_max,
+        min_alpha: args.min_alpha,
+        max_forwards: args.max_forwards,
+        max_tokens: args.max_tokens,
+        dtype: args.dtype,
+        site: args.site,
+        pooling: args.pooling,
+        chat_template: args.chat_template,
+        out: args.out.clone(),
+        overwrite: args.overwrite,
+    };
+    core_autotune(&request, deps, ui, sink)
+}
+
+/// Shared by the CLI and the MCP tool; cancellation is checked before every forward and
+/// nothing is written then.
+pub fn core_autotune(
+    request: &AutotuneRequest,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let run = autotune::run(
+        request,
+        deps.probe.as_ref(),
+        &deps.interrupted,
+        &mut |event| match event {
+            AutotuneEvent::Planned { .. } => {}
+            AutotuneEvent::Forward { done, total } => {
+                sink.event(ProgressEvent::AutotuneForward { done, total })
+            }
+            AutotuneEvent::Solve => sink.event(ProgressEvent::AutotuneSolve),
+        },
+    )
+    .map_err(|e| autotune_failure(&e))?;
+    let mut outcome = Outcome::ok(to_value(&run.report), autotune_text(ui, &run));
+    outcome.warnings = run.warnings.clone();
+    Ok(outcome)
+}
+
+fn autotune_text(ui: &Ui, run: &AutotuneRun) -> String {
+    let r = &run.report;
+    let opt = |v: Option<f64>| v.map_or("—".to_owned(), |x| format!("{x:.4}"));
+    let alphas: Vec<String> = r
+        .alphas
+        .iter()
+        .map(|a| match a.dropped {
+            true => format!("L{} —", a.layer),
+            false => format!("L{} {:+.4}", a.layer, a.alpha),
+        })
+        .collect();
+    let worst_linearity = r
+        .linearity
+        .iter()
+        .map(|c| c.relative_deviation)
+        .fold(0.0f64, f64::max);
+    let mut lines = vec![
+        format!(
+            "{} lecture L{} · {} · {} · {} prompts · {} couches · {} forwards",
+            ui::badge(ui, "AUTOTUNE"),
+            ui::metric(ui, r.readout_layer),
+            ui::metric(ui, r.site.as_str()),
+            ui::metric(ui, r.pooling.as_str()),
+            ui::metric(ui, r.n_prompts),
+            ui::metric(ui, r.layers.len()),
+            ui::metric(ui, r.forwards)
+        ),
+        format!(
+            "{} δ {} · s⁰ moyen {} → cible {} · linéarité (écart max) {}",
+            ui::badge(ui, "RESPONSE"),
+            ui::metric(ui, r.probe_alpha),
+            ui::metric(ui, format!("{:.4}", r.baseline_mean)),
+            ui::metric(ui, format!("{:.4}", r.target_mean)),
+            ui::metric(ui, format!("{:.1} %", worst_linearity * 100.0))
+        ),
+        format!(
+            "{} λ {} · R² {} · RMSE {} · LOO {} · κ {} · ‖α‖ {}",
+            ui::badge(ui, "RIDGE"),
+            ui::metric(ui, format!("{:.1e}", r.ridge.lambda)),
+            ui::metric(ui, opt(r.ridge.r2)),
+            ui::metric(ui, format!("{:.4}", r.ridge.rmse)),
+            ui::metric(ui, opt(r.ridge.loocv_rmse)),
+            ui::metric(ui, format!("{:.2e}", r.ridge.cond_estimate)),
+            ui::metric(ui, format!("{:.4}", r.ridge.alpha_norm))
+        ),
+        format!("  {}", ui::dim(ui, &format!("α : {}", alphas.join(" · ")))),
+        format!(
+            "{} décalage prévu {} · mesuré {} · écart à la cible {} → {}",
+            ui::badge(ui, "VERDICT"),
+            ui::metric(ui, format!("{:+.4}", r.validation.predicted_mean_shift)),
+            ui::metric(ui, format!("{:+.4}", r.validation.actual_mean_shift)),
+            ui::metric(ui, format!("{:.4}", r.validation.target_rmse_before)),
+            ui::metric(ui, format!("{:.4}", r.validation.target_rmse_after))
+        ),
+    ];
+    lines.push(match (&r.out, &r.patch) {
+        (Some(out), _) => format!("{} {}", ui::badge(ui, "WRITE"), ui::path(ui, out)),
+        (None, Some(_)) => format!(
+            "  {}",
+            ui::dim(ui, "patch dans data.patch (--out pour l'écrire)")
+        ),
+        (None, None) => format!("  {}", ui::dim(ui, "aucun patch produit")),
+    });
+    lines.extend(run.warnings.iter().map(|w| warning_line(ui, w)));
+    lines.push(format!("  {}", ui::dim(ui, &r.recommendation)));
+    lines.join("\n") + "\n"
 }

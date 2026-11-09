@@ -92,6 +92,11 @@ impl BackupGuard {
         &self.original
     }
 
+    /// Hex SHA-256 of the original, which the backup matches.
+    pub fn original_sha256(&self) -> &str {
+        &self.sha256_original
+    }
+
     pub fn rollback(&mut self) -> Result<()> {
         if self.state == State::Committed {
             return Err(PatchError::Backup(

@@ -53,7 +53,8 @@ fn invocations(line: &str) -> Vec<(String, Vec<String>)> {
     {
         let mut rest = tokens[i + 1..]
             .iter()
-            .take_while(|t| **t != "surgeon" && !["|", "&&", ">"].contains(t));
+            .take_while(|t| **t != "surgeon" && !["|", "&&", ">"].contains(t))
+            .peekable();
         let mut globals = Vec::new();
         let sub = loop {
             match rest.next() {
@@ -66,7 +67,11 @@ fn invocations(line: &str) -> Vec<(String, Vec<String>)> {
         if !globals.is_empty() {
             found.push((String::new(), globals));
         }
-        if let Some(sub) = sub.filter(|s| s.chars().all(|c| c.is_ascii_lowercase())) {
+        if let Some(mut sub) = sub.filter(|s| lowercase_word(s)) {
+            // Nested subcommand: `surgeon bench ppl --warn-delta` -> "bench ppl".
+            if let Some(leaf) = rest.next_if(|t| lowercase_word(t)) {
+                sub = format!("{sub} {leaf}");
+            }
             let options = rest
                 .filter(|t| t.starts_with("--"))
                 .map(|t| t.split('=').next().unwrap().to_string())
@@ -75,6 +80,10 @@ fn invocations(line: &str) -> Vec<(String, Vec<String>)> {
         }
     }
     found
+}
+
+fn lowercase_word(token: &str) -> bool {
+    !token.is_empty() && token.chars().all(|c| c.is_ascii_lowercase())
 }
 
 fn long_options(command: &clap::Command) -> BTreeSet<String> {
@@ -92,12 +101,11 @@ fn check_readme(name: &str) -> BTreeSet<String> {
     let mut cited = BTreeSet::new();
     for line in shell_lines(&markdown) {
         for (sub, options) in invocations(&line) {
-            let command = match sub.as_str() {
-                "" => &cli,
-                _ => cli
-                    .find_subcommand(&sub)
-                    .unwrap_or_else(|| panic!("{name}: `surgeon {sub}` is not a command ({line})")),
-            };
+            let command = sub.split_whitespace().fold(&cli, |parent, word| {
+                parent
+                    .find_subcommand(word)
+                    .unwrap_or_else(|| panic!("{name}: `surgeon {sub}` is not a command ({line})"))
+            });
             let known = long_options(command);
             for option in options {
                 assert!(
@@ -172,4 +180,67 @@ fn the_checker_catches_fakes() {
     cli.build();
     assert!(cli.find_subcommand("nope").is_none());
     assert!(!long_options(cli.find_subcommand("tui").unwrap()).contains("--layers"));
+}
+
+#[test]
+fn nested_bench_commands_and_mcp_tool_count_are_checked() {
+    assert_eq!(
+        invocations("surgeon --json bench ppl --model m.gguf --warn-delta 0.3"),
+        [
+            (String::new(), vec!["--json".into()]),
+            (
+                "bench ppl".into(),
+                vec!["--model".into(), "--warn-delta".into()]
+            ),
+        ]
+    );
+    let mut cli = Cli::command();
+    cli.build();
+    let ppl = cli
+        .find_subcommand("bench")
+        .and_then(|b| b.find_subcommand("ppl"))
+        .unwrap();
+    assert!(long_options(ppl).contains("--warn-delta"));
+    assert!(!long_options(cli.find_subcommand("bench").unwrap()).contains("--warn-delta"));
+
+    let english = check_readme("README.md");
+    for leaf in ["logits", "ppl", "eval", "dump"] {
+        assert!(
+            english.contains(&format!("bench {leaf}")),
+            "README.md never runs `surgeon bench {leaf}`"
+        );
+    }
+
+    let tools = weight_surgeon::mcp::tool_definitions();
+    let count = tools.as_array().unwrap().len();
+    let words = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    ];
+    let mots = [
+        "zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit",
+    ];
+    let (en, fr) = (read("README.md"), read("README.fr.md"));
+    assert!(
+        en.contains(&format!("{} tools", words[count])),
+        "README.md: {count} tools"
+    );
+    assert!(
+        fr.contains(&format!("{} outils", mots[count])),
+        "README.fr.md: {count} outils"
+    );
+    for (n, (w, m)) in words
+        .iter()
+        .zip(mots)
+        .enumerate()
+        .filter(|(n, _)| *n != count && *n > 1)
+    {
+        assert!(
+            !en.contains(&format!("serves {w} tools")),
+            "README.md still says {n} tools"
+        );
+        assert!(
+            !fr.contains(&format!("sert {m} outils")),
+            "README.fr.md still says {n} outils"
+        );
+    }
 }

@@ -108,6 +108,20 @@ pub fn required_tensors(cfg: &Qwen2Config, layer: usize) -> Vec<(String, Vec<usi
     names
 }
 
+/// Every tensor of a full forward pass: all layers, `model.norm` and `lm_head` (absent
+/// when the embeddings are tied, as in Qwen2.5-0.5B).
+pub fn required_tensors_full(cfg: &Qwen2Config) -> Vec<(String, Vec<usize>)> {
+    let mut names = required_tensors(cfg, cfg.num_hidden_layers - 1);
+    names.push(("model.norm.weight".into(), vec![cfg.hidden_size]));
+    if !cfg.tie_word_embeddings {
+        names.push((
+            "lm_head.weight".into(),
+            vec![cfg.vocab_size, cfg.hidden_size],
+        ));
+    }
+    names
+}
+
 fn candle_dtype(name: &str, dtype: &engine::DType) -> Result<DType> {
     match dtype {
         engine::DType::BF16 => Ok(DType::BF16),
