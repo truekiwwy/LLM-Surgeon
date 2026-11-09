@@ -1,1 +1,5 @@
 target/
+
+# Graphify visual artifacts
+graph.html/
+graphify-out/
