@@ -2,10 +2,22 @@
 
 use clap::{Args, ValueEnum};
 
+use crate::cli::TuiArgs;
+use crate::extract::ChatTemplate;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum PreviewTemplate {
     None,
     Chatml,
+}
+
+impl PreviewTemplate {
+    pub fn chat_template(self) -> ChatTemplate {
+        match self {
+            PreviewTemplate::None => ChatTemplate::NoTemplate,
+            PreviewTemplate::Chatml => ChatTemplate::Chatml,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Args)]
@@ -46,5 +58,41 @@ pub fn parse_alpha_range(value: &str) -> Result<(f64, f64), String> {
     match lo < hi {
         true => Ok((lo, hi)),
         false => Err(format!("MIN doit être inférieur à MAX ({lo} >= {hi})")),
+    }
+}
+
+/// `--preview` generates with a model and a steering vector: both are required.
+pub fn missing_inputs(args: &TuiArgs) -> Option<&'static str> {
+    match (&args.model, &args.vector) {
+        (Some(_), Some(_)) => None,
+        (None, None) => Some("--preview nécessite --model et --vector"),
+        (None, Some(_)) => Some("--preview nécessite --model"),
+        (Some(_), None) => Some("--preview nécessite --vector"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alpha_range_parses_and_rejects() {
+        assert_eq!(parse_alpha_range("-2:2"), Ok((-2.0, 2.0)));
+        assert_eq!(parse_alpha_range(" -0.5 : 1.5 "), Ok((-0.5, 1.5)));
+        for bad in ["2:-2", "1:1", "a:b", "3", "-inf:2", "nan:1"] {
+            assert!(parse_alpha_range(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn template_maps_to_the_extract_template() {
+        assert_eq!(
+            PreviewTemplate::None.chat_template(),
+            ChatTemplate::NoTemplate
+        );
+        assert_eq!(
+            PreviewTemplate::Chatml.chat_template(),
+            ChatTemplate::Chatml
+        );
     }
 }
