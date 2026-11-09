@@ -15,6 +15,18 @@ surgeon diff --base <DOSSIER_BASE> --tuned <DOSSIER_AFFINE> --out finetune.surge
     --include 'mlp' --factor-dtype bf16 --max-rel-error 0.3 --on-high-error full
 ```
 
+Sortie réelle sur la paire écrite par `cargo run --example make_fake_checkpoints -- --out <DOSSIER>
+--kind rank --rank 4 --lora` (tenseurs abrégés ; la différence est de rang 4, donc l'erreur est nulle) :
+
+```text
+patch écrit : finetune.surgery (0.01 MiB, factor_dtype f16, rang demandé 4)
+10 tenseur(s) dans le patch, 1 identique(s) ignoré(s), 2 filtré(s)
+  model.layers.0.self_attn.q_proj.weight · lowrank · rang 4 · erreur relative 0.0000 · énergie 1.0000
+  model.layers.0.input_layernorm.weight · full_delta · rang 0 · erreur relative 0.0000 · énergie 1.0000
+  [...]
+Note : le .surgery est une APPROXIMATION du fine-tune (erreur relative par tenseur), exacte seulement si la différence est de rang <= r. Sa taille vaut environ la somme de r(m+n) x octets par facteur : des centaines de Mo pour un 7B au rang 16.
+```
+
 La sortie est reproductible (mêmes entrées et même `--seed`, mêmes octets, quel que soit le
 nombre de threads ; une date n'est écrite qu'avec `--timestamp`). `--max-rel-error` avec
 `--on-high-error warn|skip|full` décide du sort d'un tenseur mal reconstruit par l'approximation.
@@ -27,6 +39,16 @@ place, avec la même sauvegarde et le même rollback qu'un patch JSON
 surgeon apply --model <DOSSIER_MODELE> --patch finetune.surgery --dry-run
 surgeon apply --model <DOSSIER_MODELE> --patch finetune.surgery --scale 0.5 --verify-base strict
 ```
+
+```text
+[DRY-RUN]  model.layers.0.mlp.down_proj.weight · lowrank · rang 4 · erreur 0.0000
+[DRY-RUN]  model.layers.0.input_layernorm.weight · full_delta · rang 0 · erreur 0.0000
+[...]
+dry-run : 10 tenseur(s) vérifiés, aucun octet écrit
+```
+
+Une vraie application se termine par `[BACKUP] ... ✓ sha256 vérifié`, `[COMMIT] modèle patché` et
+`10 tenseur(s) patchés, 9124 éléments modifiés, max |delta| 0.218872`.
 
 `--verify-base strict|warn|off` compare chaque tenseur du modèle au SHA-256 stocké dans le patch
 (défaut `warn` : applique quand même, avec un avertissement). Le format binaire est spécifié
@@ -64,6 +86,26 @@ au format PEFT, avec son `adapter_config.json` à côté.
 ```bash
 surgeon lora extract --base <DOSSIER_BASE> --patched <DOSSIER_AFFINE> \
     --out adapter/adapter_model.safetensors --rank 16 --dtype f32
+```
+
+Sortie réelle de la fusion, puis de l'extraction, sur la même paire factice (l'adaptateur écrit
+par `--lora` a `lora_alpha = r`) :
+
+```text
+[BACKUP]   <DOSSIER_MODELE>/model.safetensors.bak-<horodatage>  ✓ sha256 vérifié
+[COMMIT]   modèle patché · 0.0 s
+6 tenseur(s) fusionnés (rang 4, échelle effective 1), max |delta| 0.218750
+
+6 tenseur(s) extraits (rang 4, f32), erreur relative moyenne 0.0000
+  adapter : ex/adapter_model.safetensors
+  config  : ex/adapter_config.json
+```
+
+`--lora` prend le FICHIER de l'adaptateur, et le dossier de `--out` doit déjà exister. Sans
+`lora_alpha` (pas d'`adapter_config.json` voisin, pas de `--alpha`), la commande s'arrête :
+
+```text
+erreur : arguments invalides : lora_alpha introuvable : passez --alpha <valeur>, ou placez adapter_config.json à côté de --lora (ou donnez --adapter-config)
 ```
 
 Limites : le format PEFT suit sa documentation mais n'est pas testé contre HuggingFace PEFT en

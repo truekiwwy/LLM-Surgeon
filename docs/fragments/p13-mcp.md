@@ -40,11 +40,18 @@ exposées : les valeurs par défaut s'appliquent et l'en-tête reste reproductib
                  "out": "finetune.surgery", "rank": 16 } }
 ```
 
-Succès : `data.surgery` décrit le fichier écrit (taille, SHA-256, rang, dtype des facteurs,
-erreur relative par tenseur, tenseurs ignorés, avertissements). Ce que le résultat ne dit pas
-tout seul : un `.surgery` est une APPROXIMATION du fine-tune complet (exact seulement si la
-différence a un rang au plus `rank`) et sa taille vaut environ la somme de `r (m + n)` fois les
-octets du dtype, soit des centaines de Mo pour un 7B à rang 16. Il ne s'applique pas via
+Succès, `structuredContent` réel du serveur (liste des tenseurs abrégée à deux entrées, chemin
+remplacé par `<MODELS_DIR>`, sur la paire factice de `cargo run --example make_fake_checkpoints`) :
+
+```json
+{"command":"diff","data":{"surgery":{"bytes":9908,"factor_dtype":"f16","out":"<MODELS_DIR>/mcp.surgery","rank":4,"sha256":"08780993d50f2d3efb5541b3ec433fd470adbe9957df5a59c239305a8bc16b36","skipped_filtered":2,"skipped_identical":1,"tensors":[{"energy":1.0,"kind":"full_delta","name":"model.layers.0.input_layernorm.weight","rank":0,"rel_error":0.0},{"energy":0.9999999737902472,"kind":"lowrank","name":"model.layers.0.mlp.down_proj.weight","rank":4,"rel_error":4.455349812212725e-8}],"warnings":[]}},"error":null,"exit_code":0,"ok":true,"warnings":[]}
+```
+
+`skipped_filtered` compte `embed_tokens` et `lm_head` (exclus par défaut), `skipped_identical` les
+tenseurs strictement identiques. Ce que le résultat ne dit pas tout seul : un `.surgery` est une
+APPROXIMATION du fine-tune complet (exact seulement si la différence a un rang au plus `rank`,
+ce qui est le cas de cette paire factice) et sa taille vaut environ la somme de `r (m + n)` fois
+les octets du dtype, soit des centaines de Mo pour un 7B à rang 16. Il ne s'applique pas via
 `surgeon_apply` (`surgeon apply --patch x.surgery`, ligne de commande uniquement).
 
 ## Fusion et extraction LoRA (`surgeon_lora`)
@@ -84,7 +91,19 @@ CI ; la fusion dans un GGUF n'est pas supportée.
                  "out": "adapter/adapter_model.safetensors", "rank": 16 } }
 ```
 
-Succès : `data.lora` (rapport de la fusion ou de l'extraction).
+Succès de `merge` avec `dry_run: true` (rien n'est écrit, `elements_modified` vaut 0 ; liste
+abrégée à deux entrées) :
+
+```json
+{"command":"lora merge","data":{"backups":[],"lora":{"dry_run":true,"effective_scale":1.0,"lora_alpha":4.0,"max_abs_delta":0.0,"per_tensor":[{"elements_modified":0,"max_abs_delta":0.0,"name":"model.layers.0.mlp.down_proj.weight"},{"elements_modified":0,"max_abs_delta":0.0,"name":"model.layers.0.mlp.up_proj.weight"}],"rank":4,"tensors":6,"warnings":[]},"warnings":[]},"error":null,"exit_code":0,"ok":true,"warnings":[]}
+```
+
+Succès de `extract` (le dossier de `out` doit déjà exister ; un `out` existant est refusé sans
+`overwrite: true`) :
+
+```json
+{"command":"lora extract","data":{"lora":{"config":"<MODELS_DIR>/ex2/adapter_config.json","dtype":"f32","mean_rel_error":4.325878840151349e-8,"out":"<MODELS_DIR>/ex2/adapter_model.safetensors","per_tensor":[{"energy":0.9999999737902472,"name":"model.layers.0.mlp.down_proj.weight","rel_error":4.455349812212725e-8},{"energy":0.9999999835510746,"name":"model.layers.0.mlp.up_proj.weight","rel_error":3.924179396550512e-8}],"rank":4,"tensors":6,"warnings":[]},"warnings":[]},"error":null,"exit_code":0,"ok":true,"warnings":[]}
+```
 
 ## Garde-fous communs aux deux outils
 

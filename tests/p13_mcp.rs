@@ -1,6 +1,6 @@
 //! MCP tools `surgeon_diff` and `surgeon_lora`: tools/list and schemas, sandbox, `--read-only`,
-//! per-mode validation, then the end-to-end tests that need the real diff and LoRA engines
-//! (ignored until those engines are merged).
+//! per-mode validation, then the end-to-end tests on the real diff and LoRA engines
+//! (the progress test stays ignored until `McpProgress` handles `SurgeryEvent::Tensor`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -698,7 +698,6 @@ fn cli(deps: &AppDeps, args: &[&str]) -> (i32, Value) {
 // ------------------------------------------------------------------ e2e (need the engines)
 
 #[test]
-#[ignore = "needs diff/lora engines"]
 fn diff_then_cli_apply_reproduces_the_tuned_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
     let tuned = checkpoints(dir.path());
@@ -761,7 +760,6 @@ fn diff_then_cli_apply_reproduces_the_tuned_checkpoint() {
 }
 
 #[test]
-#[ignore = "needs diff/lora engines"]
 fn lora_merge_adds_scaled_delta_and_always_backs_up() {
     let dir = tempfile::tempdir().unwrap();
     checkpoints(dir.path());
@@ -804,11 +802,11 @@ fn lora_merge_adds_scaled_delta_and_always_backs_up() {
 }
 
 #[test]
-#[ignore = "needs diff/lora engines"]
 fn lora_extract_writes_a_peft_adapter_that_rebuilds_the_delta() {
     let dir = tempfile::tempdir().unwrap();
     let tuned = checkpoints(dir.path());
     let base = read_st(&dir.path().join("base.safetensors"));
+    std::fs::create_dir(dir.path().join("out")).unwrap();
     let (is_error, env) = one_call(
         &cfg(dir.path()),
         "surgeon_lora",
@@ -854,7 +852,7 @@ fn lora_extract_writes_a_peft_adapter_that_rebuilds_the_delta() {
 }
 
 #[test]
-#[ignore = "needs diff/lora engines and the McpProgress wiring line of server.rs"]
+#[ignore = "needs the McpProgress wiring line of server.rs"]
 fn progress_notifications_follow_the_token_for_diff_and_merge() {
     let dir = tempfile::tempdir().unwrap();
     checkpoints(dir.path());
@@ -899,7 +897,6 @@ fn progress_notifications_follow_the_token_for_diff_and_merge() {
 }
 
 #[test]
-#[ignore = "needs diff/lora engines"]
 fn cancellation_queued_before_the_call_leaves_everything_untouched() {
     let dir = tempfile::tempdir().unwrap();
     checkpoints(dir.path());
@@ -959,7 +956,6 @@ impl ProgressSink for CancelAfterFirstTensor<'_> {
 }
 
 #[test]
-#[ignore = "needs diff/lora engines"]
 fn cancellation_in_the_middle_of_a_merge_rolls_back_to_identical_bytes() {
     let dir = tempfile::tempdir().unwrap();
     checkpoints(dir.path());

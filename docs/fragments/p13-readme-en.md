@@ -15,6 +15,18 @@ surgeon diff --base <BASE_DIR> --tuned <TUNED_DIR> --out finetune.surgery \
     --include 'mlp' --factor-dtype bf16 --max-rel-error 0.3 --on-high-error full
 ```
 
+Real output on the pair written by `cargo run --example make_fake_checkpoints -- --out <DIR>
+--kind rank --rank 4 --lora` (tensors shortened; the difference has rank 4, so the error is 0):
+
+```text
+patch écrit : finetune.surgery (0.01 MiB, factor_dtype f16, rang demandé 4)
+10 tenseur(s) dans le patch, 1 identique(s) ignoré(s), 2 filtré(s)
+  model.layers.0.self_attn.q_proj.weight · lowrank · rang 4 · erreur relative 0.0000 · énergie 1.0000
+  model.layers.0.input_layernorm.weight · full_delta · rang 0 · erreur relative 0.0000 · énergie 1.0000
+  [...]
+Note : le .surgery est une APPROXIMATION du fine-tune (erreur relative par tenseur), exacte seulement si la différence est de rang <= r. Sa taille vaut environ la somme de r(m+n) x octets par facteur : des centaines de Mo pour un 7B au rang 16.
+```
+
 The output is reproducible (same input and `--seed`, same bytes, whatever the thread count;
 a timestamp is only recorded with `--timestamp`). `--max-rel-error` with `--on-high-error
 warn|skip|full` decides what happens to a tensor the approximation reconstructs badly.
@@ -27,6 +39,16 @@ rounded to the model dtype):
 surgeon apply --model <MODEL_DIR> --patch finetune.surgery --dry-run
 surgeon apply --model <MODEL_DIR> --patch finetune.surgery --scale 0.5 --verify-base strict
 ```
+
+```text
+[DRY-RUN]  model.layers.0.mlp.down_proj.weight · lowrank · rang 4 · erreur 0.0000
+[DRY-RUN]  model.layers.0.input_layernorm.weight · full_delta · rang 0 · erreur 0.0000
+[...]
+dry-run : 10 tenseur(s) vérifiés, aucun octet écrit
+```
+
+A real application ends with `[BACKUP] ... ✓ sha256 vérifié`, `[COMMIT] modèle patché` and
+`10 tenseur(s) patchés, 9124 éléments modifiés, max |delta| 0.218872`.
 
 `--verify-base strict|warn|off` compares each tensor of the model with the SHA-256 stored in the
 patch (default `warn`: apply anyway, with a warning). The binary format is specified in
@@ -61,6 +83,26 @@ checkpoints with a rank `r` adapter (`B = U sqrt(S)`, `A = sqrt(S) V`) and write
 ```bash
 surgeon lora extract --base <BASE_DIR> --patched <TUNED_DIR> \
     --out adapter/adapter_model.safetensors --rank 16 --dtype f32
+```
+
+Real output of the merge, then of the extraction, on the same fake pair (the adapter written by
+`--lora` has `lora_alpha = r`):
+
+```text
+[BACKUP]   <MODEL_DIR>/model.safetensors.bak-<timestamp>  ✓ sha256 vérifié
+[COMMIT]   modèle patché · 0.0 s
+6 tenseur(s) fusionnés (rang 4, échelle effective 1), max |delta| 0.218750
+
+6 tenseur(s) extraits (rang 4, f32), erreur relative moyenne 0.0000
+  adapter : ex/adapter_model.safetensors
+  config  : ex/adapter_config.json
+```
+
+`--lora` takes the adapter FILE, and the directory of `--out` must already exist. Without a
+`lora_alpha` (no `adapter_config.json` next to the adapter, no `--alpha`), the command stops:
+
+```text
+erreur : arguments invalides : lora_alpha introuvable : passez --alpha <valeur>, ou placez adapter_config.json à côté de --lora (ou donnez --adapter-config)
 ```
 
 Limits: the PEFT layout is followed from its documentation but is not tested against
