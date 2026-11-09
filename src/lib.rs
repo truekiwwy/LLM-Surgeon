@@ -10,3 +10,7 @@ pub mod mcp;
 pub mod patch;
 pub mod tui;
 pub mod ui;
+
+// --- P13 ---
+pub mod lora;
+pub mod surgery;

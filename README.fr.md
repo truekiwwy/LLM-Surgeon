@@ -366,8 +366,8 @@ indisponibles.
 
 ### 7. Le confier à un agent IA (MCP)
 
-`surgeon mcp` sert sept outils sur stdio (`surgeon_check`, `surgeon_inspect`,
-`surgeon_apply`, `surgeon_eval`, `surgeon_extract`, `surgeon_bench`, `surgeon_autotune`).
+`surgeon mcp` sert neuf outils sur stdio (`surgeon_check`, `surgeon_inspect`,
+`surgeon_apply`, `surgeon_eval`, `surgeon_extract`, `surgeon_bench`, `surgeon_autotune`, `surgeon_diff`, `surgeon_lora`).
 Chaque chemin doit
 tomber sous un dossier autorisé, et une sauvegarde vérifiée est imposée avant toute
 écriture. Le tableau de bord n'est pas exposé en MCP.

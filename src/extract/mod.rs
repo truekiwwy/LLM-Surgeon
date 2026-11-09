@@ -66,6 +66,7 @@
 mod capture;
 mod config;
 mod error;
+pub mod generate;
 mod hooked_qwen2;
 mod leace;
 mod method;

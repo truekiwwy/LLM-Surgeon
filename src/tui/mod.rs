@@ -34,6 +34,8 @@
 
 pub mod app;
 pub mod event;
+pub mod preview_args;
+pub mod tabs;
 pub mod terminal;
 pub mod theme;
 pub mod ui;

@@ -67,6 +67,10 @@ pub enum Commands {
     Bench(BenchArgs),
     /// Fit per-layer steering coefficients by ridge regression on measured responses.
     Autotune(AutotuneArgs),
+    /// Low-rank differential patch (.surgery) between two checkpoints.
+    Diff(crate::surgery::cli_args::DiffArgs),
+    /// Merge or extract a LoRA adapter.
+    Lora(crate::lora::cli_args::LoraArgs),
 }
 
 /// `surgeon extract`: the prompt 8 options plus the direction method (two structs because
@@ -361,6 +365,8 @@ pub struct ApplyArgs {
     /// Default: next to the model.
     #[arg(long)]
     pub backup_dir: Option<PathBuf>,
+    #[command(flatten)]
+    pub surgery: crate::surgery::cli_args::SurgeryApplyArgs,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -431,6 +437,8 @@ pub struct TuiArgs {
     /// Frame size for --snapshot, COLSxROWS.
     #[arg(long, default_value = "100x32", value_parser = crate::tui::parse_size)]
     pub size: (u16, u16),
+    #[command(flatten)]
+    pub preview: crate::tui::preview_args::PreviewArgs,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -445,6 +453,8 @@ pub enum SchemaKind {
     Patch,
     /// The MCP tool definitions, exactly as `tools/list` returns them.
     Tools,
+    /// JSON Schema (draft-07) of the .surgery header.
+    Surgery,
 }
 
 #[derive(Debug, Clone, Args)]
