@@ -156,6 +156,23 @@ classe au moins). `data.method_diagnostics` donne les diagnostics de la méthode
 L'effacement LEACE n'est exact qu'en échantillon : avec n < d, seul le ratio hors
 échantillon dit s'il généralise.
 
+**Sous-espaces de rang k.** `rank` (1 à 64) et `labels_file` étendent `svd` et `leace` :
+
+- `svd` avec `rank` > 1 écrit aussi `<out>.subspace.safetensors` : `a = b = V_k`, les `k`
+  premiers vecteurs singuliers droits des différences appariées, de forme `[k, hidden]`
+  (un projecteur orthogonal) ; `direction` reste le premier ;
+- `leace` avec `labels_file` (fichier JSON dans un dossier autorisé, un label par prompt,
+  les positifs puis les négatifs : indice de classe entier, ou tableau de `m` nombres)
+  efface tous les labels à la fois ; `a` et `b` de `<out>.leace.safetensors` sont alors de
+  forme `[k, hidden]`, avec `k` au plus `rank` (défaut : toutes les directions de la
+  covariance croisée) ;
+- `mean_diff` reste de rang 1 ; `rank` ou `labels_file` sur une méthode qui ne peut pas
+  les honorer est refusé (`invalid_input`).
+
+`data.method_diagnostics.subspace` détaille chaque composante : `rank`, `sigma_t`,
+`explained_variance_cumulative`, `d_prime`, `gram_BtA_error` et, pour `leace` avec
+`holdout_frac`, `holdout_cross_cov_residual`.
+
 `method` est un identifiant du registre des méthodes d'extraction du moteur (le même que
 `surgeon extract --method` et `surgeon plugins list`). Le serveur n'utilise que le registre
 intégré : il accepte exactement `mean_diff`, `svd` et `leace`, avec le schéma et les
@@ -173,6 +190,21 @@ pour `embed_tokens` ; `alpha` dans [0, 1], `vector_tensor` = `a` et `vector_tens
  "vector_file": "refusal.safetensors.leace.safetensors", "vector_tensor": "a",
  "vector_tensor_b": "b", "alpha": 1.0}
 ```
+
+Les tenseurs `a` et `b` peuvent être de forme `[k, hidden]` (sorties de rang k ci-dessus) :
+`W ← W − alpha·A(BᵀW)` retire alors les `k` directions en une seule passe, chaque poids
+n'est arrondi qu'une fois. Deux champs optionnels de l'opération, `project_out` uniquement :
+
+- `rank` : rang attendu ; des tenseurs d'un autre rang sont refusés. Absent : le rang des
+  tenseurs ;
+- `allow_non_projector` (défaut `false`) : avec `alpha = 1`, si `‖BᵀA − I‖_F > 1e-3` (`a` et
+  `b` ne forment pas un projecteur), un patch `[k, hidden]` est refusé ; `true` l'accepte
+  avec un avertissement. La forme 1D reste acceptée avec l'avertissement.
+
+`surgeon_apply` plafonne le rang à 64 (le défaut de `surgeon apply --max-rank`, que le
+serveur n'expose pas). Ces contrôles (rangs de `a` et `b`, `rank`, plafond, projecteur)
+lisent les tenseurs, donc ils ont lieu à l'exécution et non à la validation du patch, mais
+avant la première écriture : un refus laisse le modèle intact (code de sortie 3 en CLI).
 
 Ablation directionnelle de tous les écrivains (`a = b = v`, la `direction` unitaire de
 `surgeon_extract`), en une opération :

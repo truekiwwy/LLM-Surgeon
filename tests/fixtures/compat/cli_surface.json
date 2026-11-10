@@ -483,6 +483,26 @@
           ]
         },
         {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "64"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "max_rank",
+          "long": "max-rank",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "MAX_RANK"
+          ]
+        },
+        {
           "action": "SetTrue",
           "aliases": null,
           "default_values": [
@@ -1173,6 +1193,42 @@
           "short": null,
           "value_names": [
             "HOLDOUT_FRAC"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "rank",
+          "long": "rank",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "RANK"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "labels_file",
+          "long": "labels-file",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "LABELS_FILE"
           ]
         },
         {

@@ -124,6 +124,14 @@ pub struct ExtractMethodArgs {
     /// Held-out fraction (by index) for out-of-sample diagnostics (10+ prompts per set).
     #[arg(long, default_value_t = 0.0)]
     pub holdout_frac: f64,
+    /// Directions of the subspace: svd keeps that many singular vectors (default 1),
+    /// leace with --labels-file at most that many (default: all).
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=crate::engine::DEFAULT_MAX_RANK as u64))]
+    pub rank: Option<u64>,
+    /// leace: JSON array with one label per prompt, positives then negatives (a class
+    /// index, or an array of m numbers).
+    #[arg(long)]
+    pub labels_file: Option<PathBuf>,
 }
 
 impl ExtractMethodArgs {

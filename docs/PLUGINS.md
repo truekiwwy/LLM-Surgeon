@@ -132,7 +132,15 @@ Ce que la méthode doit faire :
 - être déterministe : même entrée, même sortie à l'octet près ;
 - rendre `PluginError::Cancelled` peu après que `cancel` passe à `true` si son calcul est
   long ;
-- ne déclarer que les fichiers annexes qu'elle écrit (`MethodInfo::sidecars`).
+- ne déclarer que les fichiers annexes qu'elle écrit (`MethodInfo::sidecars`) ;
+- pour un tenseur annexe de plusieurs directions (un sous-espace de rang k à passer à
+  `project_out`), le lister dans `ExtractionOutput::sidecar_rows` sous la clé
+  `(suffixe, nom du tenseur)` avec son nombre de lignes : ses `k × hidden_size` valeurs
+  sont alors écrites en forme `[k, hidden_size]`, une direction par ligne. Les tenseurs
+  absents de `sidecar_rows` restent 1D. C'est ce que font `svd` (`rank`, annexe
+  `subspace`) et `leace` (`labels`, annexe `leace`). Construisez `ExtractionOutput` avec
+  `ExtractionOutput::new` ou `..Default::default()` : un littéral complet casse à chaque
+  champ ajouté (le champ `sidecar_rows` en est un exemple).
 
 | `PluginError` | Code de sortie | `error.kind` |
 | --- | --- | --- |

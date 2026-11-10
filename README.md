@@ -522,8 +522,10 @@ surgeon extract [OPTIONS] --model <MODEL> --pos-prompts <POS_PROMPTS> --neg-prom
 | `--leace-shrinkage` | 0.1 | `leace`: shrinkage λ in [0, 1] of Σ toward tr(Σ)/d·I; 0 is the pseudo-inverse. |
 | `--leace-rcond` | 1e-10 | `leace` with λ = 0: relative threshold of the kept eigenvalues. |
 | `--holdout-frac` | 0 | Held-out fraction (by index) for out-of-sample diagnostics; needs 10 or more prompts per set. |
+| `--rank` | 1 for `svd`, all for `leace` | Directions of the subspace, 1 to 64: `svd` keeps that many singular vectors, `leace` with `--labels-file` at most that many. `mean_diff` stays rank 1. |
+| `--labels-file` | none | `leace`: JSON array with one label per prompt, positives then negatives: an integer class index, or an array of `m` numbers. All labels are erased at once. |
 
-Outputs: the direction, `<out>.stats.json` (projection of every prompt, read by the dashboard) and, for `leace`, `<out>.leace.safetensors` (`a`, `b`, `mean`, `u_whitened`). Writes are atomic. `data`: `out_path`, `stats_path`, `layer`, `method`, `hidden_size`, `n_pos`, `n_neg`, `dtype_used`, `duration_ms`, `stats`, `warnings`. Exit codes: 7 for model or computation failures; 2 for invalid arguments, including `unpaired_prompts` for `svd`.
+Outputs: the direction, `<out>.stats.json` (projection of every prompt, read by the dashboard) and, for `leace`, `<out>.leace.safetensors` (`a`, `b`, `mean`, `u_whitened`). With `svd --rank` above 1, `<out>.subspace.safetensors` holds `a = b = V_k`; with `leace --labels-file`, `a` and `b` of the `.leace.safetensors` have shape `[k, hidden]`. Both go as they are to a `project_out` operation, and `data.method_diagnostics.subspace` gives each component (`sigma_t`, `explained_variance_cumulative`, `d_prime`, `gram_BtA_error`). Writes are atomic. `data`: `out_path`, `stats_path`, `layer`, `method`, `hidden_size`, `n_pos`, `n_neg`, `dtype_used`, `duration_ms`, `stats`, `warnings`. Exit codes: 7 for model or computation failures; 2 for invalid arguments, including `unpaired_prompts` for `svd`.
 
 <a id="cmd-apply"></a>
 #### `surgeon apply`
@@ -549,6 +551,7 @@ surgeon apply [OPTIONS] --model <MODEL> --patch <PATCH>
 | `--no-prefetch` | off | No OS prefetch hint nor intermediate flush. |
 | `--scale` | 1 | `.surgery` only: `W <- W + scale * delta`. |
 | `--verify-base` | `warn` | `.surgery` only: check each base tensor against the stored hash: `strict` (error, nothing written), `warn`, `off`. |
+| `--max-rank` | 64 | `project_out`: largest rank of a subspace (rows of the `a` and `b` tensors); a larger one is refused before any write. |
 
 `data`: `backups`, `report` (`dry_run`, `backup_path`, per-operation tensors with `elements_modified`, `max_abs_delta`, `nan_or_inf_produced`, `rolled_back`), `io` (bytes, chunks, throughput, page faults), `warnings`; with `--gguf`, also `gguf` (fidelity per tensor). Exit codes: 2 invalid patch (nothing touched), 3 execution failed (model intact), 4 critical (rollback failed).
 
@@ -1070,6 +1073,8 @@ The binary only registers the three built-in methods; a third-party method runs 
 | `vector_tensor_b` | `project_out` only: the read direction `b` (`vector_tensor` is then `a`). |
 | `alpha` | Strength in [-100, 100]; `|alpha| > 5` raises a warning. For `project_out`, in [0, 1]. |
 | `axis` | `rows` or `cols` (default `cols`). |
+| `rank` | `project_out` only: the expected rank, i.e. the rows of `a` and `b` (`[rank, hidden]`, 1 for the 1D form). Tensors of another rank are refused. Absent: the rank of the tensors. |
+| `allow_non_projector` | `project_out` only: accept `alpha = 1` when `‖B^T A - I‖ > 1e-3` (not a projector), with a warning. Default `false`: refused. |
 
 The formula for `subtract` and `add`, on a row-major `[rows, cols]` tensor: `W[r][c] <- round(W[r][c] ∓ alpha * v[i])`. The product `alpha * v[i]` is computed once per vector element in f32, then each weight takes one f32 addition and is rounded to nearest even into the stored dtype (bf16, f16 or f32). `alpha = 0` is a strict no-op. Weights are `[out, in]` (Llama and Qwen layout):
 
@@ -1089,6 +1094,8 @@ With `rows`, every row receives the same vector (one value per column); with `co
 
 > **For experts**
 > `project_out` removes what `b` reads from the matrices that write into the residual stream: `W' = W - alpha * a (b^T W)` for `down_proj` and `o_proj`, `W' = W - alpha * (W b) a^T` for `embed_tokens` (its rows are the residual vectors). With `a` and `b` from a `.leace.safetensors` it is the LEACE eraser; with `a = b = v`, a unit direction (`"vector_tensor": "direction", "vector_tensor_b": "direction"`), it is a directional ablation. One operation with `"layers": "all"` and `"projections": ["down_proj", "o_proj", "embed_tokens"]` covers every writer; `gate_proj` and `up_proj` read from the stream and are refused. In bf16 a small delta can round away: measure the result.
+>
+> `a` and `b` can also be `[k, hidden]` tensors, one direction per row (`<out>.subspace.safetensors` of `svd --rank`, or the `.leace.safetensors` of `leace --labels-file`): `W' = W - alpha * A (B^T W)` then removes the `k` directions in one pass over the weights, so each weight is rounded once whatever `k`, while `k` successive rank-1 operations would round `k` times in an order that changes the result. The 1D form gives the same bytes as before. Before any write, `apply` checks that `a` and `b` have the same rank, that it matches `rank` when the operation sets it and does not exceed `--max-rank` (64; the MCP server keeps this default), and that `‖B^T A - I‖_F <= 1e-3` when `alpha = 1`: otherwise `alpha = 1` removes something else than the subspace read by `b`, and a `[k, hidden]` patch is refused unless `allow_non_projector` is `true` (the 1D form stays accepted, with a warning). These checks read the tensors, so a refusal is exit code 3 with the model intact, not an invalid patch. In a GGUF `project_out` stays refused.
 >
 > When `embed_tokens` is a target and the model ties it to the output projection (no `lm_head.weight`, as Qwen2.5-0.5B), `apply` first detaches the head so the logits are not deformed: it rewrites the shard with `lm_head.weight`, a byte copy of the unpatched embeddings, and sets `"tie_word_embeddings": false` in `config.json` (and completes `model.safetensors.index.json` for a sharded model). The shard grows by the size of the embeddings. `--dry-run` announces it in `data.untie_lm_head` and writes nothing; the shard and `config.json` are both backed up and restored on failure. Without `config.json` next to the model the patch is refused.
 
@@ -1192,8 +1199,9 @@ Each patched tensor gets a fidelity report: `intended_shift_norm`, `realized_shi
 All linear algebra is pure Rust in f64 (`src/linalg`: cyclic Jacobi, thin SVD through the smaller Gram matrix, Cholesky) and independent of the thread count.
 
 - **`mean_diff`** (default): `v = normalize(mu+ - mu-)` over the pooled activations.
-- **`svd`** (contrastive): prompts are paired by index (otherwise exit code 2, `unpaired_prompts`); with `dX_i = x+_i - x-_i`, `v` is the first right singular vector of `dX`, i.e. the dominant eigenvector of `(1/N) dX^T dX`, oriented so that `<v, mu+ - mu-> >= 0`. `dX` is not centered by default, because centering removes the mean difference, which is the concept axis itself; `--svd-center` is for pairs in arbitrary order. Diagnostics: the first five singular values, `sigma1^2 / sum(sigma^2)`, the cosine with `mu+ - mu-`, and a split-half cosine (even against odd pairs). A warning appears when `sigma2 / sigma1 > 0.9` or with fewer than 8 pairs.
+- **`svd`** (contrastive): prompts are paired by index (otherwise exit code 2, `unpaired_prompts`); with `dX_i = x+_i - x-_i`, `v` is the first right singular vector of `dX`, i.e. the dominant eigenvector of `(1/N) dX^T dX`, oriented so that `<v, mu+ - mu-> >= 0`. `dX` is not centered by default, because centering removes the mean difference, which is the concept axis itself; `--svd-center` is for pairs in arbitrary order. Diagnostics: the first five singular values, `sigma1^2 / sum(sigma^2)`, the cosine with `mu+ - mu-`, and a split-half cosine (even against odd pairs). A warning appears when `sigma2 / sigma1 > 0.9` or with fewer than 8 pairs. With `--rank k`, the first `k` right singular vectors `V_k` (orthonormal, each oriented along `mu+ - mu-`; fewer when `dX` has a lower rank) go to `<out>.subspace.safetensors` as `a = b = V_k`, an orthogonal projector; `direction` is still the first one.
 - **`leace`**: `r(x) = x - a b^T (x - mu)` with `S_l = (1 - l) S + l tr(S)/d I`, `w = S_l^(-1/2) (mu+ - mu-)`, `u = w / |w|`, `a = S_l^(1/2) u` (parallel to `mu+ - mu-`) and `b = S_l^(-1/2) u`, so that `b^T a = 1`. `a` says where to write and `b` what to read. The written `direction` is `a / |a|`, hence the same direction as `mean_diff`; `a`, `b`, `mean` and `u_whitened` go to `<out>.leace.safetensors`. `--leace-shrinkage 0` is the pseudo-inverse on the data subspace (`--leace-rcond`).
+- **`leace` with `--labels-file`** (labels `z` in R^m; class indices become one-hot rows over the classes present): `S_XZ = (1/n) sum (x_i - mu)(z_i - z_mean)^T` (`d x m`), `M = S_l^(-1/2) S_XZ = U S V^T`, `r` the number of singular values above `rcond * s_1` (at most `--rank`), then `A = S_l^(1/2) U_r` and `B = S_l^(-1/2) U_r`, so that `B^T A = I_r` and `r(x) = x - A B^T (x - mu)`. When no singular value is cut, the cross-covariance with every label vanishes in sample. `U` comes from the `m x m` Gram matrix of the columns of `M`: no `d x d` matrix is formed. The diagnostics per component are `sigma_t`, `explained_variance_cumulative`, `d_prime` and, with `--holdout-frac`, `holdout_cross_cov_residual`.
 - **Honest limits of LEACE**: the cross-covariance between `r(x)` and the label is zero in the sample for any positive definite `S_l`. "No linear predictor beats a constant" is a population guarantee, not a sample one: with fewer prompts than dimensions a classifier can still separate the erased sample. Only `--holdout-frac` (fit on the rest, measure on held-out prompts, reported as `holdout_cross_cov_ratio`) says whether the erasure generalizes.
 - **`autotune`**: the readout is `s_i = <pool(h_i^R), v>` at layer R (site, pooling and template of the vector); the target is `y_i = t_i - s_i^0` (`neg_mean_proj` for `suppress`, `pos_mean_proj` for `amplify`, `--target-projection`, or a per-prompt `target`); the response `F_il = (s_i(delta_l) - s_i^0) / delta` is measured in memory with the engine's own shift on the stored bytes (bf16 rounding included); then `alpha = (F^T F + l I)^(-1) F^T y` by Cholesky, with `l` fixed or chosen by closed-form leave-one-out (`e_i / (1 - h_ii)`, 17 points from 1e-6 to 1e2). R² is uncentered (there is no intercept). The fitted `alpha` are applied together and measured again. Side effects are not measured: run `surgeon bench` afterwards.
 
@@ -1268,7 +1276,7 @@ On this random mini-model the responses do not generalize across prompts, so the
 > **For experts**
 > There is no fused multiply-add anywhere. The product `alpha * v[i]` is computed once per vector element, the kernel only adds. A fused multiply-add rounds once instead of twice and would drift from the scalar reference by a last bit; and the operation is memory bound anyway, so fusing would buy nothing. Tensors are written by chunks (`--prefetch-chunk-mib`, default 64) with OS hints (`madvise` on Unix, `PrefetchVirtualMemory` on Windows) and an asynchronous flush of the previous chunk; `--no-prefetch` turns both off. `data.io` of `apply` reports bytes, chunks, failed hints, time, throughput and page faults.
 
-The only numbers quoted here come from one run of `examples/bench_kernels.rs` made for this README on 2026-11-09, with this command (it writes a 2 GiB scratch file and takes about 90 seconds):
+The kernel and I/O numbers below come from one run of `examples/bench_kernels.rs` made for this README on 2026-11-09, with this command (it writes a 2 GiB scratch file and takes about 90 seconds):
 
 ```bash
 # kernel and I/O benchmark, prints Markdown tables
@@ -1287,6 +1295,24 @@ Machine: Intel Core i5-12400F (6 cores, 12 threads, AVX2 and F16C, no AVX-512), 
 | avx2 | f32 | 17 070 | 16 977 | 0.98 |
 
 AVX-512 and NEON were not run: this CPU has neither. End to end (`shift_tensor` plus flush on a 2 GiB bf16 file already in the page cache) the same run gave 99 to 119 MiB/s with prefetch and 110 to 112 MiB/s without, with about 525 000 page faults either way: on this machine the write-back of dirty pages of the mapped file dominates, not the kernels, and prefetch does not remove page faults on Windows. A previous run of the same example on the same machine gave about 180 to 240 MiB/s, so treat end-to-end figures as dependent on the disk, the page cache and the OS; rerun the example on your machine. Direct I/O (`O_DIRECT`) is not implemented.
+
+The rank-k `project_out` was measured in memory on the same machine on 2026-11-11, with this command (about 20 seconds once built):
+
+```bash
+# atomic rank-k pass against k successive rank-1 passes, best of 3 per cell
+cargo test --release --lib rank_k_throughput -- --ignored --nocapture
+```
+
+Each cell is the atomic pass, then `k` successive rank-1 passes, in ms. `[896, 4864]` is the shape of a `down_proj` of Qwen2.5-0.5B, `[32768, 896]` a slice of its embeddings (the `embed_tokens` form); `a = b` are `k` orthonormal directions:
+
+| tensor | dtype | k = 1 | k = 4 | k = 16 | k = 64 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `[896, 4864]` | bf16 | 3.6 / 3.4 | 5.9 / 15.4 | 9.6 / 53.2 | 48.8 / 219.5 |
+| `[896, 4864]` | f32 | 3.4 / 3.4 | 4.0 / 10.9 | 9.4 / 40.0 | 49.1 / 157.7 |
+| `[32768, 896]` | bf16 | 24.3 / 25.1 | 36.2 / 79.5 | 78.7 / 309.0 | 248.1 / 1306.8 |
+| `[32768, 896]` | f32 | 22.1 / 23.6 | 35.3 / 68.8 | 75.1 / 249.2 | 254.4 / 986.3 |
+
+At rank 1 both paths are the same code. From k = 4 the single pass is about 2 to 5 times faster, because the weights are read and written once instead of `k` times; it also rounds each weight once, which is the real reason for it. The cost grows with `k` once the `k x in` products dominate the memory traffic (about 170 MiB/s of bf16 weights at k = 64 against 2 300 MiB/s at k = 1). A second run of the same command was 5 to 40 % slower per cell, and up to twice as slow on the cells of a few milliseconds: treat these as orders of magnitude.
 
 The reports of `bench logits` and `bench eval` were not benchmarked for this README, so no throughput is claimed for them.
 

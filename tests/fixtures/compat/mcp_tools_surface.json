@@ -167,6 +167,9 @@
               "items": {
                 "additionalProperties": false,
                 "properties": {
+                  "allow_non_projector": {
+                    "type": "boolean"
+                  },
                   "alpha": {
                     "format": "float",
                     "maximum": 100.0,
@@ -242,6 +245,14 @@
                     "minItems": 1,
                     "type": "array",
                     "uniqueItems": true
+                  },
+                  "rank": {
+                    "format": "uint",
+                    "minimum": 1.0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
                   },
                   "vector_file": {
                     "type": "string"
@@ -464,6 +475,13 @@
             "null"
           ]
         },
+        "labels_file": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "layer": {
           "default": 20,
           "format": "uint32",
@@ -582,6 +600,16 @@
           "default": null,
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "rank": {
+          "default": null,
+          "format": "uint32",
+          "maximum": 64.0,
+          "minimum": 1.0,
+          "type": [
+            "integer",
             "null"
           ]
         },

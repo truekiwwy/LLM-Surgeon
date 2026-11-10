@@ -83,6 +83,19 @@ pub struct Operation {
         description = "project_out uniquement (obligatoire) : tenseur b du fichier .leace.safetensors (vector_tensor désigne alors a)."
     )]
     pub vector_tensor_b: Option<String>,
+    /// `project_out` only: the rank the tensors must have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        range(min = 1),
+        description = "project_out uniquement : rang attendu du sous-espace, c'est-à-dire le nombre de lignes des tenseurs a et b de forme [rank, hidden] (1 pour la forme 1D [hidden]). L'opération est refusée si les tenseurs ont un autre rang. Absent : le rang est celui des tenseurs."
+    )]
+    pub rank: Option<usize>,
+    /// `project_out` only: accept `alpha = 1` when `a` and `b` are not a projector.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(
+        description = "project_out uniquement : accepte alpha = 1 quand ‖BᵀA − I‖ > 1e-3 (a et b ne forment pas un projecteur), avec un avertissement. Défaut false : l'opération est refusée."
+    )]
+    pub allow_non_projector: bool,
     #[schemars(
         range(min = -100.0, max = 100.0),
         description = "Intensité du décalage W ∓= alpha·v, dans [-100, 100] ; |alpha| > 5 déclenche un avertissement. project_out : force dans [0, 1] (1 = effacement complet)."

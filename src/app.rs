@@ -75,7 +75,7 @@ use crate::bench::score::{Backend, EvalRequest};
 use crate::bench::{self, BenchError};
 use crate::cli::{
     ApplyArgs, AutotuneArgs, BenchArgs, BenchCommand, CheckArgs, Cli, Commands, EvalArgs,
-    ExtractArgs, InspectArgs,
+    ExtractArgs, ExtractCommand, InspectArgs,
 };
 use crate::engine::stats::TensorStats;
 use crate::engine::{
@@ -99,9 +99,9 @@ use crate::kernel::{self, IoConfig, IoMeter, KernelChoice, Level};
 use crate::patch::autotune::{self, AutotuneError, AutotuneEvent, AutotuneRequest, AutotuneRun};
 use crate::patch::gguf::{self, GgufApplyArgs, GgufApplyError, Requant};
 use crate::patch::{
-    self, apply_patch, load_patch, untie, validate_patch, ApplyReport, Axis, BackupSet,
-    LayerSelection, OpStats, OperationKind, PatchBackend, PatchError, PatchFile, Projection,
-    RollbackHandle, ValidationIssue, ValidationOptions,
+    self, apply_patch, apply_patch_with, load_patch, untie, validate_patch, ApplyOptions,
+    ApplyReport, Axis, BackupSet, LayerSelection, OpStats, OperationKind, PatchBackend, PatchError,
+    PatchFile, Projection, RollbackHandle, ValidationIssue, ValidationOptions,
 };
 use crate::plugin::{unknown_method_message, Diagnostics, Registry, DEFAULT_METHOD};
 use crate::ui::{self, ColorMode, Ui, UiConfig};
@@ -349,23 +349,35 @@ fn command_name(command: &Commands) -> &'static str {
     }
 }
 
+/// `surgeon extract`: the method parameters of the command line (the labels file is read
+/// here, before anything is loaded), then the extraction.
+fn extract_cli(cmd: &ExtractCommand, deps: &AppDeps, io: &mut Io) -> CoreResult {
+    let labels = match &cmd.method.labels_file {
+        Some(path) => Some(extract::load_labels(path).map_err(|message| {
+            let message = format!("--labels-file {} : {message}", path.display());
+            Outcome::fail(exit::INVALID_INPUT, message).with_kind("invalid_input")
+        })?),
+        None => None,
+    };
+    let rank = cmd.method.rank.map(|r| r as usize);
+    let ui = io.ui;
+    core_extract_with(
+        &cmd.args,
+        &cmd.method.method,
+        &extract::params_with_subspace(&cmd.method.options(), rank, labels),
+        deps,
+        &ui,
+        &mut CliSink::new(io),
+    )
+}
+
 fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
     let result = match command {
         Commands::Check(args) => core_check(args, deps, &io.ui),
         Commands::Inspect(args) => core_inspect(args, deps, &io.ui),
         Commands::Apply(args) => apply(args, deps, io),
         Commands::Eval(args) => eval(args, deps, &io.ui),
-        Commands::Extract(cmd) => {
-            let ui = io.ui;
-            core_extract_with(
-                &cmd.args,
-                &cmd.method.method,
-                &cmd.method.options().params(),
-                deps,
-                &ui,
-                &mut CliSink::new(io),
-            )
-        }
+        Commands::Extract(cmd) => extract_cli(cmd, deps, io),
         Commands::Plugins(_) => plugins_list(&io.ui),
         Commands::Autotune(args) => {
             let ui = io.ui;
@@ -974,6 +986,25 @@ impl PatchBackend for EngineBackend {
         b: &[f32],
         alpha: f32,
     ) -> patch::Result<OpStats> {
+        self.project_out_subspace(tensor_name, a, b, 1, alpha)
+    }
+
+    fn load_directions(
+        &self,
+        file: &Path,
+        tensor: Option<&str>,
+    ) -> patch::Result<(Option<usize>, Vec<f32>)> {
+        engine::load_direction_matrix(file, tensor).map_err(backend_error)
+    }
+
+    fn project_out_subspace(
+        &mut self,
+        tensor_name: &str,
+        a: &[f32],
+        b: &[f32],
+        k: usize,
+        alpha: f32,
+    ) -> patch::Result<OpStats> {
         if self.interrupted.load(Ordering::SeqCst) {
             return Err(PatchError::Backend(INTERRUPTED.into()));
         }
@@ -982,13 +1013,16 @@ impl PatchBackend for EngineBackend {
             .ok_or_else(|| backend_error(EngineError::TensorNotFound(tensor_name.into())))?;
         // The embeddings hold the residual stream in their rows, the other writers in
         // their columns: same eraser, the other side of the matrix.
-        let model = &mut self.shards[shard].1;
-        match engine::is_embed_tokens(tensor_name) {
-            true => model.project_out_embedding(tensor_name, a, b, alpha),
-            false => model.project_out_tensor(tensor_name, a, b, alpha),
-        }
-        .map(OpStats::from)
-        .map_err(backend_error)
+        let projection = engine::SubspaceProjection { a, b, alpha, k };
+        self.shards[shard]
+            .1
+            .project_out_subspace(
+                tensor_name,
+                &projection,
+                engine::is_embed_tokens(tensor_name),
+            )
+            .map(OpStats::from)
+            .map_err(backend_error)
     }
 
     fn flush(&mut self) -> patch::Result<()> {
@@ -1016,6 +1050,8 @@ pub enum ProgressEvent {
         op_id: String,
         tensors: Vec<String>,
         vector_len: usize,
+        /// `project_out` with `[k, len]` tensors: k.
+        rank: Option<usize>,
     },
     Backup {
         path: PathBuf,
@@ -1249,6 +1285,28 @@ impl<B: PatchBackend> PatchBackend for ObservedBackend<'_, B> {
         Ok(self.track(tensor_name, stats))
     }
 
+    fn load_directions(
+        &self,
+        file: &Path,
+        tensor: Option<&str>,
+    ) -> patch::Result<(Option<usize>, Vec<f32>)> {
+        self.inner.load_directions(file, tensor)
+    }
+
+    fn project_out_subspace(
+        &mut self,
+        tensor_name: &str,
+        a: &[f32],
+        b: &[f32],
+        k: usize,
+        alpha: f32,
+    ) -> patch::Result<OpStats> {
+        let stats = self
+            .inner
+            .project_out_subspace(tensor_name, a, b, k, alpha)?;
+        Ok(self.track(tensor_name, stats))
+    }
+
     fn flush(&mut self) -> patch::Result<()> {
         self.inner.flush()
     }
@@ -1435,9 +1493,14 @@ impl ProgressSink for CliSink<'_, '_> {
                 op_id,
                 tensors,
                 vector_len,
+                rank,
             } => {
+                let what = match rank {
+                    Some(k) => format!("{k} directions de"),
+                    None => "vecteur de".to_owned(),
+                };
                 self.io.line(&format!(
-                    "{} {} · {} tenseurs · vecteur de {}",
+                    "{} {} · {} tenseurs · {what} {}",
                     ui::badge(&ui, "DRY-RUN"),
                     ui::metric(&ui, &op_id),
                     ui::metric(&ui, tensors.len()),
@@ -1622,13 +1685,15 @@ pub fn core_apply(
     deps: &AppDeps,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
-    core_apply_io(request, IoConfig::default(), deps, sink)
+    let limits = ApplyOptions::default();
+    core_apply_io(request, IoConfig::default(), limits, deps, sink)
 }
 
 /// [`core_apply`] with explicit chunking / prefetch; a real run reports `data.io`.
 fn core_apply_io(
     request: &ApplyRequest,
     io: IoConfig,
+    limits: ApplyOptions,
     deps: &AppDeps,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
@@ -1663,7 +1728,7 @@ fn core_apply_io(
     // Preflight on its own mapping, released before any file is replaced or restored.
     let (preview, mut touched) = {
         let mut backend = EngineBackend::open(&shards, Arc::clone(&deps.interrupted))?;
-        let preview = apply_patch(&patch, &mut backend, None, true)?;
+        let preview = apply_patch_with(&patch, &mut backend, None, true, &limits)?;
         let touched = backend.shards_holding(
             preview
                 .operations
@@ -1672,6 +1737,11 @@ fn core_apply_io(
         );
         (preview, touched)
     };
+    // What only the vectors can tell: a project_out that is not a projector.
+    for warning in &preview.warnings {
+        sink.event(ProgressEvent::Warn(warning.clone()));
+        warnings.push(warning.clone());
+    }
     // Patching tied embeddings would also deform the output projection: detach it first.
     let embed = preview
         .operations
@@ -1715,6 +1785,7 @@ fn core_apply_io(
                 op_id: op.id.clone(),
                 tensors: op.tensors.iter().map(|t| t.name.clone()).collect(),
                 vector_len: op.vector_len,
+                rank: op.rank,
             });
         }
         return Ok(with_untie(apply_outcome(&preview, &[], &warnings)));
@@ -1792,11 +1863,12 @@ fn core_apply_io(
         sink.event(ProgressEvent::Warn(w.clone()));
     }
     let meter = IoMeter::start();
-    let result = apply_patch(
+    let result = apply_patch_with(
         &patch,
         &mut ObservedBackend::new(&mut backend, sink, ops),
         guard,
         false,
+        &limits,
     );
     match result {
         Ok(report) => {
@@ -1916,7 +1988,12 @@ pub fn core_apply_routed(
                 "--requant, --no-verify et --force-no-backup ne s'appliquent qu'avec --gguf".into(),
             ))
         }
-        (false, false) => core_apply_io(request, opts.io(), deps, sink),
+        (false, false) => {
+            let limits = ApplyOptions {
+                max_rank: opts.max_rank,
+            };
+            core_apply_io(request, opts.io(), limits, deps, sink)
+        }
     }
 }
 
@@ -2028,6 +2105,7 @@ fn core_apply_gguf(
                     op_id: op.id.clone(),
                     tensors: op.tensors.iter().map(|t| t.name.clone()).collect(),
                     vector_len: op.vector_len,
+                    rank: op.rank,
                 });
             }
         }
@@ -2775,24 +2853,35 @@ pub fn core_bench_dump(
 /// `[METHOD]` line of an svd / leace extraction (mean_diff output is unchanged).
 fn method_line(ui: &Ui, diag: &Diagnostics) -> String {
     let opt = |v: Option<f64>| v.map_or("—".to_owned(), |x| format!("{x:.3}"));
+    // Nothing more without a subspace: the line of one direction is what it was.
+    let subspace = |s: &Option<extract::SubspaceDiagnostics>| match s {
+        Some(s) => format!(
+            " · sous-espace de rang {} · ‖BᵀA−I‖ {}",
+            ui::metric(ui, s.rank),
+            ui::metric(ui, format!("{:.1e}", s.gram_bta_error))
+        ),
+        None => String::new(),
+    };
     let body = match diag {
         // Registered methods never run here: the front-end only knows the built-in registry.
         Diagnostics::Json(_) => return String::new(),
         Diagnostics::Builtin(MethodDiagnostics::Svd(d)) => format!(
-            "svd · {} paires · σ₁²/Σσ² {} · cos(μ₊−μ₋) {} · split-half {}",
+            "svd · {} paires · σ₁²/Σσ² {} · cos(μ₊−μ₋) {} · split-half {}{}",
             ui::metric(ui, d.n_pairs),
             ui::metric(ui, format!("{:.3}", d.explained_variance_ratio)),
             ui::metric(ui, opt(d.cosine_with_mean_diff)),
-            ui::metric(ui, opt(d.split_half_cosine))
+            ui::metric(ui, opt(d.split_half_cosine)),
+            subspace(&d.subspace)
         ),
         Diagnostics::Builtin(MethodDiagnostics::Leace(d)) => format!(
-            "leace · rang {} · λ {} · κ {} · cov(x,z) {} → {} · hors-échantillon {}",
+            "leace · rang {} · λ {} · κ {} · cov(x,z) {} → {} · hors-échantillon {}{}",
             ui::metric(ui, d.rank),
             ui::metric(ui, d.shrinkage),
             ui::metric(ui, format!("{:.3e}", d.kappa)),
             ui::metric(ui, format!("{:.3e}", d.cross_cov_before)),
             ui::metric(ui, format!("{:.3e}", d.cross_cov_after)),
-            ui::metric(ui, opt(d.holdout_cross_cov_ratio))
+            ui::metric(ui, opt(d.holdout_cross_cov_ratio)),
+            subspace(&d.subspace)
         ),
     };
     format!("{} {body}\n", ui::badge(ui, "METHOD"))

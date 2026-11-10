@@ -41,7 +41,8 @@ mod validate;
 pub use backup::{BackupGuard, BackupSet};
 pub use error::{exit_code, PatchError, Result, ValidationIssue};
 pub use executor::{
-    apply_patch, ApplyReport, OpStats, OperationReport, PatchBackend, RollbackHandle, TensorReport,
+    apply_patch, apply_patch_with, ApplyOptions, ApplyReport, OpStats, OperationReport,
+    PatchBackend, RollbackHandle, TensorReport, PROJECTOR_TOLERANCE,
 };
 pub use schema::{
     load_patch, parse_patch, Axis, LayerRange, LayerSelection, LayersField, Operation,
@@ -49,5 +50,5 @@ pub use schema::{
 };
 pub use validate::{
     validate_patch, ValidatedOperation, ValidatedPatch, ValidationOptions, VectorTensor,
-    MAX_ABS_ALPHA, SUPPORTED_SCHEMA_VERSION, WARN_ABS_ALPHA,
+    DEFAULT_MAX_RANK, MAX_ABS_ALPHA, SUPPORTED_SCHEMA_VERSION, WARN_ABS_ALPHA,
 };

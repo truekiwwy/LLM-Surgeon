@@ -27,6 +27,9 @@ pub struct GgufApplyArgs {
     /// No OS prefetch hint nor intermediate flush (for comparison).
     #[arg(long)]
     pub no_prefetch: bool,
+    /// project_out: largest rank of a subspace (rows of the a and b tensors).
+    #[arg(long, default_value_t = crate::patch::DEFAULT_MAX_RANK)]
+    pub max_rank: usize,
 }
 
 /// The CLI defaults (the MCP server builds its options from it).
@@ -39,6 +42,7 @@ impl Default for GgufApplyArgs {
             force_no_backup: false,
             prefetch_chunk_mib: 64,
             no_prefetch: false,
+            max_rank: crate::patch::DEFAULT_MAX_RANK,
         }
     }
 }

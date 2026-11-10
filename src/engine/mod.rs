@@ -55,8 +55,14 @@ mod test_support;
 
 pub use error::{EngineError, Result};
 pub use index::{DType, ModelIndex, TensorInfo};
-pub use mmap_file::{load_direction_vector, read_index, ReadOnlyModel, TensorView, WritableModel};
-pub use project::{project_out_embedding, project_out_tensor};
+pub use mmap_file::{
+    load_direction_matrix, load_direction_vector, read_index, ReadOnlyModel, TensorView,
+    WritableModel,
+};
+pub use project::{
+    accumulate_r, project_out_embedding, project_out_subspace, project_out_subspace_embedding,
+    project_out_tensor, project_rows_inplace, SubspaceProjection, DEFAULT_MAX_RANK,
+};
 pub use selector::{
     find_attn_out_tensors, find_embed_tokens, find_mlp_tensors, is_embed_tokens, parse_layer_index,
     LayerSpec, MlpProj,

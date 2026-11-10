@@ -1028,6 +1028,8 @@ pub fn run_with(
                     vector_file: vector_file.clone(),
                     vector_tensor: Some("direction".into()),
                     vector_tensor_b: None,
+                    rank: None,
+                    allow_non_projector: false,
                     alpha: alpha as f32,
                     axis: engine_axis(req.proj).1,
                 })

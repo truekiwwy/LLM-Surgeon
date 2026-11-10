@@ -247,6 +247,17 @@ pub struct ExtractToolArgs {
         description = "Fraction hors-échantillon (par index) pour les diagnostics ; 10 prompts par classe au moins."
     )]
     pub holdout_frac: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1, max = 64),
+        description = "Rang du sous-espace. svd : nombre de vecteurs singuliers gardés (défaut 1) ; au-delà de 1, a = b = V_k (forme [rank, hidden]) sont écrits dans <out>.subspace.safetensors. leace avec labels_file : nombre maximal de directions (défaut : toutes). mean_diff reste de rang 1."
+    )]
+    pub rank: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "leace : fichier JSON dans un dossier autorisé, un label par prompt (les positifs puis les négatifs) : indice de classe entier, ou tableau de m nombres. Efface tous les labels à la fois ; a et b de <out>.leace.safetensors sont alors de forme [k, hidden], à passer tels quels à project_out."
+    )]
+    pub labels_file: Option<PathBuf>,
 }
 
 /// `method` of `surgeon_extract`: an identifier of the built-in registry. Its schema lists
@@ -673,14 +684,23 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         dtype: args.dtype,
         overwrite: args.overwrite,
     };
-    let params = MethodOptions {
+    let labels = match &args.labels_file {
+        Some(file) => {
+            let path = sandboxed(ctx, "labels_file", file, &root)?;
+            let labels = extract::load_labels(&path)
+                .map_err(|m| invalid("invalid_input", format!("labels_file : {m}")))?;
+            Some(labels)
+        }
+        None => None,
+    };
+    let options = MethodOptions {
         svd_center: args.svd_center,
         leace_shrinkage: args.leace_shrinkage.unwrap_or(DEFAULT_LEACE_SHRINKAGE),
         leace_rcond: args.leace_rcond.unwrap_or(DEFAULT_LEACE_RCOND),
         holdout_frac: args.holdout_frac.unwrap_or(0.0),
         ..MethodOptions::default()
-    }
-    .params();
+    };
+    let params = extract::params_with_subspace(&options, args.rank.map(|r| r as usize), labels);
     let method = args.method.map_or(DEFAULT_METHOD.to_owned(), |m| m.0);
     core_extract_method(&request, &method, &params, ctx.deps, &Ui::off(), ctx.sink)
 }

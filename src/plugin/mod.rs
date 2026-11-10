@@ -117,6 +117,8 @@ pub enum ParamKind {
     Number,
     /// A whole number.
     Integer,
+    /// A JSON array.
+    Array,
     /// A string.
     String,
 }
@@ -167,6 +169,10 @@ pub struct ExtractionOutput {
     pub metadata: BTreeMap<String, String>,
     /// Extra files, each with a suffix declared in [`MethodInfo::sidecars`].
     pub sidecars: Vec<Sidecar>,
+    /// 2D sidecar tensors, by `(suffix, tensor name)`: a listed tensor holds that many
+    /// directions of `hidden_size` values and is written with the shape
+    /// `[rows, hidden_size]`, one direction per row. The others stay 1D.
+    pub sidecar_rows: BTreeMap<(String, String), usize>,
     /// Shown after the engine's own warnings.
     pub warnings: Vec<String>,
 }
