@@ -55,3 +55,14 @@ windows-sys = { version = "0.61.2", features = [
 candle-transformers = { version = "0.11.1", default-features = false }
 jsonschema = { version = "0.61.0", default-features = false }
 tempfile = "3.27.0"
+
+# gemm-f16 (through candle-core) keeps its FP16 inline assembly in #[inline] helpers of
+# gemm-common, which only assemble once inlined into functions that enable `fp16`. Without
+# optimization they are not, and debug builds (`cargo test`) fail on aarch64 Linux with
+# "instruction requires: fullfp16" (sarah-quinones/gemm#31). Release builds are unaffected,
+# and no target feature is forced: binaries keep the generic aarch64 baseline.
+[profile.dev.package.gemm-common]
+opt-level = 3
+
+[profile.dev.package.gemm-f16]
+opt-level = 3
