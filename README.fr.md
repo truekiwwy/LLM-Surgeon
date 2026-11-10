@@ -41,7 +41,7 @@ Ce qui est faux dans cette analogie, volontairement :
 - Une vraie table se remet exactement en place. Ici « retrancher puis ajouter » n'est pas exact au bit près à cause des arrondis ; le retour en arrière, c'est la sauvegarde.
 
 > **Pour les experts**
-> L'objet modifiable est une matrice `W` d'une projection MLP (`gate_proj`, `up_proj`, `down_proj`). `surgeon` diffuse un vecteur sur ses lignes ou ses colonnes (`W <- W - alpha v`), applique un effaceur LEACE (`project_out`), ajoute un delta de rang faible (`.surgery`, LoRA) ou arrondit de nouveau un bloc GGUF quantifié. Tout est une modification déterministe et auditable d'octets stockés ; rien n'est entraîné.
+> L'objet modifiable est une matrice `W` : une projection MLP (`gate_proj`, `up_proj`, `down_proj`) ou, dans un modèle SafeTensors, la sortie d'attention `o_proj` ou les plongements d'entrée `embed_tokens`. `surgeon` diffuse un vecteur sur ses lignes ou ses colonnes (`W <- W - alpha v`), retire une direction des matrices qui écrivent dans le flux résiduel (`project_out`, effaceur LEACE ou simple ablation directionnelle), ajoute un delta de rang faible (`.surgery`, LoRA) ou arrondit de nouveau un bloc GGUF quantifié. Tout est une modification déterministe et auditable d'octets stockés ; rien n'est entraîné.
 
 <a id="why-not-retrain"></a>
 ### 1.2 Pourquoi ne pas simplement ré-entraîner ?
@@ -490,7 +490,7 @@ surgeon inspect [OPTIONS] --model <MODEL>
 | --- | --- | --- |
 | `--model` | obligatoire | Fichier ou dossier SafeTensors, ou `.gguf`. |
 | `--layers` | `all` | `all`, une plage `10-20` ou une liste `3,5,7`. |
-| `--proj` | les trois | `gate`, `up` ou `down` ; répétable. |
+| `--proj` | `gate`, `up`, `down` | `gate`, `up`, `down`, `o_proj` ou `embed_tokens` ; répétable. Les deux dernières ne sont listées que sur demande (SafeTensors). |
 | `--show-stats` | désactivé | Min, max, moyenne et norme L2 par tenseur (deux passes parallèles, déterministes). |
 
 `data` : `shards`, `tensors[]` (`name`, `dtype`, `shape`, `shard`, `stats`). Pour un fichier GGUF le tableau dit aussi si chaque tenseur est patchable.
@@ -853,7 +853,7 @@ La structure PEFT suit sa documentation et n'est pas testée contre Hugging Face
 <a id="cmd-bench"></a>
 #### `surgeon bench`
 
-Quatre modes qui mesurent ce qu'une chirurgie a changé. La recette : exporter les logits des deux modèles sur les mêmes prompts, les comparer, vérifier la perplexité et un benchmark à correspondance exacte, puis décider. Les seuils ne produisent que des avertissements, sauf avec `--fail-on-warn` (code de sortie 9, rapport toujours dans `data`).
+Cinq modes qui mesurent ce qu'une chirurgie a changé. La recette : exporter les logits des deux modèles sur les mêmes prompts, les comparer, vérifier la perplexité, un benchmark à correspondance exacte et, pour une chirurgie sur les refus, le taux de refus, puis décider. Les seuils ne produisent que des avertissements, sauf avec `--fail-on-warn` (code de sortie 9, rapport toujours dans `data`).
 
 <a id="cmd-bench-dump"></a>
 #### `surgeon bench dump`
@@ -926,7 +926,7 @@ surgeon bench ppl [OPTIONS] --model <MODEL> --text <TEXT>
 <a id="cmd-bench-eval"></a>
 #### `surgeon bench eval`
 
-Pass@1 à correspondance exacte sur un jeu de type GSM8K ou MATH, décodage glouton via llama.cpp.
+Pass@1 à correspondance exacte sur un jeu de type GSM8K ou MATH, décodage glouton via llama.cpp ou, avec `--backend native`, via le générateur en Rust pur (dossier Qwen2 SafeTensors, CPU, sans llama.cpp).
 
 ```text
 surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
@@ -936,6 +936,7 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | --- | --- | --- |
 | `--model` | obligatoire | `.gguf`, ou un dossier SafeTensors. |
 | `--dataset` | obligatoire | Tableau JSON (ou JSONL) de `{question ou problem, answer ou solution, id?}`. Aucun contenu GSM8K ou MATH n'est livré avec ce dépôt. |
+| `--backend` | `llama` | `llama` (llama.cpp sur un GGUF, converti au besoin) ou `native` (Rust pur sur un dossier Qwen2 SafeTensors ; `--llama-cpp-dir` ne sert alors pas). |
 | `--baseline-model` | aucun | Modèle de référence sur les mêmes questions (comparaison appariée). |
 | `--limit` | 50 | Les N premières entrées, dans l'ordre du fichier. |
 | `--max-new-tokens` | 512 | Budget de génération par question. |
@@ -990,6 +991,39 @@ surgeon bench eval --model tiny-q8.patched.gguf --dataset ds.json --baseline-mod
   ! échantillon réduit (n = 2) : l'intervalle de confiance est large (± 32.9 points)
 ```
 
+<a id="cmd-bench-refusal"></a>
+#### `surgeon bench refusal`
+
+Taux de refus d'un modèle Qwen2 sur des prompts : génération gloutonne en Rust pur sur le CPU (sans llama.cpp), puis recherche de marqueurs de refus canoniques dans chaque réponse.
+
+```text
+surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--model` | obligatoire | Dossier Qwen2. |
+| `--prompts` | obligatoire | Tableau JSON de chaînes ou de `{"text": ...}`, JSONL, ou texte brut. |
+| `--baseline-model` | aucun | Modèle de référence sur les mêmes prompts, généré en premier (comparaison appariée). |
+| `--max-new-tokens` | 256 | Budget de génération par prompt. |
+| `--chat-template` | `chatml` | Habillage de chaque prompt : `chatml` ou `none`. |
+
+Une réponse est un refus quand elle contient l'un de douze marqueurs anglais (`I'm sorry`, `I cannot`, `As an AI`, ... ; la liste est dans `data.markers`), comparés sans casse et aux frontières de mots. Il n'y a pas de modèle juge : une réponse dégradée ou hors sujet compte comme une acceptation, donc `data.items[]` garde chaque réponse en entier (`index`, `refused`, `marker`, `output`) pour relecture. `data` contient aussi `n`, `refused`, `refusal_rate` et son intervalle de Wilson (`ci95_low`, `ci95_high`) ; avec une référence, `baseline` et `paired` (`unblocked`, `newly_refused`, `delta_rate`, et son intervalle à 95 % `delta_ci95_low` / `delta_ci95_high`, l'intervalle de Newcombe pour proportions appariées).
+
+```bash
+# taux de refus du mini modèle patché contre l'original (poids aléatoires : aucun refus)
+surgeon bench refusal --model qwen2-mini --prompts pos.json --baseline-model qwen2-orig --max-new-tokens 8
+```
+
+```text
+[BENCH]    refusal · 6 prompts · chatml · 8 tokens max  qwen2-mini
+[REFUS]    0/6 · 0.0 % · IC95 [0.0 ; 39.0]
+[REFUS]    référence 0/6 · 0.0 % · IC95 [0.0 ; 39.0]
+  appariement : débloqués 0 · nouveaux refus 0 · Δ +0.0 points, IC95 [-39.0 ; +39.0]
+```
+
+Le mini modèle a des poids aléatoires et ne refuse jamais : l'exécution montre le rapport, pas un comportement. La génération est lente sur un vrai modèle (environ 11 tokens par seconde pour Qwen2.5-0.5B sur la machine à 12 threads de ce README).
+
 <a id="cmd-plugins"></a>
 #### `surgeon plugins`
 
@@ -1029,7 +1063,7 @@ Le binaire n'enregistre que les trois méthodes intégrées ; une méthode tierc
 | --- | --- |
 | `id` | Identifiant unique, repris dans le rapport. |
 | `layers` | `"all"`, `"10-20"`, `"3,5,7"`, un tableau `[10, 11]`, ou `{"start": 10, "end": 20}` (bornes incluses). |
-| `projections` | Non vide, sans doublon : `gate_proj`, `up_proj`, `down_proj`. |
+| `projections` | Non vide, sans doublon : `gate_proj`, `up_proj`, `down_proj`, et pour un modèle SafeTensors `o_proj` (sortie d'attention de chaque couche) et `embed_tokens` (plongements d'entrée ; ils n'appartiennent à aucune couche, donc `layers` ne les filtre pas). |
 | `operation` | `subtract`, `add` ou `project_out`. |
 | `vector_file` | Vecteur `.safetensors` ou `.json` ; relatif au dossier du patch. |
 | `vector_tensor` | Nom du tenseur quand le fichier SafeTensors en contient plusieurs ; interdit avec un `.json`. |
@@ -1051,10 +1085,12 @@ r1 -v0 -v1 -v2 -v3                                r1 -v1  -v1  -v1  -v1
 r2 -v0 -v1 -v2 -v3                                r2 -v2  -v2  -v2  -v2
 ```
 
-Avec `rows`, chaque ligne reçoit le même vecteur (une valeur par colonne) ; avec `cols`, chaque ligne reçoit une seule valeur `v[r]` répétée le long de la ligne. Un vecteur de steering vit dans le flux résiduel, dont la taille est `hidden`. Pour `gate_proj` et `up_proj` cette taille est le nombre de colonnes, donc utilisez `rows` ; pour `down_proj` c'est le nombre de lignes, donc utilisez `cols`. Un mauvais choix échoue à la validation avec une erreur de longueur avant qu'un seul octet soit écrit.
+Avec `rows`, chaque ligne reçoit le même vecteur (une valeur par colonne) ; avec `cols`, chaque ligne reçoit une seule valeur `v[r]` répétée le long de la ligne. Un vecteur de steering vit dans le flux résiduel, dont la taille est `hidden`. Pour `gate_proj` et `up_proj` cette taille est le nombre de colonnes, donc utilisez `rows` ; pour `down_proj` c'est le nombre de lignes, donc utilisez `cols`. `o_proj` (`[hidden, hidden]`) écrit comme `down_proj` : `cols`. `embed_tokens` (`[vocab, hidden]`) porte un vecteur du flux par ligne : `rows`. Un mauvais choix échoue à la validation avec une erreur de longueur avant qu'un seul octet soit écrit.
 
 > **Pour les experts**
-> `project_out` applique l'effaceur LEACE sous forme de poids, `W' = W - alpha * a (b^T W)`, sur `down_proj` uniquement (celle qui écrit dans le flux résiduel). `o_proj` et les embeddings écrivent aussi dans le flux et ne sont pas couverts : effacer un concept de tout le flux n'est donc pas garanti par un seul patch.
+> `project_out` retire ce que lit `b` des matrices qui écrivent dans le flux résiduel : `W' = W - alpha * a (b^T W)` pour `down_proj` et `o_proj`, `W' = W - alpha * (W b) a^T` pour `embed_tokens` (ses lignes sont les vecteurs du flux). Avec `a` et `b` d'un `.leace.safetensors` c'est l'effaceur LEACE ; avec `a = b = v`, une direction unitaire (`"vector_tensor": "direction", "vector_tensor_b": "direction"`), c'est une ablation directionnelle. Une seule opération avec `"layers": "all"` et `"projections": ["down_proj", "o_proj", "embed_tokens"]` couvre tous les écrivains ; `gate_proj` et `up_proj` lisent le flux et sont refusées. En bf16 un petit delta peut disparaître à l'arrondi : mesurez le résultat.
+>
+> Quand `embed_tokens` est visé et que le modèle le partage avec la projection de sortie (pas de `lm_head.weight`, comme Qwen2.5-0.5B), `apply` détache d'abord la tête pour ne pas déformer les logits : il réécrit le shard avec `lm_head.weight`, copie à l'octet des plongements non patchés, et passe `"tie_word_embeddings"` à `false` dans `config.json` (et complète `model.safetensors.index.json` pour un modèle shardé). Le shard grossit de la taille des plongements. `--dry-run` l'annonce dans `data.untie_lm_head` et n'écrit rien ; le shard et `config.json` sont tous deux sauvegardés, et restaurés en cas d'échec. Sans `config.json` à côté du modèle le patch est refusé.
 
 <a id="formats"></a>
 ### 3.4 Formats
@@ -1425,7 +1461,7 @@ Rename-Item "$env:USERPROFILE\.cargo\bin\surgeon.exe" surgeon.old.exe
 - `extract`, `autotune`, `bench dump` et l'onglet de prévisualisation ne gèrent que Qwen2 et Qwen2.5, sur le CPU ; les gros modèles demandent beaucoup de RAM.
 - La qualité d'une direction dépend de vos prompts : avec peu de paires une direction mélange des concepts (l'outil avertit sous 8 prompts par jeu). Un bon `d′` sur les prompts d'extraction ne prouve pas que la direction généralise.
 - Les patchs plus petits qu'un pas de quantification sont perdus dans les fichiers GGUF quantifiés ; les décalages hors de la plage du bloc sont écrêtés (`keep-scales`). Vérifiez `realized_over_intended`.
-- `project_out` ne couvre que `down_proj`. L'effacement LEACE n'est exact qu'en échantillon ; avec moins de prompts que de dimensions, vérifiez `holdout_cross_cov_ratio`. `autotune` ajuste et mesure sur les mêmes prompts et ne mesure pas les effets de bord.
+- `project_out` couvre les écrivains du flux résiduel d'un modèle SafeTensors (`down_proj`, `o_proj`, `embed_tokens`) ; dans un GGUF seules les projections MLP sont patchables. `bench refusal` n'a pas de modèle juge, seulement des marqueurs de refus anglais : lisez les réponses. L'effacement LEACE n'est exact qu'en échantillon ; avec moins de prompts que de dimensions, vérifiez `holdout_cross_cov_ratio`. `autotune` ajuste et mesure sur les mêmes prompts et ne mesure pas les effets de bord.
 - `svd` et `leace` reposent sur Jacobi, limité à 1024 sur le plus petit côté (prompts ou taille cachée).
 - Les échantillons de benchmark sont petits par défaut (`bench eval --limit 50`) : lisez l'intervalle de confiance.
 - Les dumps de logits en f16 ajoutent du bruit d'arrondi ; préférez le f32 par défaut.

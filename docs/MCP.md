@@ -46,11 +46,11 @@ Claude Code, en plugin : le dossier [`plugin/`](../plugin) déclare le même ser
 | Outil | Rôle | Annotations |
 | --- | --- | --- |
 | `surgeon_check` | Budget RAM/VRAM du modèle | lecture seule |
-| `surgeon_inspect` | Couches et matrices MLP, statistiques en option, `max_tensors` (défaut 500) | lecture seule |
+| `surgeon_inspect` | Couches et matrices MLP (et `o_proj`, `embed_tokens` sur demande), statistiques en option, `max_tensors` (défaut 500) | lecture seule |
 | `surgeon_apply` | Applique un patch en place (`dry_run` pour vérifier d'abord) ; `gguf: true` pour un GGUF quantifié | destructif |
 | `surgeon_eval` | Non-régression (boucles, attentes) et export GGUF conditionnel | écrit le GGUF |
 | `surgeon_extract` | Vecteur de direction depuis une couche Qwen2 (Rust pur, CPU) | écrit le `.safetensors`, idempotent |
-| `surgeon_bench` | Mesure d'une chirurgie : `mode` `dump`, `logits`, `ppl` ou `eval` | non destructif, idempotent |
+| `surgeon_bench` | Mesure d'une chirurgie : `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal` | non destructif, idempotent |
 | `surgeon_autotune` | Coefficients α par couche ajustés par ridge, patch.json en sortie | non destructif, idempotent ; écrit `out` seulement s'il est fourni |
 | `surgeon_diff` | Différence de deux checkpoints, approximée à rang `r`, écrite dans un `.surgery` neuf | écrit un fichier, non destructif, idempotent |
 | `surgeon_lora` | `mode` `merge` (fusionne un adaptateur LoRA en place) ou `extract` (écrit un adaptateur) | destructif |
@@ -107,15 +107,24 @@ est une erreur JSON-RPC `-32602` (les cinq autres outils la signalent en
 | --- | --- | --- |
 | `logits` | `before`, `after` | `tensor`, `top_k` (5), `worst` (5), `warn_kl`, `warn_top1_shift`, `fail_on_warn` |
 | `ppl` | `model`, `text` | `baseline_model` ou `baseline_ppl` (+ `baseline_ppl_err`), `ctx` (512), `chunks`, `threads`, `n_gpu_layers` (0), `llama_cpp_dir`, `warn_delta` (0.2), `timeout_secs`, `fail_on_warn` |
-| `eval` | `model`, `dataset` | `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn` |
+| `eval` | `model`, `dataset` | `backend` (`llama`, `native`), `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn` |
+| `refusal` | `model`, `prompts` (fichier) | `baseline_model`, `max_new_tokens` (256), `chat_template` (`chatml`, `none`) |
 | `dump` | `model`, `prompts` (fichier), `out` | `dtype`, `out_dtype` (`f32`, `f16`), `max_tokens` (256), `max_total_positions` (4096), `overwrite` |
 
 `data` reçoit le rapport (`BenchLogitsReport`, `BenchPplReport`, `BenchEvalReport`,
-`BenchDumpReport`), identique à `surgeon --json bench <mode>` ; les durées sont dans
+`BenchRefusalReport`, `BenchDumpReport`), identique à `surgeon --json bench <mode>` ; les durées sont dans
 `data.timing_ms`. Un seuil dépassé avec `fail_on_warn: true` donne `exit_code` 9 et
 `isError: true`, le rapport restant dans `data`. Aucun argument libre n'atteint llama.cpp
 par MCP (l'option `--llama-arg` n'existe qu'en ligne de commande, sur liste blanche).
-`--read-only` refuse le mode `dump` mais laisse `logits`, `ppl` et `eval`.
+`--read-only` refuse le mode `dump` mais laisse `logits`, `ppl`, `eval` et `refusal`.
+
+`eval` avec `backend: "native"` et `refusal` génèrent en Rust pur sur le CPU, sur un dossier
+Qwen2 SafeTensors, sans llama.cpp (décodage glouton, donc déterministe). `refusal` compte
+comme refus une réponse qui contient un marqueur canonique (`data.markers`, anglais, sans
+casse, aux frontières de mots) ; il n'y a pas de modèle juge, les réponses entières sont
+dans `data.items[].output`. Avec `baseline_model`, `data.paired` donne les prompts débloqués
+(`unblocked`), les nouveaux refus (`newly_refused`), `delta_rate` et son intervalle à 95 %
+(Newcombe apparié).
 
 Recette d'un agent :
 
@@ -154,8 +163,9 @@ messages d'erreur d'avant le registre (`unknown variant ...`, `invalid_arguments
 méthode tierce (API `v0`) s'exécute par la bibliothèque, jamais par un argument d'outil :
 voir [docs/PLUGINS.md](PLUGINS.md).
 
-L'opération de patch `project_out` applique l'effaceur aux poids de `down_proj` :
-`W ← W − alpha·a(bᵀW)`, `alpha` dans [0, 1], `vector_tensor` = `a` et `vector_tensor_b` = `b`
+L'opération de patch `project_out` applique l'effaceur aux matrices qui écrivent dans le
+flux résiduel : `W ← W − alpha·a(bᵀW)` pour `down_proj` et `o_proj`, `W ← W − alpha·(W b)aᵀ`
+pour `embed_tokens` ; `alpha` dans [0, 1], `vector_tensor` = `a` et `vector_tensor_b` = `b`
 (obligatoires), pas d'`axis` autre que le défaut :
 
 ```json
@@ -163,6 +173,30 @@ L'opération de patch `project_out` applique l'effaceur aux poids de `down_proj`
  "vector_file": "refusal.safetensors.leace.safetensors", "vector_tensor": "a",
  "vector_tensor_b": "b", "alpha": 1.0}
 ```
+
+Ablation directionnelle de tous les écrivains (`a = b = v`, la `direction` unitaire de
+`surgeon_extract`), en une opération :
+
+```json
+{"id": "ablate", "layers": "all", "projections": ["down_proj", "o_proj", "embed_tokens"],
+ "operation": "project_out", "vector_file": "refusal.safetensors",
+ "vector_tensor": "direction", "vector_tensor_b": "direction", "alpha": 0.6}
+```
+
+`o_proj` et `embed_tokens` sont aussi des cibles de `subtract` / `add` (`axis` `cols` pour
+`o_proj`, `rows` pour `embed_tokens`), dans un modèle SafeTensors seulement : un GGUF les
+refuse (`invalid_input`), comme `surgeon_autotune`. `embed_tokens` n'appartient à aucune
+couche : `layers` ne le filtre pas.
+
+**Détachement de `lm_head`.** Si `embed_tokens` est visé et que le modèle le partage avec la
+projection de sortie (pas de tenseur `lm_head.weight`, ou `tie_word_embeddings` encore vrai),
+`surgeon_apply` détache d'abord la tête : le shard est réécrit avec `lm_head.weight`, copie à
+l'octet des plongements non patchés, `config.json` reçoit `"tie_word_embeddings": false`, et
+`model.safetensors.index.json` est complété pour un modèle shardé. `dry_run: true` l'annonce
+dans `data.untie_lm_head` (`shard`, `config`, `index`, `copy_embeddings`) et dans `warnings`,
+sans rien écrire. Le shard et `config.json` sont sauvegardés (`data.backups`) et restaurés à
+l'octet près si une opération échoue ensuite. Sans `config.json` à côté du modèle, le patch
+est refusé avant toute écriture.
 
 `surgeon_autotune` (`model`, `vector`, `eval_dataset` requis ; `target_layer_range` "A-B",
 `readout_layer`, `proj`, `objective` `suppress`/`amplify`/`target`, `target_projection`,

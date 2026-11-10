@@ -41,7 +41,7 @@ Where this analogy is wrong, on purpose:
 - A real console can be put back exactly. Here "subtract then add" is not bit-exact because of rounding; the way back is the backup.
 
 > **For experts**
-> The editable object is a matrix `W` of an MLP projection (`gate_proj`, `up_proj`, `down_proj`). `surgeon` broadcasts a vector over its rows or columns (`W <- W - alpha v`), applies a LEACE eraser (`project_out`), adds a low-rank delta (`.surgery`, LoRA), or re-rounds a quantized GGUF block. Everything is a deterministic, auditable edit of stored bytes; nothing is trained.
+> The editable object is a matrix `W`: an MLP projection (`gate_proj`, `up_proj`, `down_proj`) or, in a SafeTensors model, the attention output `o_proj` or the input embeddings `embed_tokens`. `surgeon` broadcasts a vector over its rows or columns (`W <- W - alpha v`), removes a direction from the matrices that write into the residual stream (`project_out`, a LEACE eraser or a plain directional ablation), adds a low-rank delta (`.surgery`, LoRA), or re-rounds a quantized GGUF block. Everything is a deterministic, auditable edit of stored bytes; nothing is trained.
 
 <a id="why-not-retrain"></a>
 ### 1.2 Why not simply retrain?
@@ -490,7 +490,7 @@ surgeon inspect [OPTIONS] --model <MODEL>
 | --- | --- | --- |
 | `--model` | required | SafeTensors file or folder, or `.gguf`. |
 | `--layers` | `all` | `all`, a range `10-20`, or a list `3,5,7`. |
-| `--proj` | all three | `gate`, `up` or `down`; repeatable. |
+| `--proj` | `gate`, `up`, `down` | `gate`, `up`, `down`, `o_proj` or `embed_tokens`; repeatable. The last two are listed on request only (SafeTensors). |
 | `--show-stats` | off | Min, max, mean and L2 norm per tensor (two parallel passes, deterministic). |
 
 `data`: `shards`, `tensors[]` (`name`, `dtype`, `shape`, `shard`, `stats`). For a GGUF file the table also says whether each tensor is patchable.
@@ -853,7 +853,7 @@ The PEFT layout follows its documentation and is not tested against Hugging Face
 <a id="cmd-bench"></a>
 #### `surgeon bench`
 
-Four modes that measure what a surgery changed. The recipe: dump the logits of both models on the same prompts, compare them, check perplexity and an exact-match benchmark, then decide. Thresholds only produce warnings, except under `--fail-on-warn` (exit code 9, report still in `data`).
+Five modes that measure what a surgery changed. The recipe: dump the logits of both models on the same prompts, compare them, check perplexity, an exact-match benchmark and, for a surgery on refusals, the refusal rate, then decide. Thresholds only produce warnings, except under `--fail-on-warn` (exit code 9, report still in `data`).
 
 <a id="cmd-bench-dump"></a>
 #### `surgeon bench dump`
@@ -926,7 +926,7 @@ surgeon bench ppl [OPTIONS] --model <MODEL> --text <TEXT>
 <a id="cmd-bench-eval"></a>
 #### `surgeon bench eval`
 
-Exact-match Pass@1 on a GSM8K or MATH style dataset, greedy decoding through llama.cpp.
+Exact-match Pass@1 on a GSM8K or MATH style dataset, greedy decoding through llama.cpp or, with `--backend native`, through the pure Rust generator (Qwen2 SafeTensors folder, CPU, no llama.cpp).
 
 ```text
 surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
@@ -936,6 +936,7 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | --- | --- | --- |
 | `--model` | required | `.gguf`, or a SafeTensors folder. |
 | `--dataset` | required | JSON array (or JSONL) of `{question or problem, answer or solution, id?}`. No GSM8K or MATH content ships with this repository. |
+| `--backend` | `llama` | `llama` (llama.cpp on a GGUF, converted when needed) or `native` (pure Rust on a Qwen2 SafeTensors folder; `--llama-cpp-dir` is then unused). |
 | `--baseline-model` | none | Reference model on the same questions (paired comparison). |
 | `--limit` | 50 | First N entries, in file order. |
 | `--max-new-tokens` | 512 | Generation budget per question. |
@@ -990,6 +991,39 @@ surgeon bench eval --model tiny-q8.patched.gguf --dataset ds.json --baseline-mod
   ! échantillon réduit (n = 2) : l'intervalle de confiance est large (± 32.9 points)
 ```
 
+<a id="cmd-bench-refusal"></a>
+#### `surgeon bench refusal`
+
+Refusal rate of a Qwen2 model on prompts: greedy generation in pure Rust on the CPU (no llama.cpp), then a search for canonical refusal markers in each answer.
+
+```text
+surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
+```
+
+| Option | Default | Role |
+| --- | --- | --- |
+| `--model` | required | Qwen2 folder. |
+| `--prompts` | required | JSON array of strings or `{"text": ...}`, JSONL, or plain text. |
+| `--baseline-model` | none | Reference model on the same prompts, generated first (paired comparison). |
+| `--max-new-tokens` | 256 | Generation budget per prompt. |
+| `--chat-template` | `chatml` | Wrapping of each prompt: `chatml` or `none`. |
+
+An answer is a refusal when it contains one of twelve English markers (`I'm sorry`, `I cannot`, `As an AI`, ...; the list is in `data.markers`), compared without case and at word boundaries. There is no judge model: a degraded or off-topic answer counts as compliance, so `data.items[]` keeps every answer in full (`index`, `refused`, `marker`, `output`) for review. `data` also has `n`, `refused`, `refusal_rate` and its Wilson interval (`ci95_low`, `ci95_high`); with a baseline, `baseline` and `paired` (`unblocked`, `newly_refused`, `delta_rate`, and its 95 % interval `delta_ci95_low` / `delta_ci95_high`, Newcombe's interval for paired proportions).
+
+```bash
+# refusal rate of the patched mini model against the original (random weights: no refusal at all)
+surgeon bench refusal --model qwen2-mini --prompts pos.json --baseline-model qwen2-orig --max-new-tokens 8
+```
+
+```text
+[BENCH]    refusal · 6 prompts · chatml · 8 tokens max  qwen2-mini
+[REFUS]    0/6 · 0.0 % · IC95 [0.0 ; 39.0]
+[REFUS]    référence 0/6 · 0.0 % · IC95 [0.0 ; 39.0]
+  appariement : débloqués 0 · nouveaux refus 0 · Δ +0.0 points, IC95 [-39.0 ; +39.0]
+```
+
+The mini model has random weights and never refuses: the run shows the report, not a behaviour. Generation is slow on a real model (about 11 tokens per second for Qwen2.5-0.5B on the 12-thread machine of this README).
+
 <a id="cmd-plugins"></a>
 #### `surgeon plugins`
 
@@ -1029,7 +1063,7 @@ The binary only registers the three built-in methods; a third-party method runs 
 | --- | --- |
 | `id` | Unique identifier, repeated in the report. |
 | `layers` | `"all"`, `"10-20"`, `"3,5,7"`, an array `[10, 11]`, or `{"start": 10, "end": 20}` (inclusive). |
-| `projections` | Non-empty, no duplicates: `gate_proj`, `up_proj`, `down_proj`. |
+| `projections` | Non-empty, no duplicates: `gate_proj`, `up_proj`, `down_proj`, and for a SafeTensors model `o_proj` (attention output of each layer) and `embed_tokens` (input embeddings; they belong to no layer, so `layers` does not filter them). |
 | `operation` | `subtract`, `add` or `project_out`. |
 | `vector_file` | `.safetensors` or `.json` vector; relative to the folder of the patch. |
 | `vector_tensor` | Tensor name when the SafeTensors file holds several; forbidden with `.json`. |
@@ -1051,10 +1085,12 @@ r1 -v0 -v1 -v2 -v3                                r1 -v1  -v1  -v1  -v1
 r2 -v0 -v1 -v2 -v3                                r2 -v2  -v2  -v2  -v2
 ```
 
-With `rows`, every row receives the same vector (one value per column); with `cols`, every row gets a single value `v[r]` repeated along the row. A steering vector lives in the residual stream, whose size is `hidden`. For `gate_proj` and `up_proj` that size is the number of columns, so use `rows`; for `down_proj` it is the number of rows, so use `cols`. A wrong choice fails validation with a length mismatch before any byte is written.
+With `rows`, every row receives the same vector (one value per column); with `cols`, every row gets a single value `v[r]` repeated along the row. A steering vector lives in the residual stream, whose size is `hidden`. For `gate_proj` and `up_proj` that size is the number of columns, so use `rows`; for `down_proj` it is the number of rows, so use `cols`. `o_proj` (`[hidden, hidden]`) writes like `down_proj`: `cols`. `embed_tokens` (`[vocab, hidden]`) holds one residual vector per row: `rows`. A wrong choice fails validation with a length mismatch before any byte is written.
 
 > **For experts**
-> `project_out` applies the LEACE eraser in weight form, `W' = W - alpha * a (b^T W)`, on `down_proj` only (the one that writes into the residual stream). `o_proj` and the embeddings also write into the stream and are not covered, so erasing a concept from the whole stream is not guaranteed by one patch.
+> `project_out` removes what `b` reads from the matrices that write into the residual stream: `W' = W - alpha * a (b^T W)` for `down_proj` and `o_proj`, `W' = W - alpha * (W b) a^T` for `embed_tokens` (its rows are the residual vectors). With `a` and `b` from a `.leace.safetensors` it is the LEACE eraser; with `a = b = v`, a unit direction (`"vector_tensor": "direction", "vector_tensor_b": "direction"`), it is a directional ablation. One operation with `"layers": "all"` and `"projections": ["down_proj", "o_proj", "embed_tokens"]` covers every writer; `gate_proj` and `up_proj` read from the stream and are refused. In bf16 a small delta can round away: measure the result.
+>
+> When `embed_tokens` is a target and the model ties it to the output projection (no `lm_head.weight`, as Qwen2.5-0.5B), `apply` first detaches the head so the logits are not deformed: it rewrites the shard with `lm_head.weight`, a byte copy of the unpatched embeddings, and sets `"tie_word_embeddings": false` in `config.json` (and completes `model.safetensors.index.json` for a sharded model). The shard grows by the size of the embeddings. `--dry-run` announces it in `data.untie_lm_head` and writes nothing; the shard and `config.json` are both backed up and restored on failure. Without `config.json` next to the model the patch is refused.
 
 <a id="formats"></a>
 ### 3.4 Formats
@@ -1425,7 +1461,7 @@ Rename-Item "$env:USERPROFILE\.cargo\bin\surgeon.exe" surgeon.old.exe
 - `extract`, `autotune`, `bench dump` and the preview tab support Qwen2 and Qwen2.5 only, on the CPU; large models need a lot of RAM.
 - Direction quality depends on your prompts: with few pairs a direction mixes concepts (the tool warns below 8 prompts per set). A good `d′` on the extraction prompts does not prove the direction generalizes.
 - Patches smaller than a quantization step are lost in quantized GGUF files; shifts past the block range are clipped (`keep-scales`). Check `realized_over_intended`.
-- `project_out` covers `down_proj` only. LEACE erasure is exact in the sample only; with fewer prompts than dimensions, check `holdout_cross_cov_ratio`. `autotune` fits and measures on the same prompts and does not measure side effects.
+- `project_out` covers the residual writers of a SafeTensors model (`down_proj`, `o_proj`, `embed_tokens`); in a GGUF only the MLP projections are patchable. `bench refusal` has no judge model, only English refusal markers: read the answers. LEACE erasure is exact in the sample only; with fewer prompts than dimensions, check `holdout_cross_cov_ratio`. `autotune` fits and measures on the same prompts and does not measure side effects.
 - `svd` and `leace` rely on Jacobi, limited to 1024 on the smaller side (prompts or hidden size).
 - Benchmark samples are small by default (`bench eval --limit 50`): read the confidence interval.
 - Logits dumps in f16 add rounding noise; prefer the f32 default.

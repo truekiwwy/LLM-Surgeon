@@ -26,6 +26,68 @@ pub fn project_out_tensor(
     b: &[f32],
     alpha: f32,
 ) -> Result<ShiftStats> {
+    let Some(cols) = check(tensor_bytes, &dtype, shape, a, b, alpha, true)? else {
+        return Ok(ShiftStats::default());
+    };
+    Ok(match dtype {
+        DType::BF16 => project(tensor_bytes, cols, a, b, alpha, bf16_load, bf16_store),
+        DType::F16 => project(tensor_bytes, cols, a, b, alpha, f16_load, f16_store),
+        DType::F32 => project(
+            tensor_bytes,
+            cols,
+            a,
+            b,
+            alpha,
+            f32::from_le_bytes,
+            f32::to_le_bytes,
+        ),
+        DType::Other(name) => return Err(EngineError::UnsupportedDtype(name)),
+    })
+}
+
+/// `W' = W − α · (W b) aᵀ` for a matrix whose rows live in the residual stream (the input
+/// embeddings, `[vocab, hidden]`): every row `x` becomes `x − α a (bᵀ x)`. `a` and `b` have
+/// the length of the columns. Rows are independent (`bᵀ x` in f64, in column order), so the
+/// result is bit-identical with any number of threads; same checks and stores as
+/// [`project_out_tensor`].
+pub fn project_out_embedding(
+    tensor_bytes: &mut [u8],
+    dtype: DType,
+    shape: &[usize],
+    a: &[f32],
+    b: &[f32],
+    alpha: f32,
+) -> Result<ShiftStats> {
+    let Some(cols) = check(tensor_bytes, &dtype, shape, a, b, alpha, false)? else {
+        return Ok(ShiftStats::default());
+    };
+    Ok(match dtype {
+        DType::BF16 => project_rows(tensor_bytes, cols, a, b, alpha, bf16_load, bf16_store),
+        DType::F16 => project_rows(tensor_bytes, cols, a, b, alpha, f16_load, f16_store),
+        DType::F32 => project_rows(
+            tensor_bytes,
+            cols,
+            a,
+            b,
+            alpha,
+            f32::from_le_bytes,
+            f32::to_le_bytes,
+        ),
+        DType::Other(name) => return Err(EngineError::UnsupportedDtype(name)),
+    })
+}
+
+/// Every check of both orientations, before the first write. `a` and `b` index the rows
+/// when `along_rows`, the columns otherwise. `Ok(None)`: nothing to do; else the columns.
+fn check(
+    tensor_bytes: &[u8],
+    dtype: &DType,
+    shape: &[usize],
+    a: &[f32],
+    b: &[f32],
+    alpha: f32,
+    along_rows: bool,
+) -> Result<Option<usize>> {
     let elem = dtype
         .size_of()
         .ok_or_else(|| EngineError::UnsupportedDtype(dtype.to_string()))?;
@@ -46,10 +108,11 @@ pub fn project_out_tensor(
             got: tensor_bytes.len(),
         });
     }
+    let len = if along_rows { rows } else { cols };
     for v in [a, b] {
-        if v.len() != rows {
+        if v.len() != len {
             return Err(EngineError::DirectionLengthMismatch {
-                expected: rows,
+                expected: len,
                 got: v.len(),
             });
         }
@@ -58,27 +121,39 @@ pub fn project_out_tensor(
         return Err(EngineError::InvalidAlpha(alpha));
     }
     if let Some(index) = a.iter().chain(b).position(|v| !v.is_finite()) {
-        return Err(EngineError::NonFiniteDirection {
-            index: index % rows,
-        });
+        return Err(EngineError::NonFiniteDirection { index: index % len });
     }
-    if alpha == 0.0 || tensor_bytes.is_empty() {
-        return Ok(ShiftStats::default());
-    }
-    Ok(match dtype {
-        DType::BF16 => project(tensor_bytes, cols, a, b, alpha, bf16_load, bf16_store),
-        DType::F16 => project(tensor_bytes, cols, a, b, alpha, f16_load, f16_store),
-        DType::F32 => project(
-            tensor_bytes,
-            cols,
-            a,
-            b,
-            alpha,
-            f32::from_le_bytes,
-            f32::to_le_bytes,
-        ),
-        DType::Other(name) => return Err(EngineError::UnsupportedDtype(name)),
-    })
+    Ok((alpha != 0.0 && !tensor_bytes.is_empty()).then_some(cols))
+}
+
+fn project_rows<const N: usize, L, S>(
+    bytes: &mut [u8],
+    cols: usize,
+    a: &[f32],
+    b: &[f32],
+    alpha: f32,
+    load: L,
+    store: S,
+) -> ShiftStats
+where
+    L: Fn([u8; N]) -> f32 + Sync,
+    S: Fn(f32) -> [u8; N] + Sync,
+{
+    let row_bytes = cols * N;
+    bytes
+        .par_chunks_mut(row_bytes)
+        .with_min_len((64 * 1024 / row_bytes).max(1))
+        .map(|row| {
+            let (cells, _) = row.as_chunks_mut::<N>();
+            let read: f64 = cells
+                .iter()
+                .zip(b)
+                .map(|(cell, bj)| f64::from(*bj) * f64::from(load(*cell)))
+                .sum();
+            let coef = alpha * read as f32;
+            shift_cells(cells, a.iter().map(|aj| -(coef * aj)), &load, &store)
+        })
+        .reduce(ShiftStats::default, merge)
 }
 
 fn project<const N: usize, L, S>(
@@ -273,6 +348,62 @@ mod tests {
             project_out_tensor(&mut untouched, DType::F32, &[rows, cols], &a, &b, 0.0).unwrap();
         assert_eq!(untouched, encode(&w, &DType::F32));
         assert_eq!(stats, ShiftStats::default());
+    }
+
+    #[test]
+    fn embedding_side_matches_a_plain_reference_and_erases_the_read_direction() {
+        let (rows, cols) = (70, 6);
+        let w = weights(rows, cols);
+        let a: Vec<f32> = (0..cols).map(|j| ((j % 5) as f32 - 2.0) / 4.0).collect();
+        let b: Vec<f32> = (0..cols).map(|j| ((j % 3) as f32 - 1.0) / 2.0).collect();
+        for dtype in [DType::F32, DType::BF16, DType::F16] {
+            let stored = decode(&encode(&w, &dtype), &dtype);
+            let mut expected = Vec::new();
+            for row in stored.chunks_exact(cols) {
+                let read = row
+                    .iter()
+                    .zip(&b)
+                    .map(|(x, bj)| f64::from(*bj) * f64::from(*x))
+                    .sum::<f64>() as f32;
+                expected.extend(row.iter().zip(&a).map(|(x, aj)| x + -(0.5 * read * aj)));
+            }
+            let mut bytes = encode(&w, &dtype);
+            let stats =
+                project_out_embedding(&mut bytes, dtype.clone(), &[rows, cols], &a, &b, 0.5)
+                    .unwrap();
+            assert_eq!(bytes, encode(&expected, &dtype), "{dtype}");
+            assert!(stats.elements_modified > 0 && stats.nan_or_inf_produced == 0);
+        }
+
+        // a = b = unit vector: every row loses its component along it, the rest is kept.
+        let mut v = vec![0.0f32; cols];
+        (v[1], v[4]) = (0.6, 0.8);
+        let mut bytes = encode(&w, &DType::F32);
+        project_out_embedding(&mut bytes, DType::F32, &[rows, cols], &v, &v, 1.0).unwrap();
+        for (new, old) in decode(&bytes, &DType::F32)
+            .chunks_exact(cols)
+            .zip(w.chunks_exact(cols))
+        {
+            let read: f32 = new.iter().zip(&v).map(|(x, vj)| x * vj).sum();
+            assert!(read.abs() < 1e-5, "W'v = {read}");
+            assert_eq!((new[0], new[5]), (old[0], old[5]), "orthogonal columns");
+        }
+
+        // The vectors index the columns here, the rows in `project_out_tensor`.
+        let mut bytes = encode(&w, &DType::F32);
+        let rows_len = vec![0.5f32; rows];
+        assert!(matches!(
+            project_out_embedding(
+                &mut bytes,
+                DType::F32,
+                &[rows, cols],
+                &rows_len,
+                &rows_len,
+                1.0
+            ),
+            Err(EngineError::DirectionLengthMismatch { expected: 6, .. })
+        ));
+        assert_eq!(bytes, encode(&w, &DType::F32));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use memmap2::{Mmap, MmapMut, MmapOptions};
 
 use super::error::{EngineError, Result};
 use super::index::{parse_index, ModelIndex, TensorInfo};
-use super::project::project_out_tensor;
+use super::project::{project_out_embedding, project_out_tensor};
 use super::shift::{decode_f32, BroadcastAxis, ShiftOp, ShiftPlan, ShiftStats};
 use crate::kernel::{ChunkFailure, ChunkedPatcher, IoConfig, IoCounters, KernelConfig, OsHints};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -208,6 +208,19 @@ impl WritableModel {
         let info = self.index.get(name)?;
         let bytes = &mut self.mmap[info.byte_start..info.byte_end];
         project_out_tensor(bytes, info.dtype.clone(), &info.shape, a, b, alpha)
+    }
+
+    /// `W ← W − α (W b) aᵀ`, see [`project_out_embedding`].
+    pub fn project_out_embedding(
+        &mut self,
+        name: &str,
+        a: &[f32],
+        b: &[f32],
+        alpha: f32,
+    ) -> Result<ShiftStats> {
+        let info = self.index.get(name)?;
+        let bytes = &mut self.mmap[info.byte_start..info.byte_end];
+        project_out_embedding(bytes, info.dtype.clone(), &info.shape, a, b, alpha)
     }
 
     pub fn flush(&self) -> Result<()> {

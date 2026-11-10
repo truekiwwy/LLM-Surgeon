@@ -228,10 +228,12 @@ pub enum BenchCommand {
     Logits(BenchLogitsArgs),
     /// Perplexity of a GGUF (or SafeTensors, converted) with llama-perplexity.
     Ppl(BenchPplArgs),
-    /// Exact-match Pass@1 on a GSM8K / MATH style dataset (greedy, llama.cpp).
+    /// Exact-match Pass@1 on a GSM8K / MATH style dataset (greedy; llama.cpp or native).
     Eval(BenchEvalArgs),
     /// Write the logits of a Qwen2 model on prompts (pure Rust, CPU).
     Dump(BenchDumpArgs),
+    /// Refusal rate of a Qwen2 model on prompts (greedy, pure Rust, CPU).
+    Refusal(BenchRefusalArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -313,6 +315,9 @@ pub struct BenchEvalArgs {
     /// JSON array (or JSONL) of {question|problem, answer|solution, id?}.
     #[arg(long)]
     pub dataset: PathBuf,
+    /// Generator: llama.cpp on a GGUF, or pure Rust on a Qwen2 SafeTensors directory.
+    #[arg(long, value_enum, default_value_t = crate::bench::score::Backend::Llama)]
+    pub backend: crate::bench::score::Backend,
     /// Reference model on the same questions (paired comparison).
     #[arg(long)]
     pub baseline_model: Option<PathBuf>,
@@ -366,6 +371,24 @@ pub struct BenchDumpArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct BenchRefusalArgs {
+    /// Qwen2 directory (config.json, tokenizer.json, *.safetensors).
+    #[arg(long)]
+    pub model: PathBuf,
+    /// JSON array of strings or of {"text": ...}, JSONL, or plain text.
+    #[arg(long)]
+    pub prompts: PathBuf,
+    /// Reference model on the same prompts (paired comparison, Newcombe interval).
+    #[arg(long)]
+    pub baseline_model: Option<PathBuf>,
+    #[arg(long, default_value_t = crate::bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS)]
+    pub max_new_tokens: u32,
+    /// Wrapping of each prompt before generation.
+    #[arg(long, value_enum, default_value_t = ChatTemplate::Chatml)]
+    pub chat_template: ChatTemplate,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct CheckArgs {
     #[arg(long)]
     pub model: PathBuf,
@@ -381,7 +404,7 @@ pub struct InspectArgs {
     /// "all", "10-20" or "3,5,7".
     #[arg(long, default_value = "all")]
     pub layers: LayerSelection,
-    /// gate, up or down; repeatable. None = all three.
+    /// gate, up, down, o_proj or embed_tokens; repeatable. None = gate, up and down.
     #[arg(long = "proj")]
     pub projections: Vec<Projection>,
     #[arg(long)]

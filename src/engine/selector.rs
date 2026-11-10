@@ -89,6 +89,33 @@ pub fn find_mlp_tensors<'a>(
     found.into_iter().map(|(_, _, t)| t).collect()
 }
 
+/// `[prefix.]layers.{i}.self_attn.o_proj.weight`: the attention matrix that writes into the
+/// residual stream, sorted by (layer, name).
+pub fn find_attn_out_tensors<'a>(index: &'a ModelIndex, layers: &LayerSpec) -> Vec<&'a TensorInfo> {
+    let mut found: Vec<(usize, &TensorInfo)> = index
+        .tensors
+        .iter()
+        .filter_map(|t| {
+            let layer = t
+                .name
+                .ends_with(".self_attn.o_proj.weight")
+                .then(|| parse_layer_index(&t.name))??;
+            layers.contains(layer).then_some((layer, t))
+        })
+        .collect();
+    found.sort_by(|a, b| (a.0, &a.1.name).cmp(&(b.0, &b.1.name)));
+    found.into_iter().map(|(_, t)| t).collect()
+}
+
+/// `[prefix.]embed_tokens.weight`: the input embeddings, `[vocab, hidden]`.
+pub fn is_embed_tokens(name: &str) -> bool {
+    name == "embed_tokens.weight" || name.ends_with(".embed_tokens.weight")
+}
+
+pub fn find_embed_tokens(index: &ModelIndex) -> Option<&TensorInfo> {
+    index.tensors.iter().find(|t| is_embed_tokens(&t.name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +132,7 @@ mod tests {
                 names.push(format!("model.layers.{layer}.mlp.{proj}.weight"));
             }
             names.push(format!("model.layers.{layer}.self_attn.q_proj.weight"));
+            names.push(format!("model.layers.{layer}.self_attn.o_proj.weight"));
             names.push(format!(
                 "model.layers.{layer}.mlp.experts.0.gate_proj.weight"
             ));
@@ -170,6 +198,27 @@ mod tests {
         );
         assert!(find_mlp_tensors(&idx, &LayerSpec::All, &[]).is_empty());
         assert!(find_mlp_tensors(&idx, &LayerSpec::List(vec![]), &all).is_empty());
+    }
+
+    #[test]
+    fn residual_writers_outside_the_mlp() {
+        let idx = index();
+        assert_eq!(
+            names(find_attn_out_tensors(&idx, &LayerSpec::List(vec![3, 1]))),
+            [
+                "model.layers.1.self_attn.o_proj.weight",
+                "model.layers.3.self_attn.o_proj.weight"
+            ]
+        );
+        assert_eq!(find_attn_out_tensors(&idx, &LayerSpec::All).len(), 4);
+        assert_eq!(
+            find_embed_tokens(&idx).map(|t| t.name.as_str()),
+            Some("model.embed_tokens.weight")
+        );
+        assert!(is_embed_tokens("embed_tokens.weight"));
+        assert!(!is_embed_tokens("model.embed_tokens.bias"));
+        assert!(!is_embed_tokens("lm_head.weight"));
+        assert!(!is_embed_tokens("model.not_embed_tokens.weight"));
     }
 
     #[test]

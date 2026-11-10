@@ -563,19 +563,25 @@ fn from_meta<T: serde::de::DeserializeOwned>(
 
 /// The engine's axis for a residual-stream vector (see `engine/mod.rs`): `down_proj`
 /// `[hidden, intermediate]` takes v along its rows (`cols` axis), gate/up `[intermediate,
-/// hidden]` along their columns (`rows` axis).
+/// hidden]` along their columns (`rows` axis). `o_proj` writes like `down_proj`, the
+/// embeddings `[vocab, hidden]` hold v along their columns.
 pub fn engine_axis(proj: Projection) -> (BroadcastAxis, Axis) {
     match proj {
-        Projection::Down => (BroadcastAxis::Cols, Axis::Cols),
-        Projection::Gate | Projection::Up => (BroadcastAxis::Rows, Axis::Rows),
+        Projection::Down | Projection::AttnOut => (BroadcastAxis::Cols, Axis::Cols),
+        Projection::Gate | Projection::Up | Projection::EmbedTokens => {
+            (BroadcastAxis::Rows, Axis::Rows)
+        }
     }
 }
 
+/// Only reached with an MLP projection: `validate_request` refuses the others.
 fn proj_name(proj: Projection) -> &'static str {
     match proj {
         Projection::Gate => "gate_proj",
         Projection::Up => "up_proj",
         Projection::Down => "down_proj",
+        Projection::AttnOut => "o_proj",
+        Projection::EmbedTokens => "embed_tokens",
     }
 }
 
@@ -668,6 +674,9 @@ fn rmse(a: &[f64], b: &[f64]) -> f64 {
 
 fn validate_request(req: &AutotuneRequest) -> Result<()> {
     let bad = |m: &str| Err(AutotuneError::InvalidArgument(m.to_owned()));
+    if !req.proj.is_mlp() {
+        return bad("--proj : autotune ne mesure que gate_proj, up_proj et down_proj");
+    }
     if !(req.probe_alpha.is_finite() && req.probe_alpha > 0.0) {
         return bad("--probe-alpha doit être > 0");
     }

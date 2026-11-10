@@ -234,10 +234,11 @@ pub fn validate_patch(
     })
 }
 
-/// project_out: strength in [0, 1], down_proj only (it writes into the residual stream,
-/// the space of a and b), both tensors named in a .safetensors, and no axis other than
-/// the default `cols` (serde cannot tell an explicit `"cols"` from an absent axis; `cols`
-/// is also the matching convention: a and b have the length of the rows).
+/// project_out: strength in [0, 1], only the matrices that write into the residual stream,
+/// the space of a and b (down_proj, o_proj, embed_tokens; gate_proj and up_proj read from
+/// it), both tensors named in a .safetensors, and no axis other than the default `cols`
+/// (serde cannot tell an explicit `"cols"` from an absent axis; the orientation follows
+/// the matrix: a and b index the rows of down_proj / o_proj, the columns of embed_tokens).
 fn check_project_out(op: &Operation, issue: &mut dyn FnMut(&str, String)) {
     if !(op.alpha.is_finite() && (0.0..=1.0).contains(&op.alpha)) {
         issue(
@@ -248,16 +249,20 @@ fn check_project_out(op: &Operation, issue: &mut dyn FnMut(&str, String)) {
             ),
         );
     }
-    if op.projections != [Projection::Down] {
+    if op
+        .projections
+        .iter()
+        .any(|p| matches!(p, Projection::Gate | Projection::Up))
+    {
         issue(
             "projections",
-            "project_out ne s'applique qu'à [\"down_proj\"] : seule cette matrice écrit dans le flux résiduel où vivent a et b (o_proj et les embeddings ne sont pas couverts)".into(),
+            "project_out ne s'applique qu'aux matrices qui écrivent dans le flux résiduel où vivent a et b : down_proj, o_proj et embed_tokens (gate_proj et up_proj le lisent)".into(),
         );
     }
     if op.axis != Axis::Cols {
         issue(
             "axis",
-            "axis n'a pas de sens pour project_out (a et b ont la taille des lignes) : retirer le champ".into(),
+            "axis n'a pas de sens pour project_out (l'orientation suit la matrice) : retirer le champ".into(),
         );
     }
     if op.vector_tensor.is_none() || op.vector_tensor_b.is_none() {
@@ -368,6 +373,35 @@ mod tests {
                 "operations[4].projections",
             ]
         );
+    }
+
+    #[test]
+    fn project_out_takes_every_residual_writer_and_refuses_the_readers() {
+        let project = |projections: &str| {
+            patch(&[op("p", r#","vector_tensor":"a","vector_tensor_b":"b""#)
+                .replace(r#"["gate_proj"]"#, projections)
+                .replace("subtract", "project_out")
+                .replace("v.json", "v.safetensors")])
+        };
+        let writers = project(r#"["down_proj","o_proj","embed_tokens"]"#);
+        let v = validate_patch(&writers, Path::new("."), &no_files()).unwrap();
+        assert_eq!(
+            v.operations[0].projections,
+            [
+                Projection::Down,
+                Projection::AttnOut,
+                Projection::EmbedTokens
+            ]
+        );
+        for readers in [r#"["gate_proj"]"#, r#"["o_proj","up_proj"]"#] {
+            let got = issues(validate_patch(
+                &project(readers),
+                Path::new("."),
+                &no_files(),
+            ));
+            assert_eq!(got.len(), 1, "{got:?}");
+            assert_eq!(got[0].0, "operations[0].projections");
+        }
     }
 
     #[test]

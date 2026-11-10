@@ -21,6 +21,8 @@
 //! BackupGuard::rollback -> sha256_file(backup), restore (rename | in-place), sha256_file
 //! BackupGuard::drop     -> rollback (state Created only)
 //! BackupSet::{create_many, rollback_all, commit_all} -> BackupGuard::*
+//! untie::plan -> safetensors headers, config.json            (read only)
+//! UntiePlan::execute -> append_copy (lm_head.weight), write_json (config, index)
 //! ```
 //!
 //! Guarantee: whatever happens in `apply_patch`, the original is either intact, restored
@@ -33,6 +35,7 @@ mod error;
 mod executor;
 pub mod gguf;
 mod schema;
+pub mod untie;
 mod validate;
 
 pub use backup::{BackupGuard, BackupSet};

@@ -2375,6 +2375,29 @@
             {
               "action": "Set",
               "aliases": null,
+              "default_values": [
+                "llama"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "backend",
+              "long": "backend",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "llama",
+                "native"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BACKEND"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
               "default_values": [],
               "env": null,
               "global": false,
@@ -2836,6 +2859,168 @@
         },
         {
           "aliases": [],
+          "args": [
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "model",
+              "long": "model",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "MODEL"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "prompts",
+              "long": "prompts",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "PROMPTS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "baseline_model",
+              "long": "baseline-model",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BASELINE_MODEL"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "256"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "max_new_tokens",
+              "long": "max-new-tokens",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MAX_NEW_TOKENS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "chatml"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "chat_template",
+              "long": "chat-template",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "none",
+                "chatml"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "CHAT_TEMPLATE"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "Count",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "verbose",
+              "long": "verbose",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "v",
+              "value_names": [
+                "VERBOSE"
+              ]
+            },
+            {
+              "action": "Help",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "h",
+              "value_names": null
+            }
+          ],
+          "hidden": false,
+          "name": "refusal",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
           "args": [],
           "hidden": false,
           "name": "help",
@@ -2870,6 +3055,14 @@
               "args": [],
               "hidden": false,
               "name": "dump",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "refusal",
               "subcommand_required": false,
               "subcommands": []
             },
@@ -4245,6 +4438,162 @@
     },
     {
       "aliases": [],
+      "args": [
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "plugins",
+      "subcommand_required": true,
+      "subcommands": [
+        {
+          "aliases": [],
+          "args": [
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "Count",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "verbose",
+              "long": "verbose",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "v",
+              "value_names": [
+                "VERBOSE"
+              ]
+            },
+            {
+              "action": "Help",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "h",
+              "value_names": null
+            }
+          ],
+          "hidden": false,
+          "name": "list",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "help",
+          "subcommand_required": false,
+          "subcommands": [
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "list",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "help",
+              "subcommand_required": false,
+              "subcommands": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "aliases": [],
       "args": [],
       "hidden": false,
       "name": "help",
@@ -4352,6 +4701,14 @@
               "name": "dump",
               "subcommand_required": false,
               "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "refusal",
+              "subcommand_required": false,
+              "subcommands": []
             }
           ]
         },
@@ -4391,6 +4748,23 @@
               "args": [],
               "hidden": false,
               "name": "extract",
+              "subcommand_required": false,
+              "subcommands": []
+            }
+          ]
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "plugins",
+          "subcommand_required": false,
+          "subcommands": [
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "list",
               "subcommand_required": false,
               "subcommands": []
             }

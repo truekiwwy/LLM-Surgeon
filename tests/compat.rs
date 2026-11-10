@@ -1,6 +1,7 @@
 //! Compatibility contract: the CLI, the MCP tools and the `--json` outputs of the reference
-//! commands must stay what they were when `tests/fixtures/compat/` was generated (before the
-//! extension API v0). Only human texts may change: clap help, MCP `description` / `title`.
+//! commands must stay what they were when `tests/fixtures/compat/` was generated (with the
+//! steering extensions; every earlier output hash was unchanged by that rewrite except the
+//! two schemas). Only human texts may change: clap help, MCP `description` / `title`.
 //!
 //! - `cli_surface.json`: every subcommand and option of `Cli::command()` (names, short and
 //!   long flags, actions, value counts, defaults, possible values, required, global, env).
@@ -33,11 +34,11 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use weight_surgeon::cli::Cli;
 
-/// Subcommands added after the references, each one purely additive.
-const ADDITIVE_SUBCOMMANDS: [&str; 1] = [
-    // extension API v0: lists the extension points and their implementations.
-    "plugins",
-];
+/// Subcommands added after the references, each one purely additive, with the reason.
+/// Empty since the references were rewritten for the steering extensions (`o_proj` and
+/// `embed_tokens` patch targets, `bench refusal`, `bench eval --backend`): they now
+/// include `plugins`, the former entry.
+const ADDITIVE_SUBCOMMANDS: [&str; 0] = [];
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -90,7 +90,9 @@
             "enum": [
               "gate_proj",
               "up_proj",
-              "down_proj"
+              "down_proj",
+              "o_proj",
+              "embed_tokens"
             ],
             "type": "string"
           },
@@ -231,7 +233,9 @@
                       "enum": [
                         "gate_proj",
                         "up_proj",
-                        "down_proj"
+                        "down_proj",
+                        "o_proj",
+                        "embed_tokens"
                       ],
                       "type": "string"
                     },
@@ -629,6 +633,30 @@
             "null"
           ]
         },
+        "backend": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "llama"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "native"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "baseline_model": {
           "default": null,
           "type": [
@@ -658,6 +686,30 @@
             "string",
             "null"
           ]
+        },
+        "chat_template": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "none"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "chatml"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "chunks": {
           "default": null,
@@ -820,6 +872,12 @@
             {
               "enum": [
                 "dump"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "refusal"
               ],
               "type": "string"
             }
@@ -1140,7 +1198,9 @@
           "enum": [
             "gate_proj",
             "up_proj",
-            "down_proj"
+            "down_proj",
+            "o_proj",
+            "embed_tokens"
           ],
           "type": [
             "string",

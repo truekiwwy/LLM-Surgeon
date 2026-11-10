@@ -66,10 +66,12 @@ use serde_json::{json, Value};
 
 use crate::bench::dump::DumpRequest;
 use crate::bench::logits_metrics::LogitsRequest;
+use crate::bench::native::NativeGenerator;
 use crate::bench::ppl_runner::{PplBaseline, PplRequest};
 use crate::bench::prompt::Template;
+use crate::bench::refusal::RefusalRequest;
 use crate::bench::report::{self as bench_report, BenchRun};
-use crate::bench::score::EvalRequest;
+use crate::bench::score::{Backend, EvalRequest};
 use crate::bench::{self, BenchError};
 use crate::cli::{
     ApplyArgs, AutotuneArgs, BenchArgs, BenchCommand, CheckArgs, Cli, Commands, EvalArgs,
@@ -97,9 +99,9 @@ use crate::kernel::{self, IoConfig, IoMeter, KernelChoice, Level};
 use crate::patch::autotune::{self, AutotuneError, AutotuneEvent, AutotuneRequest, AutotuneRun};
 use crate::patch::gguf::{self, GgufApplyArgs, GgufApplyError, Requant};
 use crate::patch::{
-    self, apply_patch, load_patch, validate_patch, ApplyReport, Axis, BackupSet, LayerSelection,
-    OpStats, OperationKind, PatchBackend, PatchError, PatchFile, Projection, RollbackHandle,
-    ValidationIssue, ValidationOptions,
+    self, apply_patch, load_patch, untie, validate_patch, ApplyReport, Axis, BackupSet,
+    LayerSelection, OpStats, OperationKind, PatchBackend, PatchError, PatchFile, Projection,
+    RollbackHandle, ValidationIssue, ValidationOptions,
 };
 use crate::plugin::{unknown_method_message, Diagnostics, Registry, DEFAULT_METHOD};
 use crate::ui::{self, ColorMode, Ui, UiConfig};
@@ -342,6 +344,7 @@ fn command_name(command: &Commands) -> &'static str {
             BenchCommand::Ppl(_) => "bench ppl",
             BenchCommand::Eval(_) => "bench eval",
             BenchCommand::Dump(_) => "bench dump",
+            BenchCommand::Refusal(_) => "bench refusal",
         },
     }
 }
@@ -665,21 +668,16 @@ pub fn core_inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
     }
     let shards = hardware::compute_model_size(&args.model)?.shard_files;
     let layers = LayerSpec::from(&args.layers);
-    let projs: Vec<MlpProj> = match args.projections.is_empty() {
-        true => vec![MlpProj::Gate, MlpProj::Up, MlpProj::Down],
-        false => args
-            .projections
-            .iter()
-            .copied()
-            .map(MlpProj::from)
-            .collect(),
+    let projs = match args.projections.is_empty() {
+        true => vec![Projection::Gate, Projection::Up, Projection::Down],
+        false => args.projections.clone(),
     };
     let sharded = shards.len() > 1;
     let mut tensors = Vec::new();
     let mut rows = Vec::new();
     for shard in &shards {
         let model = ReadOnlyModel::open(shard)?;
-        for info in engine::find_mlp_tensors(model.index(), &layers, &projs) {
+        for info in find_targets(model.index(), &layers, &projs) {
             if deps.interrupted.load(Ordering::SeqCst) {
                 return Err(Outcome::fail(exit::GENERAL, INTERRUPTED).with_kind("cancelled"));
             }
@@ -756,7 +754,7 @@ fn layer_label(name: &str) -> String {
 
 fn projection_label(name: &str) -> &str {
     name.split('.')
-        .find(|part| part.ends_with("_proj"))
+        .find(|part| part.ends_with("_proj") || *part == "embed_tokens")
         .unwrap_or("—")
 }
 
@@ -803,14 +801,33 @@ impl From<&LayerSelection> for LayerSpec {
     }
 }
 
-impl From<Projection> for MlpProj {
-    fn from(p: Projection) -> Self {
-        match p {
-            Projection::Gate => MlpProj::Gate,
-            Projection::Up => MlpProj::Up,
-            Projection::Down => MlpProj::Down,
-        }
+/// Tensors of one shard matching a selection: the embeddings first (they belong to no
+/// layer, so `layers` does not filter them), then layer by layer the MLP projections
+/// (gate, up, down) and `o_proj`.
+fn find_targets<'a>(
+    index: &'a engine::ModelIndex,
+    layers: &LayerSpec,
+    projections: &[Projection],
+) -> Vec<&'a engine::TensorInfo> {
+    let mlp: Vec<MlpProj> = projections
+        .iter()
+        .filter_map(|p| match p {
+            Projection::Gate => Some(MlpProj::Gate),
+            Projection::Up => Some(MlpProj::Up),
+            Projection::Down => Some(MlpProj::Down),
+            Projection::AttnOut | Projection::EmbedTokens => None,
+        })
+        .collect();
+    let mut found = engine::find_mlp_tensors(index, layers, &mlp);
+    if projections.contains(&Projection::AttnOut) {
+        found.extend(engine::find_attn_out_tensors(index, layers));
     }
+    if projections.contains(&Projection::EmbedTokens) {
+        found.extend(engine::find_embed_tokens(index));
+    }
+    // Stable: inside a layer the MLP stays before o_proj; `None` (embeddings) sorts first.
+    found.sort_by_key(|t| engine::parse_layer_index(&t.name));
+    found
 }
 
 /// `project_out` is not a shift: it goes through `PatchBackend::project_out_tensor`.
@@ -903,12 +920,11 @@ impl PatchBackend for EngineBackend {
         projections: &[Projection],
     ) -> patch::Result<Vec<String>> {
         let spec = LayerSpec::from(layers);
-        let projs: Vec<MlpProj> = projections.iter().copied().map(MlpProj::from).collect();
         let mut names: Vec<String> = self
             .shards
             .iter()
             .flat_map(|(_, model)| {
-                engine::find_mlp_tensors(model.index(), &spec, &projs)
+                find_targets(model.index(), &spec, projections)
                     .into_iter()
                     .map(|t| t.name.clone())
                     .collect::<Vec<_>>()
@@ -964,11 +980,15 @@ impl PatchBackend for EngineBackend {
         let shard = self
             .shard_of(tensor_name)
             .ok_or_else(|| backend_error(EngineError::TensorNotFound(tensor_name.into())))?;
-        self.shards[shard]
-            .1
-            .project_out_tensor(tensor_name, a, b, alpha)
-            .map(OpStats::from)
-            .map_err(backend_error)
+        // The embeddings hold the residual stream in their rows, the other writers in
+        // their columns: same eraser, the other side of the matrix.
+        let model = &mut self.shards[shard].1;
+        match engine::is_embed_tokens(tensor_name) {
+            true => model.project_out_embedding(tensor_name, a, b, alpha),
+            false => model.project_out_tensor(tensor_name, a, b, alpha),
+        }
+        .map(OpStats::from)
+        .map_err(backend_error)
     }
 
     fn flush(&mut self) -> patch::Result<()> {
@@ -1067,6 +1087,11 @@ pub enum ProgressEvent {
     },
     /// `bench eval`: questions answered (per model when a baseline runs first).
     BenchEvalQuestion {
+        done: usize,
+        total: usize,
+    },
+    /// `bench refusal`: prompts answered (per model when a baseline runs first).
+    BenchRefusalPrompt {
         done: usize,
         total: usize,
     },
@@ -1371,6 +1396,9 @@ impl ProgressSink for CliSink<'_, '_> {
             }
             ProgressEvent::BenchPplChunk { done, total } => Some(("ppl", *done, *total)),
             ProgressEvent::BenchEvalQuestion { done, total } => Some(("eval", *done, Some(*total))),
+            ProgressEvent::BenchRefusalPrompt { done, total } => {
+                Some(("refusal", *done, Some(*total)))
+            }
             ProgressEvent::AutotuneForward { done, total } => {
                 Some(("autotune", *done, Some(*total)))
             }
@@ -1504,6 +1532,7 @@ impl ProgressSink for CliSink<'_, '_> {
             | ProgressEvent::BenchLogitsBlock { .. }
             | ProgressEvent::BenchPplChunk { .. }
             | ProgressEvent::BenchEvalQuestion { .. }
+            | ProgressEvent::BenchRefusalPrompt { .. }
             | ProgressEvent::AutotuneForward { .. }
             | ProgressEvent::AutotuneSolve
             | ProgressEvent::Surgery(_) => {}
@@ -1631,9 +1660,55 @@ fn core_apply_io(
         sink.event(ProgressEvent::Warn(w.clone()));
     }
 
-    let mut backend = EngineBackend::open(&shards, Arc::clone(&deps.interrupted))?;
-    backend.set_io(io);
-    let preview = apply_patch(&patch, &mut backend, None, true)?;
+    // Preflight on its own mapping, released before any file is replaced or restored.
+    let (preview, mut touched) = {
+        let mut backend = EngineBackend::open(&shards, Arc::clone(&deps.interrupted))?;
+        let preview = apply_patch(&patch, &mut backend, None, true)?;
+        let touched = backend.shards_holding(
+            preview
+                .operations
+                .iter()
+                .flat_map(|op| op.tensors.iter().map(|t| t.name.as_str())),
+        );
+        (preview, touched)
+    };
+    // Patching tied embeddings would also deform the output projection: detach it first.
+    let embed = preview
+        .operations
+        .iter()
+        .flat_map(|op| &op.tensors)
+        .find(|t| engine::is_embed_tokens(&t.name));
+    let untie = match embed {
+        Some(embed) => untie::plan(&shards, &embed.name)?,
+        None => None,
+    };
+    if let Some(plan) = &untie {
+        let what = match plan.copy_embeddings {
+            true => format!(
+                "embed_tokens est partagé avec lm_head : {} (copie non patchée des plongements) \
+                 est ajouté à {} et",
+                untie::LM_HEAD,
+                plan.shard.display()
+            ),
+            false => format!(
+                "{} existe mais la config lie encore les plongements :",
+                untie::LM_HEAD
+            ),
+        };
+        let warning = format!(
+            "{what} tie_word_embeddings passe à false dans {}, pour que la projection de sortie \
+             reste intacte",
+            plan.config.display()
+        );
+        sink.event(ProgressEvent::Warn(warning.clone()));
+        warnings.push(warning);
+    }
+    let with_untie = |mut outcome: Outcome| {
+        if let Some(plan) = &untie {
+            outcome.data["untie_lm_head"] = json!(plan);
+        }
+        outcome
+    };
     if request.dry_run {
         for op in &preview.operations {
             sink.event(ProgressEvent::DryRun {
@@ -1642,7 +1717,7 @@ fn core_apply_io(
                 vector_len: op.vector_len,
             });
         }
-        return Ok(apply_outcome(&preview, &[], &warnings));
+        return Ok(with_untie(apply_outcome(&preview, &[], &warnings)));
     }
     if deps.interrupted.load(Ordering::SeqCst) {
         return Err(PatchError::ExecutionFailed {
@@ -1654,12 +1729,11 @@ fn core_apply_io(
         .into());
     }
 
-    let touched = backend.shards_holding(
-        preview
-            .operations
-            .iter()
-            .flat_map(|op| op.tensors.iter().map(|t| t.name.as_str())),
-    );
+    for file in untie.iter().flat_map(untie::UntiePlan::files) {
+        if !touched.contains(&file) {
+            touched.push(file);
+        }
+    }
     let mut backup = match patch.backup {
         true => Some(BackupSet::create_many_in(
             &touched,
@@ -1677,12 +1751,42 @@ fn core_apply_io(
     }
 
     let started = Instant::now();
+    // Declared after `backup`, so dropped before it: a restore on unwind can rename.
+    let prepared = untie
+        .as_ref()
+        .map_or(Ok(()), untie::UntiePlan::execute)
+        .and_then(|()| {
+            EngineBackend::open(&shards, Arc::clone(&deps.interrupted)).map_err(backend_error)
+        });
+    let mut backend = match prepared {
+        Ok(backend) => backend,
+        Err(e) => {
+            let e = restored(UNTIE_OP, e.to_string(), backup.as_mut());
+            if let Some(outcome) = rollback_outcome(&e, &backup_files) {
+                sink.event(ProgressEvent::Rollback(outcome));
+            }
+            return Err(e.into());
+        }
+    };
+    backend.set_io(io);
     let ops = patch
         .operations
         .iter()
         .map(|op| (op.id.clone(), op.kind))
         .collect();
-    let guard = backup.as_mut().map(|b| b as &mut dyn RollbackHandle);
+    // Once the shard has grown, restoring it means shrinking it, which Windows refuses
+    // while the backend maps it: the rollback is then recorded and done after the drop.
+    let mut deferred = untie
+        .as_ref()
+        .zip(backup.as_ref())
+        .map(|(_, b)| DeferredRollback {
+            backup_path: b.backup_path(),
+            requested: false,
+        });
+    let guard = match &mut deferred {
+        Some(deferred) => Some(deferred as &mut dyn RollbackHandle),
+        None => backup.as_mut().map(|b| b as &mut dyn RollbackHandle),
+    };
     let kernel = kernel::from_env();
     if let Some(w) = &kernel.warning {
         sink.event(ProgressEvent::Warn(w.clone()));
@@ -1696,20 +1800,78 @@ fn core_apply_io(
     );
     match result {
         Ok(report) => {
+            if let (Some(_), Some(backup)) = (&deferred, backup.as_mut()) {
+                backup.commit_all();
+            }
             sink.event(ProgressEvent::Commit {
                 seconds: started.elapsed().as_secs_f64(),
             });
             let io_report = meter.finish(kernel, io, backend.io_counters());
-            let mut outcome = apply_outcome(&report, &backup_files, &warnings);
+            let mut outcome = with_untie(apply_outcome(&report, &backup_files, &warnings));
             outcome.data["io"] = json!(io_report);
             Ok(outcome)
         }
         Err(e) => {
+            let e = match (deferred, e) {
+                (
+                    Some(DeferredRollback {
+                        requested: true, ..
+                    }),
+                    PatchError::ExecutionFailed { op_id, cause, .. },
+                ) => {
+                    drop(backend);
+                    restored(&op_id, cause, backup.as_mut())
+                }
+                (_, e) => e,
+            };
             if let Some(outcome) = rollback_outcome(&e, &backup_files) {
                 sink.event(ProgressEvent::Rollback(outcome));
             }
             Err(e.into())
         }
+    }
+}
+
+const UNTIE_OP: &str = "untie_lm_head";
+
+/// Stands in for the `BackupSet` in `apply_patch` after an untie; see `core_apply_io`.
+struct DeferredRollback {
+    backup_path: Option<PathBuf>,
+    requested: bool,
+}
+
+impl RollbackHandle for DeferredRollback {
+    fn rollback(&mut self) -> patch::Result<()> {
+        self.requested = true;
+        Ok(())
+    }
+    fn commit(&mut self) {}
+    fn backup_path(&self) -> Option<PathBuf> {
+        self.backup_path.clone()
+    }
+}
+
+/// Restores the backups after a failure outside `apply_patch`'s own rollback, with the
+/// same three outcomes: restored, rollback failed (critical), or no backup to restore.
+fn restored(op_id: &str, cause: String, backup: Option<&mut BackupSet>) -> PatchError {
+    let op_id = op_id.to_owned();
+    match backup.map(BackupSet::rollback_all) {
+        Some(Ok(())) => PatchError::ExecutionFailed {
+            op_id,
+            cause,
+            rolled_back: true,
+            left_modified: false,
+        },
+        Some(Err(e)) => PatchError::RollbackFailed {
+            op_id,
+            cause: format!("{cause} ; rollback : {e}"),
+        },
+        None => PatchError::ExecutionFailed {
+            op_id,
+            cause: format!("{cause} (pas de backup)"),
+            rolled_back: false,
+            left_modified: true,
+        },
     }
 }
 
@@ -1780,6 +1942,21 @@ fn core_apply_gguf(
         ..Default::default()
     };
     let patch = validate_patch(&request.patch, &request.base_dir, &validation)?;
+    if let Some(op) = patch
+        .operations
+        .iter()
+        .find(|op| op.projections.iter().any(|p| !p.is_mlp()))
+    {
+        return Err(Outcome::fail(
+            exit::INVALID_INPUT,
+            format!(
+                "opération {} : o_proj et embed_tokens ne sont patchables que dans un modèle \
+                 SafeTensors, pas dans un GGUF (seules gate_proj, up_proj et down_proj le sont)",
+                op.id
+            ),
+        )
+        .with_kind("invalid_input"));
+    }
     sink.event(ProgressEvent::ApplyStart {
         patch: request.patch_label.clone(),
         operations: patch.operations.len(),
@@ -2418,6 +2595,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
             let req = EvalRequest {
                 model: a.model.clone(),
                 dataset: a.dataset.clone(),
+                backend: a.backend,
                 baseline_model: a.baseline_model.clone(),
                 limit: a.limit,
                 max_new_tokens: a.max_new_tokens,
@@ -2443,6 +2621,18 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 overwrite: a.overwrite,
             };
             core_bench_dump(&req, deps, &ui, &mut sink)
+        }
+        BenchCommand::Refusal(a) => {
+            let prompts = extract::load_prompt_texts(&a.prompts)
+                .map_err(|m| invalid(BenchError::input(&a.prompts, m)))?;
+            let req = RefusalRequest {
+                model: a.model.clone(),
+                prompts,
+                baseline_model: a.baseline_model.clone(),
+                max_new_tokens: a.max_new_tokens,
+                chat_template: a.chat_template,
+            };
+            core_bench_refusal(&req, deps, &ui, &mut sink)
         }
     }
 }
@@ -2483,8 +2673,29 @@ pub fn core_bench_ppl(
     bench_outcome(&run, fail_on_warn, bench_report::ppl_text(ui, &run))
 }
 
-/// Shared by the CLI and the MCP tool. Generators come from `deps.generator_factory`, set
-/// to greedy seeded decoding; cancellation stops the running generation.
+/// The pure Rust generator on a Qwen2 directory; its loading notes (bf16 fallback) go to
+/// the sink as warnings.
+fn native_generator(
+    model: &Path,
+    deps: &AppDeps,
+    sink: &RefCell<&mut dyn ProgressSink>,
+) -> bench::Result<Box<dyn TextGenerator>> {
+    let generator = NativeGenerator::load(
+        model,
+        extract::DTypeChoice::Auto,
+        deps.probe.as_ref(),
+        Arc::clone(&deps.interrupted),
+    )?;
+    for warning in generator.warnings() {
+        sink.borrow_mut()
+            .event(ProgressEvent::Warn(warning.clone()));
+    }
+    Ok(Box::new(generator))
+}
+
+/// Shared by the CLI and the MCP tool. Generators come from `deps.generator_factory` (or
+/// the native backend), set to greedy seeded decoding; cancellation stops the running
+/// generation.
 pub fn core_bench_eval(
     req: &EvalRequest,
     fail_on_warn: bool,
@@ -2492,7 +2703,11 @@ pub fn core_bench_eval(
     ui: &Ui,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
+    let sink = RefCell::new(sink);
     let mut make = |gguf: &Path| -> bench::Result<Box<dyn TextGenerator>> {
+        if req.backend == Backend::Native {
+            return native_generator(gguf, deps, &sink);
+        }
         let args = EvalArgs {
             model: gguf.to_path_buf(),
             prompts: PathBuf::new(),
@@ -2509,10 +2724,35 @@ pub fn core_bench_eval(
         deps.runner.as_ref(),
         &mut make,
         &deps.interrupted,
-        &mut |done, total| sink.event(ProgressEvent::BenchEvalQuestion { done, total }),
+        &mut |done, total| {
+            sink.borrow_mut()
+                .event(ProgressEvent::BenchEvalQuestion { done, total })
+        },
     )
     .map_err(|e| bench_failure(&e))?;
     bench_outcome(&run, fail_on_warn, bench_report::eval_text(ui, &run))
+}
+
+/// Shared by the CLI and the MCP tool: native greedy generation, refusal markers, paired
+/// comparison against a baseline. Nothing is written.
+pub fn core_bench_refusal(
+    req: &RefusalRequest,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let sink = RefCell::new(sink);
+    let run = bench::refusal::run(
+        req,
+        &mut |model| native_generator(model, deps, &sink),
+        &deps.interrupted,
+        &mut |done, total| {
+            sink.borrow_mut()
+                .event(ProgressEvent::BenchRefusalPrompt { done, total })
+        },
+    )
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, false, bench_report::refusal_text(ui, &run))
 }
 
 /// Shared by the CLI and the MCP tool; nothing is written unless the whole dump succeeds.
