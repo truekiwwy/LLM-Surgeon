@@ -23,11 +23,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       # Pinned to the version the README says the project is tested with, so that a lint
       # added in a newer stable release cannot turn CI red on its own. Bump it on purpose.
-      - uses: dtolnay/rust-toolchain@1.97
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.97"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
@@ -51,7 +52,7 @@ jobs:
           - name: windows x86_64
             os: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
