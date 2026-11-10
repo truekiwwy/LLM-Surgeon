@@ -14,8 +14,8 @@
 //! Normalization only removes what is not the tool's: hardware facts of `check` (RAM, GPU,
 //! verdict, their warnings), `duration_ms`, and `\` path separators (Windows). The extraction
 //! hashes come from floating-point code: they were taken on x86_64 Windows, and another CPU
-//! family may round differently. `cargo test --release --test compat` replays them with the
-//! release binary.
+//! family rounds differently (aarch64 does), so they are only compared on x86_64. `cargo test
+//! --release --test compat` replays them with the release binary.
 //!
 //! The references are written by the ignored test `write_compat_references`, and only to
 //! record a surface change that was decided on purpose, never to turn a red test green.
@@ -370,6 +370,10 @@ fn reference_outputs_are_byte_identical() {
         serde_json::from_value(read_fixture("output_hashes.json")["sha256"].clone()).unwrap();
     let mut changed = Vec::new();
     for (name, hash) in &reference {
+        // Taken on x86_64: the matmuls of the Qwen2 forward round differently elsewhere.
+        if name.starts_with("extract_") && !cfg!(target_arch = "x86_64") {
+            continue;
+        }
         match run.hashes.get(name) {
             Some(h) if h == hash => {}
             Some(_) => changed.push(format!("{name}: {}", run.texts[name])),

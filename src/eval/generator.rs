@@ -446,13 +446,21 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
     }
 
+    /// A child that writes to stderr and exits with code 3. Not `yes --option-inconnue`:
+    /// only GNU `yes` rejects unknown options, BSD `yes` (macOS) prints them forever.
+    /// Skipped when `sh` is not on PATH (stock Windows without Git Bash).
+    fn failing_command() -> Option<Command> {
+        let mut cmd = Command::new(find_binary(&["sh"], &[], std::env::var_os("PATH"))?);
+        cmd.args(["-c", "echo 'option inconnue' >&2; exit 3"]);
+        Some(cmd)
+    }
+
     #[test]
     fn failing_child_reports_stderr_tail() {
-        let Some(mut cmd) = yes_command() else {
-            eprintln!("yes absent du PATH, test ignoré");
+        let Some(cmd) = failing_command() else {
+            eprintln!("sh absent du PATH, test ignoré");
             return;
         };
-        cmd.arg("--option-inconnue");
         let err = stream_child(cmd, Duration::from_secs(10), &mut |_| {
             ControlFlow::Continue(())
         })

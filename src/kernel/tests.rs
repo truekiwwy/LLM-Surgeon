@@ -655,8 +655,15 @@ fn unix_madvise_on_a_file_mapping_succeeds() {
 #[test]
 fn page_faults_and_free_space_are_reported() {
     let before = super::page_faults().expect("page fault counters on this OS");
-    let touched: u64 = vec![1u8; 8 << 20].iter().map(|&b| u64::from(b)).sum();
-    assert_eq!(touched, 8 << 20);
+    // A fresh anonymous mapping faults on the first write to each page. A `Vec` does not
+    // always: once another test has freed a large buffer, glibc's dynamic mmap threshold
+    // can serve it from heap pages that are already resident, and nothing faults.
+    let mut fresh = MmapMut::map_anon(8 << 20).unwrap();
+    for page in fresh.chunks_mut(4096) {
+        page[0] = 1;
+    }
+    let touched: u64 = fresh.iter().map(|&b| u64::from(b)).sum();
+    assert_eq!(touched, 2048);
     let after = super::page_faults().unwrap();
     assert!(after.since(before).total > 0);
     let dir = tempfile::tempdir().unwrap();
