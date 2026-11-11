@@ -21,7 +21,7 @@ use super::decoder::{HookedDecoder, KvCache, Site};
 use super::error::{ExtractError, Result};
 
 /// A forward pass that exposes the residual stream.
-pub trait ResidualForward: Send {
+pub trait ResidualForward: Send + Sync {
     /// Layers loaded.
     fn num_layers(&self) -> usize;
     fn dtype(&self) -> DType;
@@ -42,6 +42,10 @@ pub trait ResidualForward: Send {
     ) -> Result<Tensor>;
     /// f32 logits of the last position of `hidden`. Needs [`Depth::Full`].
     fn logits_last(&self, hidden: &Tensor) -> Result<Vec<f32>>;
+    /// One decode step of B sequences, each on its own cache: their f32 logits. Needs
+    /// [`Depth::Full`].
+    fn forward_batch_step(&self, ids: &[u32], caches: &mut [&mut KvCache])
+        -> Result<Vec<Vec<f32>>>;
 }
 
 impl ResidualForward for HookedDecoder {
@@ -73,6 +77,14 @@ impl ResidualForward for HookedDecoder {
 
     fn logits_last(&self, hidden: &Tensor) -> Result<Vec<f32>> {
         HookedDecoder::logits_last(self, hidden)
+    }
+
+    fn forward_batch_step(
+        &self,
+        ids: &[u32],
+        caches: &mut [&mut KvCache],
+    ) -> Result<Vec<Vec<f32>>> {
+        HookedDecoder::forward_batch_step(self, ids, caches)
     }
 }
 

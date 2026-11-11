@@ -355,7 +355,8 @@ pub struct BenchEvalArgs {
     /// JSON array (or JSONL) of {question|problem, answer|solution, id?}.
     #[arg(long)]
     pub dataset: PathBuf,
-    /// Generator: llama.cpp on a GGUF, or pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors directory.
+    /// Generator: llama (llama.cpp on a GGUF, default; also llama-completion), llama-server, or
+    /// native (pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors directory).
     #[arg(long, value_enum, default_value_t = crate::bench::score::Backend::Llama)]
     pub backend: crate::bench::score::Backend,
     /// Reference model on the same questions (paired comparison).
@@ -382,6 +383,71 @@ pub struct BenchEvalArgs {
     /// Exit with code 9 when the accuracy is below --min-accuracy.
     #[arg(long)]
     pub fail_on_warn: bool,
+    #[command(flatten)]
+    pub generation: Box<GenerationArgs>,
+}
+
+/// Sampling, samples, batching and llama-server options of `bench eval` and `bench
+/// refusal`. The defaults are the historical run: greedy, one sample, one at a time.
+#[derive(Debug, Clone, Args)]
+pub struct GenerationArgs {
+    /// Sampling temperature; 0: greedy decoding.
+    #[arg(long, default_value_t = 0.0)]
+    pub temperature: f32,
+    /// Keep the K most likely tokens; 0: off.
+    #[arg(long, default_value_t = 0)]
+    pub top_k: usize,
+    /// Keep the smallest set of tokens reaching this probability; 1: off.
+    #[arg(long, default_value_t = 1.0)]
+    pub top_p: f32,
+    /// Drop tokens below min_p times the best probability; 0: off.
+    #[arg(long, default_value_t = 0.0)]
+    pub min_p: f32,
+    /// Penalty on every token already in the sequence (prompt included); 1: off.
+    #[arg(long, default_value_t = 1.0)]
+    pub repetition_penalty: f32,
+    /// Seed of the sampling streams (one per prompt and sample).
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
+    /// Samples per prompt (needs --temperature > 0); statistics per prompt.
+    #[arg(long, default_value_t = 1)]
+    pub samples: usize,
+    /// native: sequences decoded together; llama-server: concurrent requests and slots.
+    #[arg(long, default_value_t = 1)]
+    pub batch_size: usize,
+    /// native: batches decoded in parallel, in one thread pool.
+    #[arg(long, default_value_t = 1)]
+    pub jobs: usize,
+    /// native: threads of the pool; default: RAYON_NUM_THREADS, else every core.
+    #[arg(long)]
+    pub threads: Option<usize>,
+    /// llama-server: layers offloaded to the GPU (-ngl); default: the build's.
+    #[arg(long)]
+    pub gpu_layers: Option<u32>,
+    /// llama-server: context size (-c), shared by its slots.
+    #[arg(long)]
+    pub ctx_size: Option<u32>,
+}
+
+impl GenerationArgs {
+    pub fn options(&self) -> crate::bench::generation::GenOptions {
+        crate::bench::generation::GenOptions {
+            sampling: crate::eval::sampling::SamplingParams {
+                temperature: self.temperature,
+                top_k: self.top_k,
+                top_p: self.top_p,
+                min_p: self.min_p,
+                repetition_penalty: self.repetition_penalty,
+                seed: self.seed,
+            },
+            samples: self.samples,
+            batch_size: self.batch_size,
+            jobs: self.jobs,
+            threads: self.threads,
+            gpu_layers: self.gpu_layers,
+            ctx_size: self.ctx_size,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Args)]
@@ -450,6 +516,12 @@ pub struct BenchRefusalArgs {
     /// Exit with code 9 when --max-unparsable is exceeded.
     #[arg(long)]
     pub fail_on_warn: bool,
+    /// Generator: native (pure Rust, default), llama-server or llama-completion (on a GGUF,
+    /// a SafeTensors model converted first; --llama-cpp-dir).
+    #[arg(long, value_enum, default_value_t = crate::bench::score::Backend::Native)]
+    pub backend: crate::bench::score::Backend,
+    #[command(flatten)]
+    pub generation: Box<GenerationArgs>,
 }
 
 /// Refusal markers of the rule-based verdict.

@@ -2560,7 +2560,9 @@
               "positional": false,
               "possible_values": [
                 "llama",
-                "native"
+                "native",
+                "llama-completion",
+                "llama-server"
               ],
               "required": false,
               "short": null,
@@ -2740,6 +2742,240 @@
               "short": null,
               "value_names": [
                 "FAIL_ON_WARN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "temperature",
+              "long": "temperature",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "TEMPERATURE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "top_k",
+              "long": "top-k",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "TOP_K"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "1"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "top_p",
+              "long": "top-p",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "TOP_P"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "min_p",
+              "long": "min-p",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MIN_P"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "1"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "repetition_penalty",
+              "long": "repetition-penalty",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "REPETITION_PENALTY"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "42"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "seed",
+              "long": "seed",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "SEED"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "1"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "samples",
+              "long": "samples",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "SAMPLES"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "1"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "batch_size",
+              "long": "batch-size",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BATCH_SIZE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "1"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "jobs",
+              "long": "jobs",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JOBS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "threads",
+              "long": "threads",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "THREADS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "gpu_layers",
+              "long": "gpu-layers",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "GPU_LAYERS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "ctx_size",
+              "long": "ctx-size",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "CTX_SIZE"
               ]
             },
             {
@@ -3417,6 +3653,265 @@
               "short": null,
               "value_names": [
                 "FAIL_ON_WARN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "native"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "backend",
+              "long": "backend",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "llama",
+                "native",
+                "llama-completion",
+                "llama-server"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BACKEND"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "temperature",
+              "long": "temperature",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "TEMPERATURE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "top_k",
+              "long": "top-k",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "TOP_K"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "1"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "top_p",
+              "long": "top-p",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "TOP_P"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "min_p",
+              "long": "min-p",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MIN_P"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "1"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "repetition_penalty",
+              "long": "repetition-penalty",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "REPETITION_PENALTY"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "42"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "seed",
+              "long": "seed",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "SEED"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "1"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "samples",
+              "long": "samples",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "SAMPLES"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "1"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "batch_size",
+              "long": "batch-size",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BATCH_SIZE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "1"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "jobs",
+              "long": "jobs",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JOBS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "threads",
+              "long": "threads",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "THREADS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "gpu_layers",
+              "long": "gpu-layers",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "GPU_LAYERS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "ctx_size",
+              "long": "ctx-size",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "CTX_SIZE"
               ]
             },
             {

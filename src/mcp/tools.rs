@@ -959,7 +959,7 @@ pub struct BenchToolArgs {
     #[serde(default)]
     #[schemars(
         range(min = 1),
-        description = "logits : taille des ensembles top-k (défaut 5)."
+        description = "logits : taille des ensembles top-k (défaut 5) ; eval, refusal : garde les K tokens les plus probables (absent : désactivé)."
     )]
     pub top_k: Option<u32>,
     #[serde(default)]
@@ -998,17 +998,62 @@ pub struct BenchToolArgs {
     #[schemars(description = "ppl : incertitude ± de baseline_ppl.")]
     pub baseline_ppl_err: Option<f64>,
     #[serde(default)]
-    #[schemars(range(min = 1), description = "ppl : contexte -c (défaut 512).")]
+    #[schemars(
+        range(min = 1),
+        description = "ppl : contexte -c (défaut 512) ; eval, refusal avec backend llama-server : -c du serveur."
+    )]
     pub ctx: Option<u32>,
     #[serde(default)]
     #[schemars(range(min = 1), description = "ppl : --chunks.")]
     pub chunks: Option<u32>,
     #[serde(default)]
-    #[schemars(range(min = 1), description = "ppl : -t.")]
+    #[schemars(
+        range(min = 1),
+        description = "ppl : -t ; eval, refusal : threads du pool natif (défaut : RAYON_NUM_THREADS, sinon tous les cœurs) ou -t de llama-server."
+    )]
     pub threads: Option<u32>,
     #[serde(default)]
-    #[schemars(description = "ppl : couches sur GPU (défaut 0, CPU reproductible).")]
+    #[schemars(
+        description = "ppl : couches sur GPU (défaut 0, CPU reproductible) ; eval, refusal avec backend llama-server : -ngl (défaut : celui du build)."
+    )]
     pub n_gpu_layers: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "eval, refusal : température d'échantillonnage (défaut 0 : glouton)."
+    )]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    #[schemars(description = "eval, refusal : noyau de probabilité cumulée (1 : désactivé).")]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    #[schemars(
+        description = "eval, refusal : écarte les tokens sous min_p × la meilleure probabilité (0 : désactivé)."
+    )]
+    pub min_p: Option<f32>,
+    #[serde(default)]
+    #[schemars(description = "eval, refusal : pénalité de répétition (1 : désactivée).")]
+    pub repetition_penalty: Option<f32>,
+    #[serde(default)]
+    #[schemars(description = "eval, refusal : graine des flux d'échantillonnage (défaut 42).")]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "eval, refusal : échantillons par prompt (temperature > 0) ; statistiques par prompt, intervalle bootstrap sur les prompts."
+    )]
+    pub samples: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "eval, refusal : séquences décodées ensemble (natif) ou requêtes concurrentes et slots (llama-server)."
+    )]
+    pub batch_size: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "eval, refusal : lots décodés en parallèle (natif)."
+    )]
+    pub jobs: Option<u32>,
     #[serde(default)]
     #[schemars(
         description = "ppl, eval, refusal (juge) : racine de llama.cpp ; défaut : $LLAMA_CPP_DIR du serveur."
@@ -1052,7 +1097,7 @@ pub struct BenchToolArgs {
     pub min_accuracy: Option<f64>,
     #[serde(default)]
     #[schemars(
-        description = "eval : llama (défaut, llama.cpp sur un GGUF) ou native (génération gloutonne en Rust pur sur un dossier Qwen2, Llama/Mistral ou Qwen3, sans llama.cpp)."
+        description = "eval : llama (défaut, llama.cpp sur un GGUF), llama-completion (idem), llama-server (serveur local, GPU selon le build) ou native (Rust pur sur un dossier Qwen2, Llama/Mistral ou Qwen3) ; refusal : native (défaut), llama-server ou llama-completion."
     )]
     pub backend: Option<crate::bench::score::Backend>,
     #[serde(default)]
@@ -1190,6 +1235,18 @@ const BENCH_FIELDS: [(&str, &[&str], &[&str]); 5] = [
             "min_accuracy",
             "fail_on_warn",
             "backend",
+            "temperature",
+            "top_k",
+            "top_p",
+            "min_p",
+            "repetition_penalty",
+            "seed",
+            "samples",
+            "batch_size",
+            "jobs",
+            "threads",
+            "n_gpu_layers",
+            "ctx",
         ],
     ),
     (
@@ -1214,6 +1271,19 @@ const BENCH_FIELDS: [(&str, &[&str], &[&str]); 5] = [
             "llama_cpp_dir",
             "timeout_secs",
             "fail_on_warn",
+            "backend",
+            "temperature",
+            "top_k",
+            "top_p",
+            "min_p",
+            "repetition_penalty",
+            "seed",
+            "samples",
+            "batch_size",
+            "jobs",
+            "threads",
+            "n_gpu_layers",
+            "ctx",
         ],
     ),
     (
@@ -1228,6 +1298,30 @@ const BENCH_FIELDS: [(&str, &[&str], &[&str]); 5] = [
         ],
     ),
 ];
+
+/// The generation options of eval and refusal, every field structured and bounded by
+/// `GenOptions::validate`.
+fn generation(args: &BenchToolArgs) -> crate::bench::generation::GenOptions {
+    let d = crate::bench::generation::GenOptions::default();
+    crate::bench::generation::GenOptions {
+        sampling: crate::eval::sampling::SamplingParams {
+            temperature: args.temperature.unwrap_or(d.sampling.temperature),
+            top_k: args.top_k.map_or(d.sampling.top_k, |k| k as usize),
+            top_p: args.top_p.unwrap_or(d.sampling.top_p),
+            min_p: args.min_p.unwrap_or(d.sampling.min_p),
+            repetition_penalty: args
+                .repetition_penalty
+                .unwrap_or(d.sampling.repetition_penalty),
+            seed: args.seed.unwrap_or(d.sampling.seed),
+        },
+        samples: args.samples.map_or(d.samples, |n| n as usize),
+        batch_size: args.batch_size.map_or(d.batch_size, |n| n as usize),
+        jobs: args.jobs.map_or(d.jobs, |n| n as usize),
+        threads: args.threads.map(|n| n as usize),
+        gpu_layers: args.n_gpu_layers,
+        ctx_size: args.ctx,
+    }
+}
 
 fn bench_command(arguments: &Value) -> &'static str {
     match arguments.get("mode").and_then(Value::as_str) {
@@ -1395,6 +1489,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 llama_cpp_dir,
                 timeout,
                 min_accuracy: args.min_accuracy,
+                generation: generation(&args),
             };
             core_bench_eval(&req, fail_on_warn, ctx.deps, &ui, ctx.sink)
         }
@@ -1428,6 +1523,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 markers_file.as_deref(),
             )
             .map_err(|e| invalid("invalid_arguments", e))?;
+            let refusal_backend = args.backend.unwrap_or(crate::bench::score::Backend::Native);
             let req = RefusalRequest {
                 model: path(ctx, "model", &args.model)?,
                 prompts,
@@ -1437,6 +1533,8 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                     .unwrap_or(bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
                 chat_template: args.chat_template.unwrap_or(ChatTemplate::Chatml),
                 markers,
+                generation: generation(&args),
+                backend: refusal_backend.label().into(),
             };
             // Every judge path is sandboxed; nothing an agent writes reaches llama.cpp but
             // the rubric text, the prompts and the answers.
@@ -1468,6 +1566,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             };
             core_bench_refusal(
                 &req,
+                refusal_backend,
                 judging.as_ref(),
                 llama_cpp_dir.as_deref(),
                 fail_on_warn,

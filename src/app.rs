@@ -181,6 +181,7 @@ fn real_generator(
         model_path: gguf.to_path_buf(),
         extra_args: vec!["-no-cnv".into()],
         timeout: GENERATION_TIMEOUT,
+        sampling: None,
     }))
 }
 
@@ -2917,6 +2918,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 llama_cpp_dir: a.llama_cpp_dir.clone(),
                 timeout: timeout(a.timeout_secs)?,
                 min_accuracy: a.min_accuracy,
+                generation: a.generation.options(),
             };
             core_bench_eval(&req, a.fail_on_warn, deps, &ui, &mut sink)
         }
@@ -2945,6 +2947,8 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 max_new_tokens: a.max_new_tokens,
                 chat_template: a.chat_template,
                 markers: markers(&a.markers).map_err(invalid)?,
+                generation: a.generation.options(),
+                backend: a.backend.label().into(),
             };
             let judging = match a.judge {
                 JudgeMode::Rules if a.judge_args.judge_model.is_some() => {
@@ -2966,6 +2970,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
             let llama_cpp_dir = a.judge_args.llama_cpp_dir.as_deref();
             core_bench_refusal(
                 &req,
+                a.backend,
                 judging.as_ref(),
                 llama_cpp_dir,
                 a.fail_on_warn,
@@ -3082,7 +3087,7 @@ fn native_generator(
     model: &Path,
     deps: &AppDeps,
     sink: &RefCell<&mut dyn ProgressSink>,
-) -> bench::Result<Box<dyn TextGenerator>> {
+) -> bench::Result<NativeGenerator> {
     let generator = NativeGenerator::load(
         model,
         extract::DTypeChoice::Auto,
@@ -3093,7 +3098,7 @@ fn native_generator(
         sink.borrow_mut()
             .event(ProgressEvent::Warn(warning.clone()));
     }
-    Ok(Box::new(generator))
+    Ok(generator)
 }
 
 /// Shared by the CLI and the MCP tool. Generators come from `deps.generator_factory` (or
@@ -3107,20 +3112,21 @@ pub fn core_bench_eval(
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
     let sink = RefCell::new(sink);
-    let mut make = |gguf: &Path| -> bench::Result<Box<dyn TextGenerator>> {
-        if req.backend == Backend::Native {
-            return native_generator(gguf, deps, &sink);
-        }
-        let args = EvalArgs {
-            model: gguf.to_path_buf(),
-            prompts: PathBuf::new(),
-            max_new_tokens: req.max_new_tokens,
-            export_gguf: None,
-            quant: "Q4_K_M".into(),
-            llama_cpp_dir: req.llama_cpp_dir.clone(),
-            allow_degraded: false,
-        };
-        (deps.generator_factory)(gguf, &args).map_err(BenchError::from)
+    req.generation.validate().map_err(|e| bench_failure(&e))?;
+    let pool = generation_pool(&req.generation, req.backend, &sink)?;
+    let dir = req.llama_cpp_dir.as_deref();
+    let mut make = |gguf: &Path| {
+        let tag = "bench-eval";
+        bench_generator(
+            gguf,
+            req.backend,
+            &req.generation,
+            &pool,
+            dir,
+            tag,
+            deps,
+            &sink,
+        )
     };
     let run = bench::score::run(
         req,
@@ -3136,11 +3142,147 @@ pub fn core_bench_eval(
     bench_outcome(&run, fail_on_warn, bench_report::eval_text(ui, &run))
 }
 
+/// A bench generator for `backend`: the native one on a SafeTensors folder (batches,
+/// sampling), `llama-server` or `llama-completion` / `llama-cli` on a GGUF. A SafeTensors
+/// model given to a llama backend is converted to a temporary GGUF, kept as long as the
+/// generator.
+#[allow(clippy::too_many_arguments)]
+fn bench_generator(
+    model: &Path,
+    backend: Backend,
+    generation: &bench::generation::GenOptions,
+    pool: &Option<Arc<rayon::ThreadPool>>,
+    llama_cpp_dir: Option<&Path>,
+    tag: &str,
+    deps: &AppDeps,
+    sink: &RefCell<&mut dyn ProgressSink>,
+) -> bench::Result<Box<dyn TextGenerator>> {
+    if backend == Backend::Native {
+        let mut native = native_generator(model, deps, sink)?;
+        native.set_batching(generation.batch_size, generation.jobs, pool.clone());
+        return Ok(Box::new(native));
+    }
+    let gguf = crate::eval::ensure_gguf(model, llama_cpp_dir, tag, deps.runner.as_ref())
+        .map_err(|e| BenchError::Conversion(e.to_string()))?;
+    let inner: Box<dyn TextGenerator> = match backend {
+        Backend::LlamaServer => {
+            let binary = crate::eval::server::locate_server(llama_cpp_dir)?;
+            let server = crate::eval::server::LlamaServerGenerator::start(
+                &binary,
+                gguf.path(),
+                &generation.server(),
+                &deps.interrupted,
+            )?;
+            Box::new(server)
+        }
+        _ => {
+            let args = EvalArgs {
+                model: gguf.path().to_path_buf(),
+                prompts: PathBuf::new(),
+                max_new_tokens: 0,
+                export_gguf: None,
+                quant: "Q4_K_M".into(),
+                llama_cpp_dir: llama_cpp_dir.map(Path::to_path_buf),
+                allow_degraded: false,
+            };
+            (deps.generator_factory)(gguf.path(), &args)?
+        }
+    };
+    Ok(Box::new(WithGguf { inner, _gguf: gguf }))
+}
+
+/// A generator and the temporary GGUF it runs on, deleted when both are dropped.
+struct WithGguf {
+    inner: Box<dyn TextGenerator>,
+    _gguf: crate::eval::GgufModel,
+}
+
+impl TextGenerator for WithGguf {
+    fn generate(
+        &mut self,
+        prompt: &str,
+        max_new_tokens: u32,
+        on_chunk: &mut dyn FnMut(&str) -> std::ops::ControlFlow<()>,
+    ) -> crate::eval::Result<crate::eval::GenerationOutcome> {
+        self.inner.generate(prompt, max_new_tokens, on_chunk)
+    }
+    fn configure(&mut self, decoding: &crate::eval::Decoding) -> bool {
+        self.inner.configure(decoding)
+    }
+    fn constrain(&mut self, gbnf: &str) -> bool {
+        self.inner.constrain(gbnf)
+    }
+    fn generate_job(
+        &mut self,
+        job: &crate::eval::GenJob,
+        max_new_tokens: u32,
+        on_chunk: &mut dyn FnMut(&str) -> std::ops::ControlFlow<()>,
+    ) -> crate::eval::Result<crate::eval::GenerationOutcome> {
+        self.inner.generate_job(job, max_new_tokens, on_chunk)
+    }
+    fn generate_many(
+        &mut self,
+        jobs: &[crate::eval::GenJob],
+        max_new_tokens: u32,
+        cancel: &AtomicBool,
+        on_chunk: &mut dyn FnMut(usize, &str) -> std::ops::ControlFlow<()>,
+        on_done: &mut dyn FnMut(usize),
+    ) -> crate::eval::Result<Vec<crate::eval::Result<crate::eval::GenerationOutcome>>> {
+        self.inner
+            .generate_many(jobs, max_new_tokens, cancel, on_chunk, on_done)
+    }
+}
+
+/// The rayon pool of a native generation, built only for `--threads` (otherwise the global
+/// pool, sized by `RAYON_NUM_THREADS` or the cores, is that one budget), and its
+/// over-subscription warnings sent to the sink. A llama backend runs its own threads.
+fn generation_pool(
+    generation: &bench::generation::GenOptions,
+    backend: Backend,
+    sink: &RefCell<&mut dyn ProgressSink>,
+) -> std::result::Result<Option<Arc<rayon::ThreadPool>>, Outcome> {
+    // The default options run as before: no process scan, no new warning.
+    if backend != Backend::Native || generation.is_historical(true) {
+        return Ok(None);
+    }
+    let (threads, warnings) = generation.thread_budget(other_surgeon_processes());
+    for w in warnings {
+        sink.borrow_mut().event(ProgressEvent::Warn(w));
+    }
+    if generation.threads.is_none() {
+        return Ok(None);
+    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map(|pool| Some(Arc::new(pool)))
+        .map_err(|e| Outcome::fail(exit::GENERAL, format!("pool de threads : {e}")))
+}
+
+/// Other running `surgeon` processes (they compete for cores and memory bandwidth).
+fn other_surgeon_processes() -> usize {
+    let Ok(mut sys) = sysinfo::System::new() else {
+        return 0;
+    };
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let me = std::process::id();
+    sys.processes()
+        .values()
+        .filter(|p| p.pid().as_u32() != me)
+        .filter(|p| {
+            let name = p.name().to_string_lossy().to_ascii_lowercase();
+            name == "surgeon" || name == "surgeon.exe"
+        })
+        .count()
+}
+
 /// Shared by the CLI and the MCP tool: native greedy generation, refusal markers, paired
 /// comparison against a baseline; with `judging`, a llama.cpp judge then labels every
 /// answer. Nothing is written but the verdict cache of the judge, when one is given.
+#[allow(clippy::too_many_arguments)]
 pub fn core_bench_refusal(
     req: &RefusalRequest,
+    backend: Backend,
     judging: Option<&RefusalJudging>,
     llama_cpp_dir: Option<&Path>,
     fail_on_warn: bool,
@@ -3154,15 +3296,25 @@ pub fn core_bench_refusal(
         .map(bench::judge::prepare)
         .transpose()
         .map_err(|e| bench_failure(&e))?;
-    let mut run = bench::refusal::run(
-        req,
-        &mut |model| native_generator(model, deps, &sink),
-        &deps.interrupted,
-        &mut |done, total| {
-            sink.borrow_mut()
-                .event(ProgressEvent::BenchRefusalPrompt { done, total })
-        },
-    )
+    req.generation.validate().map_err(|e| bench_failure(&e))?;
+    let pool = generation_pool(&req.generation, backend, &sink)?;
+    let mut make = |model: &Path| {
+        let (tag, generation) = ("bench-refusal", &req.generation);
+        bench_generator(
+            model,
+            backend,
+            generation,
+            &pool,
+            llama_cpp_dir,
+            tag,
+            deps,
+            &sink,
+        )
+    };
+    let mut run = bench::refusal::run(req, &mut make, &deps.interrupted, &mut |done, total| {
+        sink.borrow_mut()
+            .event(ProgressEvent::BenchRefusalPrompt { done, total })
+    })
     .map_err(|e| bench_failure(&e))?;
     if let Some(judging) = judging {
         bench::judge::annotate(

@@ -238,6 +238,23 @@ impl Attention {
             .forward(xs)?
             .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
+        self.attend(q, k, v, rope, mask, cache)?
+            .reshape((b_sz, q_len, self.attn_dim))?
+            .apply(&self.o_proj)
+    }
+
+    /// RoPE, cache append, attention of `q` (`[b, heads, q_len, head_dim]`) over the cached
+    /// sequence; the heads merged, before `o_proj`: `[b, q_len, heads * head_dim]`.
+    fn attend(
+        &self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        rope: &(Tensor, Tensor),
+        mask: Option<&Tensor>,
+        cache: &mut Option<(Tensor, Tensor)>,
+    ) -> candle_core::Result<Tensor> {
+        let (b_sz, _, q_len, _) = q.dims4()?;
         let (cos, sin) = rope;
         let q = candle_nn::rotary_emb::rope(&q.contiguous()?, cos, sin)?;
         let k = candle_nn::rotary_emb::rope(&k.contiguous()?, cos, sin)?;
@@ -262,7 +279,45 @@ impl Attention {
         weights
             .matmul(&v)?
             .transpose(1, 2)?
-            .reshape((b_sz, q_len, self.attn_dim))?
+            .reshape((b_sz, q_len, self.attn_dim))
+    }
+
+    /// One new token for each of B sequences (`xs`: `[B, hidden]`): the projections run on
+    /// the whole batch, attention on each sequence's cache with its own RoPE position.
+    fn forward_batch(
+        &self,
+        xs: &Tensor,
+        steps: &[(Tensor, Tensor)],
+        masks: &[Option<Tensor>],
+        caches: &mut [&mut Option<(Tensor, Tensor)>],
+    ) -> candle_core::Result<Tensor> {
+        let (b_sz, _) = xs.dims2()?;
+        let split = |proj: &Linear, norm: Option<&RmsNorm>, n_heads: usize| {
+            let x = proj
+                .forward(xs)?
+                .reshape((b_sz, 1, n_heads, self.head_dim))?;
+            let x = match norm {
+                Some(norm) => norm.forward(&x)?,
+                None => x,
+            };
+            x.transpose(1, 2)
+        };
+        let q = split(&self.q_proj, self.q_norm.as_ref(), self.num_heads)?;
+        let k = split(&self.k_proj, self.k_norm.as_ref(), self.num_kv_heads)?;
+        let v = split(&self.v_proj, None, self.num_kv_heads)?;
+        let mut merged = Vec::with_capacity(b_sz);
+        for (b, cache) in caches.iter_mut().enumerate() {
+            merged.push(self.attend(
+                q.narrow(0, b, 1)?,
+                k.narrow(0, b, 1)?,
+                v.narrow(0, b, 1)?,
+                &steps[b],
+                masks[b].as_ref(),
+                cache,
+            )?);
+        }
+        Tensor::cat(&merged, 0)?
+            .reshape((b_sz, self.attn_dim))?
             .apply(&self.o_proj)
     }
 }
@@ -318,6 +373,24 @@ impl DecoderLayer {
         let residual = xs;
         let xs = self.input_layernorm.forward(xs)?;
         let xs = self.self_attn.forward_cached(&xs, rope, mask, cache)?;
+        let xs = (xs + residual)?;
+        let mlp_out = xs.apply(&self.post_attention_layernorm)?.apply(&self.mlp)?;
+        &xs + &mlp_out
+    }
+}
+
+impl DecoderLayer {
+    /// [`Attention::forward_batch`] then the MLP, on `[B, hidden]`.
+    fn forward_batch(
+        &self,
+        xs: &Tensor,
+        steps: &[(Tensor, Tensor)],
+        masks: &[Option<Tensor>],
+        caches: &mut [&mut Option<(Tensor, Tensor)>],
+    ) -> candle_core::Result<Tensor> {
+        let residual = xs;
+        let xs = self.input_layernorm.forward(xs)?;
+        let xs = self.self_attn.forward_batch(&xs, steps, masks, caches)?;
         let xs = (xs + residual)?;
         let mlp_out = xs.apply(&self.post_attention_layernorm)?.apply(&self.mlp)?;
         &xs + &mlp_out
@@ -619,6 +692,53 @@ impl HookedDecoder {
 
     /// Logits (f32, `vocab` entries) of the last position of `hidden` (`[1, seq, hidden]`),
     /// final norm and `lm_head` included. Needs [`Self::from_tensors_full`].
+    /// One decode step for B sequences: `ids[b]` is the next token of the sequence whose
+    /// cache is `caches[b]`. The embeddings, norms, projections, MLP and output head run on
+    /// `[B, hidden]` (each weight is read once for the whole batch); attention runs per
+    /// sequence over its own cache, at its own RoPE position, so no padding is needed.
+    /// Returns the f32 logits of each sequence. Needs [`Self::from_tensors_full`].
+    pub fn forward_batch_step(
+        &self,
+        ids: &[u32],
+        caches: &mut [&mut KvCache],
+    ) -> Result<Vec<Vec<f32>>> {
+        let head = self.head.as_ref().ok_or_else(|| {
+            ExtractError::Compute("modèle chargé sans norme finale ni lm_head".into())
+        })?;
+        if ids.is_empty() || ids.len() != caches.len() {
+            return Err(ExtractError::InvalidArgument(format!(
+                "forward_batch_step : {} tokens pour {} caches",
+                ids.len(),
+                caches.len()
+            )));
+        }
+        if caches.iter().any(|c| c.layers.len() != self.layers.len()) {
+            return Err(ExtractError::InvalidArgument(
+                "forward_batch_step : cache d'un autre modèle".into(),
+            ));
+        }
+        let mut steps = Vec::with_capacity(ids.len());
+        let mut masks = Vec::with_capacity(ids.len());
+        for cache in caches.iter() {
+            let offset = cache.len();
+            let (cos, sin) = self.rope(offset + 1)?;
+            steps.push((
+                cos.narrow(0, offset, 1)?.contiguous()?,
+                sin.narrow(0, offset, 1)?.contiguous()?,
+            ));
+            masks.push(self.mask_at(offset, 1)?);
+        }
+        let input = Tensor::new(ids, &self.device)?;
+        let mut xs = self.embed_tokens.forward(&input)?;
+        for (i, layer) in self.layers.iter().enumerate() {
+            let mut slots: Vec<&mut Option<(Tensor, Tensor)>> =
+                caches.iter_mut().map(|c| &mut c.layers[i]).collect();
+            xs = layer.forward_batch(&xs, &steps, &masks, &mut slots)?;
+        }
+        let logits = xs.apply(&head.norm)?.apply(&head.lm_head)?;
+        Ok(logits.to_dtype(DType::F32)?.to_vec2::<f32>()?)
+    }
+
     pub fn logits_last(&self, hidden: &Tensor) -> Result<Vec<f32>> {
         let head = self.head.as_ref().ok_or_else(|| {
             ExtractError::Compute("modèle chargé sans norme finale ni lm_head".into())

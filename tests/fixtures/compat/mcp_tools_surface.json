@@ -715,6 +715,18 @@
                     "native"
                   ],
                   "type": "string"
+                },
+                {
+                  "enum": [
+                    "llama-completion"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "llama-server"
+                  ],
+                  "type": "string"
                 }
               ]
             },
@@ -744,6 +756,15 @@
           "format": "double",
           "type": [
             "number",
+            "null"
+          ]
+        },
+        "batch_size": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -864,6 +885,15 @@
             }
           ],
           "default": null
+        },
+        "jobs": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "judge": {
           "anyOf": [
@@ -1041,6 +1071,14 @@
             "null"
           ]
         },
+        "min_p": {
+          "default": null,
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "mode": {
           "oneOf": [
             {
@@ -1137,6 +1175,40 @@
             "null"
           ]
         },
+        "repetition_penalty": {
+          "default": null,
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "samples": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "seed": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "temperature": {
+          "default": null,
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "tensor": {
           "default": null,
           "type": [
@@ -1175,6 +1247,14 @@
           "minimum": 1.0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "top_p": {
+          "default": null,
+          "format": "float",
+          "type": [
+            "number",
             "null"
           ]
         },

@@ -43,14 +43,20 @@ mod command;
 mod error;
 mod generator;
 mod gguf;
+mod http;
 mod loop_detector;
 mod prompts;
 mod runner;
+pub mod sampling;
+pub mod server;
 
 pub(crate) use command::last_lines;
 pub use command::{CommandOutput, CommandRunner, StreamControl, SystemCommandRunner};
 pub use error::{EvalError, Result};
-pub use generator::{locate_binary, Decoding, GenerationOutcome, LlamaCliGenerator, TextGenerator};
+pub use generator::{
+    generate_one_by_one, locate_binary, sampling_flags, Decoding, GenJob, GenerationOutcome,
+    LlamaCliGenerator, TextGenerator,
+};
 pub use gguf::{
     ensure_gguf, export_gguf, export_if_healthy, is_gguf, model_dir, GgufExportConfig,
     GgufExportReport, GgufModel, StepReport, ALLOWED_QUANTS, LLAMA_DIR_REQUIRED,

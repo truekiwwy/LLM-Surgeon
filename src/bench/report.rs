@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use super::generation::{GenerationReport, SampledScore};
 use super::judge::{self, JudgeReport};
 use super::logits_io::{DumpFormat, LogitsDtype};
 use crate::ui::{self, Ui};
@@ -215,6 +216,9 @@ pub struct ItemResult {
     pub loop_detected: bool,
     /// Début de la sortie (200 caractères au plus, coupé proprement en UTF-8).
     pub output_excerpt: String,
+    /// Index de l'échantillon (base 0), si --samples > 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -301,6 +305,10 @@ pub struct BenchEvalReport {
     pub verdict: Verdict,
     /// Durées en millisecondes.
     pub timing_ms: EvalTiming,
+    /// Génération autre que l'historique (sampling, échantillons, lots, backend) ; absent
+    /// sinon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<super::generation::GenerationReport>,
 }
 
 // ------------------------------------------------------------------ refusal
@@ -315,6 +323,9 @@ pub struct RefusalItem {
     pub marker: Option<String>,
     /// Réponse générée, entière.
     pub output: String,
+    /// Index de l'échantillon (base 0), si --samples > 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -398,6 +409,10 @@ pub struct BenchRefusalReport {
     pub judge: Option<JudgeReport>,
     /// Durées en millisecondes.
     pub timing_ms: RefusalTiming,
+    /// Génération autre que l'historique (sampling, échantillons, lots, backend) ; absent
+    /// sinon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<super::generation::GenerationReport>,
 }
 
 // ------------------------------------------------------------------ dump
@@ -573,18 +588,75 @@ fn score_line(ui: &Ui, label: &str, s: &EvalScore) -> String {
     )
 }
 
+/// "6 prompts", or "6 prompts × 3" when each one was answered several times.
+fn count(ui: &Ui, n: usize, noun: &str, generation: Option<&GenerationReport>) -> String {
+    match generation.filter(|g| g.samples > 1) {
+        Some(g) => format!(
+            "{} {noun} × {}",
+            ui::metric(ui, n / g.samples),
+            ui::metric(ui, g.samples)
+        ),
+        None => format!("{} {noun}", ui::metric(ui, n)),
+    }
+}
+
+/// The label of the per-answer line: "réponses " when a prompt has several answers.
+fn answers(generation: Option<&GenerationReport>) -> &'static str {
+    match generation.is_some_and(|g| g.samples > 1) {
+        true => "réponses ",
+        false => "",
+    }
+}
+
+/// The per-prompt statistics of `--samples`: mean rate, bootstrap interval over prompts,
+/// dispersions; with a baseline, its line and the paired difference.
+fn sampled_lines(ui: &Ui, generation: Option<&GenerationReport>) -> Vec<String> {
+    let Some(g) = generation else {
+        return Vec::new();
+    };
+    let line = |label: &str, s: &SampledScore| {
+        format!(
+            "{} {label}par prompt {} · IC95 bootstrap [{} ; {}] · dispersion intra {} · inter {}",
+            ui::badge(ui, "ÉCHANT."),
+            ui::metric(ui, pct(s.mean)),
+            ui::metric(ui, format!("{:.1}", s.ci95_low * 100.0)),
+            ui::metric(ui, format!("{:.1}", s.ci95_high * 100.0)),
+            ui::metric(ui, format!("{:.4}", s.within_prompt_variance)),
+            ui::metric(ui, format!("{:.4}", s.between_prompt_variance))
+        )
+    };
+    let mut lines: Vec<String> = g.sampled.iter().map(|s| line("", s)).collect();
+    lines.extend(g.baseline_sampled.iter().map(|s| line("référence ", s)));
+    lines.extend(g.delta.iter().map(|d| {
+        format!(
+            "  {}",
+            ui::dim(
+                ui,
+                &format!(
+                    "par prompt : Δ {:+.1} points, IC95 bootstrap [{:+.1} ; {:+.1}]",
+                    d.delta * 100.0,
+                    d.ci95_low * 100.0,
+                    d.ci95_high * 100.0
+                )
+            )
+        )
+    }));
+    lines
+}
+
 pub fn eval_text(ui: &Ui, run: &BenchRun<BenchEvalReport>) -> String {
     let r = &run.report;
     let mut lines = vec![
         format!(
-            "{} eval · {} questions · {}  {}",
+            "{} eval · {} · {}  {}",
             ui::badge(ui, "BENCH"),
-            ui::metric(ui, r.score.n),
+            count(ui, r.score.n, "questions", r.generation.as_ref()),
             ui::metric(ui, &r.format),
             ui::path(ui, &r.dataset)
         ),
-        score_line(ui, "", &r.score),
+        score_line(ui, answers(r.generation.as_ref()), &r.score),
     ];
+    lines.extend(sampled_lines(ui, r.generation.as_ref()));
     if let (Some(b), Some(p)) = (&r.baseline, &r.paired) {
         lines.push(score_line(ui, "référence ", &b.score));
         lines.push(format!(
@@ -620,15 +692,16 @@ pub fn refusal_text(ui: &Ui, run: &BenchRun<BenchRefusalReport>) -> String {
     let r = &run.report;
     let mut lines = vec![
         format!(
-            "{} refusal · {} prompts · {} · {} tokens max  {}",
+            "{} refusal · {} · {} · {} tokens max  {}",
             ui::badge(ui, "BENCH"),
-            ui::metric(ui, r.score.n),
+            count(ui, r.score.n, "prompts", r.generation.as_ref()),
             ui::metric(ui, &r.chat_template),
             ui::metric(ui, r.max_new_tokens),
             ui::path(ui, &r.model)
         ),
-        refusal_line(ui, "", &r.score),
+        refusal_line(ui, answers(r.generation.as_ref()), &r.score),
     ];
+    lines.extend(sampled_lines(ui, r.generation.as_ref()));
     if let (Some(b), Some(p)) = (&r.baseline, &r.paired) {
         lines.push(refusal_line(ui, "référence ", &b.score));
         lines.push(format!(

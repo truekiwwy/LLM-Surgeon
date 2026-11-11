@@ -574,10 +574,7 @@ impl Judge {
                         Some(made) => made,
                         None => {
                             let mut made = make_generator(&self.setup.model)?;
-                            made.configure(&Decoding {
-                                seed: SEED,
-                                timeout: self.setup.timeout,
-                            });
+                            made.configure(&Decoding::greedy(SEED, self.setup.timeout));
                             made.constrain(&grammar(role));
                             generator.insert(made)
                         }
@@ -1497,6 +1494,8 @@ pub(crate) mod tests {
             max_new_tokens: 16,
             chat_template: ChatTemplate::Chatml,
             markers: Default::default(),
+            generation: Default::default(),
+            backend: "native".into(),
         };
         let mut calls = 0;
         let mut make = |_: &Path| -> Result<Box<dyn TextGenerator>> {
