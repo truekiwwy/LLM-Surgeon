@@ -107,8 +107,8 @@ est une erreur JSON-RPC `-32602` (les cinq autres outils la signalent en
 | --- | --- | --- |
 | `logits` | `before`, `after` | `tensor`, `top_k` (5), `worst` (5), `warn_kl`, `warn_top1_shift`, `fail_on_warn` |
 | `ppl` | `model`, `text` | `baseline_model` ou `baseline_ppl` (+ `baseline_ppl_err`), `ctx` (512), `chunks`, `threads`, `n_gpu_layers` (0), `llama_cpp_dir`, `warn_delta` (0.2), `timeout_secs`, `fail_on_warn` |
-| `eval` | `model`, `dataset` | `backend` (`llama`, `native`), `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn` |
-| `refusal` | `model`, `prompts` (fichier) | `baseline_model`, `max_new_tokens` (256), `chat_template` (`chatml`, `none`), `marker_langs`, `markers_file`, `judge` (`rules`, `llm`, `both`), `judge_model`, `judge_role` (`refusal`, `harm`), `judge_template`, `judge_cache`, `judge_calibration`, `min_calibration_n` (100), `min_kappa` (0.6), `partial_as_refusal`, `max_unparsable`, `llama_cpp_dir`, `timeout_secs`, `fail_on_warn` |
+| `eval` | `model`, `dataset` | `backend` (`llama`, `llama-completion`, `llama-server`, `native`), `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn`, options de génération |
+| `refusal` | `model`, `prompts` (fichier) | `backend` (`native`, `llama-server`, `llama-completion`), `baseline_model`, `max_new_tokens` (256), `chat_template` (`chatml`, `none`), `marker_langs`, `markers_file`, `judge` (`rules`, `llm`, `both`), `judge_model`, `judge_role` (`refusal`, `harm`), `judge_template`, `judge_cache`, `judge_calibration`, `min_calibration_n` (100), `min_kappa` (0.6), `partial_as_refusal`, `max_unparsable`, `llama_cpp_dir`, `timeout_secs`, `fail_on_warn`, options de génération |
 | `dump` | `model`, `prompts` (fichier), `out` | `dtype`, `out_dtype` (`f32`, `f16`), `max_tokens` (256), `max_total_positions` (4096), `overwrite` |
 
 `data` reçoit le rapport (`BenchLogitsReport`, `BenchPplReport`, `BenchEvalReport`,
@@ -119,8 +119,20 @@ par MCP (l'option `--llama-arg` n'existe qu'en ligne de commande, sur liste blan
 `--read-only` refuse le mode `dump` et le champ `judge_cache` (il écrit un fichier) mais
 laisse `logits`, `ppl`, `eval` et `refusal`, juge compris.
 
+Options de génération de `eval` et `refusal`, toutes structurées et bornées comme en ligne
+de commande : `temperature` (0, glouton), `top_k` (absent : désactivé), `top_p` (1),
+`min_p` (0), `repetition_penalty` (1), `seed` (42), `samples` (1 ; au-delà, `temperature`
+doit dépasser 0), `batch_size` (1), `jobs` (1), `threads`, `n_gpu_layers` (`-ngl` de
+`llama-server`), `ctx` (`-c` de `llama-server`). Sans elles, le rapport est celui d'avant ;
+avec elles, il gagne `data.generation` (statistiques par prompt et intervalle bootstrap sur
+les prompts quand `samples` dépasse 1). Le backend `llama-server` ne reçoit que les options
+de sa liste blanche (`-m`, `--host 127.0.0.1`, `--port`, `--api-key` aléatoire, `-np`,
+`-c`, `-ngl`, `-t`), vérifiées contre son `--help` ; aucune propriété libre n'existe
+(`additionalProperties: false`), et `llama_cpp_dir` passe par le bac à sable. Voir la
+section « Échantillonnage, lots et backends » du README.
+
 `eval` avec `backend: "native"` et `refusal` génèrent en Rust pur sur le CPU, sur un dossier
-Qwen2 SafeTensors, sans llama.cpp (décodage glouton, donc déterministe). `refusal` compte
+Qwen2 SafeTensors, sans llama.cpp (décodage glouton par défaut, donc déterministe). `refusal` compte
 comme refus une réponse qui contient un marqueur canonique (`data.markers`, anglais par
 défaut, sans casse, aux frontières de mots ; `marker_langs` et `markers_file` ajoutent
 d'autres langues) ; les réponses entières sont dans `data.items[].output`. Avec

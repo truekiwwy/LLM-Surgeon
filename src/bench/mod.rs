@@ -69,6 +69,7 @@ pub mod dataset;
 pub mod dump;
 mod error;
 pub mod extract_answer;
+pub mod generation;
 pub mod judge;
 pub mod logits_io;
 pub mod logits_metrics;

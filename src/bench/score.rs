@@ -22,6 +22,7 @@ use regex::Regex;
 use super::dataset::{self, DatasetFormat, Item};
 use super::error::{BenchError, Result};
 use super::extract_answer::{extract, number_re};
+use super::generation::{by_prompt, GenOptions};
 use super::prompt::Template;
 use super::report::{
     BenchEvalReport, BenchRun, EvalBaseline, EvalScore, EvalTiming, ItemResult, PairedComparison,
@@ -29,8 +30,8 @@ use super::report::{
 };
 use super::sha256_file;
 use crate::eval::{
-    ensure_gguf, truncate_chars, CommandRunner, Decoding, EvalError, LoopDetector,
-    LoopDetectorConfig, LoopVerdict, TextGenerator, LLAMA_DIR_REQUIRED,
+    ensure_gguf, truncate_chars, CommandRunner, EvalError, LoopDetector, LoopDetectorConfig,
+    LoopVerdict, TextGenerator, LLAMA_DIR_REQUIRED,
 };
 
 /// Fixed seed of the greedy decoding (greedy ignores it, set anyway for reproducibility).
@@ -242,48 +243,57 @@ pub fn judge(item: &Item, output: &str, loop_detected: bool) -> ItemResult {
         reason: reason.to_owned(),
         loop_detected,
         output_excerpt: truncate_chars(output, EXCERPT_CHARS).to_owned(),
+        sample: None,
     }
 }
 
 /// Every question in order. A timeout fails that question only; any other generator
 /// error (process crash, missing binary) stops the suite.
+///
+/// Every (question, sample) goes through [`TextGenerator::generate_many`] (batched by the
+/// native backend, concurrent with llama-server), each with its own loop detector fed by
+/// its own stream, so a loop is cut exactly as in the sequential run.
 pub fn run_suite(
     generator: &mut dyn TextGenerator,
     items: &[Item],
     template: &Template,
     max_new_tokens: u32,
+    generation: &GenOptions,
     cancel: &AtomicBool,
     on_question: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<ItemResult>> {
-    let mut results = Vec::with_capacity(items.len());
-    let mut detector = LoopDetector::new(LoopDetectorConfig::default());
-    for (i, item) in items.iter().enumerate() {
-        if cancel.load(Ordering::SeqCst) {
-            return Err(BenchError::Cancelled);
-        }
-        detector.reset();
-        let mut looped = false;
-        let outcome = generator.generate(
-            &template.render(&item.question),
-            max_new_tokens,
-            &mut |chunk| {
-                if cancel.load(Ordering::SeqCst) {
-                    return std::ops::ControlFlow::Break(());
-                }
-                match detector.push(chunk) {
-                    LoopVerdict::Loop { .. } => {
-                        looped = true;
-                        std::ops::ControlFlow::Break(())
-                    }
-                    LoopVerdict::Ok => std::ops::ControlFlow::Continue(()),
-                }
-            },
-        );
-        if cancel.load(Ordering::SeqCst) {
-            return Err(BenchError::Cancelled);
-        }
-        results.push(match outcome {
-            Ok(out) => judge(item, &out.text, looped),
+    let samples = generation.samples;
+    let jobs = generation.jobs(items.iter().map(|item| template.render(&item.question)));
+    let total = jobs.len();
+    let mut detectors: Vec<LoopDetector> = (0..total)
+        .map(|_| LoopDetector::new(LoopDetectorConfig::default()))
+        .collect();
+    let mut looped = vec![false; total];
+    let mut done = 0;
+    let outcomes = generator.generate_many(
+        &jobs,
+        max_new_tokens,
+        cancel,
+        &mut |j, chunk| match detectors[j].push(chunk) {
+            LoopVerdict::Loop { .. } => {
+                looped[j] = true;
+                std::ops::ControlFlow::Break(())
+            }
+            LoopVerdict::Ok => std::ops::ControlFlow::Continue(()),
+        },
+        &mut |_| {
+            done += 1;
+            on_question(done, total);
+        },
+    )?;
+    if cancel.load(Ordering::SeqCst) {
+        return Err(BenchError::Cancelled);
+    }
+    let mut results = Vec::with_capacity(total);
+    for (j, outcome) in outcomes.into_iter().enumerate() {
+        let item = &items[j / samples];
+        let mut result = match outcome {
+            Ok(out) => judge(item, &out.text, looped[j]),
             Err(EvalError::Timeout { .. }) => ItemResult {
                 id: item.id.clone(),
                 gold: normalize(&item.gold),
@@ -293,10 +303,15 @@ pub fn run_suite(
                 reason: "timeout".into(),
                 loop_detected: false,
                 output_excerpt: String::new(),
+                sample: None,
             },
             Err(e) => return Err(e.into()),
-        });
-        on_question(i + 1, items.len());
+        };
+        result.sample = (samples > 1).then_some(j % samples);
+        results.push(result);
+    }
+    if results.len() < total {
+        return Err(BenchError::Cancelled);
     }
     Ok(results)
 }
@@ -338,8 +353,30 @@ pub enum Backend {
     /// llama.cpp (`llama-completion` / `llama-cli`) sur un GGUF, converti au besoin.
     #[default]
     Llama,
-    /// Génération gloutonne en Rust pur sur CPU, sur un dossier Qwen2 SafeTensors.
+    /// Génération en Rust pur sur CPU, sur un dossier SafeTensors (forward natif).
     Native,
+    /// llama.cpp `llama-completion` / `llama-cli`, un processus par génération (comme llama).
+    #[serde(rename = "llama-completion")]
+    LlamaCompletion,
+    /// llama.cpp `llama-server` : un serveur local, requêtes concurrentes, GPU selon le build.
+    #[serde(rename = "llama-server")]
+    LlamaServer,
+}
+
+impl Backend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Backend::Llama => "llama",
+            Backend::Native => "native",
+            Backend::LlamaCompletion => "llama-completion",
+            Backend::LlamaServer => "llama-server",
+        }
+    }
+
+    /// Runs llama.cpp on a GGUF (a SafeTensors model is converted first).
+    pub fn is_llama(self) -> bool {
+        self != Backend::Native
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +393,7 @@ pub struct EvalRequest {
     /// Per question.
     pub timeout: Option<Duration>,
     pub min_accuracy: Option<f64>,
+    pub generation: GenOptions,
 }
 
 /// Builds a generator for a model: a GGUF with [`Backend::Llama`] (the app's
@@ -400,23 +438,21 @@ pub fn run(
     let mut evaluate = |model: &Path, tag: &str| -> Result<(Vec<ItemResult>, u64)> {
         let started = Instant::now();
         // Kept until the suite ends: a converted GGUF is a temporary file.
-        let gguf = match req.backend {
-            Backend::Llama => Some(
+        let gguf = match req.backend.is_llama() {
+            true => Some(
                 ensure_gguf(model, req.llama_cpp_dir.as_deref(), tag, runner)
                     .map_err(gguf_error)?,
             ),
-            Backend::Native => None,
+            false => None,
         };
         let mut generator = make_generator(gguf.as_ref().map_or(model, |g| g.path()))?;
-        generator.configure(&Decoding {
-            seed: SEED,
-            timeout: req.timeout,
-        });
+        generator.configure(&req.generation.decoding(req.timeout));
         let results = run_suite(
             generator.as_mut(),
             &items,
             &req.template,
             req.max_new_tokens,
+            &req.generation,
             cancel,
             on_question,
         )?;
@@ -448,9 +484,20 @@ pub fn run(
         }
     }
     warnings.extend(threshold_warnings.iter().cloned());
+    // Several samples per question are not independent pairs: per-question rates instead.
+    let samples = req.generation.samples;
     let paired_cmp = baseline
         .as_ref()
+        .filter(|_| samples == 1)
         .map(|(_, (base, _))| paired(&results, base));
+    let hits = |items: &[ItemResult]| by_prompt(items.iter().map(|i| i.correct), samples);
+    let generation = (!req.generation.is_historical(req.backend == Backend::Llama)).then(|| {
+        req.generation.report(
+            req.backend.label(),
+            Some(&hits(&results)),
+            baseline.as_ref().map(|(_, (b, _))| hits(b)).as_deref(),
+        )
+    });
     let report = BenchEvalReport {
         model: req.model.clone(),
         dataset: req.dataset.clone(),
@@ -477,6 +524,7 @@ pub fn run(
             (Some(_), true) => Verdict::Ok,
             (Some(_), false) => Verdict::Warn,
         },
+        generation,
     };
     Ok(BenchRun {
         report,
@@ -571,7 +619,7 @@ mod tests {
             })
         }
 
-        fn configure(&mut self, decoding: &Decoding) -> bool {
+        fn configure(&mut self, decoding: &crate::eval::Decoding) -> bool {
             assert_eq!(decoding.seed, SEED);
             self.configured = true;
             true
@@ -619,6 +667,7 @@ mod tests {
             llama_cpp_dir: None,
             timeout: None,
             min_accuracy: None,
+            generation: Default::default(),
         };
         (dir, req)
     }

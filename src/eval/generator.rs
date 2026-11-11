@@ -3,6 +3,7 @@ use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use serde::Serialize;
 
 use super::command::{drain_tail, last_lines, spawn_error, ChildGuard};
 use super::error::{EvalError, Result};
+use super::sampling::{self, SamplingParams};
 
 const STDERR_TAIL_BYTES: usize = 64 * 1024;
 const READ_CHUNK_BYTES: usize = 4096;
@@ -28,10 +30,38 @@ pub trait TextGenerator {
         on_chunk: &mut dyn FnMut(&str) -> ControlFlow<()>,
     ) -> Result<GenerationOutcome>;
 
-    /// Switches to greedy, seeded decoding (call once, before the first `generate`).
-    /// Returns false when the generator has no sampling to configure (mocks, scripts).
+    /// Sets the decoding (greedy and seeded by default; call once, before the first
+    /// `generate`). Returns false when the generator has no sampling to configure (mocks,
+    /// scripts).
     fn configure(&mut self, _decoding: &Decoding) -> bool {
         false
+    }
+
+    /// One job: [`Self::generate`] by default. A generator that samples overrides it to
+    /// draw from the job's own stream (`sequence_id`).
+    fn generate_job(
+        &mut self,
+        job: &GenJob,
+        max_new_tokens: u32,
+        on_chunk: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> Result<GenerationOutcome> {
+        self.generate(&job.prompt, max_new_tokens, on_chunk)
+    }
+
+    /// Several jobs, one result each in their order; the default runs them one by one
+    /// through [`Self::generate_job`]. `on_chunk(i, text)` streams job `i` (`Break` stops
+    /// that job); `on_done(i)` follows its end. A raised `cancel` stops at the next job:
+    /// the results so far are returned, fewer than the jobs. A job's error other than a
+    /// timeout ends the run after it (the outer error is for what fails the whole run).
+    fn generate_many(
+        &mut self,
+        jobs: &[GenJob],
+        max_new_tokens: u32,
+        cancel: &AtomicBool,
+        on_chunk: &mut dyn FnMut(usize, &str) -> ControlFlow<()>,
+        on_done: &mut dyn FnMut(usize),
+    ) -> Result<Vec<Result<GenerationOutcome>>> {
+        generate_one_by_one(self, jobs, max_new_tokens, cancel, on_chunk, on_done)
     }
 
     /// Restricts the output to a GBNF grammar (call once, before the first `generate`).
@@ -39,6 +69,52 @@ pub trait TextGenerator {
     /// parse free text.
     fn constrain(&mut self, _gbnf: &str) -> bool {
         false
+    }
+}
+
+/// The default [`TextGenerator::generate_many`]: each job through `generate_job`, in order.
+pub fn generate_one_by_one<G: TextGenerator + ?Sized>(
+    generator: &mut G,
+    jobs: &[GenJob],
+    max_new_tokens: u32,
+    cancel: &AtomicBool,
+    on_chunk: &mut dyn FnMut(usize, &str) -> ControlFlow<()>,
+    on_done: &mut dyn FnMut(usize),
+) -> Result<Vec<Result<GenerationOutcome>>> {
+    let mut outcomes = Vec::with_capacity(jobs.len());
+    for (i, job) in jobs.iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        let outcome = generator.generate_job(job, max_new_tokens, &mut |chunk| match cancel
+            .load(Ordering::SeqCst)
+        {
+            true => ControlFlow::Break(()),
+            false => on_chunk(i, chunk),
+        });
+        let fatal = matches!(outcome, Err(ref e) if !matches!(e, EvalError::Timeout { .. }));
+        outcomes.push(outcome);
+        // A failed job is not done: progress stops at the last one that ended.
+        if fatal {
+            break;
+        }
+        on_done(i);
+    }
+    Ok(outcomes)
+}
+
+/// One generation of [`TextGenerator::generate_many`]: the prompt and the id of its random
+/// stream, `(prompt index << 32) | sample index` in the benches, so that a sample keeps its
+/// stream whatever the batch, the order or the number of samples.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenJob {
+    pub prompt: String,
+    pub sequence_id: u64,
+}
+
+impl GenJob {
+    pub fn id(prompt: usize, sample: usize) -> u64 {
+        ((prompt as u64) << 32) | sample as u64
     }
 }
 
@@ -63,14 +139,30 @@ pub struct LlamaCliGenerator {
     pub model_path: PathBuf,
     pub extra_args: Vec<String>,
     pub timeout: Duration,
+    /// Set by `configure` when it asks for sampling: the flags are per job (the seed of
+    /// each sequence).
+    pub sampling: Option<SamplingParams>,
 }
 
-/// Deterministic decoding requested by `surgeon bench eval`, passed as structured flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Decoding requested by the benches, passed as structured flags. `sampling` at its
+/// default (temperature 0) is the historical greedy, seeded decoding.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Decoding {
     pub seed: u32,
     /// Per generation; `None` keeps the generator's own timeout.
     pub timeout: Option<Duration>,
+    pub sampling: SamplingParams,
+}
+
+impl Decoding {
+    /// Greedy and seeded, as the benches always ran.
+    pub fn greedy(seed: u32, timeout: Option<Duration>) -> Self {
+        Self {
+            seed,
+            timeout,
+            sampling: SamplingParams::default(),
+        }
+    }
 }
 
 impl LlamaCliGenerator {
@@ -98,15 +190,37 @@ impl TextGenerator for LlamaCliGenerator {
         stream_child(self.command(prompt, max_new_tokens), self.timeout, on_chunk)
     }
 
-    /// `--temp 0 --top-k 1 --seed N`: same model, prompt and build give the same text.
+    /// Greedy: `--temp 0 --top-k 1 --seed N`, same model, prompt and build give the same
+    /// text. Sampling: the parameters as llama.cpp flags, the seed per job.
     fn configure(&mut self, decoding: &Decoding) -> bool {
-        let seed = decoding.seed.to_string();
-        self.extra_args
-            .extend(["--temp", "0", "--top-k", "1", "--seed", &seed].map(String::from));
+        match decoding.sampling.is_greedy() {
+            true => {
+                let seed = decoding.seed.to_string();
+                self.extra_args
+                    .extend(["--temp", "0", "--top-k", "1", "--seed", &seed].map(String::from));
+            }
+            false => self.sampling = Some(decoding.sampling),
+        }
         if let Some(timeout) = decoding.timeout {
             self.timeout = timeout;
         }
         true
+    }
+
+    fn generate_job(
+        &mut self,
+        job: &GenJob,
+        max_new_tokens: u32,
+        on_chunk: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> Result<GenerationOutcome> {
+        let mut cmd = self.command(&job.prompt, max_new_tokens);
+        if let Some(p) = &self.sampling {
+            cmd.args(sampling_flags(
+                p,
+                sampling::sequence_seed(p.seed, job.sequence_id),
+            ));
+        }
+        stream_child(cmd, self.timeout, on_chunk)
     }
 
     /// `--grammar <GBNF>`, inline: no grammar file to write or clean up.
@@ -115,6 +229,21 @@ impl TextGenerator for LlamaCliGenerator {
             .extend(["--grammar".to_owned(), gbnf.to_owned()]);
         true
     }
+}
+
+/// The llama.cpp sampling flags of `p`, with the seed of one sequence.
+pub fn sampling_flags(p: &SamplingParams, seed: u32) -> Vec<String> {
+    [
+        ("--temp", p.temperature.to_string()),
+        ("--top-k", p.top_k.to_string()),
+        ("--top-p", p.top_p.to_string()),
+        ("--min-p", p.min_p.to_string()),
+        ("--repeat-penalty", p.repetition_penalty.to_string()),
+        ("--seed", seed.to_string()),
+    ]
+    .into_iter()
+    .flat_map(|(flag, value)| [flag.to_owned(), value])
+    .collect()
 }
 
 /// Spawns `cmd`, streams its stdout to `on_chunk`, and guarantees the child is reaped
@@ -379,6 +508,7 @@ mod tests {
             model_path: dir.path().join("m.gguf"),
             extra_args: vec![],
             timeout: Duration::from_secs(5),
+            sampling: None,
         };
         let err = g
             .generate("x", 8, &mut |_| ControlFlow::Continue(()))
@@ -395,6 +525,7 @@ mod tests {
             model_path: "m.gguf".into(),
             extra_args: vec!["-no-cnv".into()],
             timeout: Duration::from_secs(1),
+            sampling: None,
         };
         let cmd = g.command("Bonjour; rm -rf /", 64);
         let args: Vec<_> = cmd

@@ -497,8 +497,12 @@ fn every_command_and_option_is_documented_and_real() {
 fn quoted_options_exist_somewhere_in_the_cli() {
     let mut known: BTreeSet<String> = real_commands().into_iter().flat_map(|(_, o)| o).collect();
     known.extend(["--json", "--verbose", "--help", "--version"].map(String::from));
-    // Options of other tools quoted on purpose: Claude Code, cargo, llama-perplexity.
+    // Options of other tools quoted on purpose: Claude Code, cargo, llama-perplexity,
+    // llama-server (its whitelisted flags).
     let foreign = [
+        "--host",
+        "--port",
+        "--api-key",
         "--scope",
         "--temp",
         "--release",

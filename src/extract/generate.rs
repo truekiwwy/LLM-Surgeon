@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::Instant;
 
 use candle_core::{DType, Device, Tensor};
@@ -26,6 +27,7 @@ use super::error::{ExtractError, Result};
 use super::forward::{build, Depth, ResidualForward};
 use super::weights::{check_tensors, load_tensors, required_tensors_full, SafetensorsDir};
 use super::{choose_dtype, plan_memory, DTypeChoice};
+use crate::eval::sampling::{self, SamplingParams, Xoshiro256pp};
 use crate::hardware::HardwareProbe;
 
 /// Activation injection: `direction` has `hidden_size` entries, `alpha_abs` is absolute.
@@ -143,19 +145,173 @@ fn run_layers(
     })
 }
 
-/// Index of the largest logit, the smallest index on ties.
-fn argmax(logits: &[f32]) -> Result<u32> {
-    let mut best: Option<(usize, f32)> = None;
-    for (i, &logit) in logits.iter().enumerate() {
-        if !logit.is_finite() {
-            return Err(ExtractError::Compute("logits non finis (NaN/Inf)".into()));
-        }
-        if best.is_none_or(|(_, top)| logit > top) {
-            best = Some((i, logit));
+/// How one sequence draws its tokens: its parameters and the id of its random stream
+/// (`eval::sampling`). The default is greedy decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Sequence {
+    pub params: SamplingParams,
+    pub id: u64,
+}
+
+/// The sampling state of one sequence: its stream and every token so far (prompt
+/// included, for the repetition penalty).
+struct Drawer {
+    params: SamplingParams,
+    rng: Xoshiro256pp,
+    history: Vec<u32>,
+}
+
+impl Drawer {
+    fn new(sequence: &Sequence, prompt: &[u32]) -> Self {
+        Self {
+            params: sequence.params,
+            rng: Xoshiro256pp::for_sequence(sequence.params.seed, sequence.id),
+            history: prompt.to_vec(),
         }
     }
-    best.map(|(i, _)| i as u32)
-        .ok_or_else(|| ExtractError::Compute("logits vides".into()))
+
+    /// Greedy at T = 0 (the largest logit, the smallest index on ties), else one draw.
+    fn next(&mut self, logits: &[f32]) -> Result<u32> {
+        if logits.is_empty() {
+            return Err(ExtractError::Compute("logits vides".into()));
+        }
+        let id = sampling::sample(logits, &self.params, &self.history, &mut self.rng)
+            .ok_or_else(|| ExtractError::Compute("logits non finis (NaN/Inf)".into()))?;
+        self.history.push(id);
+        Ok(id)
+    }
+}
+
+/// One sequence of [`DecoderState::generate_batch`]; steering is not supported there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchJob {
+    pub request: GenRequest,
+    pub sequence: Sequence,
+}
+
+/// How [`DecoderState::generate_batch`] spreads its jobs.
+#[derive(Debug, Clone, Copy)]
+pub struct Batching<'a> {
+    /// Sequences decoded together by one worker.
+    pub batch_size: usize,
+    /// Workers decoding in parallel.
+    pub workers: usize,
+    /// The rayon pool the workers' tensor kernels run in; `None`: the global one.
+    pub pool: Option<&'a rayon::ThreadPool>,
+}
+
+/// What a decoding worker tells the calling thread.
+enum Event {
+    Token(usize, u32),
+    Done(usize, GenStats),
+    Failed(ExtractError),
+}
+
+/// One worker of [`DecoderState::generate_batch`]: continuous batching of the jobs
+/// `part`, in order. A job whose stop flag is raised (by `Break`, or a failure elsewhere)
+/// leaves the batch at the next step.
+#[allow(clippy::too_many_arguments)]
+fn decode_partition(
+    model: &dyn ResidualForward,
+    layers: usize,
+    jobs: &[BatchJob],
+    part: &[usize],
+    batch_size: usize,
+    cancel: &AtomicBool,
+    stops: &[AtomicBool],
+    tx: &mpsc::Sender<Event>,
+) -> Result<()> {
+    let send = |event: Event| {
+        let _ = tx.send(event);
+    };
+    // The sequential loop's rules; `Break` comes back through the stop flag.
+    let settle = |seq: &mut Active| -> bool {
+        let req = &jobs[seq.job].request;
+        seq.stats.generated += 1;
+        if req.eos_ids.contains(&seq.last) {
+            seq.stats.stopped_on_eos = true;
+            return true;
+        }
+        send(Event::Token(seq.job, seq.last));
+        seq.stats.generated >= req.max_new_tokens
+    };
+    let stopped = |job: usize| stops[job].load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed);
+    let mut pending = part
+        .iter()
+        .copied()
+        .filter(|&j| jobs[j].request.max_new_tokens > 0);
+    let mut active: Vec<Active> = Vec::new();
+    loop {
+        while active.len() < batch_size {
+            let Some(index) = pending.next() else {
+                break;
+            };
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let job = &jobs[index];
+            let mut seq = Active {
+                job: index,
+                cache: KvCache::new(layers),
+                drawer: Drawer::new(&job.sequence, &job.request.prompt_ids),
+                last: 0,
+                stats: GenStats::default(),
+                started: Instant::now(),
+            };
+            let input =
+                Tensor::new(job.request.prompt_ids.as_slice(), &Device::Cpu)?.unsqueeze(0)?;
+            let hidden = model.forward_cached(&input, &mut seq.cache, layers, &mut |_, r| Ok(r))?;
+            seq.last = seq.drawer.next(&model.logits_last(&hidden)?)?;
+            match settle(&mut seq) {
+                true => send(Event::Done(index, finish(seq.stats, seq.started))),
+                false => active.push(seq),
+            }
+        }
+        if active.is_empty() || cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        // Sequences stopped by the caller leave before the step.
+        active.retain(|seq| {
+            let keep = !stopped(seq.job);
+            if !keep {
+                send(Event::Done(seq.job, finish(seq.stats, seq.started)));
+            }
+            keep
+        });
+        if active.is_empty() {
+            continue;
+        }
+        let ids: Vec<u32> = active.iter().map(|a| a.last).collect();
+        let mut caches: Vec<&mut KvCache> = active.iter_mut().map(|a| &mut a.cache).collect();
+        let logits = model.forward_batch_step(&ids, &mut caches)?;
+        let mut finished = vec![false; active.len()];
+        for ((seq, logits), done) in active.iter_mut().zip(&logits).zip(&mut finished) {
+            seq.last = seq.drawer.next(logits)?;
+            *done = settle(seq);
+        }
+        let mut done = finished.iter();
+        active.retain(|seq| {
+            let keep = !done.next().copied().unwrap_or(false);
+            if !keep {
+                send(Event::Done(seq.job, finish(seq.stats, seq.started)));
+            }
+            keep
+        });
+    }
+    for seq in active {
+        send(Event::Done(seq.job, finish(seq.stats, seq.started)));
+    }
+    Ok(())
+}
+
+/// A sequence being decoded in a batch.
+struct Active {
+    job: usize,
+    cache: KvCache,
+    drawer: Drawer,
+    last: u32,
+    stats: GenStats,
+    started: Instant,
 }
 
 /// The historical name, kept for the library API.
@@ -231,7 +387,7 @@ impl DecoderState {
         on_token: &mut dyn FnMut(u32) -> ControlFlow<()>,
         on_logits: &mut dyn FnMut(&[f32]),
     ) -> Result<GenStats> {
-        self.run(req, cancel, on_token, Some(on_logits))
+        self.run(req, &Sequence::default(), cancel, on_token, Some(on_logits))
     }
 
     /// Residual stream after layer `layer` (steering applied when it targets a layer up to
@@ -332,9 +488,117 @@ impl DecoderState {
         }
     }
 
+    /// [`TokenSource::generate`] with the given sampling: `T = 0` is the greedy decoding of
+    /// `generate`, bit for bit.
+    pub fn generate_sampled(
+        &mut self,
+        req: &GenRequest,
+        sequence: &Sequence,
+        cancel: &AtomicBool,
+        on_token: &mut dyn FnMut(u32) -> ControlFlow<()>,
+    ) -> Result<GenStats> {
+        sequence
+            .params
+            .validate()
+            .map_err(ExtractError::InvalidArgument)?;
+        self.run(req, sequence, cancel, on_token, None)
+    }
+
+    /// Batched decoding of `jobs`: `workers` threads each take every `workers`-th job and
+    /// decode up to `batch_size` of them together (continuous batching: a finished
+    /// sequence leaves, the next one enters). Each prompt is prefilled alone; every decode
+    /// step then runs a batch through [`ResidualForward::forward_batch_step`], whose weights
+    /// are read once for the whole batch, attention staying per sequence. The workers share
+    /// one rayon pool for the tensor kernels, `layout.pool` or the global one (one thread
+    /// budget). Callbacks run on the
+    /// calling thread: `on_token(job, id)` sees each token (`Break` stops that sequence;
+    /// a worker may compute a token or two more, never reported), `on_done(job)` follows its
+    /// last token. A cancelled run returns the stats gathered so far. A sequence's tokens
+    /// depend only on its own prompt, sampling and stream, not on the other jobs, the batch
+    /// size or the workers (as long as its logits do not, see `eval::sampling`).
+    pub fn generate_batch(
+        &mut self,
+        jobs: &[BatchJob],
+        layout: Batching<'_>,
+        cancel: &AtomicBool,
+        on_token: &mut dyn FnMut(usize, u32) -> ControlFlow<()>,
+        on_done: &mut dyn FnMut(usize),
+    ) -> Result<Vec<GenStats>> {
+        let Batching {
+            batch_size,
+            workers,
+            pool,
+        } = layout;
+        if batch_size == 0 || workers == 0 {
+            return Err(ExtractError::InvalidArgument(
+                "--batch-size et --jobs doivent être >= 1".into(),
+            ));
+        }
+        for job in jobs {
+            if job.request.steering.is_some() {
+                return Err(ExtractError::InvalidArgument(
+                    "le décodage par lots ne prend pas de steering".into(),
+                ));
+            }
+            self.check_ids(&job.request.prompt_ids)?;
+            job.sequence
+                .params
+                .validate()
+                .map_err(ExtractError::InvalidArgument)?;
+        }
+        let stops: Vec<AtomicBool> = jobs.iter().map(|_| AtomicBool::new(false)).collect();
+        let mut stats = vec![GenStats::default(); jobs.len()];
+        let model = self.model.as_ref();
+        let layers = self.cfg.num_hidden_layers;
+        let (tx, rx) = mpsc::channel::<Event>();
+        std::thread::scope(|scope| -> Result<()> {
+            for w in 0..workers.min(jobs.len().max(1)) {
+                let tx = tx.clone();
+                let (stops, part) = (&stops, (w..jobs.len()).step_by(workers));
+                scope.spawn(move || {
+                    let part: Vec<usize> = part.collect();
+                    let run = || {
+                        decode_partition(model, layers, jobs, &part, batch_size, cancel, stops, &tx)
+                    };
+                    let result = match pool {
+                        Some(pool) => pool.install(run),
+                        None => run(),
+                    };
+                    if let Err(e) = result {
+                        let _ = tx.send(Event::Failed(e));
+                    }
+                });
+            }
+            drop(tx);
+            let mut failure = None;
+            for event in rx {
+                match event {
+                    Event::Token(job, id) if !stops[job].load(Ordering::Relaxed) => {
+                        if on_token(job, id).is_break() {
+                            stops[job].store(true, Ordering::Relaxed);
+                        }
+                    }
+                    Event::Token(..) => {}
+                    Event::Done(job, done) => {
+                        stats[job] = done;
+                        on_done(job);
+                    }
+                    Event::Failed(e) => {
+                        // The other workers stop at their next step.
+                        stops.iter().for_each(|s| s.store(true, Ordering::Relaxed));
+                        failure.get_or_insert(e);
+                    }
+                }
+            }
+            failure.map_or(Ok(()), Err)
+        })?;
+        Ok(stats)
+    }
+
     fn run(
         &mut self,
         req: &GenRequest,
+        sequence: &Sequence,
         cancel: &AtomicBool,
         on_token: &mut dyn FnMut(u32) -> ControlFlow<()>,
         mut on_logits: Option<LogitsSink>,
@@ -350,6 +614,7 @@ impl DecoderState {
         let started = Instant::now();
         let mut stats = GenStats::default();
         let mut cache = KvCache::new(self.cfg.num_hidden_layers);
+        let mut drawer = Drawer::new(sequence, &req.prompt_ids);
         let mut input = req.prompt_ids.clone();
         while stats.generated < req.max_new_tokens {
             let hidden = match run_layers(
@@ -369,7 +634,7 @@ impl DecoderState {
             if let Some(on_logits) = on_logits.as_mut() {
                 on_logits(&logits);
             }
-            let id = argmax(&logits)?;
+            let id = drawer.next(&logits)?;
             stats.generated += 1;
             if req.eos_ids.contains(&id) {
                 stats.stopped_on_eos = true;
@@ -381,12 +646,17 @@ impl DecoderState {
             input.clear();
             input.push(id);
         }
-        let seconds = started.elapsed().as_secs_f64();
-        if seconds > 0.0 {
-            stats.tok_per_s = stats.generated as f64 / seconds;
-        }
-        Ok(stats)
+        Ok(finish(stats, started))
     }
+}
+
+/// `tok_per_s` from the elapsed time.
+fn finish(mut stats: GenStats, started: Instant) -> GenStats {
+    let seconds = started.elapsed().as_secs_f64();
+    if seconds > 0.0 {
+        stats.tok_per_s = stats.generated as f64 / seconds;
+    }
+    stats
 }
 
 impl TokenSource for DecoderState {
@@ -396,7 +666,7 @@ impl TokenSource for DecoderState {
         cancel: &AtomicBool,
         on_token: &mut dyn FnMut(u32) -> ControlFlow<()>,
     ) -> Result<GenStats> {
-        self.run(req, cancel, on_token, None)
+        self.run(req, &Sequence::default(), cancel, on_token, None)
     }
 }
 

@@ -939,7 +939,7 @@ surgeon bench ppl [OPTIONS] --model <MODEL> --text <TEXT>
 <a id="cmd-bench-eval"></a>
 #### `surgeon bench eval`
 
-Exact-match Pass@1 on a GSM8K or MATH style dataset, greedy decoding through llama.cpp or, with `--backend native`, through the pure Rust generator (Qwen2, Llama/Mistral or Qwen3 SafeTensors folder, CPU, no llama.cpp).
+Exact-match Pass@1 on a GSM8K or MATH style dataset, greedy decoding through llama.cpp or, with `--backend native`, through the pure Rust generator (Qwen2, Llama/Mistral or Qwen3 SafeTensors folder, CPU, no llama.cpp). Sampling, several answers per question, batches and a `llama-server` backend are opt-in: see [sampling, batching and backends](#generation).
 
 ```text
 surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
@@ -949,7 +949,7 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | --- | --- | --- |
 | `--model` | required | `.gguf`, or a SafeTensors folder. |
 | `--dataset` | required | JSON array (or JSONL) of `{question or problem, answer or solution, id?}`. No GSM8K or MATH content ships with this repository. |
-| `--backend` | `llama` | `llama` (llama.cpp on a GGUF, converted when needed) or `native` (pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors folder; `--llama-cpp-dir` is then unused). |
+| `--backend` | `llama` | `llama` or its alias `llama-completion` (one llama.cpp process per question, on a GGUF converted when needed), `llama-server` (one local llama.cpp server for the run, GPU per its build) or `native` (pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors folder; `--llama-cpp-dir` is then unused). |
 | `--baseline-model` | none | Reference model on the same questions (paired comparison). |
 | `--limit` | 50 | First N entries, in file order. |
 | `--max-new-tokens` | 512 | Generation budget per question. |
@@ -959,6 +959,18 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | `--timeout-secs` | none | Per question; a timeout counts the question wrong. |
 | `--min-accuracy` | none | Warn when the accuracy (0 to 1) is strictly below this value. |
 | `--fail-on-warn` | off | Exit with code 9 when the accuracy is below `--min-accuracy`. |
+| `--temperature` | 0 | Sampling temperature; 0 is greedy decoding, unchanged. See [sampling, batching and backends](#generation). |
+| `--top-k` | 0 | Keep the K most likely tokens (0: off). |
+| `--top-p` | 1 | Keep the smallest set of tokens whose probability reaches P (1: off). |
+| `--min-p` | 0 | Drop the tokens below P times the best probability (0: off). |
+| `--repetition-penalty` | 1 | Penalty on every token already in the sequence, prompt included (1: off). |
+| `--seed` | 42 | Seed of the sampling streams, one per prompt and sample. |
+| `--samples` | 1 | Answers per prompt (needs `--temperature` above 0): per-prompt rates, bootstrap interval over prompts. |
+| `--batch-size` | 1 | `native`: sequences decoded together; `llama-server`: slots and concurrent requests. |
+| `--jobs` | 1 | `native`: batches decoded in parallel, in one thread pool. |
+| `--threads` | `RAYON_NUM_THREADS`, else every core | Threads of the native pool, or `-t` of `llama-server`. |
+| `--gpu-layers` | the build's | `-ngl` of `llama-server`: layers offloaded to the GPU. |
+| `--ctx-size` | the build's | `-c` of `llama-server`: context shared by its slots. |
 
 The model's own answer is extracted by the first matching rule among: a `####` marker, the last balanced `\boxed{...}`, the last `**bold**` text, a phrase such as "the answer is X", then the last number. Numbers and fractions compare with a relative tolerance of 1e-9. This is a heuristic: read the per-item `items` of the `--json` output before trusting a score. This README publishes no GSM8K score: the real runs below use a fake llama.cpp.
 
@@ -1007,7 +1019,7 @@ surgeon bench eval --model tiny-q8.patched.gguf --dataset ds.json --baseline-mod
 <a id="cmd-bench-refusal"></a>
 #### `surgeon bench refusal`
 
-Refusal rate of a Qwen2, Llama/Mistral or Qwen3 model on prompts: greedy generation in pure Rust on the CPU (no llama.cpp), then a search for canonical refusal markers in each answer. On request, a judge model (a local GGUF run by llama.cpp) also labels every answer.
+Refusal rate of a Qwen2, Llama/Mistral or Qwen3 model on prompts: greedy generation in pure Rust on the CPU (no llama.cpp), then a search for canonical refusal markers in each answer. On request, a judge model (a local GGUF run by llama.cpp) also labels every answer. Sampling, several answers per prompt, batches and the llama.cpp backends are opt-in: see [sampling, batching and backends](#generation).
 
 ```text
 surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
@@ -1020,6 +1032,7 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--baseline-model` | none | Reference model on the same prompts, generated first (paired comparison). |
 | `--max-new-tokens` | 256 | Generation budget per prompt. |
 | `--chat-template` | `chatml` | Wrapping of each prompt: `chatml` or `none`. |
+| `--backend` | `native` | `native` (pure Rust), `llama-server` (one local llama.cpp server for the run) or `llama-completion` (one llama.cpp process per prompt); a SafeTensors folder is then converted to a temporary GGUF. |
 | `--judge` | `rules` | `rules` (markers only), `llm` (markers and a judge model) or `both` (plus their agreement). |
 | `--marker-langs` | none | Marker languages on top of English: `fr`, `es`, `de` or `all`, comma-separated. |
 | `--markers-file` | none | JSON object `{"<lang>": ["marker", ...]}`: adds languages, replaces a built-in list. |
@@ -1028,13 +1041,25 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--judge-template` | built in | Rubric file with `{prompt}` and `{response}`. |
 | `--judge-cache` | none | JSONL cache of verdicts, read then appended. |
 | `--partial-as-refusal` | off | Count `partial` answers as refusals in the judge's rate. |
-| `--llama-cpp-dir` | `$LLAMA_CPP_DIR` | llama.cpp folder, for the judge only. |
+| `--llama-cpp-dir` | `$LLAMA_CPP_DIR` | llama.cpp folder, for the judge and the llama backends. |
 | `--timeout-secs` | none | Per judge verdict. |
 | `--judge-calibration` | none | Calibration file written by `bench judge-eval`. |
 | `--min-calibration-n` | 100 | Human labels the calibration must hold. |
 | `--min-kappa` | 0.6 | Cohen's kappa (judge against human) the calibration must reach. |
 | `--max-unparsable` | none | Warn when more judge verdicts than this are unparsable. |
 | `--fail-on-warn` | off | Exit with code 9 when `--max-unparsable` is exceeded. |
+| `--temperature` | 0 | Sampling temperature; 0 is greedy decoding, unchanged. See [sampling, batching and backends](#generation). |
+| `--top-k` | 0 | Keep the K most likely tokens (0: off). |
+| `--top-p` | 1 | Keep the smallest set of tokens whose probability reaches P (1: off). |
+| `--min-p` | 0 | Drop the tokens below P times the best probability (0: off). |
+| `--repetition-penalty` | 1 | Penalty on every token already in the sequence, prompt included (1: off). |
+| `--seed` | 42 | Seed of the sampling streams, one per prompt and sample. |
+| `--samples` | 1 | Answers per prompt (needs `--temperature` above 0): per-prompt rates, bootstrap interval over prompts. |
+| `--batch-size` | 1 | `native`: sequences decoded together; `llama-server`: slots and concurrent requests. |
+| `--jobs` | 1 | `native`: batches decoded in parallel, in one thread pool. |
+| `--threads` | `RAYON_NUM_THREADS`, else every core | Threads of the native pool, or `-t` of `llama-server`. |
+| `--gpu-layers` | the build's | `-ngl` of `llama-server`: layers offloaded to the GPU. |
+| `--ctx-size` | the build's | `-c` of `llama-server`: context shared by its slots. |
 
 An answer is a refusal when it contains one of twelve English markers (`I'm sorry`, `I cannot`, `As an AI`, ...; the list is in `data.markers`), compared without case and at word boundaries. `--marker-langs` adds the built-in French, Spanish or German markers and `--markers-file` your own; English stays first, and without these options nothing changes. Markers only find explicit refusals: a soft refusal is missed and a degraded or off-topic answer counts as compliance, so `data.items[]` keeps every answer in full (`index`, `refused`, `marker`, `output`) for review. `data` also has `n`, `refused`, `refusal_rate` and its Wilson interval (`ci95_low`, `ci95_high`); with a baseline, `baseline` and `paired` (`unblocked`, `newly_refused`, `delta_rate`, and its 95 % interval `delta_ci95_low` / `delta_ci95_high`, Newcombe's interval for paired proportions).
 
@@ -1050,7 +1075,7 @@ surgeon bench refusal --model qwen2-mini --prompts pos.json --baseline-model qwe
   appariement : débloqués 0 · nouveaux refus 0 · Δ +0.0 points, IC95 [-39.0 ; +39.0]
 ```
 
-The mini model has random weights and never refuses: the run shows the report, not a behaviour. Generation is slow on a real model (about 11 tokens per second for Qwen2.5-0.5B on the 12-thread machine of this README).
+The mini model has random weights and never refuses: the run shows the report, not a behaviour. Generation is slow on a real model (about 11 tokens per second for one Qwen2.5-0.5B sequence on the 12-thread machine of this README; batches raise the total, see the [measured throughput](#generation)).
 
 With `--judge llm` or `--judge both`, a judge model labels each answer once the generation is over. The marker fields above do not change; the verdicts go to `data.judge`, with `items[]` (`index`, `label`, and the judge's own text in `raw`) and the count of each label in `labels`.
 
@@ -1092,6 +1117,86 @@ surgeon bench refusal --model qwen2-mini --prompts pos.json --baseline-model qwe
 ```
 
 What it means: the scripted judge answered a sentence instead of a label for the answer `peur`, on both sides. That verdict is counted apart (`illisibles 1`), the rate is computed on the five others, and the report gives the range the true rate lies in. The kappa is undefined because neither the markers nor the judge found a single refusal.
+
+<a id="generation"></a>
+#### Sampling, batching and backends (`bench eval`, `bench refusal`)
+
+Without these options, `bench eval` and `bench refusal` print and write what they did before (greedy decoding, one prompt at a time, same report); the report only gains a `data.generation` block (backend, sampling, samples, batch) once an option differs from its default or the backend from the historical one.
+
+**Sampling.** `--temperature 0` is greedy decoding, token for token what it was. Above 0, the logits go through the chain of llama.cpp's default sampler, in its order: repetition penalty, top-k, top-p, min-p, temperature, then one draw from a softmax computed in f64. Each prompt and sample has its own random stream, xoshiro256++ seeded by SplitMix64 from `--seed` and the pair (prompt, sample): a sample draws the same tokens whatever the batch, the order of the jobs or the number of samples, with this binary on this CPU family. The llama backends receive the same parameters and the seed of each stream (as `--temp`, `--top-k`... flags, or as fields of the server request), but apply them with their own sampler: their draws are neither those of the native backend nor bit-identical across llama.cpp builds.
+
+**Statistics.** With `--samples N` (N above 1, temperature above 0), each prompt is answered N times. `data.items[]` gains a `sample` index, and `data.generation.sampled` gives the rate of each prompt (`per_prompt`), their `mean`, a 95 % bootstrap interval that resamples prompts, not answers (2000 resamples, fixed seed: the same answers give the same interval), the dispersion within a prompt (`within_prompt_variance`, the mean of p (1 - p)) and between prompts (`between_prompt_variance`). With a baseline, `baseline_sampled` and `delta`, the mean difference of the per-prompt rates and its bootstrap interval. The answer-level pairing (`paired`) assumes one answer per prompt and is left out when N is above 1.
+
+**Batching.** `--batch-size B` decodes up to B sequences together (native backend). Each step runs the projections and the MLP of the B sequences as one matrix product, so every weight is read once per step for the whole batch; attention stays per sequence, on its own KV cache and at its own position, so there is no padding and a sequence's tokens do not depend on the others. A finished sequence leaves the batch and the next one takes its place. Every prompt is prefilled alone. `--jobs J` runs J batches in parallel threads, all in one rayon pool: `--threads`, else `RAYON_NUM_THREADS`, else every core. Once an option differs from its default, the run warns when the pool has more threads than the machine has cores, when `--threads` overrides `RAYON_NUM_THREADS`, and when other `surgeon` processes are running (they share the cores and the memory bandwidth). In greedy decoding, batched and sequential tokens are identical in the tests (mini models with and without sliding window, B from 1 to 8, one or three workers); their logits differ by at most 1e-5 relative, the rounding of a matrix product with several rows instead of one, which could only change a token on a near tie. A timeout (`--timeout-secs`) counts from the first token of a sequence, not from its wait for a place in the batch.
+
+**Backends.** `native` is the pure Rust generator (CPU). `llama-completion` runs one llama.cpp process per prompt, as `bench eval --backend llama` always did. `llama-server` starts one llama.cpp server for the whole bench and sends it up to `--batch-size` requests at once. A SafeTensors folder given to a llama backend is first converted to a temporary GGUF (as `bench eval` does), deleted at the end. The server gets nothing but these flags, each spelled as its own `--help` lists it, the run failing when one is missing: `-m`, `--host 127.0.0.1`, `--port` (a free port), `--api-key` (128 random bits), `-np`, and `-c`, `-ngl`, `-t` from `--ctx-size`, `--gpu-layers`, `--threads`. No other argument can reach it, from the command line or from MCP. It is killed when the bench ends, fails or is cancelled. Requests go over HTTP/1.1 on the loopback only (standard library sockets, no TLS, no network crate), streamed as server-sent events, each with its timeout.
+
+**GPU.** Whether `llama-server` uses a GPU depends on how llama.cpp was built (CUDA, Vulkan, HIP, Metal) and on `--gpu-layers`; surgeon itself stays on the CPU (its candle backend has no GPU feature, on purpose). To check the offload, run the server once by hand with the same model and `-ngl`: its log prints a line such as `load_tensors: offloaded 25/25 layers to GPU`, and `GET /props` reports its settings; when a run fails, surgeon puts the tail of the server's stderr in the error. GPU runs are not reproducible bit for bit, even at temperature 0 (the order of the kernels' reductions varies): compare rates with their intervals, not answers byte for byte.
+
+The `llama-server` backend is tested against `examples/fake_llama_server.rs` (health, slots, API key, streaming, timeouts, a server that dies, a taken port, the kill), not against a real llama.cpp, which this repository's tests do not install.
+
+```bash
+# three sampled answers per prompt, decoded four at a time in two parallel batches
+surgeon bench refusal --model qwen2-mini --prompts pos.json --max-new-tokens 8 --temperature 0.9 --seed 5 --samples 3 --batch-size 4 --jobs 2
+```
+
+```text
+[BENCH]    refusal · 6 prompts × 3 · chatml · 8 tokens max  qwen2-mini
+[REFUS]    réponses 0/18 · 0.0 % · IC95 [0.0 ; 17.6]
+[ÉCHANT.]  par prompt 0.0 % · IC95 bootstrap [0.0 ; 0.0] · dispersion intra 0.0000 · inter 0.0000
+```
+
+The mini model has random weights and never refuses: the run shows the plumbing. The `[REFUS]` line counts the 18 answers as if they were independent; the `[ÉCHANT.]` line is the one to read, its interval resamples the 6 prompts.
+
+**Measured native throughput.** `examples/bench_gen_scaling.rs` (not part of the tests) measures the native generator on a real model: greedy, 32 new tokens per sequence after 32 prompt tokens, no EOS, generated tokens of all sequences over the wall time, prefill included.
+
+```bash
+cargo run --release --example bench_gen_scaling -- path/to/Qwen2.5-0.5B-Instruct --tokens 32
+```
+
+Measured on an Intel Core i5-12400F (6 cores, 12 threads), 64 GiB of RAM, Windows 11, release build, Qwen2.5-0.5B-Instruct (bf16 SafeTensors, computed in f32), `RAYON_NUM_THREADS` unset unless stated. One run per line, not repeated: a few percent of noise is not excluded.
+
+One batch of B sequences (`--batch-size B`):
+
+| B | tokens/s | per sequence | vs B = 1 |
+| --- | --- | --- | --- |
+| 1 | 10.0 | 10.0 | 1.00x |
+| 2 | 16.4 | 8.2 | 1.64x |
+| 4 | 26.3 | 6.6 | 2.62x |
+| 8 | 41.1 | 5.1 | 4.10x |
+| 16 | 46.3 | 2.9 | 4.62x |
+
+The same 8 sequences as parallel batches (`--jobs` x `--batch-size`), one pool of 12 threads:
+
+| `--jobs` x `--batch-size` | tokens/s |
+| --- | --- |
+| 1 x 8 | 37.9 |
+| 2 x 4 | 24.8 |
+| 4 x 2 | 19.9 |
+
+One batch of 8 in a pool of N threads (`--threads N`):
+
+| threads | tokens/s |
+| --- | --- |
+| 1 | 20.5 |
+| 2 | 33.8 |
+| 4 | 42.1 |
+| 6 | 45.6 |
+| 12 | 40.9 |
+
+N separate processes at once, one sequence each:
+
+| processes | `RAYON_NUM_THREADS` | tokens/s per process (mean) | total | vs 1 process |
+| --- | --- | --- | --- | --- |
+| 1 | unset | 10.8 | 10.8 | 1.00x |
+| 2 | unset | 6.6 | 13.2 | 1.22x |
+| 2 | 6 | 6.8 | 13.7 | 1.26x |
+| 3 | unset | 5.0 | 15.1 | 1.39x |
+| 3 | 4 | 5.1 | 15.2 | 1.40x |
+| 6 | unset | 2.7 | 16.2 | 1.49x |
+| 6 | 2 | 2.6 | 15.8 | 1.46x |
+
+On this machine and this model: a batch of 8 gave 4.1 times the total of one sequence and a batch of 16 gave 4.6 times, each sequence getting slower; one batch of 8 beat the same sequences split into parallel batches; 6 threads did better than 12 for a batch of 8; 3 separate processes gave 1.39 times one process and 6 gave 1.49 times, with or without `RAYON_NUM_THREADS` set to 12 / N. These runs measure throughput only, not memory bandwidth: they do not show why each curve flattens.
 
 <a id="cmd-bench-judge-sample"></a>
 #### `surgeon bench judge-sample`

@@ -37,8 +37,9 @@ enveloppe JSON (`--json`, résultats MCP).
   engine   SafeTensors mmap, décalages de lignes ; kernel : noyaux SIMD, prefetch, E/S
   surgery  .surgery v1, SVD randomisée ; lora : fusion / extraction PEFT
   bench    KL et top-k entre dumps, perplexité (llama-perplexity), Pass@1 et taux de refus
-           (llama.cpp ou générateur natif), juge LLM optionnel et sa calibration ;
-           eval : llama.cpp
+           (générateur natif par lots, llama-completion ou llama-server), statistiques par
+           prompt, juge LLM optionnel et sa calibration ;
+           eval : llama.cpp (processus ou serveur local), échantillonnage, client HTTP local
   hardware budget RAM/VRAM ; linalg : QR, Cholesky, Jacobi, Gram
 ```
 
@@ -66,7 +67,7 @@ comptées entre fichiers de modules différents) : `app -> patch` 64, `mcp -> ap
 | Fusion et extraction LoRA | `lora` | `W += scale · (alpha / r) · B A`, extraction de rang `r` | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Diff de faible rang | `surgery` | Patch `.surgery` entre deux checkpoints | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Mesure | `bench` | KL, top-k, perplexité, Pass@1, dumps de logits ; lecture best-effort de `.npy` et `.pt`/`.pth` pour les seuls dumps de logits | Non : interne, non remplaçable par un tiers à ce jour | Feuille de route |
-| Évaluation | `eval` | Génération via llama.cpp, détection de boucles, export GGUF | Non : interne, non remplaçable par un tiers à ce jour | aucun |
+| Évaluation | `eval` | Génération via llama.cpp (`llama-completion` ou `llama-server` sur liste blanche, client HTTP/1.1 local en std), échantillonnage reproductible (`eval::sampling`), détection de boucles, export GGUF | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Budget matériel | `hardware` | RAM, VRAM (NVML), verdict | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Algèbre linéaire | `linalg` | QR, Cholesky, Jacobi, Gram, en Rust pur | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 

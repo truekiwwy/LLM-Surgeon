@@ -16,15 +16,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use super::error::{BenchError, Result};
+use super::generation::{by_prompt, GenOptions};
 pub use super::markers::REFUSAL_MARKERS;
 use super::markers::{self, Markers};
 use super::report::{
     BenchRefusalReport, BenchRun, RefusalBaseline, RefusalItem, RefusalPaired, RefusalScore,
     RefusalTiming,
 };
-use super::score::{wilson, MakeGenerator, SEED};
+use super::score::{wilson, MakeGenerator};
 use super::sha256_hex;
-use crate::eval::{Decoding, TextGenerator};
+use crate::eval::TextGenerator;
 use crate::extract::{check_texts, ChatTemplate};
 
 /// The first marker of [`REFUSAL_MARKERS`] found in `text`, if any.
@@ -133,39 +134,57 @@ pub struct RefusalRequest {
     pub chat_template: ChatTemplate,
     /// Active refusal markers; the default is the twelve English ones.
     pub markers: Markers,
+    pub generation: GenOptions,
+    /// Shown in the report: native, llama-completion or llama-server.
+    pub backend: String,
 }
 
-/// Every prompt in order; a generator error stops the suite.
+/// Every (prompt, sample), prompt by prompt, through [`TextGenerator::generate_many`]
+/// (batched by the native backend, concurrent with llama-server); a generator error
+/// stops the suite.
 fn run_prompts(
     generator: &mut dyn TextGenerator,
     req: &RefusalRequest,
     cancel: &AtomicBool,
     on_prompt: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<RefusalItem>> {
-    let mut items = Vec::with_capacity(req.prompts.len());
-    for (index, prompt) in req.prompts.iter().enumerate() {
-        if cancel.load(Ordering::SeqCst) {
-            return Err(BenchError::Cancelled);
-        }
-        let outcome = generator.generate(
-            &req.chat_template.apply(prompt),
-            req.max_new_tokens,
-            &mut |_| match cancel.load(Ordering::SeqCst) {
-                true => std::ops::ControlFlow::Break(()),
-                false => std::ops::ControlFlow::Continue(()),
-            },
-        )?;
-        if cancel.load(Ordering::SeqCst) {
-            return Err(BenchError::Cancelled);
-        }
+    let samples = req.generation.samples;
+    let jobs = req
+        .generation
+        .jobs(req.prompts.iter().map(|p| req.chat_template.apply(p)));
+    let total = jobs.len();
+    let mut done = 0;
+    let outcomes = generator.generate_many(
+        &jobs,
+        req.max_new_tokens,
+        cancel,
+        &mut |_, _| match cancel.load(Ordering::SeqCst) {
+            true => std::ops::ControlFlow::Break(()),
+            false => std::ops::ControlFlow::Continue(()),
+        },
+        &mut |_| {
+            done += 1;
+            on_prompt(done, total);
+        },
+    )?;
+    if cancel.load(Ordering::SeqCst) {
+        return Err(BenchError::Cancelled);
+    }
+    // A failed generation ends the list: its error comes before the missing items.
+    let mut items = Vec::with_capacity(total);
+    for (j, outcome) in outcomes.into_iter().enumerate() {
+        let outcome = outcome?;
         let marker = req.markers.find(&outcome.text).map(str::to_owned);
         items.push(RefusalItem {
-            index,
+            index: j / samples,
             refused: marker.is_some(),
             marker,
             output: outcome.text,
+            sample: (samples > 1).then_some(j % samples),
         });
-        on_prompt(index + 1, req.prompts.len());
+    }
+    if items.len() < total {
+        return Err(BenchError::Cancelled);
     }
     Ok(items)
 }
@@ -183,6 +202,7 @@ pub fn run(
         ));
     }
     check_texts(req.prompts.clone()).map_err(BenchError::InvalidArgument)?;
+    req.generation.validate()?;
     for model in std::iter::once(&req.model).chain(&req.baseline_model) {
         if !model.exists() {
             return Err(BenchError::input(model, "modèle introuvable"));
@@ -191,10 +211,7 @@ pub fn run(
     let mut evaluate = |model: &Path| -> Result<(Vec<RefusalItem>, u64)> {
         let started = Instant::now();
         let mut generator = make_generator(model)?;
-        generator.configure(&Decoding {
-            seed: SEED,
-            timeout: None,
-        });
+        generator.configure(&req.generation.decoding(None));
         let items = run_prompts(generator.as_mut(), req, cancel, on_prompt)?;
         Ok((items, started.elapsed().as_millis() as u64))
     };
@@ -203,7 +220,20 @@ pub fn run(
         None => None,
     };
     let (items, total_ms) = evaluate(&req.model)?;
-    let paired_cmp = baseline.as_ref().map(|(_, (base, _))| paired(&items, base));
+    // Several samples per prompt are not independent pairs: per-prompt rates instead.
+    let samples = req.generation.samples;
+    let paired_cmp = baseline
+        .as_ref()
+        .filter(|_| samples == 1)
+        .map(|(_, (base, _))| paired(&items, base));
+    let hits = |items: &[RefusalItem]| by_prompt(items.iter().map(|i| i.refused), samples);
+    let generation = (!req.generation.is_historical(req.backend == "native")).then(|| {
+        req.generation.report(
+            &req.backend,
+            Some(&hits(&items)),
+            baseline.as_ref().map(|(_, (b, _))| hits(b)).as_deref(),
+        )
+    });
     let report = BenchRefusalReport {
         model: req.model.clone(),
         prompts_sha256: sha256_hex(
@@ -228,6 +258,7 @@ pub fn run(
         }),
         paired: paired_cmp,
         judge: None,
+        generation,
     };
     Ok(BenchRun {
         report,
@@ -323,6 +354,8 @@ mod tests {
             max_new_tokens: 16,
             chat_template: ChatTemplate::Chatml,
             markers: Markers::default(),
+            generation: GenOptions::default(),
+            backend: "native".into(),
         }
     }
 

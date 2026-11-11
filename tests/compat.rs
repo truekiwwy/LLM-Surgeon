@@ -19,6 +19,12 @@
 //!   `arch_spec` of `surgeon_inspect`. The `inspect` output hash moved by its additive
 //!   `data.arch` object, the tool schema hash by the new properties; every extraction file
 //!   (the Qwen2 forward, refactored) is byte for byte what it was.
+//! - sampling, batching and the llama-server backend: twelve generation options of `bench
+//!   eval` and `bench refusal` (`--temperature` to `--ctx-size`), `bench refusal
+//!   --backend`, the values `llama-completion` and `llama-server` of `--backend` (the old
+//!   ones kept), eight optional properties of `surgeon_bench` and the same two values of
+//!   its `backend` (`top_k`, `threads`, `n_gpu_layers` and `ctx` reused). Only the tool
+//!   schema hash moved; every reference output with the default options is unchanged.
 //!
 //! No entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
