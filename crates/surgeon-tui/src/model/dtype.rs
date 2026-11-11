@@ -98,10 +98,7 @@ impl DType {
         };
         let (elems, block_bytes) = (elems as usize, block_bytes as usize);
         let mut block = vec![0.0f32; elems];
-        for (b, y) in bytes
-            .chunks(block_bytes)
-            .zip(out.chunks_mut(elems))
-        {
+        for (b, y) in bytes.chunks(block_bytes).zip(out.chunks_mut(elems)) {
             if b.len() == block_bytes {
                 decode_block(self, b, y);
             } else {

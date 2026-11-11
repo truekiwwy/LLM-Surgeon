@@ -1,20 +1,26 @@
-﻿//! End-to-end bridge tests: a real server on a real endpoint (Unix socket or
+//! End-to-end bridge tests: a real server on a real endpoint (Unix socket or
 //! Windows named pipe), JSON-lines commands from a client, one reply per
 //! command, snapshot answered by the app side of the channel.
 
 use serde_json::{json, Value};
 use surgeon_tui::ipc::{IpcCommand, IpcRequest, IpcTarget};
 
-/// A unique endpoint for this test run.
+/// A unique endpoint for this test run. The timestamp alone is not enough on
+/// Windows (clock resolution ~15 ms can collide across parallel tests), so a
+/// per-call counter disambiguates.
 fn test_target() -> IpcTarget {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let serial = CALLS.fetch_add(1, Ordering::Relaxed);
     if cfg!(windows) {
         IpcTarget::WindowsPipe(format!(
-            "surgeon-tui-test-{}-{}",
+            "surgeon-tui-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock")
-                .as_nanos()
+                .as_nanos(),
+            serial
         ))
     } else {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -83,7 +89,7 @@ async fn commands_get_one_ack_each_and_reach_the_app() {
 
     // The app side received every forwarded command, in order.
     let mut seen = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..6 {
         let request = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("event")
@@ -93,7 +99,14 @@ async fn commands_get_one_ack_each_and_reach_the_app() {
     }
     assert_eq!(
         seen,
-        vec!["highlight_layer", "preview_patch", "set_filter", "clear_preview", "set_filter"]
+        vec![
+            "ping",
+            "highlight_layer",
+            "preview_patch",
+            "set_filter",
+            "clear_preview",
+            "set_filter"
+        ]
     );
 }
 
@@ -139,21 +152,18 @@ async fn snapshot_goes_through_the_oneshot_reply() {
 
     let commands = [json!({"cmd": "snapshot"})];
     let client = surgeon_tui::ipc::send_commands(&target, &commands);
-    let (client_replies, command) = tokio::join!(
-        client,
-        async {
-            let request = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-                .await
-                .expect("event")
-                .expect("channel");
-            // The app answers the snapshot right away; the client's reply line
-            // only then completes.
-            if let Some(sender) = request.reply {
-                let _ = sender.send(json!({"tensor": "token_embd.weight", "role": "embed"}));
-            }
-            request.command
+    let (client_replies, command) = tokio::join!(client, async {
+        let request = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("event")
+            .expect("channel");
+        // The app answers the snapshot right away; the client's reply line
+        // only then completes.
+        if let Some(sender) = request.reply {
+            let _ = sender.send(json!({"tensor": "token_embd.weight", "role": "embed"}));
         }
-    );
+        request.command
+    });
     let replies = client_replies.expect("replies");
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["ok"], json!(true));
@@ -188,16 +198,22 @@ async fn multiple_commands_on_one_connection() {
 
 #[test]
 fn the_protocol_parses_typical_agent_payloads() {
-    let parsed = IpcCommand::from_value(&json!({"cmd": "highlight_layer", "layer": 3}))
-        .expect("highlight");
+    let parsed =
+        IpcCommand::from_value(&json!({"cmd": "highlight_layer", "layer": 3})).expect("highlight");
     assert_eq!(parsed, IpcCommand::HighlightLayer { layer: 3 });
     let parsed =
         IpcCommand::from_value(&json!({"cmd": "select_tensor", "name": "token_embd.weight"}))
             .expect("select");
     assert_eq!(parsed.name(), "select_tensor");
     // alpha must be finite; a float is accepted whatever its sign.
-    assert!(IpcCommand::from_value(&json!({"cmd": "preview_patch", "tensor": "t", "alpha": -1.5})).is_ok());
-    assert!(IpcCommand::from_value(&json!({"cmd": "preview_patch", "tensor": "t", "alpha": "x"})).is_err());
+    assert!(
+        IpcCommand::from_value(&json!({"cmd": "preview_patch", "tensor": "t", "alpha": -1.5}))
+            .is_ok()
+    );
+    assert!(
+        IpcCommand::from_value(&json!({"cmd": "preview_patch", "tensor": "t", "alpha": "x"}))
+            .is_err()
+    );
     // The role filter stays optional.
     assert!(matches!(
         IpcCommand::from_value(&json!({"cmd": "set_filter"})),
@@ -207,7 +223,10 @@ fn the_protocol_parses_typical_agent_payloads() {
 
 #[test]
 fn targets_resolve_their_display_form() {
-    assert_eq!(IpcTarget::parse(r"\\.\pipe\surgeon-tui").display(), r"\\.\pipe\surgeon-tui");
+    assert_eq!(
+        IpcTarget::parse(r"\\.\pipe\surgeon-tui").display(),
+        r"\\.\pipe\surgeon-tui"
+    );
     assert_eq!(
         IpcTarget::parse("/tmp/other.sock").display(),
         "/tmp/other.sock"

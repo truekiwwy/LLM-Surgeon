@@ -61,8 +61,8 @@ impl<'a> Reader<'a> {
         match value_type {
             0 | 1 | 7 => self.take(1).map(|_| ()),
             2 | 3 => self.take(2).map(|_| ()),
-            4 | 5 | 6 => self.take(4).map(|_| ()),
-            10 | 11 | 12 => self.take(8).map(|_| ()),
+            4..=6 => self.take(4).map(|_| ()),
+            10..=12 => self.take(8).map(|_| ()),
             8 => self.string().map(|_| ()),
             9 => {
                 let elem_type = self.u32()?;

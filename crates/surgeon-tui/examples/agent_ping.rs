@@ -16,7 +16,12 @@ async fn main() {
     // An optional leading argument is the endpoint; the rest is the command.
     let (endpoint, command_args): (Option<&str>, &[&str]) = match args.as_slice() {
         [] => (None, &[]),
-        [only] if !matches!(*only, "highlight" | "select" | "preview" | "filter" | "clear" | "snapshot") => {
+        [only]
+            if !matches!(
+                *only,
+                "highlight" | "select" | "preview" | "filter" | "clear" | "snapshot"
+            ) =>
+        {
             (Some(only), &[])
         }
         _ => (None, &args[..]),

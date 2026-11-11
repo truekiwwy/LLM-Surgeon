@@ -182,7 +182,12 @@ impl ModelIndex {
         let mut tensors: Vec<TensorEntry> = tensors
             .into_iter()
             .map(|(name, shape, dtype, byte_len, file, offset)| {
-                let Classified { role, layer, expert, moe } = roles::classify(&name, format);
+                let Classified {
+                    role,
+                    layer,
+                    expert,
+                    moe,
+                } = roles::classify(&name, format);
                 TensorEntry {
                     name,
                     shape,
@@ -292,8 +297,14 @@ mod tests {
     #[test]
     fn hf_architectures_map_to_families() {
         assert_eq!(family_from_hf_architecture("LlamaForCausalLM"), "llama");
-        assert_eq!(family_from_hf_architecture("Qwen3MoeForCausalLM"), "qwen3_moe");
-        assert_eq!(family_from_hf_architecture("GPT2LMHeadModel"), "gpt2lmheadmodel");
+        assert_eq!(
+            family_from_hf_architecture("Qwen3MoeForCausalLM"),
+            "qwen3_moe"
+        );
+        assert_eq!(
+            family_from_hf_architecture("GPT2LMHeadModel"),
+            "gpt2lmheadmodel"
+        );
     }
 
     #[test]

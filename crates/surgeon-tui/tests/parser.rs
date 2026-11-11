@@ -41,9 +41,24 @@ fn a_single_safetensors_file_opens_with_roles_and_offsets() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("model.safetensors");
     let bytes = build_safetensors(&[
-        ("model.layers.0.mlp.down_proj.weight", "F32", vec![2, 4], f32_values(&[0.0; 8])),
-        ("model.layers.0.self_attn.o_proj.weight", "F32", vec![4, 4], f32_values(&[0.0; 16])),
-        ("model.embed_tokens.weight", "F32", vec![4, 2], f32_values(&[0.0; 8])),
+        (
+            "model.layers.0.mlp.down_proj.weight",
+            "F32",
+            vec![2, 4],
+            f32_values(&[0.0; 8]),
+        ),
+        (
+            "model.layers.0.self_attn.o_proj.weight",
+            "F32",
+            vec![4, 4],
+            f32_values(&[0.0; 16]),
+        ),
+        (
+            "model.embed_tokens.weight",
+            "F32",
+            vec![4, 2],
+            f32_values(&[0.0; 8]),
+        ),
     ]);
     std::fs::write(&path, bytes).expect("write");
 
@@ -62,7 +77,11 @@ fn a_single_safetensors_file_opens_with_roles_and_offsets() {
     assert_eq!(index.tensors[1].byte_len, 32);
     // Metrics decode the mapped bytes correctly.
     let entry = &index.tensors[1];
-    let stats = metrics::compute(&entry.dtype, &entry.shape, &surgeon_tui::model::read_entry_bytes(entry).expect("bytes"));
+    let stats = metrics::compute(
+        &entry.dtype,
+        &entry.shape,
+        &surgeon_tui::model::read_entry_bytes(entry).expect("bytes"),
+    );
     assert!(stats.available);
     assert_eq!(stats.numel, 8);
 }
@@ -89,7 +108,11 @@ fn a_sharded_directory_and_its_config_are_honored() {
         r#"{"weight_map": {"model.layers.0.mlp.gate_proj.weight": "model-00001.safetensors", "model.layers.1.mlp.down_proj.weight": "model-00002.safetensors"}}"#,
     )
     .expect("write");
-    std::fs::write(dir.path().join("config.json"), r#"{"model_type": "gemma3"}"#).expect("write");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type": "gemma3"}"#,
+    )
+    .expect("write");
 
     let index = ModelIndex::open(dir.path()).expect("open");
     assert_eq!(index.tensors.len(), 2);
@@ -111,7 +134,10 @@ fn a_sharded_directory_and_its_config_are_honored() {
 fn an_empty_directory_is_a_typed_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let error = ModelIndex::open(dir.path()).expect_err("empty dir");
-    assert!(matches!(error, surgeon_tui::model::ModelError::UnknownFormat(_)));
+    assert!(matches!(
+        error,
+        surgeon_tui::model::ModelError::UnknownFormat(_)
+    ));
 }
 
 fn build_gguf() -> Vec<u8> {
@@ -124,7 +150,7 @@ fn build_gguf() -> Vec<u8> {
     kv.extend_from_slice(&20u64.to_le_bytes());
     kv.extend_from_slice(b"general.architecture");
     kv.extend_from_slice(&8u32.to_le_bytes());
-    kv.extend_from_slice(&8u64.to_le_bytes());
+    kv.extend_from_slice(&9u64.to_le_bytes());
     kv.extend_from_slice(b"qwen3_moe");
     out.extend_from_slice(&kv);
     // token_embd.weight [8] F32 @ 0
@@ -151,8 +177,10 @@ fn build_gguf() -> Vec<u8> {
     let mut block = Vec::new();
     block.extend_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
     block.extend_from_slice(&[1u8; 32]);
-    out.extend_from_slice(&block);
-    out.extend_from_slice(&block);
+    // 128 elements = 4 Q8_0 blocks.
+    for _ in 0..4 {
+        out.extend_from_slice(&block);
+    }
     out
 }
 
@@ -167,19 +195,24 @@ fn a_gguf_file_opens_with_family_and_fused_experts() {
     assert_eq!(index.family.as_deref(), Some("qwen3_moe"));
     assert_eq!(index.tensors.len(), 2);
 
-    let fused = &index.tensors[1];
+    // Entries are sorted by name: blk.3... before token_embd...
+    let fused = &index.tensors[0];
     assert_eq!(fused.name, "blk.3.ffn_down_exps.weight");
     assert_eq!(fused.role, Role::MlpOut);
     assert_eq!(fused.moe, MoeKind::Fused);
     assert_eq!(fused.layer, Some(3));
     assert_eq!(fused.dtype, DType::Q8_0);
-    assert_eq!(fused.byte_len, 2 * 34);
+    assert_eq!(fused.byte_len, 4 * 34);
     // Rows: dims written fastest-first [64, 2] are read as [2, 64].
     assert_eq!(fused.shape, vec![2, 64]);
 
-    let embed = &index.tensors[0];
+    let embed = &index.tensors[1];
     assert_eq!(embed.role, Role::Embed);
-    let stats = metrics::compute(&embed.dtype, &embed.shape, &surgeon_tui::model::read_entry_bytes(embed).expect("bytes"));
+    let stats = metrics::compute(
+        &embed.dtype,
+        &embed.shape,
+        &surgeon_tui::model::read_entry_bytes(embed).expect("bytes"),
+    );
     assert_eq!(stats.min, -1.0);
     assert_eq!(stats.max, 1.0);
     // Exact ablation on qwen3 MoE writers.

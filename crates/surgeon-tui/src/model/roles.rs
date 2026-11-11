@@ -4,9 +4,9 @@
 //! router). Patterns match the END of a tensor name, `{layer}` and `{expert}`
 //! capture a decimal segment, exactly like `src/arch` describes them.
 
-use crate::model::TensorEntry;
-pub use crate::model::MoeKind;
 use crate::model::Format;
+pub use crate::model::MoeKind;
+use crate::model::TensorEntry;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -90,8 +90,16 @@ struct Patterns {
 }
 
 const HF: Patterns = Patterns {
-    embed: &["embed_tokens.weight", "token_embd.weight", "wte.weight", "word_embeddings.weight"],
-    router: &["layers.{layer}.mlp.gate.weight", "block_sparse_moe.gate.weight"],
+    embed: &[
+        "embed_tokens.weight",
+        "token_embd.weight",
+        "wte.weight",
+        "word_embeddings.weight",
+    ],
+    router: &[
+        "layers.{layer}.mlp.gate.weight",
+        "block_sparse_moe.gate.weight",
+    ],
     attn_out: &[
         "layers.{layer}.self_attn.o_proj.weight",
         "layers.{layer}.attention.wo.weight",
@@ -105,8 +113,14 @@ const HF: Patterns = Patterns {
         "layers.{layer}.mlp.up_proj.weight",
         "layers.{layer}.mlp.experts.{expert}.up_proj.weight",
     ],
-    fused_gate: &["layers.{layer}.mlp.experts.gate_proj", "layers.{layer}.mlp.experts.gate"],
-    fused_up: &["layers.{layer}.mlp.experts.up_proj", "layers.{layer}.mlp.experts.up"],
+    fused_gate: &[
+        "layers.{layer}.mlp.experts.gate_proj",
+        "layers.{layer}.mlp.experts.gate",
+    ],
+    fused_up: &[
+        "layers.{layer}.mlp.experts.up_proj",
+        "layers.{layer}.mlp.experts.up",
+    ],
     shared_gate: &["layers.{layer}.mlp.shared_experts.gate_proj.weight"],
     shared_up: &["layers.{layer}.mlp.shared_experts.up_proj.weight"],
     mlp_out: &[
@@ -128,12 +142,21 @@ const GGUF: Patterns = Patterns {
     attn_out: &["blk.{layer}.attn_output.weight"],
     mlp_gate: &["blk.{layer}.ffn_gate.weight"],
     mlp_up: &["blk.{layer}.ffn_up.weight"],
-    fused_gate: &["blk.{layer}.ffn_gate_exps.weight", "blk.{layer}.ffn_gate_shexp.weight"],
-    fused_up: &["blk.{layer}.ffn_up_exps.weight", "blk.{layer}.ffn_up_shexp.weight"],
+    fused_gate: &[
+        "blk.{layer}.ffn_gate_exps.weight",
+        "blk.{layer}.ffn_gate_shexp.weight",
+    ],
+    fused_up: &[
+        "blk.{layer}.ffn_up_exps.weight",
+        "blk.{layer}.ffn_up_shexp.weight",
+    ],
     shared_gate: &[],
     shared_up: &[],
     mlp_out: &["blk.{layer}.ffn_down.weight"],
-    fused_out: &["blk.{layer}.ffn_down_exps.weight", "blk.{layer}.ffn_down_shexp.weight"],
+    fused_out: &[
+        "blk.{layer}.ffn_down_exps.weight",
+        "blk.{layer}.ffn_down_shexp.weight",
+    ],
     shared_out: &[],
 };
 
@@ -145,7 +168,12 @@ pub fn classify(name: &str, format: Format) -> Classified {
     };
     let (role, moe) = pick(patterns, name);
     let (layer, expert) = captures(name);
-    Classified { role, layer, expert, moe }
+    Classified {
+        role,
+        layer,
+        expert,
+        moe,
+    }
 }
 
 fn pick(p: &Patterns, name: &str) -> (Role, MoeKind) {
@@ -208,7 +236,9 @@ fn captures(name: &str) -> (Option<u32>, Option<u32>) {
             .find(|(s, _)| *s == &key)
             .and_then(|(_, n)| n.parse().ok())
     };
-    let layer = ["layers", "blk", "h", "block"].iter().find_map(|k| after(k));
+    let layer = ["layers", "blk", "h", "block"]
+        .iter()
+        .find_map(|k| after(k));
     let expert = after("experts");
     (layer, expert)
 }
@@ -262,27 +292,56 @@ mod tests {
     fn hf_names_classify_by_role() {
         for (name, role, layer) in [
             ("model.embed_tokens.weight", Role::Embed, None),
-            ("model.layers.3.self_attn.o_proj.weight", Role::AttnOut, Some(3)),
-            ("model.layers.3.mlp.gate_proj.weight", Role::MlpGate, Some(3)),
+            (
+                "model.layers.3.self_attn.o_proj.weight",
+                Role::AttnOut,
+                Some(3),
+            ),
+            (
+                "model.layers.3.mlp.gate_proj.weight",
+                Role::MlpGate,
+                Some(3),
+            ),
             ("model.layers.3.mlp.up_proj.weight", Role::MlpUp, Some(3)),
             ("model.layers.3.mlp.down_proj.weight", Role::MlpOut, Some(3)),
-            ("model.layers.3.mlp.experts.7.down_proj.weight", Role::MlpOut, Some(3)),
-            ("model.layers.3.mlp.shared_experts.down_proj.weight", Role::MlpOut, Some(3)),
+            (
+                "model.layers.3.mlp.experts.7.down_proj.weight",
+                Role::MlpOut,
+                Some(3),
+            ),
+            (
+                "model.layers.3.mlp.shared_experts.down_proj.weight",
+                Role::MlpOut,
+                Some(3),
+            ),
             ("model.layers.3.mlp.gate.weight", Role::Router, Some(3)),
-            ("model.layers.3.self_attn.q_proj.weight", Role::Other, Some(3)),
+            (
+                "model.layers.3.self_attn.q_proj.weight",
+                Role::Other,
+                Some(3),
+            ),
             ("model.norm.weight", Role::Other, None),
         ] {
             let c = classify(name, Format::SafeTensors);
             assert_eq!(c.role, role, "{name}");
             assert_eq!(c.layer, layer, "{name}");
         }
-        let expert = classify("model.layers.3.mlp.experts.7.gate_proj.weight", Format::SafeTensors);
+        let expert = classify(
+            "model.layers.3.mlp.experts.7.gate_proj.weight",
+            Format::SafeTensors,
+        );
         assert_eq!(expert.expert, Some(7));
         assert_eq!(expert.moe, MoeKind::Dense);
-        let fused = classify("model.layers.3.mlp.experts.down_proj.weight", Format::SafeTensors);
+        let fused = classify(
+            "model.layers.3.mlp.experts.down_proj.weight",
+            Format::SafeTensors,
+        );
         assert_eq!(fused.role, Role::MlpOut);
         assert_eq!(fused.moe, MoeKind::Fused);
-        let shared = classify("model.layers.3.mlp.shared_experts.gate_proj.weight", Format::SafeTensors);
+        let shared = classify(
+            "model.layers.3.mlp.shared_experts.gate_proj.weight",
+            Format::SafeTensors,
+        );
         assert_eq!(shared.role, Role::MlpGate);
         assert_eq!(shared.moe, MoeKind::Shared);
     }
@@ -312,11 +371,23 @@ mod tests {
 
     #[test]
     fn prefix_free_and_digit_gated() {
-        assert!(match_suffix("layers.{layer}.mlp.down_proj.weight", "model.layers.9.mlp.down_proj.weight").is_some());
+        assert!(match_suffix(
+            "layers.{layer}.mlp.down_proj.weight",
+            "model.layers.9.mlp.down_proj.weight"
+        )
+        .is_some());
         // A non-decimal segment never captures {layer}.
-        assert!(match_suffix("layers.{layer}.mlp.down_proj.weight", "x.layers.foo.mlp.down_proj.weight").is_none());
+        assert!(match_suffix(
+            "layers.{layer}.mlp.down_proj.weight",
+            "x.layers.foo.mlp.down_proj.weight"
+        )
+        .is_none());
         // A shorter name does not match a longer pattern.
-        assert!(match_suffix("layers.{layer}.mlp.down_proj.weight", "mlp.down_proj.weight").is_none());
+        assert!(match_suffix(
+            "layers.{layer}.mlp.down_proj.weight",
+            "mlp.down_proj.weight"
+        )
+        .is_none());
     }
 
     #[test]
@@ -335,13 +406,37 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("m.safetensors");
         let tensors = vec![
-            ("model.layers.0.mlp.down_proj.weight".to_string(), vec![2u64, 2], super::super::dtype::DType::F32, 16u64, path.clone(), 0u64),
-            ("model.layers.0.mlp.up_proj.weight".to_string(), vec![2u64, 2], super::super::dtype::DType::F32, 16u64, path.clone(), 16u64),
-            ("model.embed_tokens.weight".to_string(), vec![2u64, 2], super::super::dtype::DType::F32, 16u64, path.clone(), 32u64),
+            (
+                "model.layers.0.mlp.down_proj.weight".to_string(),
+                vec![2u64, 2],
+                super::super::dtype::DType::F32,
+                16u64,
+                path.clone(),
+                0u64,
+            ),
+            (
+                "model.layers.0.mlp.up_proj.weight".to_string(),
+                vec![2u64, 2],
+                super::super::dtype::DType::F32,
+                16u64,
+                path.clone(),
+                16u64,
+            ),
+            (
+                "model.embed_tokens.weight".to_string(),
+                vec![2u64, 2],
+                super::super::dtype::DType::F32,
+                16u64,
+                path.clone(),
+                32u64,
+            ),
         ];
         let index = ModelIndex::finish(dir.path(), Format::SafeTensors, None, tensors);
         assert_eq!(index.tensors[0].name, "model.embed_tokens.weight");
-        assert_eq!(index.roles_present(), vec![Role::Embed, Role::MlpUp, Role::MlpOut]);
+        assert_eq!(
+            index.roles_present(),
+            vec![Role::Embed, Role::MlpUp, Role::MlpOut]
+        );
         assert_eq!(index.first_of_layer(0), Some(1));
         assert_eq!(index.index_of("model.layers.0.mlp.up_proj.weight"), Some(2));
         assert_eq!(index.num_layers, 1);

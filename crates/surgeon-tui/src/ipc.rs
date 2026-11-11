@@ -59,8 +59,8 @@ impl IpcCommand {
 
     /// Parses one JSON document; a typed error string is returned to the agent.
     pub fn from_value(value: &Value) -> Result<IpcCommand, String> {
-        let parsed: CommandWire =
-            serde_json::from_value(value.clone()).map_err(|e| format!("commande invalide : {e}"))?;
+        let parsed: CommandWire = serde_json::from_value(value.clone())
+            .map_err(|e| format!("commande invalide : {e}"))?;
         match parsed {
             CommandWire::Ping => Ok(IpcCommand::Ping),
             CommandWire::HighlightLayer { layer } => Ok(IpcCommand::HighlightLayer { layer }),
@@ -176,7 +176,10 @@ pub enum BridgeError {
 /// Serves agents until the process ends. Every parsed command is forwarded to
 /// the app through `tx`; `snapshot` waits for the app's answer.
 #[cfg(unix)]
-pub async fn serve(target: IpcTarget, tx: mpsc::UnboundedSender<IpcRequest>) -> Result<(), BridgeError> {
+pub async fn serve(
+    target: IpcTarget,
+    tx: mpsc::UnboundedSender<IpcRequest>,
+) -> Result<(), BridgeError> {
     match target {
         IpcTarget::Unix(path) => serve_unix(path, tx).await,
         IpcTarget::WindowsPipe(name) => serve_pipe(&name, tx).await,
@@ -185,7 +188,10 @@ pub async fn serve(target: IpcTarget, tx: mpsc::UnboundedSender<IpcRequest>) -> 
 
 /// Serves agents until the process ends (Windows: named pipes only).
 #[cfg(windows)]
-pub async fn serve(target: IpcTarget, tx: mpsc::UnboundedSender<IpcRequest>) -> Result<(), BridgeError> {
+pub async fn serve(
+    target: IpcTarget,
+    tx: mpsc::UnboundedSender<IpcRequest>,
+) -> Result<(), BridgeError> {
     match target {
         IpcTarget::Unix(path) => Err(std::io::Error::other(format!(
             "socket unix indisponible sur Windows : {}",
@@ -197,7 +203,10 @@ pub async fn serve(target: IpcTarget, tx: mpsc::UnboundedSender<IpcRequest>) -> 
 }
 
 #[cfg(unix)]
-async fn serve_unix(path: PathBuf, tx: mpsc::UnboundedSender<IpcRequest>) -> Result<(), BridgeError> {
+async fn serve_unix(
+    path: PathBuf,
+    tx: mpsc::UnboundedSender<IpcRequest>,
+) -> Result<(), BridgeError> {
     // A stale socket file from a previous crash must not block the bind.
     let _ = std::fs::remove_file(&path);
     if let Some(parent) = path.parent() {
@@ -229,7 +238,10 @@ async fn serve_pipe(name: &str, tx: mpsc::UnboundedSender<IpcRequest>) -> Result
 }
 
 #[cfg(not(windows))]
-async fn serve_pipe(_name: &str, _tx: mpsc::UnboundedSender<IpcRequest>) -> Result<(), BridgeError> {
+async fn serve_pipe(
+    _name: &str,
+    _tx: mpsc::UnboundedSender<IpcRequest>,
+) -> Result<(), BridgeError> {
     Err(std::io::Error::other("named pipes : Windows uniquement").into())
 }
 
@@ -264,7 +276,13 @@ async fn process_line(line: &str, tx: &mpsc::UnboundedSender<IpcRequest>) -> Val
         Ok(command) => {
             if command.name() == "snapshot" {
                 let (sent, received) = oneshot::channel();
-                if tx.send(IpcRequest { command, reply: Some(sent) }).is_err() {
+                if tx
+                    .send(IpcRequest {
+                        command,
+                        reply: Some(sent),
+                    })
+                    .is_err()
+                {
                     return json!({"ok": false, "error": "interface hors ligne"});
                 }
                 match tokio::time::timeout(std::time::Duration::from_secs(5), received).await {
@@ -272,7 +290,13 @@ async fn process_line(line: &str, tx: &mpsc::UnboundedSender<IpcRequest>) -> Val
                     _ => json!({"ok": false, "error": "capture expirée"}),
                 }
             } else {
-                if tx.send(IpcRequest { command, reply: None }).is_err() {
+                if tx
+                    .send(IpcRequest {
+                        command,
+                        reply: None,
+                    })
+                    .is_err()
+                {
                     return json!({"ok": false, "error": "interface hors ligne"});
                 }
                 value_ack(&value)
@@ -292,7 +316,10 @@ fn value_ack(value: &Value) -> Value {
 
 /// Client helper: sends commands and collects the replies (tests, examples).
 #[cfg(unix)]
-pub async fn send_commands(target: &IpcTarget, commands: &[Value]) -> Result<Vec<Value>, BridgeError> {
+pub async fn send_commands(
+    target: &IpcTarget,
+    commands: &[Value],
+) -> Result<Vec<Value>, BridgeError> {
     match target {
         IpcTarget::Unix(path) => {
             let stream = tokio::net::UnixStream::connect(path).await?;
@@ -306,7 +333,10 @@ pub async fn send_commands(target: &IpcTarget, commands: &[Value]) -> Result<Vec
 
 /// Client helper: sends commands and collects the replies (tests, examples).
 #[cfg(windows)]
-pub async fn send_commands(target: &IpcTarget, commands: &[Value]) -> Result<Vec<Value>, BridgeError> {
+pub async fn send_commands(
+    target: &IpcTarget,
+    commands: &[Value],
+) -> Result<Vec<Value>, BridgeError> {
     match target {
         IpcTarget::Unix(_) => {
             Err(std::io::Error::other("sockets unix : Linux/macOS uniquement").into())

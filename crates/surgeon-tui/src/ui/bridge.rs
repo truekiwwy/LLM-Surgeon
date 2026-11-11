@@ -16,14 +16,26 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::bordered()
         .title(Span::styled(
             " Bridge agents ",
-            Style::new().fg(if focused { theme::BORDER_FOCUS } else { theme::ACCENT }),
+            Style::new().fg(if focused {
+                theme::BORDER_FOCUS
+            } else {
+                theme::ACCENT
+            }),
         ))
-        .border_style(if focused { theme::focused_border() } else { theme::border() });
+        .border_style(if focused {
+            theme::focused_border()
+        } else {
+            theme::border()
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(3), Constraint::Length(2)])
+        .constraints([
+            Constraint::Min(4),
+            Constraint::Length(3),
+            Constraint::Length(2),
+        ])
         .split(inner);
     render_log(frame, rows[0], app);
     render_preview(frame, rows[1], app);
@@ -63,8 +75,7 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled(
                     format!(
                         "{} · α={:.4} · rang 1 · il y a {age} s",
-                        preview.tensor,
-                        preview.alpha
+                        preview.tensor, preview.alpha
                     ),
                     theme::base(),
                 ),

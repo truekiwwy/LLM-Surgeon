@@ -1,8 +1,0 @@
-﻿cargo :    Compiling surgeon-tui v0.1.0 (C:\Users\kiwwy\projects\weight-surgeon\crates\surgeon-tui)
-Au caractère Ligne:1 : 1
-+ cargo build 2>&1 | Out-File -FilePath build_log.txt -Encoding utf8; S ...
-+ ~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: (   Compiling su...es\surgeon-tui):String) [], RemoteException
-    + FullyQualifiedErrorId : NativeCommandError
- 
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.49s

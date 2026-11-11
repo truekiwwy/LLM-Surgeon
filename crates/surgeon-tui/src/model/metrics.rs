@@ -120,7 +120,7 @@ fn decode_range(
     let Some((elems, _)) = dtype.block() else {
         return;
     };
-    let (elems, cols, col_stride) = (elems as usize, cols as usize, col_stride as usize);
+    let (elems, cols, col_stride) = (elems as usize, cols, col_stride);
     // Decode the blocks covered by this row once, then stride.
     let block = row_start / elems;
     let end = (row_start + cols - 1) / elems;
@@ -259,9 +259,7 @@ fn effective_rank(matrix: &[f32], cols: usize) -> f64 {
     let mut gram = [[0.0f64; BASIS]; BASIS];
     for k in 0..BASIS {
         for j in 0..=k {
-            let dot = (0..rows)
-                .map(|r| y[r * BASIS + k] * y[r * BASIS + j])
-                .sum();
+            let dot = (0..rows).map(|r| y[r * BASIS + k] * y[r * BASIS + j]).sum();
             gram[k][j] = dot;
             gram[j][k] = dot;
         }
@@ -277,6 +275,8 @@ fn effective_rank(matrix: &[f32], cols: usize) -> f64 {
 }
 
 /// Eigenvalues of a small symmetric matrix, cyclic Jacobi, deterministic.
+/// The rotations are inherently index-matrix work: range loops read best here.
+#[allow(clippy::needless_range_loop)]
 fn jacobi_eigenvalues(a: &mut [[f64; BASIS]; BASIS]) -> Vec<f64> {
     for _ in 0..40 {
         let mut off = 0.0f64;
@@ -346,12 +346,22 @@ mod tests {
         assert!(stats.available);
         assert_eq!(stats.numel, 32);
         assert_eq!(stats.sampled, 32);
-        let reference_l2 = values.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>().sqrt();
+        let reference_l2 = values
+            .iter()
+            .map(|v| f64::from(*v) * f64::from(*v))
+            .sum::<f64>()
+            .sqrt();
         assert!((stats.l2 - reference_l2).abs() < 1e-9);
         let reference_mean = values.iter().map(|v| f64::from(*v)).sum::<f64>() / 32.0;
         assert!((stats.mean - reference_mean).abs() < 1e-9);
-        assert_eq!(stats.min, values.iter().copied().fold(f32::INFINITY, f32::min));
-        assert_eq!(stats.max, values.iter().copied().fold(f32::NEG_INFINITY, f32::max));
+        assert_eq!(
+            stats.min,
+            values.iter().copied().fold(f32::INFINITY, f32::min)
+        );
+        assert_eq!(
+            stats.max,
+            values.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+        );
         assert_eq!(stats.row_profile.len(), 4);
     }
 
@@ -377,7 +387,11 @@ mod tests {
             values.extend_from_slice(&base);
         }
         let stats = compute(&DType::F32, &[16, 32], &f32_bytes(&values));
-        assert!((stats.r_eff - 1.0).abs() < 0.2, "rank 1, got {}", stats.r_eff);
+        assert!(
+            (stats.r_eff - 1.0).abs() < 0.2,
+            "rank 1, got {}",
+            stats.r_eff
+        );
 
         // Full-rank noise: far above 1.
         let mut state = 0x1234_5678_9ABC_DEF0u64;

@@ -9,7 +9,7 @@ use safetensors::tensor::Dtype as StDtype;
 use safetensors::SafeTensors;
 
 use crate::model::dtype::DType;
-use crate::model::{ModelError, Format};
+use crate::model::{Format, ModelError};
 
 /// A raw entry before role classification.
 pub type RawEntry = (String, Vec<u64>, DType, u64, PathBuf, u64);

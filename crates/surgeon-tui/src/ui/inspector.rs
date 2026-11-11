@@ -22,9 +22,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::bordered()
         .title(Span::styled(
             title,
-            Style::new().fg(if focused { theme::BORDER_FOCUS } else { theme::ACCENT }),
+            Style::new().fg(if focused {
+                theme::BORDER_FOCUS
+            } else {
+                theme::ACCENT
+            }),
         ))
-        .border_style(if focused { theme::focused_border() } else { theme::border() });
+        .border_style(if focused {
+            theme::focused_border()
+        } else {
+            theme::border()
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(entry) = app.selected() else {
@@ -32,7 +40,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     };
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(6), Constraint::Length(1), Constraint::Min(3)])
+        .constraints([
+            Constraint::Min(6),
+            Constraint::Length(1),
+            Constraint::Min(3),
+        ])
         .split(inner);
     render_card(frame, rows[0], app, entry);
     if rows[1].height >= 1 {
@@ -85,13 +97,10 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App, entry: &crate::model::T
             theme::base(),
         ),
     );
-    let dtype_line = entry
-        .dtype
-        .bits_per_weight()
-        .map_or_else(
-            || format!("{} (non décodé)", entry.dtype.name()),
-            |bpw| format!("{} ({bpw:.2} bits/poids)", entry.dtype.name()),
-        );
+    let dtype_line = entry.dtype.bits_per_weight().map_or_else(
+        || format!("{} (non décodé)", entry.dtype.name()),
+        |bpw| format!("{} ({bpw:.2} bits/poids)", entry.dtype.name()),
+    );
     push(&mut lines, "dtype", Span::styled(dtype_line, theme::base()));
     push(
         &mut lines,
@@ -151,14 +160,21 @@ fn metrics_lines(lines: &mut Vec<Line<'static>>, stats: &Stats) {
     };
     row("norme L2", format!("{:.4} ({sample})", stats.l2));
     row("min / max", format!("{:.6} / {:.6}", stats.min, stats.max));
-    row("moyenne / |moyenne|", format!("{:.6} / {:.6}", stats.mean, stats.abs_mean));
+    row(
+        "moyenne / |moyenne|",
+        format!("{:.6} / {:.6}", stats.mean, stats.abs_mean),
+    );
     row(
         "kurtosis (excès)",
         format!("{:.4} — outliers", stats.kurtosis),
     );
     row(
         "rang effectif approx.",
-        format!("{:.2} / {} (projection aléatoire)", stats.r_eff, crate::model::metrics::BASIS),
+        format!(
+            "{:.2} / {} (projection aléatoire)",
+            stats.r_eff,
+            crate::model::metrics::BASIS
+        ),
     );
 }
 

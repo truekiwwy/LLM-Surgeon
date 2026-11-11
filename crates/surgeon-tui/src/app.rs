@@ -125,7 +125,9 @@ impl App {
 
     /// The tensor under the cursor.
     pub fn selected(&self) -> Option<&TensorEntry> {
-        self.filtered.get(self.sel).and_then(|i| self.index.tensors.get(*i))
+        self.filtered
+            .get(self.sel)
+            .and_then(|i| self.index.tensors.get(*i))
     }
 
     /// Selected index in `tensors`, if any.
@@ -415,7 +417,9 @@ impl App {
             return None;
         };
         let info = ContextInfo {
-            stats: self.selected_index().and_then(|i| self.stats.get(&i).cloned()),
+            stats: self
+                .selected_index()
+                .and_then(|i| self.stats.get(&i).cloned()),
             entry,
             family: self.index.family.clone(),
             format: self.index.format.to_string(),

@@ -33,7 +33,10 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(e) => {
             eprintln!("runtime tokio : {e}");
@@ -51,9 +54,8 @@ fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<(), surgeon_tui::app::AppError> {
     // Load before touching the terminal: errors print normally.
-    let index = ModelIndex::open(&cli.model).map_err(|e| {
-        surgeon_tui::app::AppError::Io(std::io::Error::other(e.to_string()))
-    })?;
+    let index = ModelIndex::open(&cli.model)
+        .map_err(|e| surgeon_tui::app::AppError::Io(std::io::Error::other(e.to_string())))?;
     let target = cli
         .ipc_socket
         .as_deref()

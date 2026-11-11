@@ -64,8 +64,14 @@ impl ContextInfo {
                     }
                 ));
                 out.push('\n');
-                out.push_str(&format!("- Min / Max : {:.6} / {:.6}\n", stats.min, stats.max));
-                out.push_str(&format!("- Moyenne / |moyenne| : {:.6} / {:.6}\n", stats.mean, stats.abs_mean));
+                out.push_str(&format!(
+                    "- Min / Max : {:.6} / {:.6}\n",
+                    stats.min, stats.max
+                ));
+                out.push_str(&format!(
+                    "- Moyenne / |moyenne| : {:.6} / {:.6}\n",
+                    stats.mean, stats.abs_mean
+                ));
                 out.push_str(&format!("- Kurtosis (excès) : {:.4}\n", stats.kurtosis));
                 out.push_str(&format!(
                     "- Rang effectif approx. : {:.2} / {}\n",
@@ -76,7 +82,9 @@ impl ContextInfo {
                 out.push_str("- Dtype non décodé : métriques indisponibles.\n");
             }
         } else {
-            out.push_str("\n### Métriques statiques\n\n- Métriques indisponibles (pas encore calculées).\n");
+            out.push_str(
+                "\n### Métriques statiques\n\n- Métriques indisponibles (pas encore calculées).\n",
+            );
         }
         out
     }
@@ -195,17 +203,19 @@ mod tests {
 
     #[test]
     fn markdown_lists_identity_topology_and_metrics() {
-        let mut stats = Stats::default();
-        stats.available = true;
-        stats.numel = 1024 * 4096;
-        stats.sampled = 64 * 256;
-        stats.l2 = 42.5;
-        stats.min = -0.5;
-        stats.max = 0.5;
-        stats.mean = 0.001;
-        stats.abs_mean = 0.01;
-        stats.kurtosis = 1.5;
-        stats.r_eff = 8.25;
+        let stats = Stats {
+            available: true,
+            numel: 1024 * 4096,
+            sampled: 64 * 256,
+            l2: 42.5,
+            min: -0.5,
+            max: 0.5,
+            mean: 0.001,
+            abs_mean: 0.01,
+            kurtosis: 1.5,
+            r_eff: 8.25,
+            ..Stats::default()
+        };
         let md = info(Some(stats)).markdown();
         assert!(md.contains("`model.layers.14.mlp.down_proj.weight`"));
         assert!(md.contains("Q6_K"));
@@ -238,7 +248,10 @@ mod tests {
             split_command(r#"claude --model opus "hello world""#),
             vec!["claude", "--model", "opus", "hello world"]
         );
-        let argv = agent_argv("aider --message-file {context}", std::path::Path::new("/tmp/c.md"));
+        let argv = agent_argv(
+            "aider --message-file {context}",
+            std::path::Path::new("/tmp/c.md"),
+        );
         assert_eq!(argv, vec!["aider", "--message-file", "/tmp/c.md"]);
         // Without a placeholder the path is appended last.
         let argv = agent_argv("codex", std::path::Path::new("/tmp/c.md"));

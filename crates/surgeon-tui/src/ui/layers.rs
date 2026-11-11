@@ -17,37 +17,60 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::bordered()
         .title(Span::styled(
             format!(" Couches ({}) ", app.filtered.len()),
-            Style::new().fg(if focused { theme::BORDER_FOCUS } else { theme::ACCENT }),
+            Style::new().fg(if focused {
+                theme::BORDER_FOCUS
+            } else {
+                theme::ACCENT
+            }),
         ))
-        .border_style(if focused { theme::focused_border() } else { theme::border() });
+        .border_style(if focused {
+            theme::focused_border()
+        } else {
+            theme::border()
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height < 1 || app.filtered.is_empty() {
-        frame.render_widget(
-            Paragraph::new(" aucun tenseur").style(theme::dim()),
-            inner,
-        );
+        frame.render_widget(Paragraph::new(" aucun tenseur").style(theme::dim()), inner);
         return;
     }
     let visible = inner.height as usize;
     let start = app.sel.saturating_sub(visible / 2);
-    let start = start.min(app.filtered.len().saturating_sub(visible.min(app.filtered.len())));
+    let start = start.min(
+        app.filtered
+            .len()
+            .saturating_sub(visible.min(app.filtered.len())),
+    );
     let now = std::time::Instant::now();
     for (row, position) in (start..app.filtered.len()).take(visible).enumerate() {
         let index = app.filtered[position];
         let entry = &app.index.tensors[index];
         let selected = position == app.sel;
-        let highlighted = app
-            .highlight
-            .is_some_and(|(layer, at)| entry.layer == Some(layer) && now.duration_since(at) < Duration::from_secs(5));
+        let highlighted = app.highlight.is_some_and(|(layer, at)| {
+            entry.layer == Some(layer) && now.duration_since(at) < Duration::from_secs(5)
+        });
         let mut spans = Vec::new();
         spans.push(Span::styled(
-            if highlighted { " ◉ " } else if selected { " ▸ " } else { "   " },
-            Style::new().fg(if highlighted { theme::HIGHLIGHT } else { theme::DIM }),
+            if highlighted {
+                " ◉ "
+            } else if selected {
+                " ▸ "
+            } else {
+                "   "
+            },
+            Style::new().fg(if highlighted {
+                theme::HIGHLIGHT
+            } else {
+                theme::DIM
+            }),
         ));
         spans.push(Span::styled(
             format!("{:>4} ", entry.layer_text()),
-            Style::new().fg(if entry.layer.is_some() { theme::DIM } else { theme::BORDER }),
+            Style::new().fg(if entry.layer.is_some() {
+                theme::DIM
+            } else {
+                theme::BORDER
+            }),
         ));
         let role_tag = match entry.moe {
             crate::model::MoeKind::Fused => "f",
@@ -69,7 +92,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         ));
         frame.render_widget(
             Paragraph::new(Line::from(spans)),
-            Rect { y: inner.y + row as u16, ..inner },
+            Rect {
+                y: inner.y + row as u16,
+                ..inner
+            },
         );
     }
 }
@@ -131,7 +157,8 @@ fn truncate_tail(name: &str, width: usize) -> String {
 
 /// The current role filter, for the filter bar.
 pub fn filter_label(app: &App) -> String {
-    app.role_filter.map_or_else(|| "tous".to_owned(), |r| r.label().to_owned())
+    app.role_filter
+        .map_or_else(|| "tous".to_owned(), |r| r.label().to_owned())
 }
 
 #[cfg(test)]

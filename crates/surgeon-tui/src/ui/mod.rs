@@ -21,48 +21,45 @@ use std::io::Stdout;
 use crate::app::App;
 
 /// Renders one frame (called at 60 Hz).
-pub fn draw(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    app: &App,
-) -> std::io::Result<()> {
+pub fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> std::io::Result<()> {
     terminal
         .draw(|frame| {
-        let area = frame.area();
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
-            .split(area);
-        let panels = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(rows[0]);
-        draw_filter_bar(frame, panels[0], app);
-        if area.width >= 100 {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(28),
-                    Constraint::Percentage(46),
-                    Constraint::Percentage(26),
-                ])
-                .split(panels[1]);
-            layers::render(frame, columns[0], app);
-            inspector::render(frame, columns[1], app);
-            bridge::render(frame, columns[2], app);
-        } else {
-            let stacked = Layout::default()
+            let area = frame.area();
+            let rows = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(34),
-                    Constraint::Percentage(38),
-                    Constraint::Percentage(28),
-                ])
-                .split(panels[1]);
-            layers::render(frame, stacked[0], app);
-            inspector::render(frame, stacked[1], app);
-            bridge::render(frame, stacked[2], app);
-        }
-        draw_status(frame, rows[1], app);
+                .constraints([Constraint::Min(3), Constraint::Length(1)])
+                .split(area);
+            let panels = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(0)])
+                .split(rows[0]);
+            draw_filter_bar(frame, panels[0], app);
+            if area.width >= 100 {
+                let columns = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Percentage(28),
+                        Constraint::Percentage(46),
+                        Constraint::Percentage(26),
+                    ])
+                    .split(panels[1]);
+                layers::render(frame, columns[0], app);
+                inspector::render(frame, columns[1], app);
+                bridge::render(frame, columns[2], app);
+            } else {
+                let stacked = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Percentage(34),
+                        Constraint::Percentage(38),
+                        Constraint::Percentage(28),
+                    ])
+                    .split(panels[1]);
+                layers::render(frame, stacked[0], app);
+                inspector::render(frame, stacked[1], app);
+                bridge::render(frame, stacked[2], app);
+            }
+            draw_status(frame, rows[1], app);
         })
         .map(|_| ())
 }
@@ -93,15 +90,12 @@ fn draw_filter_bar(frame: &mut ratatui::Frame, area: ratatui::prelude::Rect, app
             theme::dim(),
         )]
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(theme::base()),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(theme::base()), area);
 }
 
 fn draw_status(frame: &mut ratatui::Frame, area: ratatui::prelude::Rect, app: &App) {
-    use ratatui::text::{Line, Span};
     use ratatui::style::Style;
+    use ratatui::text::{Line, Span};
     use ratatui::widgets::Paragraph;
     let Some(entry) = app.selected() else {
         frame.render_widget(
@@ -124,10 +118,7 @@ fn draw_status(frame: &mut ratatui::Frame, area: ratatui::prelude::Rect, app: &A
         Some(_) => "métriques indisponibles".to_owned(),
         None => "métriques en cours…".to_owned(),
     };
-    let exactness = app
-        .selected_exactness()
-        .map(|e| e.label())
-        .unwrap_or("—");
+    let exactness = app.selected_exactness().map(|e| e.label()).unwrap_or("—");
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" ● ", Style::new().fg(theme::role_color(entry.role))),
