@@ -25,8 +25,8 @@
 //! logits_io -> logits_metrics -> report          (engine::ReadOnlyModel mmap, candle npy/pth)
 //! ppl_runner -> ppl_parse -> report              (eval::CommandRunner::run_streaming)
 //! dataset -> prompt -> score(generate) -> extract_answer -> score -> report
-//! dump -> extract::HookedQwen2::forward_logits   (extract::SafetensorsDir, TensorSource)
-//! native (eval::TextGenerator over extract::generate::Qwen2State) <- score, refusal
+//! dump -> extract::forward::build -> ResidualForward::forward_logits   (SafetensorsDir)
+//! native (eval::TextGenerator over extract::generate::DecoderState) <- score, refusal
 //! refusal -> native -> score::wilson -> report
 //! markers <- refusal, calibration                (English by default, fr/es/de or a file)
 //! judge -> calibration::gate, agreement -> report  (eval::TextGenerator::constrain, GBNF)
@@ -52,7 +52,7 @@
 //!          -> judge::annotate (generator_factory, verdict cache, parse_verdict)
 //!             -> judge::{score, paired, agreement} (Wilson, McNemar exact, Cohen's kappa)
 //!   dump   -> extract::{load_config, SafetensorsDir, check_tensors, choose_dtype}
-//!          -> tokenize -> HookedQwen2::from_tensors_full -> forward_logits per prompt
+//!          -> tokenize -> forward::build(Depth::Full) -> forward_logits per prompt
 //!          -> streamed .tmp -> rename
 //! every core -> report::*Report (Serialize + JsonSchema) -> Outcome.data / report::*_text
 //! ```

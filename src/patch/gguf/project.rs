@@ -66,6 +66,11 @@ pub struct Plan {
     pub fidelity: Fidelity,
     pub residual_fraction: Option<f64>,
     pub requant_residual_fraction: Option<f64>,
+    /// Squared norms of the chosen pass, to combine several matrices (fused experts):
+    /// `‖R(W)‖²`, `‖R(deq W')‖²`, `‖R(deq W' − W_exact)‖²`.
+    pub base_sq: f64,
+    pub after_sq: f64,
+    pub err_sq: f64,
     /// `requant_residual_fraction` after each pass run.
     pub history: Vec<Option<f64>>,
 }
@@ -324,6 +329,9 @@ impl Projector<'_> {
                     fidelity: sweep.fidelity,
                     residual_fraction: fraction(sweep.after_sq),
                     requant_residual_fraction: requant,
+                    base_sq: norm * norm,
+                    after_sq: sweep.after_sq,
+                    err_sq: sweep.err_sq(),
                     history: Vec::new(),
                 });
             }

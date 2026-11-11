@@ -10,7 +10,7 @@
 //! run_with -> schema (raw JSON) | mcp (stdio server, see `mcp/mod.rs`) | dispatch
 //! dispatch -> check   -> hardware::evaluate_budget
 //!          -> inspect -> hardware::compute_model_size (shards) -> ReadOnlyModel::open
-//!                     -> engine::find_mlp_tensors -> tensor_stats (mmap view, streamed)
+//!                     -> arch::resolve -> engine::find_by_roles -> tensor_stats (mmap view, streamed)
 //!          -> apply   -> patch::load_patch -> validate_patch -> hardware::evaluate_budget
 //!                     -> EngineBackend::open (WritableModel per shard)
 //!                     -> apply_patch(dry run: preflight, no write)
@@ -64,6 +64,7 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::arch;
 use crate::bench::calibration::{JudgeEvalRequest, SampleRequest};
 use crate::bench::dump::DumpRequest;
 use crate::bench::judge::{JudgeMode, JudgeSetup, RefusalJudging};
@@ -82,8 +83,8 @@ use crate::cli::{
 };
 use crate::engine::stats::TensorStats;
 use crate::engine::{
-    self, BroadcastAxis, DType, EngineError, LayerSpec, MlpProj, ReadOnlyModel, ShiftOp,
-    ShiftStats, WritableModel,
+    self, BroadcastAxis, DType, EngineError, LayerSpec, ReadOnlyModel, ShiftOp, ShiftStats,
+    WritableModel,
 };
 use crate::eval::{
     ensure_gguf, export_if_healthy, is_gguf, load_prompts, locate_binary, run_eval, CommandRunner,
@@ -342,6 +343,10 @@ fn command_name(command: &Commands) -> &'static str {
             crate::lora::cli_args::LoraCommand::Extract(_) => "lora extract",
         },
         Commands::Plugins(_) => "plugins list",
+        Commands::Arch(args) => match args.command {
+            crate::cli::ArchCommand::List => "arch list",
+            crate::cli::ArchCommand::Detect(_) => "arch detect",
+        },
         Commands::Bench(args) => match args.command {
             BenchCommand::Logits(_) => "bench logits",
             BenchCommand::Ppl(_) => "bench ppl",
@@ -384,6 +389,10 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         Commands::Eval(args) => eval(args, deps, &io.ui),
         Commands::Extract(cmd) => extract_cli(cmd, deps, io),
         Commands::Plugins(_) => plugins_list(&io.ui),
+        Commands::Arch(args) => match &args.command {
+            crate::cli::ArchCommand::List => arch_list(&io.ui),
+            crate::cli::ArchCommand::Detect(args) => arch_detect(args, &io.ui),
+        },
         Commands::Autotune(args) => {
             let ui = io.ui;
             autotune_cli(args, deps, &ui, &mut CliSink::new(io))
@@ -672,11 +681,16 @@ struct InspectedTensor {
 /// MLP tensor topology (and streamed statistics); human text only when `ui` is not `Off`.
 pub fn core_inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
     if gguf::is_gguf(&args.model) {
+        let spec = match &args.arch_spec {
+            Some(path) => Some(arch::load_spec(path).map_err(arch_failure)?),
+            None => None,
+        };
         let shown = gguf::report::inspect(
             &args.model,
             &args.layers,
             &args.projections,
             args.show_stats,
+            spec.as_ref(),
             ui,
         );
         return shown
@@ -684,6 +698,8 @@ pub fn core_inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
             .map_err(|e| Outcome::fail(exit::GENERAL, e).with_kind("invalid_gguf"));
     }
     let shards = hardware::compute_model_size(&args.model)?.shard_files;
+    let resolution =
+        arch::resolve(&args.model, None, args.arch_spec.as_deref()).map_err(arch_failure)?;
     let layers = LayerSpec::from(&args.layers);
     let projs = match args.projections.is_empty() {
         true => vec![Projection::Gate, Projection::Up, Projection::Down],
@@ -692,9 +708,11 @@ pub fn core_inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
     let sharded = shards.len() > 1;
     let mut tensors = Vec::new();
     let mut rows = Vec::new();
+    let mut all_names = Vec::new();
     for shard in &shards {
         let model = ReadOnlyModel::open(shard)?;
-        for info in find_targets(model.index(), &layers, &projs) {
+        all_names.extend(model.index().tensors.iter().map(|t| t.name.clone()));
+        for info in find_targets(model.index(), &resolution.spec, &layers, &projs) {
             if deps.interrupted.load(Ordering::SeqCst) {
                 return Err(Outcome::fail(exit::GENERAL, INTERRUPTED).with_kind("cancelled"));
             }
@@ -736,12 +754,21 @@ pub fn core_inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
     let mut banner = Vec::new();
     let _ = ui::print_banner(ui, &mut banner);
     let mut human = String::from_utf8_lossy(&banner).into_owned();
+    let report = arch_report(&resolution, &args.model, &all_names);
     human.push_str(&format!(
-        "{} {} tenseurs sélectionnés\n{}\n",
+        "{} {} tenseurs sélectionnés\n",
         ui::badge(ui, "INSPECT"),
         ui::metric(ui, rows.len()),
-        ui::separator(ui)
     ));
+    // Nothing detected: the historical naming, and the output it always had.
+    if report.detected {
+        human.push_str(&format!(
+            "{} {}\n",
+            ui::badge(ui, "ARCH"),
+            ui::text(ui, &report.summary())
+        ));
+    }
+    human.push_str(&format!("{}\n", ui::separator(ui)));
     if rows.is_empty() {
         human.push_str(&ui::dim(
             ui,
@@ -759,9 +786,24 @@ pub fn core_inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
         human.push_str(&ui::table(ui, &headers, &rows));
     }
     Ok(Outcome::ok(
-        json!({ "shards": shards, "tensors": tensors }),
+        json!({ "shards": shards, "tensors": tensors, "arch": report }),
         human,
     ))
+}
+
+/// `arch::Report` of a SafeTensors model: every tensor name, tied rule from config.json.
+fn arch_report(resolution: &arch::Resolution, model: &Path, names: &[String]) -> arch::Report {
+    let tied = arch::read_config(model).map(|c| resolution.spec.tied_in_config(&c));
+    arch::Report::new(
+        resolution,
+        names.iter().map(String::as_str),
+        arch::Format::SafeTensors,
+        tied,
+    )
+}
+
+fn arch_failure(e: arch::ArchError) -> Outcome {
+    Outcome::fail(exit::INVALID_INPUT, e.to_string()).with_kind(e.kind())
 }
 
 /// `[L12]`, or `[—]` for a tensor outside numbered layers.
@@ -818,33 +860,20 @@ impl From<&LayerSelection> for LayerSpec {
     }
 }
 
-/// Tensors of one shard matching a selection: the embeddings first (they belong to no
-/// layer, so `layers` does not filter them), then layer by layer the MLP projections
-/// (gate, up, down) and `o_proj`.
+/// Tensors of one shard matching a selection, by the roles of `spec`: the embeddings first
+/// (they belong to no layer, so `layers` does not filter them), then layer by layer the MLP
+/// projections (gate, up, down) and `o_proj`.
 fn find_targets<'a>(
     index: &'a engine::ModelIndex,
+    spec: &arch::ArchSpec,
     layers: &LayerSpec,
     projections: &[Projection],
 ) -> Vec<&'a engine::TensorInfo> {
-    let mlp: Vec<MlpProj> = projections
-        .iter()
-        .filter_map(|p| match p {
-            Projection::Gate => Some(MlpProj::Gate),
-            Projection::Up => Some(MlpProj::Up),
-            Projection::Down => Some(MlpProj::Down),
-            Projection::AttnOut | Projection::EmbedTokens => None,
-        })
-        .collect();
-    let mut found = engine::find_mlp_tensors(index, layers, &mlp);
-    if projections.contains(&Projection::AttnOut) {
-        found.extend(engine::find_attn_out_tensors(index, layers));
-    }
-    if projections.contains(&Projection::EmbedTokens) {
-        found.extend(engine::find_embed_tokens(index));
-    }
-    // Stable: inside a layer the MLP stays before o_proj; `None` (embeddings) sorts first.
-    found.sort_by_key(|t| engine::parse_layer_index(&t.name));
-    found
+    let roles: Vec<arch::Role> = projections.iter().map(|p| p.role()).collect();
+    engine::find_by_roles(index, spec, &roles, layers)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect()
 }
 
 /// `project_out` is not a shift: it goes through `PatchBackend::project_out_tensor`.
@@ -883,6 +912,7 @@ fn backend_error(e: EngineError) -> PatchError {
 pub struct EngineBackend {
     shards: Vec<(PathBuf, WritableModel)>,
     interrupted: Arc<AtomicBool>,
+    spec: arch::ArchSpec,
 }
 
 impl EngineBackend {
@@ -894,7 +924,34 @@ impl EngineBackend {
         Ok(Self {
             shards,
             interrupted,
+            spec: arch::legacy().clone(),
         })
+    }
+
+    /// Selects and orients tensors by `spec` (the default naming otherwise).
+    pub fn with_arch(mut self, spec: arch::ArchSpec) -> Self {
+        self.spec = spec;
+        self
+    }
+
+    /// Writer biases (`.bias` next to a selected writer): they are not projected.
+    pub fn writer_biases<'n>(&self, names: impl IntoIterator<Item = &'n str>) -> Vec<String> {
+        names
+            .into_iter()
+            .filter(|n| {
+                self.spec
+                    .role_of(n, arch::Format::SafeTensors)
+                    .is_some_and(|r| r.role.is_writer())
+            })
+            .filter_map(|n| n.strip_suffix(".weight").map(|stem| format!("{stem}.bias")))
+            .filter(|bias| self.shard_of(bias).is_some())
+            .collect()
+    }
+
+    fn layout_of(&self, name: &str) -> Option<arch::Layout> {
+        self.spec
+            .role_of(name, arch::Format::SafeTensors)
+            .map(|r| r.layout)
     }
 
     fn shard_of(&self, name: &str) -> Option<usize> {
@@ -936,20 +993,23 @@ impl PatchBackend for EngineBackend {
         layers: &LayerSelection,
         projections: &[Projection],
     ) -> patch::Result<Vec<String>> {
-        let spec = LayerSpec::from(layers);
+        let layers = LayerSpec::from(layers);
         let mut names: Vec<String> = self
             .shards
             .iter()
             .flat_map(|(_, model)| {
-                find_targets(model.index(), &spec, projections)
+                find_targets(model.index(), &self.spec, &layers, projections)
                     .into_iter()
                     .map(|t| t.name.clone())
                     .collect::<Vec<_>>()
             })
             .collect();
-        names.sort_by(|a, b| {
-            (engine::parse_layer_index(a), a).cmp(&(engine::parse_layer_index(b), b))
-        });
+        let layer = |name: &str| {
+            self.spec
+                .role_of(name, arch::Format::SafeTensors)
+                .and_then(|r| r.layer)
+        };
+        names.sort_by(|a, b| (layer(a), a).cmp(&(layer(b), b)));
         // A tensor listed by two shards must still be shifted once.
         names.dedup();
         Ok(names)
@@ -977,6 +1037,11 @@ impl PatchBackend for EngineBackend {
         let op = shift_op(op).ok_or_else(|| {
             PatchError::Backend("project_out passe par project_out_tensor".into())
         })?;
+        if self.layout_of(tensor_name) == Some(arch::Layout::ExpertsOutIn) {
+            return Err(PatchError::Backend(format!(
+                "{tensor_name} : experts fusionnés [experts, out, in] : seul project_out les                  modifie (add/subtract n'a pas d'axe défini sur un tenseur 3D)"
+            )));
+        }
         self.shards[shard]
             .1
             .shift_tensor(tensor_name, direction, alpha, op, axis.into())
@@ -1017,17 +1082,21 @@ impl PatchBackend for EngineBackend {
             .shard_of(tensor_name)
             .ok_or_else(|| backend_error(EngineError::TensorNotFound(tensor_name.into())))?;
         // The embeddings hold the residual stream in their rows, the other writers in
-        // their columns: same eraser, the other side of the matrix.
+        // their columns (per expert for fused experts): same eraser, the side the
+        // architecture gives.
         let projection = engine::SubspaceProjection { a, b, alpha, k };
-        self.shards[shard]
-            .1
-            .project_out_subspace(
+        let layout = self.layout_of(tensor_name);
+        let model = &mut self.shards[shard].1;
+        match layout {
+            Some(arch::Layout::ExpertsOutIn) => model.project_out_experts(tensor_name, &projection),
+            layout => model.project_out_subspace(
                 tensor_name,
                 &projection,
-                engine::is_embed_tokens(tensor_name),
-            )
-            .map(OpStats::from)
-            .map_err(backend_error)
+                layout == Some(arch::Layout::Rows),
+            ),
+        }
+        .map(OpStats::from)
+        .map_err(backend_error)
     }
 
     fn flush(&mut self) -> patch::Result<()> {
@@ -1698,7 +1767,37 @@ pub fn core_apply(
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
     let limits = ApplyOptions::default();
-    core_apply_io(request, IoConfig::default(), limits, deps, sink)
+    let arch = ArchOptions::default();
+    core_apply_io(request, IoConfig::default(), limits, &arch, deps, sink)
+}
+
+/// The architecture options of `apply` (`--arch-spec`, `--accept-approximate`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArchOptions {
+    pub spec: Option<PathBuf>,
+    pub accept_approximate: bool,
+}
+
+/// The gate of a weight ablation ([`arch::gate`]): `Ok(Some(..))`, the `data.arch` object
+/// and the warning, when the patch holds a `project_out`.
+pub fn arch_gate(
+    patch: &patch::ValidatedPatch,
+    report: &arch::Report,
+    accept: bool,
+) -> Result<Option<(Value, Option<String>)>, Outcome> {
+    let project_out = patch
+        .operations
+        .iter()
+        .any(|op| op.kind == OperationKind::ProjectOut);
+    let warning = arch::gate(report, project_out, accept).map_err(|refusal| {
+        Outcome::fail(exit::INVALID_INPUT, refusal.message).with_kind(refusal.kind)
+    })?;
+    if !project_out {
+        return Ok(None);
+    }
+    let mut data = json!(report);
+    data["accepted_approximate"] = json!(warning.is_some());
+    Ok(Some((data, warning)))
 }
 
 /// [`core_apply`] with explicit chunking / prefetch; a real run reports `data.io`.
@@ -1706,6 +1805,7 @@ fn core_apply_io(
     request: &ApplyRequest,
     io: IoConfig,
     limits: ApplyOptions,
+    arch_opts: &ArchOptions,
     deps: &AppDeps,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
@@ -1733,13 +1833,31 @@ fn core_apply_io(
              charge que les tenseurs ciblés"
         ));
     }
+    // The architecture decides the targets and their orientation, and gates an
+    // approximate ablation before anything is read for writing.
+    let resolution =
+        arch::resolve(&model, None, arch_opts.spec.as_deref()).map_err(arch_failure)?;
+    let mut names = Vec::new();
+    for shard in &shards {
+        let model = ReadOnlyModel::open(shard)?;
+        names.extend(model.index().tensors.iter().map(|t| t.name.clone()));
+    }
+    let report = arch_report(&resolution, &model, &names);
+    let arch_data = match arch_gate(&patch, &report, arch_opts.accept_approximate)? {
+        Some((data, warning)) => {
+            warnings.extend(warning);
+            Some(data)
+        }
+        None => None,
+    };
     for w in &warnings {
         sink.event(ProgressEvent::Warn(w.clone()));
     }
 
     // Preflight on its own mapping, released before any file is replaced or restored.
     let (preview, mut touched) = {
-        let mut backend = EngineBackend::open(&shards, Arc::clone(&deps.interrupted))?;
+        let mut backend = EngineBackend::open(&shards, Arc::clone(&deps.interrupted))?
+            .with_arch(resolution.spec.clone());
         let preview = apply_patch_with(&patch, &mut backend, None, true, &limits)?;
         let touched = backend.shards_holding(
             preview
@@ -1788,6 +1906,9 @@ fn core_apply_io(
     let with_untie = |mut outcome: Outcome| {
         if let Some(plan) = &untie {
             outcome.data["untie_lm_head"] = json!(plan);
+        }
+        if let Some(arch) = &arch_data {
+            outcome.data["arch"] = arch.clone();
         }
         outcome
     };
@@ -1839,7 +1960,9 @@ fn core_apply_io(
         .as_ref()
         .map_or(Ok(()), untie::UntiePlan::execute)
         .and_then(|()| {
-            EngineBackend::open(&shards, Arc::clone(&deps.interrupted)).map_err(backend_error)
+            EngineBackend::open(&shards, Arc::clone(&deps.interrupted))
+                .map(|b| b.with_arch(resolution.spec.clone()))
+                .map_err(backend_error)
         });
     let mut backend = match prepared {
         Ok(backend) => backend,
@@ -2011,7 +2134,7 @@ pub fn core_apply_routed(
             let limits = ApplyOptions {
                 max_rank: opts.max_rank,
             };
-            core_apply_io(request, opts.io(), limits, deps, sink)
+            core_apply_io(request, opts.io(), limits, &opts.arch_options(), deps, sink)
         }
     }
 }
@@ -2059,7 +2182,10 @@ fn core_apply_gguf(
         .iter()
         .map(|op| (op.id.clone(), op.kind))
         .collect();
-    let options = opts.options(request.backup_dir.clone());
+    let mut options = opts.options(request.backup_dir.clone());
+    if let Some(path) = &opts.arch_spec {
+        options.arch_spec = Some(arch::load_spec(path).map_err(arch_failure)?);
+    }
     let dry_run = request.dry_run;
     let started = Instant::now();
     let meter = IoMeter::start();
@@ -2089,7 +2215,9 @@ fn core_apply_gguf(
         Err(GgufApplyError::Patch(e)) => return Err(e.into()),
         Err(e) => {
             let code = match &e {
-                GgufApplyError::Usage(_) | GgufApplyError::Mapping(_) => exit::INVALID_INPUT,
+                GgufApplyError::Usage(_) | GgufApplyError::Mapping(_) | GgufApplyError::Arch(_) => {
+                    exit::INVALID_INPUT
+                }
                 _ => exit::GENERAL,
             };
             let kind = e.kind().unwrap_or("execution_failed");
@@ -2117,9 +2245,21 @@ fn core_apply_gguf(
             seconds: started.elapsed().as_secs_f64(),
         }),
     }
+    if let Some(w) = &run.arch_warning {
+        warnings.push(w.clone());
+        sink.event(ProgressEvent::Warn(w.clone()));
+    }
     let backups: Vec<PathBuf> = run.backup.iter().cloned().collect();
     let mut outcome = apply_outcome(&run.report, &backups, &warnings);
     outcome.data["gguf"] = json!(run);
+    if patch
+        .operations
+        .iter()
+        .any(|op| op.kind == OperationKind::ProjectOut)
+    {
+        outcome.data["arch"] = json!(run.arch);
+        outcome.data["arch"]["accepted_approximate"] = json!(run.arch_warning.is_some());
+    }
     if !dry_run {
         // Dequantize / requantize is scalar code (rows in parallel), not the SIMD kernels.
         let kernel = KernelChoice {
@@ -2586,6 +2726,97 @@ fn plugins_list(ui: &Ui) -> CoreResult {
         }
     }
     Ok(Outcome::ok(to_value(&catalog), text))
+}
+
+/// `surgeon arch list`: every built-in spec, with its classification and how it was
+/// checked.
+fn arch_list(ui: &Ui) -> CoreResult {
+    let mut text = String::new();
+    let mut rows = Vec::new();
+    for spec in arch::builtins() {
+        let exactness = spec.exactness();
+        text.push_str(&format!(
+            "{} {:<10} {} · GGUF {} · project_out {} · forward {}
+",
+            ui::badge(ui, "ARCH"),
+            spec.id,
+            ui::metric(ui, spec.hf_model_types.join(", ")),
+            ui::metric(ui, spec.gguf_arch.join(", ")),
+            ui::metric(ui, exactness.label()),
+            ui::metric(
+                ui,
+                if arch::FORWARD_IDS.contains(&spec.id.as_str()) {
+                    "oui"
+                } else {
+                    "non"
+                }
+            ),
+        ));
+        if let Some(reason) = exactness.reason() {
+            text.push_str(&format!(
+                "  {}
+",
+                ui::dim(ui, reason)
+            ));
+        }
+        rows.push(json!({
+            "id": spec.id,
+            "hf_model_types": spec.hf_model_types,
+            "hf_architectures": spec.hf_architectures,
+            "gguf_arch": spec.gguf_arch,
+            "exactness": exactness,
+            "forward": arch::FORWARD_IDS.contains(&spec.id.as_str()),
+            "verification": arch::verification(&spec.id),
+            "spec": spec,
+        }));
+    }
+    Ok(Outcome::ok(json!({ "architectures": rows }), text))
+}
+
+/// `surgeon arch detect`: the architecture of a SafeTensors model or a GGUF file, with the
+/// roles of its tensors.
+fn arch_detect(args: &crate::cli::ArchDetectArgs, ui: &Ui) -> CoreResult {
+    let report = match gguf::is_gguf(&args.model) {
+        true => {
+            let fail = |e: &dyn std::fmt::Display| {
+                Outcome::fail(exit::GENERAL, format!("{} : {e}", args.model.display()))
+                    .with_kind("invalid_gguf")
+            };
+            let file = std::fs::File::open(&args.model).map_err(|e| fail(&e))?;
+            let map = kernel::map_read(&file).map_err(|e| fail(&e))?;
+            let parsed = gguf::parse(&map).map_err(|e| fail(&e))?;
+            let resolution = arch::resolve(
+                &args.model,
+                Some(parsed.architecture()),
+                args.arch_spec.as_deref(),
+            )
+            .map_err(arch_failure)?;
+            arch::Report::new(
+                &resolution,
+                parsed.tensors.iter().map(|t| t.name.as_str()),
+                arch::Format::Gguf,
+                Some(gguf::mapping::tied_embeddings(&parsed)),
+            )
+        }
+        false => {
+            let shards = hardware::compute_model_size(&args.model)?.shard_files;
+            let resolution = arch::resolve(&args.model, None, args.arch_spec.as_deref())
+                .map_err(arch_failure)?;
+            let mut names = Vec::new();
+            for shard in &shards {
+                let model = ReadOnlyModel::open(shard)?;
+                names.extend(model.index().tensors.iter().map(|t| t.name.clone()));
+            }
+            arch_report(&resolution, &args.model, &names)
+        }
+    };
+    let text = format!(
+        "{} {}
+",
+        ui::badge(ui, "ARCH"),
+        ui::text(ui, &report.summary())
+    );
+    Ok(Outcome::ok(json!(report), text))
 }
 
 // ---------------------------------------------------------------- bench

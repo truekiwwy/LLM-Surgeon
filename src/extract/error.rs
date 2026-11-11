@@ -18,8 +18,9 @@ pub enum ExtractError {
     Config(String),
 
     #[error(
-        "architecture « {model_type} » non supportée : seul Qwen2/Qwen2.5 (model_type \"qwen2\") \
-         est supporté ; Qwen3 diffère (q_norm/k_norm dans l'attention)"
+        "architecture « {model_type} » non supportée par le forward natif (extraction, \
+         génération, bench dump) : Qwen2/Qwen2.5, Llama 2/3, Mistral et Qwen3 seulement ; ses \
+         poids restent patchables (surgeon arch list)"
     )]
     UnsupportedArchitecture { model_type: String },
 

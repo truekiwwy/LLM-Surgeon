@@ -1,6 +1,12 @@
+//! Target selection by architecture: every tensor whose name an [`ArchSpec`] gives a role,
+//! filtered by layer. The historical functions (`find_mlp_tensors`, `find_attn_out_tensors`,
+//! `find_embed_tokens`) are the default spec ([`arch::legacy`], the Llama/Mistral/Qwen
+//! naming), with the same results as before (`tests/arch.rs` keeps the name fixtures).
+
 use serde::Serialize;
 
 use super::index::{ModelIndex, TensorInfo};
+use crate::arch::{self, ArchSpec, Format, Role, TensorRole};
 
 /// Declaration order is the sort order of `find_mlp_tensors`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -11,12 +17,11 @@ pub enum MlpProj {
 }
 
 impl MlpProj {
-    fn from_name(s: &str) -> Option<Self> {
-        match s {
-            "gate_proj" => Some(Self::Gate),
-            "up_proj" => Some(Self::Up),
-            "down_proj" => Some(Self::Down),
-            _ => None,
+    fn role(self) -> Role {
+        match self {
+            Self::Gate => Role::MlpGate,
+            Self::Up => Role::MlpUp,
+            Self::Down => Role::MlpOut,
         }
     }
 }
@@ -52,23 +57,59 @@ pub fn parse_layer_index(name: &str) -> Option<usize> {
     None
 }
 
+/// Order inside a layer: the MLP (gate, up, out) before the attention output, as the
+/// selection has always been listed; the embeddings have no layer and come first.
+fn rank(role: Role) -> u8 {
+    match role {
+        Role::Embed => 0,
+        Role::MlpGate => 1,
+        Role::MlpUp => 2,
+        Role::MlpOut => 3,
+        Role::AttnOut => 4,
+        Role::Router => 5,
+    }
+}
+
+/// Tensors of `index` that `spec` gives one of `roles`, in the selected layers (a tensor
+/// without layer, the embeddings, is always selected), sorted by (layer, role, expert,
+/// name).
+pub fn find_by_roles<'a>(
+    index: &'a ModelIndex,
+    spec: &ArchSpec,
+    roles: &[Role],
+    layers: &LayerSpec,
+) -> Vec<(&'a TensorInfo, TensorRole)> {
+    let mut found: Vec<(&TensorInfo, TensorRole)> = index
+        .tensors
+        .iter()
+        .filter_map(|t| {
+            let role = spec.role_of(&t.name, Format::SafeTensors)?;
+            let wanted =
+                roles.contains(&role.role) && role.layer.is_none_or(|l| layers.contains(l));
+            wanted.then_some((t, role))
+        })
+        .collect();
+    found.sort_by(|(a, ra), (b, rb)| {
+        (ra.layer, rank(ra.role), ra.expert, &a.name).cmp(&(
+            rb.layer,
+            rank(rb.role),
+            rb.expert,
+            &b.name,
+        ))
+    });
+    found
+}
+
 /// `[prefix.]layers.{i}.mlp.{gate|up|down}_proj.weight`, the Llama/Mistral/Qwen naming,
 /// whatever the prefix (`model.`, `model.language_model.`...). MoE experts
 /// (`mlp.experts.{j}.gate_proj`) deliberately do not match.
+#[cfg(test)]
 fn parse_mlp(name: &str) -> Option<(usize, MlpProj)> {
-    let mut parts = name.rsplit('.');
-    match (
-        parts.next()?,
-        parts.next()?,
-        parts.next()?,
-        parts.next()?,
-        parts.next()?,
-    ) {
-        ("weight", proj, "mlp", layer, "layers") => {
-            Some((layer.parse().ok()?, MlpProj::from_name(proj)?))
-        }
-        _ => None,
-    }
+    let role = arch::legacy().role_of(name, Format::SafeTensors)?;
+    let proj = [MlpProj::Gate, MlpProj::Up, MlpProj::Down]
+        .into_iter()
+        .find(|p| p.role() == role.role)?;
+    Some((role.layer?, proj))
 }
 
 /// MLP weights matching the layers and projections, sorted by (layer, projection, name).
@@ -77,39 +118,27 @@ pub fn find_mlp_tensors<'a>(
     layers: &LayerSpec,
     projs: &[MlpProj],
 ) -> Vec<&'a TensorInfo> {
-    let mut found: Vec<(usize, MlpProj, &TensorInfo)> = index
-        .tensors
-        .iter()
-        .filter_map(|t| {
-            let (layer, proj) = parse_mlp(&t.name)?;
-            (layers.contains(layer) && projs.contains(&proj)).then_some((layer, proj, t))
-        })
-        .collect();
-    found.sort_by(|a, b| (a.0, a.1, &a.2.name).cmp(&(b.0, b.1, &b.2.name)));
-    found.into_iter().map(|(_, _, t)| t).collect()
+    let roles: Vec<Role> = projs.iter().map(|p| p.role()).collect();
+    find_by_roles(index, arch::legacy(), &roles, layers)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect()
 }
 
 /// `[prefix.]layers.{i}.self_attn.o_proj.weight`: the attention matrix that writes into the
 /// residual stream, sorted by (layer, name).
 pub fn find_attn_out_tensors<'a>(index: &'a ModelIndex, layers: &LayerSpec) -> Vec<&'a TensorInfo> {
-    let mut found: Vec<(usize, &TensorInfo)> = index
-        .tensors
-        .iter()
-        .filter_map(|t| {
-            let layer = t
-                .name
-                .ends_with(".self_attn.o_proj.weight")
-                .then(|| parse_layer_index(&t.name))??;
-            layers.contains(layer).then_some((layer, t))
-        })
-        .collect();
-    found.sort_by(|a, b| (a.0, &a.1.name).cmp(&(b.0, &b.1.name)));
-    found.into_iter().map(|(_, t)| t).collect()
+    find_by_roles(index, arch::legacy(), &[Role::AttnOut], layers)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect()
 }
 
 /// `[prefix.]embed_tokens.weight`: the input embeddings, `[vocab, hidden]`.
 pub fn is_embed_tokens(name: &str) -> bool {
-    name == "embed_tokens.weight" || name.ends_with(".embed_tokens.weight")
+    arch::legacy()
+        .role_of(name, Format::SafeTensors)
+        .is_some_and(|r| r.role == Role::Embed)
 }
 
 pub fn find_embed_tokens(index: &ModelIndex) -> Option<&TensorInfo> {

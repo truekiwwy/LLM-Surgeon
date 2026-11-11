@@ -1,15 +1,19 @@
-//! Qwen2 forward pass that stops at layer L and exposes its activation.
+//! Forward pass of a dense decoder (Qwen2, Llama/Mistral, Qwen3: [`DecoderConfig`]) that
+//! stops at layer L and exposes its activation.
 //!
 //! Adapted from candle-transformers 0.11.1, `src/models/qwen2.rs`
 //! (Copyright (c) the candle authors; dual-licensed under MIT OR Apache-2.0,
-//! https://github.com/huggingface/candle). Same math, same candle ops, in the same order:
+//! <https://github.com/huggingface/candle>). Same math, same candle ops, in the same order:
 //! RMSNorm (`candle_nn::RmsNorm`), rotate-half RoPE (`candle_nn::rotary_emb::rope`, sin/cos
 //! computed in the model dtype), GQA through `repeat_kv` (concatenation), biases on q/k/v
 //! only, causal mask with sliding window (built in f32, then cast), softmax on the last
 //! dimension, SwiGLU (`act(gate) * up -> down`). Changes: no KV cache (one pass, batch of
 //! one, offset 0), sin/cos computed for the prompt length instead of every position (each
 //! entry is a single product, so the values are identical), and an early exit at layer L
-//! with a choice of site.
+//! with a choice of site. The other decoders change only what [`Variant`] says (biases,
+//! Qwen3's per-head `q_norm`/`k_norm` RMSNorm before RoPE, `head_dim` from the config) and
+//! Llama 3's RoPE frequency scaling (as candle's `llama.rs`); with Qwen2's variant every op
+//! is the one above, in the same order, so its results are unchanged.
 
 use std::collections::HashMap;
 
@@ -17,9 +21,31 @@ use candle_core::{DType, Device, Module, Tensor};
 use candle_nn::{Activation, Embedding, Linear, RmsNorm, VarBuilder};
 use serde::{Deserialize, Serialize};
 
-use super::config::Qwen2Config;
+use super::config::{DecoderConfig, Llama3Scaling, Variant};
 use super::error::{ExtractError, Result};
 use super::weights::{load_tensors, required_tensors, TensorSource};
+
+/// Llama 3's frequency scaling of RoPE (`Cache::new` of candle's `llama.rs`): long
+/// wavelengths divided by `factor`, short ones kept, a smooth blend in between.
+fn llama3_scaled(inv_freq: Vec<f32>, s: Llama3Scaling) -> Vec<f32> {
+    let original = s.original_max_position_embeddings as f32;
+    let (low_wavelen, high_wavelen) = (original / s.low_freq_factor, original / s.high_freq_factor);
+    inv_freq
+        .into_iter()
+        .map(|freq| {
+            let wavelen = 2. * std::f32::consts::PI / freq;
+            if wavelen < high_wavelen {
+                freq
+            } else if wavelen > low_wavelen {
+                freq / s.factor
+            } else {
+                let smooth = (original / wavelen - s.low_freq_factor)
+                    / (s.high_freq_factor - s.low_freq_factor);
+                (1. - smooth) * freq / s.factor + smooth * freq
+            }
+        })
+        .collect()
+}
 
 /// Where the activation of layer L is read.
 #[derive(
@@ -62,12 +88,13 @@ struct Mlp {
 }
 
 impl Mlp {
-    fn new(cfg: &Qwen2Config, vb: VarBuilder) -> candle_core::Result<Self> {
+    fn new(cfg: &DecoderConfig, vb: VarBuilder) -> candle_core::Result<Self> {
         let (h, i) = (cfg.hidden_size, cfg.intermediate_size);
+        let bias = cfg.variant().mlp_bias;
         Ok(Self {
-            gate_proj: candle_nn::linear_no_bias(h, i, vb.pp("gate_proj"))?,
-            up_proj: candle_nn::linear_no_bias(h, i, vb.pp("up_proj"))?,
-            down_proj: candle_nn::linear_no_bias(i, h, vb.pp("down_proj"))?,
+            gate_proj: candle_nn::linear_b(h, i, bias, vb.pp("gate_proj"))?,
+            up_proj: candle_nn::linear_b(h, i, bias, vb.pp("up_proj"))?,
+            down_proj: candle_nn::linear_b(i, h, bias, vb.pp("down_proj"))?,
             act_fn: cfg.hidden_act,
         })
     }
@@ -86,11 +113,15 @@ struct Attention {
     k_proj: Linear,
     v_proj: Linear,
     o_proj: Linear,
+    /// Qwen3: RMSNorm over each head of q and k, before RoPE.
+    q_norm: Option<RmsNorm>,
+    k_norm: Option<RmsNorm>,
     num_heads: usize,
     num_kv_heads: usize,
     num_kv_groups: usize,
     head_dim: usize,
-    hidden_size: usize,
+    /// `num_heads * head_dim` (the hidden size in Qwen2).
+    attn_dim: usize,
 }
 
 /// `candle_transformers::utils::repeat_kv`.
@@ -104,24 +135,56 @@ fn repeat_kv(xs: Tensor, n_rep: usize) -> candle_core::Result<Tensor> {
 }
 
 impl Attention {
-    fn new(cfg: &Qwen2Config, vb: VarBuilder) -> candle_core::Result<Self> {
+    fn new(cfg: &DecoderConfig, vb: VarBuilder) -> candle_core::Result<Self> {
         let h = cfg.hidden_size;
         let (num_heads, num_kv_heads, head_dim) = (
             cfg.num_attention_heads,
             cfg.num_key_value_heads,
             cfg.head_dim(),
         );
+        let Variant {
+            qkv_bias,
+            o_bias,
+            qk_norm,
+            ..
+        } = cfg.variant();
+        let norm = |name: &str| match qk_norm {
+            true => candle_nn::rms_norm(head_dim, cfg.rms_norm_eps, vb.pp(name)).map(Some),
+            false => Ok(None),
+        };
         Ok(Self {
-            q_proj: candle_nn::linear(h, num_heads * head_dim, vb.pp("q_proj"))?,
-            k_proj: candle_nn::linear(h, num_kv_heads * head_dim, vb.pp("k_proj"))?,
-            v_proj: candle_nn::linear(h, num_kv_heads * head_dim, vb.pp("v_proj"))?,
-            o_proj: candle_nn::linear_no_bias(num_heads * head_dim, h, vb.pp("o_proj"))?,
+            q_proj: candle_nn::linear_b(h, num_heads * head_dim, qkv_bias, vb.pp("q_proj"))?,
+            k_proj: candle_nn::linear_b(h, num_kv_heads * head_dim, qkv_bias, vb.pp("k_proj"))?,
+            v_proj: candle_nn::linear_b(h, num_kv_heads * head_dim, qkv_bias, vb.pp("v_proj"))?,
+            o_proj: candle_nn::linear_b(num_heads * head_dim, h, o_bias, vb.pp("o_proj"))?,
+            q_norm: norm("q_norm")?,
+            k_norm: norm("k_norm")?,
             num_heads,
             num_kv_heads,
             num_kv_groups: num_heads / num_kv_heads,
             head_dim,
-            hidden_size: h,
+            attn_dim: num_heads * head_dim,
         })
+    }
+
+    /// `[b, heads, seq, head_dim]` of a projection, through the per-head norm if any
+    /// (applied on the last dimension, so before or after the transpose is the same).
+    fn heads(
+        &self,
+        proj: &Linear,
+        norm: Option<&RmsNorm>,
+        xs: &Tensor,
+        n_heads: usize,
+    ) -> candle_core::Result<Tensor> {
+        let (b_sz, q_len, _) = xs.dims3()?;
+        let x = proj
+            .forward(xs)?
+            .reshape((b_sz, q_len, n_heads, self.head_dim))?;
+        let x = match norm {
+            Some(norm) => norm.forward(&x)?,
+            None => x,
+        };
+        x.transpose(1, 2)
     }
 
     fn forward(
@@ -131,16 +194,8 @@ impl Attention {
         mask: Option<&Tensor>,
     ) -> candle_core::Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
-        let q = self
-            .q_proj
-            .forward(xs)?
-            .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let k = self
-            .k_proj
-            .forward(xs)?
-            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
+        let q = self.heads(&self.q_proj, self.q_norm.as_ref(), xs, self.num_heads)?;
+        let k = self.heads(&self.k_proj, self.k_norm.as_ref(), xs, self.num_kv_heads)?;
         let v = self
             .v_proj
             .forward(xs)?
@@ -161,7 +216,7 @@ impl Attention {
         weights
             .matmul(&v)?
             .transpose(1, 2)?
-            .reshape((b_sz, q_len, self.hidden_size))?
+            .reshape((b_sz, q_len, self.attn_dim))?
             .apply(&self.o_proj)
     }
 
@@ -176,16 +231,8 @@ impl Attention {
         cache: &mut Option<(Tensor, Tensor)>,
     ) -> candle_core::Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
-        let q = self
-            .q_proj
-            .forward(xs)?
-            .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let k = self
-            .k_proj
-            .forward(xs)?
-            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
+        let q = self.heads(&self.q_proj, self.q_norm.as_ref(), xs, self.num_heads)?;
+        let k = self.heads(&self.k_proj, self.k_norm.as_ref(), xs, self.num_kv_heads)?;
         let v = self
             .v_proj
             .forward(xs)?
@@ -215,7 +262,7 @@ impl Attention {
         weights
             .matmul(&v)?
             .transpose(1, 2)?
-            .reshape((b_sz, q_len, self.hidden_size))?
+            .reshape((b_sz, q_len, self.attn_dim))?
             .apply(&self.o_proj)
     }
 }
@@ -228,7 +275,7 @@ struct DecoderLayer {
 }
 
 impl DecoderLayer {
-    fn new(cfg: &Qwen2Config, vb: VarBuilder) -> candle_core::Result<Self> {
+    fn new(cfg: &DecoderConfig, vb: VarBuilder) -> candle_core::Result<Self> {
         Ok(Self {
             self_attn: Attention::new(cfg, vb.pp("self_attn"))?,
             mlp: Mlp::new(cfg, vb.pp("mlp"))?,
@@ -278,12 +325,12 @@ impl DecoderLayer {
 }
 
 /// Per-layer keys and values of the tokens already processed (batch of one).
-pub(super) struct KvCache {
+pub struct KvCache {
     layers: Vec<Option<(Tensor, Tensor)>>,
 }
 
 impl KvCache {
-    pub(super) fn new(num_layers: usize) -> Self {
+    pub fn new(num_layers: usize) -> Self {
         Self {
             layers: vec![None; num_layers],
         }
@@ -298,28 +345,32 @@ impl KvCache {
     }
 }
 
-/// Final norm and output projection, only loaded by [`HookedQwen2::from_tensors_full`].
+/// Final norm and output projection, only loaded by [`HookedDecoder::from_tensors_full`].
 struct LmHead {
     norm: RmsNorm,
     lm_head: Linear,
 }
 
-pub struct HookedQwen2 {
+pub struct HookedDecoder {
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,
     head: Option<LmHead>,
     head_dim: usize,
     rope_theta: f64,
+    rope_llama3: Option<Llama3Scaling>,
     sliding_window: usize,
     dtype: DType,
     device: Device,
 }
 
-impl HookedQwen2 {
+/// The historical name, kept for the library API.
+pub type HookedQwen2 = HookedDecoder;
+
+impl HookedDecoder {
     /// Reads the embeddings and layers `0..=up_to_layer` only.
     pub fn load(
         src: &dyn TensorSource,
-        cfg: &Qwen2Config,
+        cfg: &DecoderConfig,
         up_to_layer: usize,
         dtype: DType,
         device: &Device,
@@ -334,7 +385,7 @@ impl HookedQwen2 {
     /// Builds the model from tensors named as in the checkpoint (`model.layers.0...`).
     pub fn from_tensors(
         tensors: HashMap<String, Tensor>,
-        cfg: &Qwen2Config,
+        cfg: &DecoderConfig,
         up_to_layer: usize,
         dtype: DType,
         device: &Device,
@@ -347,7 +398,7 @@ impl HookedQwen2 {
     /// `weights::required_tensors_full`.
     pub fn from_tensors_full(
         tensors: HashMap<String, Tensor>,
-        cfg: &Qwen2Config,
+        cfg: &DecoderConfig,
         dtype: DType,
         device: &Device,
     ) -> Result<Self> {
@@ -356,7 +407,7 @@ impl HookedQwen2 {
 
     fn build(
         tensors: HashMap<String, Tensor>,
-        cfg: &Qwen2Config,
+        cfg: &DecoderConfig,
         up_to_layer: usize,
         dtype: DType,
         device: &Device,
@@ -396,6 +447,7 @@ impl HookedQwen2 {
             head,
             head_dim: cfg.head_dim(),
             rope_theta: cfg.rope_theta,
+            rope_llama3: cfg.rope_llama3,
             sliding_window: cfg.sliding_window(),
             dtype,
             device: device.clone(),
@@ -409,6 +461,10 @@ impl HookedQwen2 {
             .step_by(2)
             .map(|i| 1f32 / self.rope_theta.powf(i as f64 / dim as f64) as f32)
             .collect();
+        let inv_freq = match self.rope_llama3 {
+            None => inv_freq,
+            Some(s) => llama3_scaled(inv_freq, s),
+        };
         let inv_freq_len = inv_freq.len();
         let inv_freq =
             Tensor::from_vec(inv_freq, (1, inv_freq_len), &self.device)?.to_dtype(self.dtype)?;
@@ -518,7 +574,7 @@ impl HookedQwen2 {
     /// `after_layer(i, resid)` sees and may replace the residual stream after layer `i`
     /// (steering, capture) and may abort with an error (cancellation). Returns the stream
     /// after the last executed layer.
-    pub(super) fn forward_cached(
+    pub fn forward_cached(
         &self,
         input_ids: &Tensor,
         cache: &mut KvCache,
@@ -563,7 +619,7 @@ impl HookedQwen2 {
 
     /// Logits (f32, `vocab` entries) of the last position of `hidden` (`[1, seq, hidden]`),
     /// final norm and `lm_head` included. Needs [`Self::from_tensors_full`].
-    pub(super) fn logits_last(&self, hidden: &Tensor) -> Result<Vec<f32>> {
+    pub fn logits_last(&self, hidden: &Tensor) -> Result<Vec<f32>> {
         let head = self.head.as_ref().ok_or_else(|| {
             ExtractError::Compute("modèle chargé sans norme finale ni lm_head".into())
         })?;
@@ -578,6 +634,11 @@ impl HookedQwen2 {
 
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+
+    /// Layers loaded (`up_to_layer + 1`, or all).
+    pub fn num_layers(&self) -> usize {
+        self.layers.len()
     }
 
     #[cfg(test)]
@@ -605,7 +666,7 @@ mod tests {
         }
     }
 
-    fn cfg(num_kv_heads: usize) -> Qwen2Config {
+    fn cfg(num_kv_heads: usize) -> DecoderConfig {
         super::super::config::parse_config(&format!(
             r#"{{"model_type":"qwen2","vocab_size":64,"hidden_size":16,"intermediate_size":32,
             "num_hidden_layers":4,"num_attention_heads":2,"num_key_value_heads":{num_kv_heads},
@@ -615,7 +676,7 @@ mod tests {
         .unwrap()
     }
 
-    fn reference_cfg(c: &Qwen2Config) -> reference::Config {
+    fn reference_cfg(c: &DecoderConfig) -> reference::Config {
         reference::Config {
             vocab_size: c.vocab_size,
             hidden_size: c.hidden_size,
@@ -635,7 +696,7 @@ mod tests {
     }
 
     /// Every tensor of the full model, final norm and lm_head included.
-    fn weights(c: &Qwen2Config, seed: u64) -> HashMap<String, Tensor> {
+    fn weights(c: &DecoderConfig, seed: u64) -> HashMap<String, Tensor> {
         let mut rng = Lcg(seed);
         let mut all = required_tensors(c, c.num_hidden_layers - 1);
         all.push(("model.norm.weight".into(), vec![c.hidden_size]));

@@ -172,6 +172,7 @@ surgeon inspect --model qwen2-mini --layers 0-1 --show-stats
 █▀█ █ █ ▀█▀  W E I G H T
 █ █ ▀▄▀  █   S U R G E O N
 [INSPECT]  6 tenseurs sélectionnés
+[ARCH]     qwen2 (config.json model_type) · project_out exact · embed 1, attn_out 4, mlp_gate 4, mlp_up 4, mlp_out 4
 ────────────────────────────────────────────────────────────
 COUCHE   PROJ        DTYPE   SHAPE     TAILLE    MIN       MAX      MOYENNE   L2    
 [L0]     gate_proj   f32     32 × 16   2.0 KiB   -0.3996   0.3994   0.0184    5.0572
@@ -343,6 +344,8 @@ COUCHE   PROJ        DTYPE   SHAPE        TAILLE    MIN       MAX      MOYENNE  
 [L12]    down_proj   bf16    896 × 4864   8.3 MiB   -0.4395   0.3652   0.0000    38.0406
 ```
 
+Cette exécution précède la description des architectures : la version actuelle affiche une ligne `[ARCH]` après `[INSPECT]` (`surgeon arch detect` la donne seule).
+
 **Étape 3. Extraire une direction.** Enregistrez deux fichiers de huit phrases courtes, par exemple `pos.json` (`["I love this, it is wonderful.", "What a fantastic day!", ...]`) et `neg.json` (`["I hate this, it is awful.", "What a terrible day!", ...]`), puis lancez :
 
 ```bash
@@ -480,7 +483,7 @@ surgeon check [OPTIONS] --model <MODEL>
 <a id="cmd-inspect"></a>
 #### `surgeon inspect`
 
-Liste les tenseurs MLP d'un modèle SafeTensors (fichier, shards ou index) ou d'un fichier GGUF, avec des statistiques facultatives.
+Liste les tenseurs MLP d'un modèle SafeTensors (fichier, shards ou index) ou d'un fichier GGUF, avec des statistiques facultatives, et l'[architecture](#architectures) détectée (ligne `[ARCH]`, affichée quand elle est reconnue).
 
 ```text
 surgeon inspect [OPTIONS] --model <MODEL>
@@ -492,8 +495,9 @@ surgeon inspect [OPTIONS] --model <MODEL>
 | `--layers` | `all` | `all`, une plage `10-20` ou une liste `3,5,7`. |
 | `--proj` | `gate`, `up`, `down` | `gate`, `up`, `down`, `o_proj` ou `embed_tokens` ; répétable. Les deux dernières ne sont listées que sur demande (SafeTensors). |
 | `--show-stats` | désactivé | Min, max, moyenne et norme L2 par tenseur (deux passes parallèles, déterministes). |
+| `--arch-spec` | aucun | Spécification d'architecture (JSON, `surgeon schema --kind arch`) à la place de la détection. |
 
-`data` : `shards`, `tensors[]` (`name`, `dtype`, `shape`, `shard`, `stats`). Pour un fichier GGUF le tableau donne aussi l'orientation de chaque tenseur (`reader`, `writer`, `writer_local` pour les plongements) et s'il est patchable, avec la raison sinon (`patchable_reason`), et `data.tied_embeddings` dit si `token_embd` sert aussi de tête de sortie. `o_proj` et `embed_tokens` sont listés quand `--proj` les demande.
+`data` : `shards`, `tensors[]` (`name`, `dtype`, `shape`, `shard`, `stats`), `arch` (comme [`arch detect`](#cmd-arch-detect)). Pour un fichier GGUF le tableau donne aussi l'orientation de chaque tenseur (`reader`, `writer`, `writer_local` pour les plongements) et s'il est patchable, avec la raison sinon (`patchable_reason`), et `data.tied_embeddings` dit si `token_embd` sert aussi de tête de sortie. `o_proj` et `embed_tokens` sont listés quand `--proj` les demande.
 
 <a id="cmd-extract"></a>
 #### `surgeon extract`
@@ -555,6 +559,8 @@ surgeon apply [OPTIONS] --model <MODEL> --patch <PATCH>
 | `--scale` | 1 | `.surgery` uniquement : `W <- W + scale * delta`. |
 | `--verify-base` | `warn` | `.surgery` uniquement : compare chaque tenseur de base au hash stocké : `strict` (erreur, rien d'écrit), `warn`, `off`. |
 | `--max-rank` | 64 | `project_out` : rang maximal d'un sous-espace (lignes des tenseurs `a` et `b`) ; au-delà, refus avant toute écriture. |
+| `--arch-spec` | aucun | Spécification d'architecture (JSON, `surgeon schema --kind arch`) à la place de la détection : quels tenseurs sont des cibles et comment ils sont orientés. |
+| `--accept-approximate` | désactivé | Accepte un `project_out` que l'architecture rend approximatif (post-normes de Gemma 2/3, biais d'écrivains), avec un avertissement et `data.arch.accepted_approximate` ; refusé sinon. Un `unsupported` est toujours refusé ([détails](#architectures)). |
 
 `data` : `backups`, `report` (`dry_run`, `backup_path`, tenseurs par opération avec `elements_modified`, `max_abs_delta`, `nan_or_inf_produced`, `rolled_back`), `io` (octets, blocs, débit, défauts de page), `warnings` ; avec `--gguf`, aussi `gguf` (fidélité par tenseur). Codes de sortie : 2 patch invalide (rien touché), 3 échec d'exécution (modèle intact), 4 critique (rollback échoué).
 
@@ -683,13 +689,14 @@ surgeon schema [OPTIONS]
 
 | Option | Défaut | Rôle |
 | --- | --- | --- |
-| `--kind` | `patch` | `patch` (schéma de `patch.json`), `tools` (les définitions d'outils exactement comme `tools/list` les renvoie), `surgery` (schéma de l'en-tête `.surgery`). |
+| `--kind` | `patch` | `patch` (schéma de `patch.json`), `tools` (les définitions d'outils exactement comme `tools/list` les renvoie), `surgery` (schéma de l'en-tête `.surgery`), `arch` (schéma d'une spécification d'architecture, `--arch-spec`). |
 
 ```bash
-# les trois schémas, en JSON brut
+# les quatre schémas, en JSON brut
 surgeon schema --kind patch
 surgeon schema --kind tools
 surgeon schema --kind surgery
+surgeon schema --kind arch
 ```
 
 <a id="cmd-autotune"></a>
@@ -703,7 +710,7 @@ surgeon autotune [OPTIONS] --model <MODEL> --vector <VECTOR> --eval-dataset <EVA
 
 | Option | Défaut | Rôle |
 | --- | --- | --- |
-| `--model` | obligatoire | Dossier Qwen2. |
+| `--model` | obligatoire | Dossier Qwen2, Llama/Mistral ou Qwen3 (`model_type` de `config.json` : `qwen2`, `llama`, `mistral` ou `qwen3`). |
 | `--vector` | obligatoire | Fichier de direction issu de `extract` (tenseur `direction` et ses métadonnées). |
 | `--eval-dataset` | obligatoire | Tableau JSON (ou JSONL) de chaînes ou de `{"text", "target"?}`. |
 | `--target-layer-range` | de 0 à la couche de lecture | Couches candidates `A-B`. |
@@ -864,7 +871,7 @@ Cinq modes qui mesurent ce qu'une chirurgie a changé. La recette : exporter les
 <a id="cmd-bench-dump"></a>
 #### `surgeon bench dump`
 
-Écrit les logits d'un modèle Qwen2 sur des prompts (Rust pur, CPU).
+Écrit les logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts (Rust pur, CPU).
 
 ```text
 surgeon bench dump [OPTIONS] --model <MODEL> --prompts <PROMPTS> --out <OUT>
@@ -872,7 +879,7 @@ surgeon bench dump [OPTIONS] --model <MODEL> --prompts <PROMPTS> --out <OUT>
 
 | Option | Défaut | Rôle |
 | --- | --- | --- |
-| `--model` | obligatoire | Dossier Qwen2. |
+| `--model` | obligatoire | Dossier Qwen2, Llama/Mistral ou Qwen3 (`model_type` de `config.json` : `qwen2`, `llama`, `mistral` ou `qwen3`). |
 | `--prompts` | obligatoire | Tableau JSON de chaînes ou de `{"text": ...}`, JSONL, ou texte brut. |
 | `--out` | obligatoire | `.safetensors` avec `logits` `[positions, vocabulaire]` et `prompt_offsets`, plus des métadonnées (`prompts_sha256`, `tokenizer_sha256`). |
 | `--dtype` | `auto` | Dtype de calcul : `auto`, `f32`, `bf16`. |
@@ -932,7 +939,7 @@ surgeon bench ppl [OPTIONS] --model <MODEL> --text <TEXT>
 <a id="cmd-bench-eval"></a>
 #### `surgeon bench eval`
 
-Pass@1 à correspondance exacte sur un jeu de type GSM8K ou MATH, décodage glouton via llama.cpp ou, avec `--backend native`, via le générateur en Rust pur (dossier Qwen2 SafeTensors, CPU, sans llama.cpp).
+Pass@1 à correspondance exacte sur un jeu de type GSM8K ou MATH, décodage glouton via llama.cpp ou, avec `--backend native`, via le générateur en Rust pur (dossier SafeTensors Qwen2, Llama/Mistral ou Qwen3, CPU, sans llama.cpp).
 
 ```text
 surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
@@ -942,7 +949,7 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | --- | --- | --- |
 | `--model` | obligatoire | `.gguf`, ou un dossier SafeTensors. |
 | `--dataset` | obligatoire | Tableau JSON (ou JSONL) de `{question ou problem, answer ou solution, id?}`. Aucun contenu GSM8K ou MATH n'est livré avec ce dépôt. |
-| `--backend` | `llama` | `llama` (llama.cpp sur un GGUF, converti au besoin) ou `native` (Rust pur sur un dossier Qwen2 SafeTensors ; `--llama-cpp-dir` ne sert alors pas). |
+| `--backend` | `llama` | `llama` (llama.cpp sur un GGUF, converti au besoin) ou `native` (Rust pur sur un dossier SafeTensors Qwen2, Llama/Mistral ou Qwen3 ; `--llama-cpp-dir` ne sert alors pas). |
 | `--baseline-model` | aucun | Modèle de référence sur les mêmes questions (comparaison appariée). |
 | `--limit` | 50 | Les N premières entrées, dans l'ordre du fichier. |
 | `--max-new-tokens` | 512 | Budget de génération par question. |
@@ -1000,7 +1007,7 @@ surgeon bench eval --model tiny-q8.patched.gguf --dataset ds.json --baseline-mod
 <a id="cmd-bench-refusal"></a>
 #### `surgeon bench refusal`
 
-Taux de refus d'un modèle Qwen2 sur des prompts : génération gloutonne en Rust pur sur le CPU (sans llama.cpp), puis recherche de marqueurs de refus canoniques dans chaque réponse. Sur demande, un modèle juge (un GGUF local lancé par llama.cpp) étiquette aussi chaque réponse.
+Taux de refus d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts : génération gloutonne en Rust pur sur le CPU (sans llama.cpp), puis recherche de marqueurs de refus canoniques dans chaque réponse. Sur demande, un modèle juge (un GGUF local lancé par llama.cpp) étiquette aussi chaque réponse.
 
 ```text
 surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
@@ -1008,7 +1015,7 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 
 | Option | Défaut | Rôle |
 | --- | --- | --- |
-| `--model` | obligatoire | Dossier Qwen2. |
+| `--model` | obligatoire | Dossier Qwen2, Llama/Mistral ou Qwen3 (`model_type` de `config.json` : `qwen2`, `llama`, `mistral` ou `qwen3`). |
 | `--prompts` | obligatoire | Tableau JSON de chaînes ou de `{"text": ...}`, JSONL, ou texte brut. |
 | `--baseline-model` | aucun | Modèle de référence sur les mêmes prompts, généré en premier (comparaison appariée). |
 | `--max-new-tokens` | 256 | Budget de génération par prompt. |
@@ -1210,6 +1217,70 @@ surgeon plugins list
 
 Le binaire n'enregistre que les trois méthodes intégrées ; une méthode tierce passe par la bibliothèque ([docs/PLUGINS.md](docs/PLUGINS.md)).
 
+<a id="cmd-arch"></a>
+#### `surgeon arch`
+
+Commande parente de `arch list` et `arch detect` ([architectures](#architectures)) ; elle n'a pas d'option propre.
+
+<a id="cmd-arch-list"></a>
+#### `surgeon arch list`
+
+Liste les architectures intégrées : `model_type` de `config.json`, noms `general.architecture` des GGUF, exactitude de `project_out` et présence d'un forward natif.
+
+```text
+surgeon arch list [OPTIONS]
+```
+
+Pas d'option au-delà des globales. `data.architectures[]` : `id`, `hf_model_types`, `hf_architectures`, `gguf_arch`, `exactness` (`kind`, `reason`), `forward`, `verification` (`forward` ou `topology`, voir [architectures](#architectures)) et la `spec` entière. Sortie réelle :
+
+```bash
+# architectures intégrées
+surgeon arch list
+```
+
+```text
+[ARCH]     llama      llama, mistral · GGUF llama · project_out exact · forward oui
+[ARCH]     qwen2      qwen2 · GGUF qwen2 · project_out exact · forward oui
+[ARCH]     qwen3      qwen3 · GGUF qwen3 · project_out exact · forward oui
+[ARCH]     qwen2_moe  qwen2_moe · GGUF qwen2moe · project_out exact · forward non
+[ARCH]     qwen3_moe  qwen3_moe · GGUF qwen3moe · project_out exact · forward non
+[ARCH]     deepseek   deepseek_v2, deepseek_v3 · GGUF deepseek2 · project_out exact · forward non
+[ARCH]     gemma2     gemma2 · GGUF gemma2 · project_out approximate · forward non
+  une norme apprise est appliquée à la sortie de chaque sous-couche avant l'ajout au flux : son échelle élément par élément ne commute pas avec la projection et réintroduit une partie de la direction
+[ARCH]     gemma3     gemma3, gemma3_text · GGUF gemma3 · project_out approximate · forward non
+  une norme apprise est appliquée à la sortie de chaque sous-couche avant l'ajout au flux : son échelle élément par élément ne commute pas avec la projection et réintroduit une partie de la direction
+[ARCH]     phi3       phi3 · GGUF phi3 · project_out exact · forward non
+[ARCH]     falcon     falcon · GGUF falcon · project_out exact · forward non
+[ARCH]     command-r  cohere · GGUF command-r · project_out exact · forward non
+```
+
+<a id="cmd-arch-detect"></a>
+#### `surgeon arch detect`
+
+L'architecture d'un modèle (`model_type` de `config.json`, puis `architectures`, ou `general.architecture` d'un GGUF), son nombre de tenseurs par rôle, ses biais d'écrivains, si ses plongements sont liés, et l'exactitude de `project_out` pour ce modèle précis.
+
+```text
+surgeon arch detect [OPTIONS] --model <MODEL>
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--model` | obligatoire | Fichier ou dossier SafeTensors, ou `.gguf`. |
+| `--arch-spec` | aucun | Spécification d'architecture (JSON, `surgeon schema --kind arch`) à la place de la détection. |
+
+`data` : `id`, `source` (`config_model_type`, `config_architectures`, `gguf`, `arch_spec_file`, ou `default` quand rien n'est reconnu : le nommage historique Llama/Qwen s'applique alors, comme avant), `detected`, `declared`, `roles`, `writer_biases`, `tied_embeddings`, `exactness`, `forward`, `verification`. Exécutions réelles sur les faux fichiers du [parcours A](#path-a) et de la section [formats](#formats) :
+
+```bash
+# le faux dossier Qwen2 et le faux GGUF
+surgeon arch detect --model qwen2-mini
+surgeon arch detect --model tiny-q8.gguf
+```
+
+```text
+[ARCH]     qwen2 (config.json model_type) · project_out exact · embed 1, attn_out 4, mlp_gate 4, mlp_up 4, mlp_out 4
+[ARCH]     qwen2 (general.architecture) · project_out exact · mlp_gate 2, mlp_up 2, mlp_out 2
+```
+
 <a id="patch-format"></a>
 ### 3.3 `patch.json` et les axes `rows` / `cols`
 
@@ -1293,6 +1364,7 @@ tiny-q8.gguf
 █▀█ █ █ ▀█▀  W E I G H T
 █ █ ▀▄▀  █   S U R G E O N
 [INSPECT]  6 tenseurs sélectionnés · GGUF v3 · qwen2
+[ARCH]     qwen2 (general.architecture) · project_out exact · mlp_gate 2, mlp_up 2, mlp_out 2
 couche   proj   type   orientation   shape      taille    patchable
 0        gate   Q8_0   reader        [64, 32]   2.1 KiB   oui
 0        up     Q8_0   reader        [64, 32]   2.1 KiB   oui
@@ -1377,6 +1449,7 @@ surgeon apply --gguf --model writers.gguf --patch ablate.json --refine-passes 3 
 
 ```text
 [INSPECT]  3 tenseurs sélectionnés · GGUF v3 · qwen2
+[ARCH]     qwen2 (general.architecture) · project_out exact · embed 1, attn_out 2, mlp_gate 2, mlp_out 2
 couche   proj           type   orientation    shape        taille     patchable
 —        embed_tokens   Q5_K   writer_local   [48, 256]    8.2 KiB    oui
 0        o_proj         Q4_K   writer         [256, 256]   36.0 KiB   oui
@@ -1404,6 +1477,78 @@ Les `ffn_down` en Q6_K atteignent la cible de 5 % en deux passes ; les `attn_out
 
 > **Pour les experts**
 > Ce que les tests ne peuvent pas vérifier, et comment le vérifier à la main avec un vrai llama.cpp : appliquez la même recette au modèle SafeTensors, convertissez-le (`convert_hf_to_gguf.py`) et quantifiez-le (`llama-quantize`) dans le type du GGUF d'origine ; appliquez la recette au GGUF d'origine avec `apply --gguf` ; comparez ensuite les deux fichiers avec `surgeon bench ppl --model <fichier> --text <texte> --baseline-model <origine.gguf> --llama-cpp-dir <llama.cpp>` et, pour les logits, avec le mode divergence KL du `llama-perplexity` de llama.cpp contre le modèle converti. `surgeon bench logits` compare le modèle SafeTensors patché à son original (`bench dump` ne lit que du SafeTensors). Les codecs suivent `ggml-quants.c` tel que lu dans le portage Rust de candle ; ils n'ont pas été exécutés contre llama.cpp lui-même, et `q * d + m` (Q4_1, Q5_1) fait ici deux arrondis là où une compilation C qui le contracte en FMA n'en fait qu'un.
+
+<a id="architectures"></a>
+#### Architectures et exactitude d'une ablation
+
+`surgeon` décrit chaque architecture par des données (`src/arch`, `surgeon schema --kind arch`) : les motifs de noms de chaque rôle, pour SafeTensors et pour GGUF, et les faits de sa topologie. Les rôles sont `embed` (un vecteur résiduel par ligne, `[vocab, hidden]`), `attn_out` et `mlp_out` (les écrivains du flux résiduel, `[hidden, *]` : dense, par expert, experts fusionnés `[E, hidden, inter]`, experts partagés), `mlp_gate` et `mlp_up` (lecteurs, pour `add` / `subtract`) et `router` (listé, jamais modifié). Un motif s'apparie à la fin d'un nom, avec n'importe quel préfixe (`model.`, `model.language_model.`...), `{layer}` et `{expert}` tenant lieu de nombres : `layers.{layer}.mlp.experts.{expert}.down_proj.weight`. Les projections du patch correspondent aux rôles : `embed_tokens`, `o_proj`, `down_proj` (tout écrivain du MLP), `gate_proj`, `up_proj`. L'architecture vient de `config.json` (`model_type`, puis `architectures`), de `general.architecture` d'un GGUF, ou de `--arch-spec` ; quand rien n'est reconnu, le nommage historique Llama/Qwen s'applique, exactement comme avant.
+
+| id | `model_type` | GGUF | `project_out` | Forward natif | Vérifié sur |
+| --- | --- | --- | --- | --- | --- |
+| `llama` | `llama`, `mistral` | `llama` | exact | oui | forward |
+| `qwen2` | `qwen2` | `qwen2` | exact | oui | forward |
+| `qwen3` | `qwen3` | `qwen3` | exact | oui | forward |
+| `qwen2_moe` | `qwen2_moe` | `qwen2moe` | exact | non | topologie |
+| `qwen3_moe` | `qwen3_moe` | `qwen3moe` | exact | non | topologie |
+| `deepseek` | `deepseek_v2`, `deepseek_v3` | `deepseek2` | exact | non | topologie |
+| `gemma2` | `gemma2` | `gemma2` | approximatif | non | topologie |
+| `gemma3` | `gemma3`, `gemma3_text` | `gemma3` | approximatif | non | topologie |
+| `phi3` | `phi3` | `phi3` | exact | non | topologie |
+| `falcon` | `falcon` | `falcon` | exact | non | topologie |
+| `command-r` | `cohere` | `command-r` | exact | non | topologie |
+
+Une ablation par les poids (`project_out` sur tous les écrivains) est **exacte** quand le flux résiduel est la somme des plongements et de chaque sortie de sous-couche et que chaque norme n'alimente qu'une sous-couche : pré-norme, séquentielle ou parallèle (Falcon, Command-R), RMSNorm comme LayerNorm. Elle est **approximative** quand une norme apprise est appliquée à la sortie d'une sous-couche avant l'ajout (Gemma 2/3 : `post_attention_layernorm` et `post_feedforward_layernorm`), dont l'échelle coordonnée par coordonnée ne commute pas avec la projection, ou quand le modèle a des biais d'écrivains (`attention_bias`, `mlp_bias`, le `bias` de Falcon : détectés par les tenseurs `.bias` du checkpoint lui-même), qui ne sont pas projetés. Elle est **non supportée** quand une spécification déclare des écrivains qu'elle ne sait pas patcher (`unprojected_writers`, des plongements de position appris par exemple) ou n'a aucun motif pour un rôle écrivain. La suite de tests le mesure : sur le vrai forward de `llama`, `qwen2` et `qwen3`, la direction effacée de tous les écrivains laisse moins de 1e-5 du flux résiduel après chaque couche (environ 0,1 avant) ; pour les autres, un empilement résiduel ayant la topologie de chaque architecture intégrée (type de norme, post-norme, bloc parallèle) laisse moins de 1e-12 quand elle est exacte et plus de 1e-3 quand elle est approximative. « topologie » veut dire exactement cela : leur vrai forward n'a pas été exécuté.
+
+MoE : le `down_proj` de chaque expert est un écrivain ; un tenseur fusionné `[E, hidden, inter]` (transformers v5) ou `ffn_down_exps` (GGUF, `ne = [inter, hidden, E]`) est effacé expert par expert, les experts partagés comme tout écrivain, le routeur jamais. `add` / `subtract` n'ont pas d'axe sur un tenseur fusionné 3D et y sont refusés. Ces modèles n'ont pas de forward natif : la direction vient d'un modèle dense de même taille cachée, ce qui est une limite (le flux résiduel du MoE ne porte pas forcément le concept sur la même direction).
+
+`apply` tranche avant de lire quoi que ce soit pour écrire : une ablation `exact` s'exécute, une `approximate` est refusée (`error.kind = "approximate_ablation"`, code de sortie 2) sauf avec `--accept-approximate`, puis signalée et reportée dans `data.arch.accepted_approximate` ; une `unsupported` est refusée (`unsupported_architecture`). `add` / `subtract` (steering) ne sont pas des ablations et ne sont jamais filtrés. Exécution réelle sur une copie du faux modèle déclarée Gemma 2 (mêmes noms de tenseurs), avec `ablate-all.json` la recette de [la note experts](#patch-format) sur `erase.safetensors.leace.safetensors` :
+
+```json
+{"schema_version": 1, "backup": false, "operations": [{"id": "erase-all", "layers": "all", "projections": ["embed_tokens", "o_proj", "down_proj"], "operation": "project_out", "vector_file": "erase.safetensors.leace.safetensors", "vector_tensor": "a", "vector_tensor_b": "b", "alpha": 1.0}]}
+```
+
+```bash
+# le faux Qwen2 déclaré Gemma 2 : une ablation n'y est qu'approximative
+cp -r qwen2-mini gemma-mini
+sed -i 's/"qwen2"/"gemma2"/' gemma-mini/config.json
+surgeon arch detect --model gemma-mini
+surgeon apply --model gemma-mini --patch ablate-all.json --dry-run
+surgeon apply --model gemma-mini --patch ablate-all.json --dry-run --accept-approximate
+```
+
+```text
+[ARCH]     gemma2 (config.json model_type) · project_out approximate · embed 1, attn_out 4, mlp_gate 4, mlp_up 4, mlp_out 4 · une norme apprise est appliquée à la sortie de chaque sous-couche avant l'ajout au flux : son échelle élément par élément ne commute pas avec la projection et réintroduit une partie de la direction
+```
+
+```text
+[APPLY]    ablate-all.json · 1 opérations
+erreur : project_out sur l'architecture gemma2 n'est qu'approximatif : une norme apprise est appliquée à la sortie de chaque sous-couche avant l'ajout au flux : son échelle élément par élément ne commute pas avec la projection et réintroduit une partie de la direction. Relancez avec --accept-approximate (accept_approximate en MCP) pour l'accepter, puis mesurez le résultat
+```
+
+```text
+[APPLY]    ablate-all.json · 1 opérations
+  ! ablation approximative acceptée (--accept-approximate) sur gemma2 : une norme apprise est appliquée à la sortie de chaque sous-couche avant l'ajout au flux : son échelle élément par élément ne commute pas avec la projection et réintroduit une partie de la direction
+[DRY-RUN]  erase-all · 9 tenseurs · vecteur de 16
+```
+
+Une architecture tierce est un fichier JSON validé par `surgeon schema --kind arch` (champs inconnus refusés ; motifs et dispositions contrôlés : `invalid_arch_spec`), donné à `inspect`, `apply` et `arch detect` par `--arch-spec`, à `surgeon_inspect` et `surgeon_apply` par `arch_spec` (dans le bac à sable MCP) :
+
+```json
+{
+  "id": "toy",
+  "safetensors": {
+    "embed": ["tok.weight"],
+    "attn_out": ["blocks.{layer}.mixer.out.weight"],
+    "mlp_out": ["blocks.{layer}.ff.w2.weight", {"name": "blocks.{layer}.ff.experts.w2", "layout": "experts_out_in"}]
+  },
+  "norm_kind": "rms_norm",
+  "post_sublayer_norm": false,
+  "tied_embeddings": {"config_key": "tie_word_embeddings", "default": false}
+}
+```
+
+> **Pour les experts**
+> Sources, lues le 2026-11-11 : les fichiers `modeling_*.py` de transformers `main` (ordre des couches, normes, biais, noms d'attributs, paramètres d'experts fusionnés appliqués par `F.linear`), `gguf-py/gguf/constants.py` de llama.cpp `master` (noms d'architecture et tenseurs que chacune liste), et les `model.safetensors.index.json` de `Qwen/Qwen3-30B-A3B` et `deepseek-ai/DeepSeek-V2-Lite` pour les noms par expert ; chaque spécification liste les siennes dans `sources`. Non lu dans un checkpoint : la valeur par défaut des plongements liés de Falcon (celle de `PretrainedConfig`). Le forward natif est un seul décodeur paramétré par le type de modèle (biais de q/k/v et de o_proj, `mlp_bias`, `q_norm` / `k_norm` par tête de Qwen3 avant RoPE, `head_dim` lu dans la config, mise à l'échelle RoPE de Llama 3) derrière le trait `ResidualForward` ; avec les paramètres de Qwen2 chaque opération est l'historique, dans le même ordre (les fichiers d'extraction de la suite de compatibilité sont inchangés à l'octet près), et les logits de Llama (avec et sans mise à l'échelle Llama 3), Mistral et Qwen3 rejoignent ceux des modèles candle à 1e-4 près. Gemma 2 (plongements mis à l'échelle, normes `(1 + w)`, post-normes, soft-capping des logits, attention locale/globale alternée) n'a pas de forward : sa fidélité à candle n'a pas été démontrée, il n'est donc pas livré.
 
 <a id="theory"></a>
 ### 3.5 Théorie telle qu'implémentée
@@ -1547,7 +1692,7 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 | `surgeon_inspect` | Couches et matrices MLP, statistiques facultatives. |
 | `surgeon_apply` | Applique un patch en place (`dry_run` pour vérifier d'abord) ; `gguf: true` pour un GGUF quantifié. |
 | `surgeon_eval` | Contrôles de boucles et d'attentes, export GGUF conditionnel. |
-| `surgeon_extract` | Vecteur de steering depuis une couche Qwen2. |
+| `surgeon_extract` | Vecteur de steering depuis une couche Qwen2, Llama/Mistral ou Qwen3. |
 | `surgeon_bench` | Mesure, avec `mode` `dump`, `logits`, `ppl` ou `eval`. |
 | `surgeon_autotune` | Coefficients par couche par régression ridge. |
 | `surgeon_diff` | Différence de deux checkpoints écrite dans un nouveau `.surgery`. |
@@ -1696,7 +1841,7 @@ Rename-Item "$env:USERPROFILE\.cargo\bin\surgeon.exe" surgeon.old.exe
 <a id="limits"></a>
 ### 5.4 Limites connues
 
-- `extract`, `autotune`, `bench dump` et l'onglet de prévisualisation ne gèrent que Qwen2 et Qwen2.5, sur le CPU ; les gros modèles demandent beaucoup de RAM.
+- `extract`, `autotune`, `bench dump`, `bench refusal` et l'onglet de prévisualisation n'ont de forward natif que pour Qwen2/Qwen2.5, Llama 2/3, Mistral et Qwen3, sur le CPU ; les gros modèles demandent beaucoup de RAM. Les modèles MoE (Qwen2-MoE, Qwen3-MoE, DeepSeek) et Gemma, Phi-3, Falcon, Command-R n'en ont pas (`unsupported_architecture`) : leurs poids se patchent, mais la direction doit venir d'un modèle dense de même taille cachée.
 - La qualité d'une direction dépend de vos prompts : avec peu de paires une direction mélange des concepts (l'outil avertit sous 8 prompts par jeu). Un bon `d′` sur les prompts d'extraction ne prouve pas que la direction généralise.
 - Les patchs plus petits qu'un pas de quantification sont perdus dans les fichiers GGUF quantifiés ; les décalages hors de la plage du bloc sont écrêtés (`keep-scales`). Vérifiez `realized_over_intended`.
 - `project_out` couvre les écrivains du flux résiduel d'un modèle SafeTensors (`down_proj`, `o_proj`, `embed_tokens`) ; dans un GGUF seules les projections MLP sont patchables. `bench refusal` compte des marqueurs de refus (anglais par défaut), et son modèle juge optionnel est rapporté comme non calibré tant que vous ne l'avez pas mesuré contre vos propres étiquettes humaines : lisez les réponses. L'effacement LEACE n'est exact qu'en échantillon ; avec moins de prompts que de dimensions, vérifiez `holdout_cross_cov_ratio`. `autotune` ajuste et mesure sur les mêmes prompts et ne mesure pas les effets de bord.

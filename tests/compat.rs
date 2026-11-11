@@ -12,7 +12,13 @@
 //!   `surgeon_bench`;
 //! - the GGUF residual writers: `apply --allow-tied-embedding`, `--refine-passes` and
 //!   `--residual-target`, the same three optional properties of `surgeon_apply` (only the
-//!   tool schema hash moved).
+//!   tool schema hash moved);
+//! - the architecture descriptions: the subcommands `arch list` and `arch detect`,
+//!   `schema --kind arch`, `apply --arch-spec` and `--accept-approximate`, `inspect
+//!   --arch-spec`, the properties `arch_spec` / `accept_approximate` of `surgeon_apply` and
+//!   `arch_spec` of `surgeon_inspect`. The `inspect` output hash moved by its additive
+//!   `data.arch` object, the tool schema hash by the new properties; every extraction file
+//!   (the Qwen2 forward, refactored) is byte for byte what it was.
 //!
 //! No entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

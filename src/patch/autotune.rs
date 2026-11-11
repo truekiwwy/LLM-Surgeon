@@ -37,10 +37,9 @@ use super::schema::{Axis, LayersField, Operation, OperationKind, PatchFile, Proj
 use super::validate::{validate_patch, ValidationOptions, MAX_ABS_ALPHA};
 use crate::engine::{self, BroadcastAxis, ReadOnlyModel, ShiftOp};
 use crate::extract::{
-    check_tensors, choose_dtype, companion_path, dtype_name, load_config, load_tensors,
+    check_tensors, choose_dtype, companion_path, dtype_name, forward, load_config, load_tensors,
     load_tokenizer, plan_memory, pool, required_tensors, tokenize, write_atomic, ChatTemplate,
-    DTypeChoice, ExtractError, HookedQwen2, Pooling, Qwen2Config, SafetensorsDir, Site,
-    TensorSource,
+    DTypeChoice, ExtractError, Pooling, Qwen2Config, SafetensorsDir, Site, TensorSource,
 };
 use crate::hardware::HardwareProbe;
 use crate::linalg::cholesky::Cholesky;
@@ -648,8 +647,8 @@ impl Bench<'_> {
         for &(layer, alpha) in shifts {
             tensors.insert(self.weight_name(layer), self.shifted(layer, alpha)?);
         }
-        let model =
-            HookedQwen2::from_tensors(tensors, self.cfg, self.readout, self.dtype, &self.device)?;
+        let depth = forward::Depth::UpTo(self.readout);
+        let model = forward::build(self.cfg, tensors, depth, self.dtype, &self.device)?;
         let mut out = Vec::with_capacity(self.inputs.len());
         for (i, input) in self.inputs.iter().enumerate() {
             if cancel.load(Ordering::SeqCst) {

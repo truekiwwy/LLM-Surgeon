@@ -1,4 +1,5 @@
-//! Text generation in pure Rust on CPU: [`Qwen2State`] behind the [`TextGenerator`] trait,
+//! Text generation in pure Rust on CPU: [`Qwen2State`] (any decoder with a native forward)
+//! behind the [`TextGenerator`] trait,
 //! so `bench eval --backend native` and `bench refusal` run without llama.cpp.
 //!
 //! Greedy only (argmax, the smallest index on ties): same weights and prompt give the same

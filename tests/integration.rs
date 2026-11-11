@@ -2837,13 +2837,13 @@ fn extract_errors_are_typed() {
 
     std::fs::write(
         f.model.join("config.json"),
-        qwen_config("qwen3").to_string(),
+        qwen_config("gemma2").to_string(),
     )
     .unwrap();
     let (code, v) = run_args(&deps(), &json_args("q3.safetensors", &[]));
     assert_eq!(code, exit::EXTRACT_FAILED);
     assert_eq!(v["error"]["kind"], "unsupported_architecture");
-    assert!(v["error"]["message"].as_str().unwrap().contains("qwen3"));
+    assert!(v["error"]["message"].as_str().unwrap().contains("gemma2"));
 
     let g = extract_fixture("BF16", true);
     let (code, v) = run_args(
@@ -4445,10 +4445,10 @@ fn bench_dump_refuses_before_computing_and_leaves_nothing() {
     assert_eq!(code, exit::GENERAL);
     assert_eq!(v["error"]["kind"], "cancelled");
 
-    std::fs::write(model.join("config.json"), qwen_config("qwen3").to_string()).unwrap();
+    std::fs::write(model.join("config.json"), qwen_config("gemma2").to_string()).unwrap();
     let (code, v) = run_json(&deps(), &dump_args(&model, &prompts, &out));
     assert_eq!(code, exit::INVALID_INPUT);
-    assert!(v["error"]["message"].as_str().unwrap().contains("qwen3"));
+    assert!(v["error"]["message"].as_str().unwrap().contains("gemma2"));
 
     assert!(!out.exists());
     assert!(temp_files(dir.path()).is_empty());

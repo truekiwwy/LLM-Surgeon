@@ -20,9 +20,10 @@ use std::time::Instant;
 use candle_core::{DType, Device, Tensor};
 use tokenizers::Tokenizer;
 
-use super::config::{load_config, Qwen2Config};
+use super::config::{load_config, DecoderConfig, SUPPORTED_MODEL_TYPES};
+use super::decoder::KvCache;
 use super::error::{ExtractError, Result};
-use super::hooked_qwen2::{HookedQwen2, KvCache};
+use super::forward::{build, Depth, ResidualForward};
 use super::weights::{check_tensors, load_tensors, required_tensors_full, SafetensorsDir};
 use super::{choose_dtype, plan_memory, DTypeChoice};
 use crate::hardware::HardwareProbe;
@@ -69,10 +70,11 @@ pub type LayerObserver = Box<dyn FnMut(usize) + Send>;
 /// Receives the f32 logits of each step.
 type LogitsSink<'a> = &'a mut dyn FnMut(&[f32]);
 
-/// Qwen2 with a KV cache, built from a model directory.
-pub struct Qwen2State {
-    model: HookedQwen2,
-    cfg: Qwen2Config,
+/// A decoder with a native forward ([`ResidualForward`]) and a KV cache, built from a
+/// model directory.
+pub struct DecoderState {
+    model: Box<dyn ResidualForward>,
+    cfg: DecoderConfig,
     observer: Option<LayerObserver>,
     warnings: Vec<String>,
 }
@@ -113,7 +115,7 @@ impl Injector {
 /// Layers `0..n_layers` on `ids` continuing `cache`, steering and cancellation applied
 /// after each layer. `Err(Cancelled)` means the flag was raised.
 fn run_layers(
-    model: &HookedQwen2,
+    model: &dyn ResidualForward,
     observer: &mut Option<LayerObserver>,
     ids: &[u32],
     cache: &mut KvCache,
@@ -156,19 +158,22 @@ fn argmax(logits: &[f32]) -> Result<u32> {
         .ok_or_else(|| ExtractError::Compute("logits vides".into()))
 }
 
-impl Qwen2State {
+/// The historical name, kept for the library API.
+pub type Qwen2State = DecoderState;
+
+impl DecoderState {
     /// Builds the model from tensors named as in the checkpoint, as listed by
     /// `required_tensors_full` (CPU).
     pub fn from_tensors(
         tensors: HashMap<String, Tensor>,
-        cfg: &Qwen2Config,
+        cfg: &DecoderConfig,
         dtype: DType,
     ) -> Result<Self> {
-        if cfg.model_type != "qwen2" {
+        if !SUPPORTED_MODEL_TYPES.contains(&cfg.model_type.as_str()) {
             return Err(unsupported(&cfg.model_type));
         }
         Ok(Self {
-            model: HookedQwen2::from_tensors_full(tensors, cfg, dtype, &Device::Cpu)?,
+            model: build(cfg, tensors, Depth::Full, dtype, &Device::Cpu)?,
             cfg: cfg.clone(),
             observer: None,
             warnings: Vec::new(),
@@ -203,7 +208,7 @@ impl Qwen2State {
         Ok(state)
     }
 
-    pub fn config(&self) -> &Qwen2Config {
+    pub fn config(&self) -> &DecoderConfig {
         &self.cfg
     }
 
@@ -249,7 +254,7 @@ impl Qwen2State {
         };
         let mut cache = KvCache::new(self.cfg.num_hidden_layers);
         let resid = run_layers(
-            &self.model,
+            self.model.as_ref(),
             &mut self.observer,
             prompt_ids,
             &mut cache,
@@ -348,7 +353,7 @@ impl Qwen2State {
         let mut input = req.prompt_ids.clone();
         while stats.generated < req.max_new_tokens {
             let hidden = match run_layers(
-                &self.model,
+                self.model.as_ref(),
                 &mut self.observer,
                 &input,
                 &mut cache,
@@ -384,7 +389,7 @@ impl Qwen2State {
     }
 }
 
-impl TokenSource for Qwen2State {
+impl TokenSource for DecoderState {
     fn generate(
         &mut self,
         req: &GenRequest,
@@ -397,8 +402,9 @@ impl TokenSource for Qwen2State {
 
 fn unsupported(model_type: &str) -> ExtractError {
     ExtractError::InvalidArgument(format!(
-        "architecture « {model_type} » non supportée : seul Qwen2/Qwen2.5 (model_type \"qwen2\") \
-         est supporté"
+        "architecture « {model_type} » non supportée par la génération native : model_type {} \
+         seulement",
+        SUPPORTED_MODEL_TYPES.join(", ")
     ))
 }
 

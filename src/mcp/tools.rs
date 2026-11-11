@@ -88,6 +88,11 @@ pub struct InspectToolArgs {
         description = "Calcule min, max, moyenne et norme L2 de chaque matrice (lecture complète, plus lent)."
     )]
     pub show_stats: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Spécification d'architecture JSON (surgeon schema --kind arch) à la place de la détection, dans un dossier autorisé."
+    )]
+    pub arch_spec: Option<PathBuf>,
     #[serde(default = "default_max_tensors")]
     #[schemars(
         range(min = 1),
@@ -143,6 +148,16 @@ pub struct ApplyToolArgs {
         description = "GGUF, project_out : le raffinement s'arrête quand la fraction résiduelle due à la re-quantification est au plus cette part, dans ]0, 1] (défaut 0.05)."
     )]
     pub residual_target: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Spécification d'architecture JSON (surgeon schema --kind arch) à la place de la détection, dans un dossier autorisé."
+    )]
+    pub arch_spec: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "project_out sur une architecture où il n'est qu'approximatif (post-normes de Gemma 2/3, biais d'écrivains) : refusé sans ce champ, accepté avec un avertissement et data.arch.accepted_approximate."
+    )]
+    pub accept_approximate: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -196,7 +211,7 @@ fn default_max_new_tokens() -> u32 {
 )]
 pub struct ExtractToolArgs {
     #[schemars(
-        description = "Dossier du modèle Qwen2/Qwen2.5 (config.json, tokenizer.json, *.safetensors), dans un dossier autorisé."
+        description = "Dossier du modèle Qwen2/Qwen2.5, Llama/Mistral ou Qwen3 (config.json, tokenizer.json, *.safetensors), dans un dossier autorisé."
     )]
     pub model: PathBuf,
     #[serde(default)]
@@ -442,14 +457,14 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_EXTRACT,
             "Extraction de direction",
-            "Calcule un vecteur de direction (steering) à partir des activations d'une couche d'un modèle Qwen2, en Rust pur sur CPU, avec une méthode du registre du moteur (method : mean_diff par défaut, v = normalize(mean(pos) - mean(neg)) ; svd ; leace), et l'écrit dans un .safetensors (tenseur `direction`) à utiliser comme vector_file d'un patch surgeon_apply. Renvoie des diagnostics de séparation (d′, accuracy).",
+            "Calcule un vecteur de direction (steering) à partir des activations d'une couche d'un modèle Qwen2, Llama/Mistral ou Qwen3, en Rust pur sur CPU, avec une méthode du registre du moteur (method : mean_diff par défaut, v = normalize(mean(pos) - mean(neg)) ; svd ; leace), et l'écrit dans un .safetensors (tenseur `direction`) à utiliser comme vector_file d'un patch surgeon_apply. Renvoie des diagnostics de séparation (d′, accuracy).",
             schema_value::<ExtractToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
         tool(
             TOOL_BENCH,
             "Mesure d'une chirurgie",
-            "Mesure l'effet d'une chirurgie, selon mode : dump (logits d'un modèle Qwen2 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision.",
+            "Mesure l'effet d'une chirurgie, selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision.",
             schema_value::<BenchToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
@@ -469,6 +484,7 @@ pub fn render_schema(kind: SchemaKind) -> String {
         SchemaKind::Patch => patch_schema(),
         SchemaKind::Tools => tool_definitions(),
         SchemaKind::Surgery => crate::surgery::schema::header_schema(),
+        SchemaKind::Arch => crate::arch::schema(),
     };
     let mut text = serde_json::to_string_pretty(&value).unwrap_or_default();
     text.push('\n');
@@ -552,11 +568,16 @@ fn inspect(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             .map_err(|e| invalid("invalid_arguments", format!("layers : {e}")))?,
         None => LayerSelection::All,
     };
+    let arch_spec = match &args.arch_spec {
+        Some(path) => Some(sandboxed(ctx, "arch_spec", path, ctx.cfg.sandbox.base())?),
+        None => None,
+    };
     let core_args = InspectArgs {
         model,
         layers,
         projections: args.projections.unwrap_or_default(),
         show_stats: args.show_stats,
+        arch_spec,
     };
     let mut outcome = core_inspect(&core_args, ctx.deps, &Ui::off())?;
     let max = args.max_tensors as usize;
@@ -609,6 +630,10 @@ fn apply(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         no_backup: false,
         backup_dir,
     };
+    let arch_spec = match &args.arch_spec {
+        Some(path) => Some(sandboxed(ctx, "arch_spec", path, ctx.cfg.sandbox.base())?),
+        None => None,
+    };
     // GGUF: same guards, and never --force-no-backup from an agent.
     let defaults = crate::patch::gguf::GgufApplyArgs::default();
     let gguf = crate::patch::gguf::GgufApplyArgs {
@@ -617,6 +642,8 @@ fn apply(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         allow_tied_embedding: args.allow_tied_embedding,
         refine_passes: args.refine_passes.unwrap_or(defaults.refine_passes),
         residual_target: args.residual_target.unwrap_or(defaults.residual_target),
+        arch_spec,
+        accept_approximate: args.accept_approximate,
         ..defaults
     };
     core_apply_routed(&request, &gguf, ctx.deps, &Ui::off(), ctx.sink)
@@ -732,7 +759,9 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     description = "Arguments de surgeon_autotune : coefficients α par couche ajustés par ridge sur des réponses mesurées en mémoire."
 )]
 pub struct AutotuneToolArgs {
-    #[schemars(description = "Dossier du modèle Qwen2, dans un dossier autorisé.")]
+    #[schemars(
+        description = "Dossier du modèle Qwen2, Llama/Mistral ou Qwen3, dans un dossier autorisé."
+    )]
     pub model: PathBuf,
     #[schemars(
         description = "Fichier direction de surgeon_extract (tenseur direction et métadonnées)."
@@ -903,9 +932,9 @@ pub enum BenchMode {
     Ppl,
     /// Pass@1 exact match glouton sur un dataset (model, dataset).
     Eval,
-    /// Écrit les logits d'un modèle Qwen2 sur des prompts (model, prompts, out).
+    /// Écrit les logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts (model, prompts, out).
     Dump,
-    /// Taux de refus d'un modèle Qwen2 sur des prompts, génération native (model, prompts).
+    /// Taux de refus d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, génération native (model, prompts).
     Refusal,
 }
 
@@ -951,7 +980,7 @@ pub struct BenchToolArgs {
     pub fail_on_warn: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "ppl, eval : .gguf ou dossier SafeTensors (converti en GGUF temporaire, sauf eval avec backend native) ; dump, refusal : dossier Qwen2."
+        description = "ppl, eval : .gguf ou dossier SafeTensors (converti en GGUF temporaire, sauf eval avec backend native) ; dump, refusal : dossier Qwen2, Llama/Mistral ou Qwen3."
     )]
     pub model: Option<PathBuf>,
     #[serde(default)]
@@ -1023,7 +1052,7 @@ pub struct BenchToolArgs {
     pub min_accuracy: Option<f64>,
     #[serde(default)]
     #[schemars(
-        description = "eval : llama (défaut, llama.cpp sur un GGUF) ou native (génération gloutonne en Rust pur sur un dossier Qwen2, sans llama.cpp)."
+        description = "eval : llama (défaut, llama.cpp sur un GGUF) ou native (génération gloutonne en Rust pur sur un dossier Qwen2, Llama/Mistral ou Qwen3, sans llama.cpp)."
     )]
     pub backend: Option<crate::bench::score::Backend>,
     #[serde(default)]

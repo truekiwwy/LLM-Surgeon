@@ -1,5 +1,5 @@
-//! `surgeon apply` options added by the GGUF patch and the chunked writer (flattened into
-//! `ApplyArgs`).
+//! `surgeon apply` options added by the GGUF patch, the chunked writer and the architecture
+//! descriptions (flattened into `ApplyArgs`).
 
 use clap::Args;
 
@@ -40,6 +40,12 @@ pub struct GgufApplyArgs {
     /// GGUF project_out: stop refining once the requantization residual is at most this share.
     #[arg(long, default_value_t = DEFAULT_RESIDUAL_TARGET)]
     pub residual_target: f64,
+    /// Architecture spec (JSON, `surgeon schema --kind arch`) instead of detection.
+    #[arg(long)]
+    pub arch_spec: Option<std::path::PathBuf>,
+    /// Accept a project_out the architecture makes approximate (post-sublayer norms...).
+    #[arg(long)]
+    pub accept_approximate: bool,
 }
 
 /// The CLI defaults (the MCP server builds its options from it).
@@ -56,6 +62,8 @@ impl Default for GgufApplyArgs {
             allow_tied_embedding: false,
             refine_passes: DEFAULT_REFINE_PASSES,
             residual_target: DEFAULT_RESIDUAL_TARGET,
+            arch_spec: None,
+            accept_approximate: false,
         }
     }
 }
@@ -65,6 +73,13 @@ impl GgufApplyArgs {
         IoConfig {
             chunk_bytes: usize::try_from(self.prefetch_chunk_mib << 20).unwrap_or(usize::MAX),
             prefetch: !self.no_prefetch,
+        }
+    }
+
+    pub fn arch_options(&self) -> crate::app::ArchOptions {
+        crate::app::ArchOptions {
+            spec: self.arch_spec.clone(),
+            accept_approximate: self.accept_approximate,
         }
     }
 
@@ -78,6 +93,9 @@ impl GgufApplyArgs {
             allow_tied_embedding: self.allow_tied_embedding,
             refine_passes: self.refine_passes,
             residual_target: self.residual_target,
+            // Loaded (and sandboxed) by the caller: options never read files.
+            arch_spec: None,
+            accept_approximate: self.accept_approximate,
         }
     }
 }

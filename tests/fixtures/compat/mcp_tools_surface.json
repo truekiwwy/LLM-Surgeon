@@ -32,6 +32,13 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
       "properties": {
+        "arch_spec": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "layers": {
           "anyOf": [
             {
@@ -124,9 +131,20 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
       "properties": {
+        "accept_approximate": {
+          "default": false,
+          "type": "boolean"
+        },
         "allow_tied_embedding": {
           "default": false,
           "type": "boolean"
+        },
+        "arch_spec": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "backup_dir": {
           "default": null,
