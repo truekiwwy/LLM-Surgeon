@@ -28,7 +28,12 @@ impl Fake {
     fn new(script: Value) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let fake = Self { dir };
-        std::fs::copy(fake_server(), fake.binary()).unwrap();
+        // A hard link, not a copy: a copy holds a write descriptor on the executable, and a
+        // child forked meanwhile by another test thread inherits it until its own exec, so
+        // executing the copy can fail with ETXTBSY on Linux (rust-lang/rust#114554).
+        if std::fs::hard_link(fake_server(), fake.binary()).is_err() {
+            std::fs::copy(fake_server(), fake.binary()).unwrap();
+        }
         let mut script = script;
         script["args_out"] = json!(fake.path("args.txt"));
         script["log"] = json!(fake.path("requests.jsonl"));
@@ -45,13 +50,27 @@ impl Fake {
         self.path(&server_name())
     }
 
+    /// Retried while the executable is busy (ETXTBSY, os error 26): only the copy fallback
+    /// of `new` can meet it, for the time a concurrently forked child takes to exec.
     fn start(&self, opts: &ServerOptions) -> weight_surgeon::eval::Result<LlamaServerGenerator> {
-        LlamaServerGenerator::start(
-            &self.binary(),
-            &self.path("model.gguf"),
-            opts,
-            &AtomicBool::new(false),
-        )
+        let mut attempts = 0;
+        loop {
+            let started = LlamaServerGenerator::start(
+                &self.binary(),
+                &self.path("model.gguf"),
+                opts,
+                &AtomicBool::new(false),
+            );
+            match started {
+                Err(EvalError::Spawn { ref message, .. })
+                    if message.contains("os error 26") && attempts < 50 =>
+                {
+                    attempts += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
     }
 
     fn args(&self) -> Vec<String> {
