@@ -5132,7 +5132,7 @@ fn bench_module_has_no_print_and_no_unsafe() {
     // `unsafe` is also a judge label (Llama-Guard): the compiler checks, not a text search.
     let root = std::fs::read_to_string(dir.join("mod.rs")).unwrap();
     assert!(
-        root.contains("\n#![forbid(unsafe_code)]\n"),
+        root.lines().any(|l| l == "#![forbid(unsafe_code)]"), // `lines` also handles CRLF checkouts
         "src/bench/mod.rs: unsafe code is no longer forbidden"
     );
     for entry in std::fs::read_dir(dir).unwrap() {
