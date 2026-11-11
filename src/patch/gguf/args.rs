@@ -4,10 +4,11 @@
 use clap::Args;
 
 use super::backend::GgufOptions;
+use super::project::{DEFAULT_REFINE_PASSES, DEFAULT_RESIDUAL_TARGET, MAX_REFINE_PASSES};
 use super::quant::Requant;
 use crate::kernel::IoConfig;
 
-#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[derive(Debug, Clone, PartialEq, Args)]
 pub struct GgufApplyArgs {
     /// Patch a quantized .gguf in place (lossy: values are re-rounded to the file's grid).
     #[arg(long)]
@@ -30,6 +31,15 @@ pub struct GgufApplyArgs {
     /// project_out: largest rank of a subspace (rows of the a and b tensors).
     #[arg(long, default_value_t = crate::patch::DEFAULT_MAX_RANK)]
     pub max_rank: usize,
+    /// GGUF: patch token_embd even when it is also the output head (no output.weight).
+    #[arg(long)]
+    pub allow_tied_embedding: bool,
+    /// GGUF project_out: quantization passes measured (1 = no refinement, max 5).
+    #[arg(long, default_value_t = DEFAULT_REFINE_PASSES, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=MAX_REFINE_PASSES as u64))]
+    pub refine_passes: usize,
+    /// GGUF project_out: stop refining once the requantization residual is at most this share.
+    #[arg(long, default_value_t = DEFAULT_RESIDUAL_TARGET)]
+    pub residual_target: f64,
 }
 
 /// The CLI defaults (the MCP server builds its options from it).
@@ -43,6 +53,9 @@ impl Default for GgufApplyArgs {
             prefetch_chunk_mib: 64,
             no_prefetch: false,
             max_rank: crate::patch::DEFAULT_MAX_RANK,
+            allow_tied_embedding: false,
+            refine_passes: DEFAULT_REFINE_PASSES,
+            residual_target: DEFAULT_RESIDUAL_TARGET,
         }
     }
 }
@@ -62,6 +75,9 @@ impl GgufApplyArgs {
             force_no_backup: self.force_no_backup,
             io: self.io(),
             backup_dir,
+            allow_tied_embedding: self.allow_tied_embedding,
+            refine_passes: self.refine_passes,
+            residual_target: self.residual_target,
         }
     }
 }

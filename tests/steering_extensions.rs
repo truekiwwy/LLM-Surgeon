@@ -191,7 +191,8 @@ fn dry_run_simulates_the_whole_ablation_without_writing() {
     assert_eq!(data["paired"], Value::Null);
     assert_eq!(snapshot(&model), before);
 
-    // In a GGUF only the MLP is patchable: refused on the patch alone, the file unread.
+    // o_proj is a GGUF target too (tests/p15_gguf_writers.rs): the patch is accepted and
+    // the file is read, so this 8-byte stand-in fails as an invalid GGUF, nothing written.
     std::fs::write(dir.path().join("m.gguf"), b"GGUF\0\0\0\0").unwrap();
     std::fs::write(dir.path().join("v.json"), "[1.0]").unwrap();
     std::fs::write(
@@ -212,12 +213,12 @@ fn dry_run_simulates_the_whole_ablation_without_writing() {
             "--dry-run",
         ],
     );
-    assert_eq!(code, 2, "{refused}");
-    assert_eq!(refused["error"]["kind"], "invalid_input");
-    assert!(refused["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("SafeTensors"));
+    assert_eq!(code, 1, "{refused}");
+    assert_eq!(refused["error"]["kind"], "invalid_gguf");
+    assert_eq!(
+        std::fs::read(dir.path().join("m.gguf")).unwrap(),
+        b"GGUF\0\0\0\0"
+    );
 
     // o_proj and embed_tokens are listed on request.
     let (_, inspect) = surgeon(

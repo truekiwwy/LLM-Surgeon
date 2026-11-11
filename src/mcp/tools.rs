@@ -128,6 +128,21 @@ pub struct ApplyToolArgs {
     #[serde(default)]
     #[schemars(description = "GGUF : keep-scales (défaut) ou recompute.")]
     pub requant: Option<crate::patch::gguf::Requant>,
+    #[serde(default)]
+    #[schemars(
+        description = "GGUF : autorise la modification de token_embd quand il sert aussi de tête de sortie (output.weight absent) ; avertissement dans le rapport (défaut false : refusé)."
+    )]
+    pub allow_tied_embedding: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "GGUF, project_out : passes de quantification mesurées, de 1 (défaut, sans raffinement) à 5."
+    )]
+    pub refine_passes: Option<usize>,
+    #[serde(default)]
+    #[schemars(
+        description = "GGUF, project_out : le raffinement s'arrête quand la fraction résiduelle due à la re-quantification est au plus cette part, dans ]0, 1] (défaut 0.05)."
+    )]
+    pub residual_target: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -413,7 +428,7 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_APPLY,
             "Chirurgie de poids",
-            "Applique un patch (W ∓= alpha·v, ou project_out sur les écrivains du flux résiduel : down_proj, o_proj, embed_tokens) EN PLACE sur les poids du modèle. Si embed_tokens est visé et partagé avec lm_head, la tête est d'abord détachée : lm_head.weight (copie non patchée) est ajouté au modèle et tie_word_embeddings passe à false ; le dry_run l'annonce dans data.untie_lm_head. Sauvegarde vérifiée imposée avant écriture, rollback automatique en cas d'erreur ou d'annulation. Faire d'abord un dry_run: true pour vérifier les cibles.",
+            "Applique un patch (W ∓= alpha·v, ou project_out sur les écrivains du flux résiduel : down_proj, o_proj, embed_tokens) EN PLACE sur les poids du modèle. Si embed_tokens est visé et partagé avec lm_head, la tête est d'abord détachée : lm_head.weight (copie non patchée) est ajouté au modèle et tie_word_embeddings passe à false ; le dry_run l'annonce dans data.untie_lm_head. Sur un GGUF (gguf: true), les mêmes cibles sont re-quantifiées en place ; un token_embd partagé avec la tête (output.weight absent) est refusé sauf allow_tied_embedding, et project_out rapporte residual_fraction par tenseur (jamais une ablation complète). Sauvegarde vérifiée imposée avant écriture, rollback automatique en cas d'erreur ou d'annulation. Faire d'abord un dry_run: true pour vérifier les cibles.",
             schema_value::<ApplyToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false }),
         ),
@@ -595,10 +610,14 @@ fn apply(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         backup_dir,
     };
     // GGUF: same guards, and never --force-no-backup from an agent.
+    let defaults = crate::patch::gguf::GgufApplyArgs::default();
     let gguf = crate::patch::gguf::GgufApplyArgs {
         gguf: args.gguf,
         requant: args.requant.unwrap_or_default(),
-        ..Default::default()
+        allow_tied_embedding: args.allow_tied_embedding,
+        refine_passes: args.refine_passes.unwrap_or(defaults.refine_passes),
+        residual_target: args.residual_target.unwrap_or(defaults.residual_target),
+        ..defaults
     };
     core_apply_routed(&request, &gguf, ctx.deps, &Ui::off(), ctx.sink)
 }

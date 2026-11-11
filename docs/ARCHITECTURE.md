@@ -57,7 +57,7 @@ comptées entre fichiers de modules différents) : `app -> patch` 64, `mcp -> ap
 | Moteur mmap et décalages | `engine` | Lecture et écriture en place des SafeTensors | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Noyaux SIMD et prefetch | `kernel` | AVX-512, AVX2, NEON ou scalaire, choisis à l'exécution par détection du CPU (`SURGEON_KERNEL` pour forcer) ; compilés dans le binaire | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Patch SafeTensors | `patch` | `patch.json` (`add`, `subtract`, `project_out` ; projections MLP, `o_proj`, `embed_tokens`), validation, sauvegarde, rollback, détachement de `lm_head` (`patch::untie`) | Non : interne, non remplaçable par un tiers à ce jour | Feuille de route |
-| Patch GGUF en place | `patch::gguf` | Déquantification, décalage, requantification | Non : interne, non remplaçable par un tiers à ce jour | aucun |
+| Patch GGUF en place | `patch::gguf` | Déquantification, décalage ou `project_out` (MLP, `attn_output`, `token_embd`), requantification avec résidu mesuré | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Formats d'adaptation | `engine`, `patch::gguf`, `surgery`, `lora` | SafeTensors, GGUF, `.surgery` v1, adaptateurs PEFT | Non : interne, non remplaçable par un tiers à ce jour | Feuille de route |
 | Fusion et extraction LoRA | `lora` | `W += scale · (alpha / r) · B A`, extraction de rang `r` | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Diff de faible rang | `surgery` | Patch `.surgery` entre deux checkpoints | Non : interne, non remplaçable par un tiers à ce jour | aucun |

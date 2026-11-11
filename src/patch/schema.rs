@@ -157,7 +157,7 @@ pub enum Projection {
 }
 
 impl Projection {
-    /// The matrices of the MLP, the only ones a GGUF patch or `autotune` can target.
+    /// The matrices of the MLP, the only ones `autotune` can target.
     pub fn is_mlp(self) -> bool {
         matches!(self, Self::Gate | Self::Up | Self::Down)
     }

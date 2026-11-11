@@ -41,7 +41,7 @@ Where this analogy is wrong, on purpose:
 - A real console can be put back exactly. Here "subtract then add" is not bit-exact because of rounding; the way back is the backup.
 
 > **For experts**
-> The editable object is a matrix `W`: an MLP projection (`gate_proj`, `up_proj`, `down_proj`) or, in a SafeTensors model, the attention output `o_proj` or the input embeddings `embed_tokens`. `surgeon` broadcasts a vector over its rows or columns (`W <- W - alpha v`), removes a direction from the matrices that write into the residual stream (`project_out`, a LEACE eraser or a plain directional ablation), adds a low-rank delta (`.surgery`, LoRA), or re-rounds a quantized GGUF block. Everything is a deterministic, auditable edit of stored bytes; nothing is trained.
+> The editable object is a matrix `W`: an MLP projection (`gate_proj`, `up_proj`, `down_proj`), the attention output `o_proj` or the input embeddings `embed_tokens`, in a SafeTensors model or a quantized GGUF. `surgeon` broadcasts a vector over its rows or columns (`W <- W - alpha v`), removes a direction from the matrices that write into the residual stream (`project_out`, a LEACE eraser or a plain directional ablation), adds a low-rank delta (`.surgery`, LoRA), or re-rounds a quantized GGUF block. Everything is a deterministic, auditable edit of stored bytes; nothing is trained.
 
 <a id="why-not-retrain"></a>
 ### 1.2 Why not simply retrain?
@@ -493,7 +493,7 @@ surgeon inspect [OPTIONS] --model <MODEL>
 | `--proj` | `gate`, `up`, `down` | `gate`, `up`, `down`, `o_proj` or `embed_tokens`; repeatable. The last two are listed on request only (SafeTensors). |
 | `--show-stats` | off | Min, max, mean and L2 norm per tensor (two parallel passes, deterministic). |
 
-`data`: `shards`, `tensors[]` (`name`, `dtype`, `shape`, `shard`, `stats`). For a GGUF file the table also says whether each tensor is patchable.
+`data`: `shards`, `tensors[]` (`name`, `dtype`, `shape`, `shard`, `stats`). For a GGUF file the table also gives each tensor's orientation (`reader`, `writer`, `writer_local` for the embeddings) and whether it is patchable, with the reason when it is not (`patchable_reason`), and `data.tied_embeddings` says whether `token_embd` is also the output head. `o_proj` and `embed_tokens` are listed when `--proj` asks for them.
 
 <a id="cmd-extract"></a>
 #### `surgeon extract`
@@ -547,6 +547,9 @@ surgeon apply [OPTIONS] --model <MODEL> --patch <PATCH>
 | `--requant` | `keep-scales` | GGUF: `keep-scales` or `recompute` ([details](#formats)). |
 | `--no-verify` | off | GGUF: skip the read-back check after writing. |
 | `--force-no-backup` | off | GGUF: patch without a backup; a failure leaves the file modified. |
+| `--allow-tied-embedding` | off | GGUF: patch `token_embd` even when the file has no `output.weight` (the output head then reads the same tensor and changes too); refused otherwise ([details](#gguf-writers)). |
+| `--refine-passes` | 1 | GGUF `project_out`: quantization passes measured, 1 (no refinement) to 5; the pass with the smallest residual is written. |
+| `--residual-target` | 0.05 | GGUF `project_out`: refinement stops once `requant_residual_fraction` is at most this share, in `]0, 1]`; a target not reached is a warning. |
 | `--prefetch-chunk-mib` | 64 | Size of the write chunks (prefetch window and flush granularity). |
 | `--no-prefetch` | off | No OS prefetch hint nor intermediate flush. |
 | `--scale` | 1 | `.surgery` only: `W <- W + scale * delta`. |
@@ -1245,7 +1248,7 @@ With `rows`, every row receives the same vector (one value per column); with `co
 > **For experts**
 > `project_out` removes what `b` reads from the matrices that write into the residual stream: `W' = W - alpha * a (b^T W)` for `down_proj` and `o_proj`, `W' = W - alpha * (W b) a^T` for `embed_tokens` (its rows are the residual vectors). With `a` and `b` from a `.leace.safetensors` it is the LEACE eraser; with `a = b = v`, a unit direction (`"vector_tensor": "direction", "vector_tensor_b": "direction"`), it is a directional ablation. One operation with `"layers": "all"` and `"projections": ["down_proj", "o_proj", "embed_tokens"]` covers every writer; `gate_proj` and `up_proj` read from the stream and are refused. In bf16 a small delta can round away: measure the result.
 >
-> `a` and `b` can also be `[k, hidden]` tensors, one direction per row (`<out>.subspace.safetensors` of `svd --rank`, or the `.leace.safetensors` of `leace --labels-file`): `W' = W - alpha * A (B^T W)` then removes the `k` directions in one pass over the weights, so each weight is rounded once whatever `k`, while `k` successive rank-1 operations would round `k` times in an order that changes the result. The 1D form gives the same bytes as before. Before any write, `apply` checks that `a` and `b` have the same rank, that it matches `rank` when the operation sets it and does not exceed `--max-rank` (64; the MCP server keeps this default), and that `‖B^T A - I‖_F <= 1e-3` when `alpha = 1`: otherwise `alpha = 1` removes something else than the subspace read by `b`, and a `[k, hidden]` patch is refused unless `allow_non_projector` is `true` (the 1D form stays accepted, with a warning). These checks read the tensors, so a refusal is exit code 3 with the model intact, not an invalid patch. In a GGUF `project_out` stays refused.
+> `a` and `b` can also be `[k, hidden]` tensors, one direction per row (`<out>.subspace.safetensors` of `svd --rank`, or the `.leace.safetensors` of `leace --labels-file`): `W' = W - alpha * A (B^T W)` then removes the `k` directions in one pass over the weights, so each weight is rounded once whatever `k`, while `k` successive rank-1 operations would round `k` times in an order that changes the result. The 1D form gives the same bytes as before. Before any write, `apply` checks that `a` and `b` have the same rank, that it matches `rank` when the operation sets it and does not exceed `--max-rank` (64; the MCP server keeps this default), and that `‖B^T A - I‖_F <= 1e-3` when `alpha = 1`: otherwise `alpha = 1` removes something else than the subspace read by `b`, and a `[k, hidden]` patch is refused unless `allow_non_projector` is `true` (the 1D form stays accepted, with a warning). These checks read the tensors, so a refusal is exit code 3 with the model intact, not an invalid patch. A quantized GGUF takes the same recipe, with a measured residual: see [GGUF residual writers](#gguf-writers).
 >
 > When `embed_tokens` is a target and the model ties it to the output projection (no `lm_head.weight`, as Qwen2.5-0.5B), `apply` first detaches the head so the logits are not deformed: it rewrites the shard with `lm_head.weight`, a byte copy of the unpatched embeddings, and sets `"tie_word_embeddings": false` in `config.json` (and completes `model.safetensors.index.json` for a sharded model). The shard grows by the size of the embeddings. `--dry-run` announces it in `data.untie_lm_head` and writes nothing; the shard and `config.json` are both backed up and restored on failure. Without `config.json` next to the model the patch is refused.
 
@@ -1255,12 +1258,12 @@ With `rows`, every row receives the same vector (one value per column); with `co
 | Format | Where it is used |
 | --- | --- |
 | SafeTensors (file, shards, index) | Read and patched in place by `inspect`, `apply`, `diff`, `lora`, `eval`; memory-mapped. Dtypes of the shift kernels: bf16, f16, f32. |
-| GGUF v3, single file, little endian | `inspect`, `apply --gguf`; target types F32, F16, BF16, Q8_0, Q4_K, Q6_K. Written by `eval --export-gguf` through llama.cpp. |
+| GGUF v3, single file, little endian | `inspect`, `apply --gguf`; target types F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K. Written by `eval --export-gguf` through llama.cpp. |
 | `.surgery` | Low-rank patch written by `diff`, applied by `apply`; magic `SURG`, specified in [docs/SPECIFICATION.md](docs/SPECIFICATION.md); header schema: `surgeon schema --kind surgery`. |
 | PEFT LoRA adapter | `adapter_model.safetensors` (keys `base_model.model.<path>.lora_A.weight` and `lora_B.weight`) plus `adapter_config.json`; read by `lora merge`, written by `lora extract`. |
 | Logits dumps | `.safetensors` written by `bench dump`; `bench logits` also reads `.npy` and `.pt`. |
 
-For a GGUF file, `gate_proj`, `up_proj` and `down_proj` of layer `i` are `blk.{i}.ffn_{gate,up,down}.weight`; `ne[0]` is the column dimension, so `rows` and `cols` keep their SafeTensors meaning. A "Q4_K_M" file mixes types per tensor (`ffn_down` is often Q6_K); a patched tensor of another type is refused with `unsupported_quant_type`. A tiny GGUF to try this is generated by `examples/make_fake_gguf.rs` (two layers, hidden size 32, Q8_0). Save a vector of 32 ones as `v32.json`, then the patch below as `gguf-patch.json`:
+For a GGUF file, `gate_proj`, `up_proj` and `down_proj` of layer `i` are `blk.{i}.ffn_{gate,up,down}.weight`, `o_proj` is `blk.{i}.attn_output.weight` and `embed_tokens` is `token_embd.weight`; `ne[0]` is the column dimension, so `rows` and `cols` keep their SafeTensors meaning. A "Q4_K_M" file mixes types per tensor (`ffn_down` is often Q6_K, and a hidden size that is not a multiple of 256, such as 896, makes llama.cpp fall back to 32-element types like Q5_0 or Q4_1); every target of the patch is typed before the first write, and a target of another type (IQ*, Q2_K, Q3_K, MXFP4...) is refused with `unsupported_quant_type`, naming the tensor and its type. A tiny GGUF to try this is generated by `examples/make_fake_gguf.rs` (two layers, hidden size 32, Q8_0). Save a vector of 32 ones as `v32.json`, then the patch below as `gguf-patch.json`:
 
 ```json
 [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
@@ -1290,13 +1293,13 @@ tiny-q8.gguf
 █▀█ █ █ ▀█▀  W E I G H T
 █ █ ▀▄▀  █   S U R G E O N
 [INSPECT]  6 tenseurs sélectionnés · GGUF v3 · qwen2
-couche   proj   type   shape      taille    patchable
-0        gate   Q8_0   [64, 32]   2.1 KiB   oui      
-0        up     Q8_0   [64, 32]   2.1 KiB   oui      
-0        down   Q8_0   [32, 64]   2.1 KiB   oui      
-1        gate   Q8_0   [64, 32]   2.1 KiB   oui      
-1        up     Q8_0   [64, 32]   2.1 KiB   oui      
-1        down   Q8_0   [32, 64]   2.1 KiB   oui      
+couche   proj   type   orientation   shape      taille    patchable
+0        gate   Q8_0   reader        [64, 32]   2.1 KiB   oui
+0        up     Q8_0   reader        [64, 32]   2.1 KiB   oui
+0        down   Q8_0   writer        [32, 64]   2.1 KiB   oui
+1        gate   Q8_0   reader        [64, 32]   2.1 KiB   oui
+1        up     Q8_0   reader        [64, 32]   2.1 KiB   oui
+1        down   Q8_0   writer        [32, 64]   2.1 KiB   oui      
 ```
 
 ```text
@@ -1307,9 +1310,10 @@ couche   proj   type   shape      taille    patchable
            blk.0.ffn_down.weight
            blk.1.ffn_down.weight
 [GGUF]     <WORKDIR>\tiny-q8.gguf · GGUF v3 · qwen2 · requant keep-scales · 2 tenseurs
-tenseur                 type   réalisé/voulu   corr    inchangés   saturés   nmse   
-blk.0.ffn_down.weight   Q8_0   0.833           0.949   1.4%        1195      9.98e-2
-blk.1.ffn_down.weight   Q8_0   0.840           0.948   1.5%        1152      9.64e-2
+tenseur                 type   réalisé/voulu   corr    inchangés   saturés   nmse      résiduel   passes
+blk.0.ffn_down.weight   Q8_0   0.833           0.949   1.4%        1195      9.98e-2   —          —
+blk.1.ffn_down.weight   Q8_0   0.840           0.948   1.5%        1152      9.64e-2   —          —
+[PRÉ-VOL]  2 tenseurs, 4.2 KiB ciblés, 4.2 KiB à traiter, ~0.0 s estimées, backup 13.2 KiB
 [VERIFY]   dry-run : rien n'a été écrit
 ```
 
@@ -1327,21 +1331,79 @@ surgeon apply --gguf --requant recompute --model tiny-q8.gguf --patch gguf-patch
 [SHIFT]    g-down terminée · Δmax 0.0505 · 2 tenseurs
 [COMMIT]   modèle patché · 0.0 s
 [GGUF]     <WORKDIR>\tiny-q8.gguf · GGUF v3 · qwen2 · requant recompute · 2 tenseurs
-tenseur                 type   réalisé/voulu   corr    inchangés   saturés   nmse   
-blk.0.ffn_down.weight   Q8_0   1.000           1.000   0.0%        0         1.47e-5
-blk.1.ffn_down.weight   Q8_0   1.000           1.000   0.0%        0         1.48e-5
+tenseur                 type   réalisé/voulu   corr    inchangés   saturés   nmse      résiduel   passes
+blk.0.ffn_down.weight   Q8_0   1.000           1.000   0.0%        0         1.47e-5   —          —
+blk.1.ffn_down.weight   Q8_0   1.000           1.000   0.0%        0         1.48e-5   —          —
+[PRÉ-VOL]  2 tenseurs, 4.2 KiB ciblés, 4.2 KiB à traiter, ~0.0 s estimées, backup 13.2 KiB
 [VERIFY]   relecture OK : octets, échelles et valeurs finies ; en-tête inchangé (sha256 a08facefb718…)
 ```
 
 | `--requant` | What changes in a block | Use it when |
 | --- | --- | --- |
 | `keep-scales` (default) | Only the integers of the elements whose patched value differs; the scales are kept byte for byte; values past the grid are clipped and counted | small shifts, about one quantization step |
-| `recompute` | New scales for every touched block (Q8_0: `quantize_row_q8_0_ref`; Q4_K and Q6_K: min/max with scales rounded up, no clipping) | strong shifts; it is not the iterative `llama-quantize`, and there is no importance matrix |
+| `recompute` | New scales for every touched block (Q8_0, Q4_0, Q4_1, Q5_0, Q5_1: their `quantize_row_*_ref`; Q4_K, Q5_K and Q6_K: min/max with scales rounded up, no clipping) | strong shifts; it is not the iterative `llama-quantize`, and there is no importance matrix |
 
 Each patched tensor gets a fidelity report: `intended_shift_norm`, `realized_shift_norm`, `realized_over_intended`, `correlation_intended_realized`, `unchanged_fraction`, `saturated_elements`, `nmse_vs_exact`. A ratio under 0.5 or a correlation under 0.8 means the shift is smaller than half a quantization step and was lost or turned into noise.
 
 > **For experts**
 > An in-place write on a file of tens of GB is guarded in six steps: everything is checked before writing (targets, types, whole blocks, vector lengths, free disk space for the copy); a full backup is made and its SHA-256 verified; a crash marker `<model>.surgeon-inprogress` (backup path, original SHA-256, time) is written before the first byte; tensors are written chunk by chunk, each chunk computed and checked (finite scales and values) in a copy first, and the header, metadata and tensor table are never rewritten (their SHA-256 is compared before and after); after the flush a second mapping re-reads every patched tensor and compares it to the SHA-256 computed while writing (`--no-verify` skips this); any error restores the backup, and the marker is removed after the commit or the rollback. The test suite cannot validate a patched file against a real llama.cpp: check that it loads and run `surgeon bench ppl` before use.
+
+<a id="gguf-writers"></a>
+#### GGUF residual writers: `project_out` on a quantized file
+
+The full ablation recipe of the SafeTensors path works on a GGUF as is: one `project_out` on `embed_tokens`, `o_proj` and `down_proj`, every layer. Each tensor is dequantized, projected exactly as the SafeTensors engine does (`W' = W - alpha A (B^T W)` on `ffn_down` and `attn_output`, whose rows are the residual stream, in two passes; each row of `token_embd` on its own), then requantized with `--requant`. With `keep-scales` the written bytes are those of `requant(project(dequant(W)))`, byte for byte (the tests check it against an independent decoder, for every patchable type).
+
+Requantization adds noise, and the part of that noise read by `B` brings back some of the erased direction. So a GGUF ablation is never complete; it is measured, per tensor, in `data.gguf.tensors[]`:
+
+| Field | Meaning |
+| --- | --- |
+| `residual_fraction` | `‖B^T deq(W')‖ / ‖B^T W‖` (`‖deq(W') B‖ / ‖W B‖` for the embeddings): the share of the read component still there, `1 - alpha` at best for a projector. |
+| `requant_residual_fraction` | `‖B^T (deq(W') - W_exact)‖ / ‖B^T W‖`: the part brought back by the requantization, what `--residual-target` bounds. |
+| `refine_passes` | Quantization passes measured. |
+
+`--refine-passes N` (1 to 5) measures up to `N` quantizations of each tensor: pass `n + 1` requantizes `W_exact - A C` with `C` the sum of the residuals read so far, starting again from the original bytes; it stops once `requant_residual_fraction <= --residual-target` (default 0.05) and writes the pass with the smallest residual. The correction is far below a quantization step, so it lowers the residual statistically, never to zero; a target not reached, or a pass that did not lower the residual, is a warning. Nothing is written while measuring: every pass is a read-only sweep, then one write pass replays the chosen bytes, under the same guards (pre-flight, backup, crash marker, read-back, rollback). The pre-flight types every target before the first write and reports the work, an order of magnitude of the time and the backup size in `data.gguf.preflight`.
+
+When the file has no `output.weight` (tied embeddings, as Qwen2.5-0.5B), llama.cpp reads `token_embd` as the output head too: editing it changes the logits as well, so `apply` refuses it unless `--allow-tied-embedding`, and then says so in the report. With an `output.weight`, only `token_embd` (the writer) is changed, never the head (a reader).
+
+The runs below use two fake files written by an ignored test of the suite: `writers.gguf` (hidden size 256, Q5_K embeddings, Q4_K `attn_output`, Q6_K `ffn_down`, its own head) and `tied.gguf` (hidden size 96, Q8_0 / Q4_1 / Q5_0, no `output.weight`), one unit direction each (`a = b`, `dirs.safetensors`, `dirs96.safetensors`) and the full recipe (`ablate.json`, `ablate96.json`: one `project_out` on `embed_tokens`, `o_proj` and `down_proj`, `"layers": "all"`, `alpha` 1).
+
+```bash
+# fake writers GGUF, then inspect, a refused tied file and a real run with refinement
+SURGEON_FAKE_GGUF_DIR=$PWD cargo test --manifest-path ../Cargo.toml --test p15_gguf_writers -- --ignored make_writers_gguf_on_disk
+surgeon inspect --model writers.gguf --proj o_proj --proj embed_tokens
+surgeon apply --gguf --model tied.gguf --patch ablate96.json
+surgeon apply --gguf --model writers.gguf --patch ablate.json --refine-passes 3 --backup-dir backups
+```
+
+```text
+[INSPECT]  3 tenseurs sélectionnés · GGUF v3 · qwen2
+couche   proj           type   orientation    shape        taille     patchable
+—        embed_tokens   Q5_K   writer_local   [48, 256]    8.2 KiB    oui
+0        o_proj         Q4_K   writer         [256, 256]   36.0 KiB   oui
+1        o_proj         Q4_K   writer         [256, 256]   36.0 KiB   oui
+```
+
+```text
+[APPLY]    ablate96.json · 1 opérations
+erreur : opération ablate : token_embd.weight est aussi la tête de sortie de ce GGUF (output.weight absent, embeddings liés comme dans Qwen2.5-0.5B) : le modifier change aussi les logits de sortie. Refusé par défaut ; --allow-tied-embedding pour l'accepter (avertissement dans le rapport), ou patchez le SafeTensors, où surgeon détache d'abord lm_head
+```
+
+```text
+[GGUF]     <WORKDIR>\writers.gguf · GGUF v3 · qwen2 · requant keep-scales · 5 tenseurs
+tenseur                    type   réalisé/voulu   corr    inchangés   saturés   nmse      résiduel   passes
+token_embd.weight          Q5_K   1.111           0.883   78.7%       60        1.09e-3   0.107      3
+blk.0.ffn_down.weight      Q6_K   1.056           0.951   58.1%       991       3.96e-4   0.047      2
+blk.0.attn_output.weight   Q4_K   1.233           0.667   91.8%       158       3.29e-3   0.310      3
+blk.1.ffn_down.weight      Q6_K   1.059           0.950   57.9%       965       3.98e-4   0.043      2
+blk.1.attn_output.weight   Q4_K   1.231           0.707   91.1%       190       3.23e-3   0.243      3
+[PRÉ-VOL]  5 tenseurs, 290.2 KiB ciblés, 1.4 MiB à traiter, ~0.0 s estimées, backup 576.5 KiB
+[VERIFY]   relecture OK : octets, échelles et valeurs finies ; en-tête inchangé (sha256 5417e7ed81c2…)
+```
+
+The Q6_K `ffn_down` reach the 5 % target in two passes; the Q4_K `attn_output` keep a quarter to a third of the erased component after three (one pass left about half), and the warnings say so. **Recommended recipe when exactness matters: unquantized SafeTensors -> patch -> conversion -> quantization.** Patching the GGUF is the shortcut when only the quantized file exists.
+
+> **For experts**
+> What the tests cannot check, and how to check it by hand with a real llama.cpp: apply the same recipe to the SafeTensors model, convert it (`convert_hf_to_gguf.py`) and quantize it (`llama-quantize`) to the type of the original GGUF; apply the recipe to the original GGUF with `apply --gguf`; then compare both files with `surgeon bench ppl --model <file> --text <text> --baseline-model <original.gguf> --llama-cpp-dir <llama.cpp>` and, for the logits, with the KL-divergence mode of llama.cpp's own `llama-perplexity` against the converted model. `surgeon bench logits` compares the SafeTensors patched model with its original (`bench dump` reads SafeTensors only). The codecs follow `ggml-quants.c` as read through candle's Rust port; they were not run against llama.cpp itself, and `q * d + m` (Q4_1, Q5_1) is two roundings here where a C build that contracts it into an FMA rounds once.
 
 <a id="theory"></a>
 ### 3.5 Theory as implemented

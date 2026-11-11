@@ -232,9 +232,9 @@ Ablation directionnelle de tous les écrivains (`a = b = v`, la `direction` unit
 ```
 
 `o_proj` et `embed_tokens` sont aussi des cibles de `subtract` / `add` (`axis` `cols` pour
-`o_proj`, `rows` pour `embed_tokens`), dans un modèle SafeTensors seulement : un GGUF les
-refuse (`invalid_input`), comme `surgeon_autotune`. `embed_tokens` n'appartient à aucune
-couche : `layers` ne le filtre pas.
+`o_proj`, `rows` pour `embed_tokens`), en SafeTensors comme en GGUF (voir plus bas) ;
+`surgeon_autotune` ne vise que le MLP. `embed_tokens` n'appartient à aucune couche :
+`layers` ne le filtre pas.
 
 **Détachement de `lm_head`.** Si `embed_tokens` est visé et que le modèle le partage avec la
 projection de sortie (pas de tenseur `lm_head.weight`, ou `tie_word_embeddings` encore vrai),
@@ -259,16 +259,29 @@ secondaires : enchaîner avec `surgeon_bench` sur une copie.
 
 ## GGUF quantifié (`surgeon_apply` avec `gguf: true`)
 
-`surgeon_inspect` accepte un `.gguf` : `data.format = "gguf"`, et pour chaque tenseur MLP
-(`blk.{i}.ffn_{gate,up,down}.weight`) son `ggml_type`, sa forme `[lignes, colonnes]`, sa
-taille et `patchable` (F32, F16, BF16, Q8_0, Q4_K, Q6_K).
+`surgeon_inspect` accepte un `.gguf` : `data.format = "gguf"`, `data.tied_embeddings`, et
+pour chaque cible (`blk.{i}.ffn_{gate,up,down}.weight` par défaut ;
+`blk.{i}.attn_output.weight` et `token_embd.weight` avec `proj` `o_proj` / `embed_tokens`)
+son `ggml_type`, son `orientation` (`reader`, `writer`, `writer_local`), sa forme
+`[lignes, colonnes]`, sa taille, `patchable` (F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0,
+Q4_K, Q5_K, Q6_K) et `patchable_reason` quand il ne l'est pas.
 
-`surgeon_apply` gagne deux champs, le nombre d'outils ne change pas :
+`surgeon_apply` gagne ces champs, le nombre d'outils ne change pas :
 
 | Champ | Défaut | Rôle |
 | --- | --- | --- |
 | `gguf` | `false` | Obligatoire pour un `.gguf` : sans lui, `error.kind = "invalid_input"` (la re-quantification perd de l'information, jamais par surprise). |
-| `requant` | `keep-scales` | `keep-scales` garde `d`, `dmin` et les sous-échelles ; `recompute` recalcule les échelles des blocs touchés. |
+| `requant` | `keep-scales` | `keep-scales` garde `d`, `m` / `dmin` et les sous-échelles ; `recompute` recalcule les échelles des blocs touchés. |
+| `allow_tied_embedding` | `false` | Autorise `token_embd` quand le fichier n'a pas d'`output.weight` (la tête de sortie le lit aussi et change avec lui) ; refusé sinon (`invalid_input`), avertissement dans le rapport sinon. |
+| `refine_passes` | 1 | `project_out` : passes de quantification mesurées, de 1 à 5 (hors bornes : `invalid_input`). |
+| `residual_target` | 0.05 | `project_out` : arrêt du raffinement quand `requant_residual_fraction` vaut au plus cette part, dans `]0, 1]`. |
+
+`project_out` fonctionne sur les écrivains du flux résiduel d'un GGUF (`down_proj`, `o_proj`,
+`embed_tokens`) : chaque tenseur est déquantifié, projeté comme en SafeTensors, puis
+re-quantifié. Une ablation GGUF n'est jamais complète : `data.gguf.tensors[]` donne
+`residual_fraction` (`‖Bᵀ deq(W')‖ / ‖Bᵀ W‖`), `requant_residual_fraction` (la part ramenée
+par la re-quantification) et `refine_passes`. Quand l'exactitude compte : SafeTensors non
+quantifiés, patch, conversion, puis quantification.
 
 ```json
 {"name": "surgeon_apply", "arguments": {"model": "qwen2.5-7b-q4_k_m.gguf",
@@ -288,14 +301,16 @@ Erreurs propres au GGUF :
 
 | `error.kind` | Signification |
 | --- | --- |
-| `unsupported_quant_type` | Une cible n'est pas en F32, F16, BF16, Q8_0, Q4_K ni Q6_K. |
+| `unsupported_quant_type` | Une cible n'est pas en F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K ni Q6_K ; toutes les cibles sont vérifiées avant la première écriture. |
 | `invalid_gguf` | Fichier illisible, tronqué, big-endian ou multi-parties. |
 | `invalid_target` | Cible non 2D, ou colonnes non multiples du bloc. |
 
 `data.gguf.tensors[]` donne la fidélité par tenseur (`realized_over_intended`,
 `correlation_intended_realized`, `unchanged_fraction`, `saturated_elements`,
-`nmse_vs_exact`, `warning`), et `data.io` donne les blocs écrits, le débit et les défauts de
-page (absent en `dry_run`). Un `warning` signale un patch perdu sous le demi-pas, ou des
+`nmse_vs_exact`, `warning`, et pour `project_out` les champs de résidu ci-dessus),
+`data.gguf.preflight` le travail prévu (`tensors`, `target_bytes`, `work_bytes`,
+`estimated_seconds`, `backup_bytes`), et `data.io` donne les blocs écrits, le débit et les
+défauts de page (absent en `dry_run`). Un `warning` signale un patch perdu sous le demi-pas, ou des
 valeurs écrêtées : il faut alors réessayer avec `requant: "recompute"`, puis valider avec
 `surgeon_bench` (`ppl`) contre le fichier d'origine.
 

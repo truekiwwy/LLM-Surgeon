@@ -78,8 +78,13 @@ pub struct GgmlType(pub u32);
 impl GgmlType {
     pub const F32: GgmlType = GgmlType(0);
     pub const F16: GgmlType = GgmlType(1);
+    pub const Q4_0: GgmlType = GgmlType(2);
+    pub const Q4_1: GgmlType = GgmlType(3);
+    pub const Q5_0: GgmlType = GgmlType(6);
+    pub const Q5_1: GgmlType = GgmlType(7);
     pub const Q8_0: GgmlType = GgmlType(8);
     pub const Q4_K: GgmlType = GgmlType(12);
+    pub const Q5_K: GgmlType = GgmlType(13);
     pub const Q6_K: GgmlType = GgmlType(14);
     pub const BF16: GgmlType = GgmlType(30);
 
@@ -101,8 +106,13 @@ impl GgmlType {
         match self {
             GgmlType::F32 => Some((1, 4)),
             GgmlType::F16 | GgmlType::BF16 => Some((1, 2)),
+            GgmlType::Q4_0 => Some((32, 18)),
+            GgmlType::Q4_1 => Some((32, 20)),
+            GgmlType::Q5_0 => Some((32, 22)),
+            GgmlType::Q5_1 => Some((32, 24)),
             GgmlType::Q8_0 => Some((32, 34)),
             GgmlType::Q4_K => Some((256, 144)),
+            GgmlType::Q5_K => Some((256, 176)),
             GgmlType::Q6_K => Some((256, 210)),
             _ => None,
         }

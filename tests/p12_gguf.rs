@@ -1,7 +1,8 @@
 //! P12: in-place GGUF patching (parser, codecs, backend, CLI, MCP) and the chunked I/O of
-//! `apply`. Every fixture is built here: a minimal GGUF v3 writer, hand-built blocks with
-//! hand-computed values, and a second decoder / requantizer written independently of
-//! `patch::gguf::quant` (index formulas instead of unpack loops).
+//! `apply`. Every fixture is built in the tests: a minimal GGUF v3 writer, hand-built
+//! blocks with hand-computed values, and a second decoder / requantizer written
+//! independently of `patch::gguf::quant` (index formulas instead of unpack loops), the
+//! last two shared with p15 in `support/gguf.rs`.
 
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
@@ -9,9 +10,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use half::{bf16, f16};
+use half::f16;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use weight_surgeon::engine::{self, BroadcastAxis, DType, ShiftOp};
 use weight_surgeon::patch::gguf::{
@@ -24,164 +24,12 @@ use weight_surgeon::patch::{
 
 // ------------------------------------------------------------------ helpers
 
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn uniform(&mut self) -> f64 {
-        (self.next() >> 11) as f64 / (1u64 << 53) as f64
-    }
-    fn normal(&mut self) -> f32 {
-        let (u1, u2) = (self.uniform().max(1e-12), self.uniform());
-        ((-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()) as f32
-    }
-}
-
-const F32: u32 = 0;
-const F16: u32 = 1;
-const Q4_0: u32 = 2;
-const Q8_0: u32 = 8;
-const Q4_K: u32 = 12;
-const Q6_K: u32 = 14;
-const BF16: u32 = 30;
+#[path = "support/gguf.rs"]
+mod support;
+use support::*;
 
 const HIDDEN: usize = 256;
 const INTER: usize = 512;
-
-fn sha(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-fn f16v(b: &[u8], at: usize) -> f32 {
-    f16::from_bits(u16::from_le_bytes([b[at], b[at + 1]])).to_f32()
-}
-
-fn codec(ty: u32) -> Codec {
-    Codec::from_type(GgmlType(ty)).unwrap()
-}
-
-// ------------------------------------------------------------------ GGUF v3 writer
-
-enum Kv {
-    U32(u32),
-    Str(&'static str),
-    Strs(Vec<String>),
-    I32s(Vec<i32>),
-    F32(f32),
-    Bool(bool),
-}
-
-struct T {
-    name: String,
-    ne: Vec<u64>,
-    ty: u32,
-    data: Vec<u8>,
-}
-
-fn put_str(b: &mut Vec<u8>, s: &str) {
-    b.extend((s.len() as u64).to_le_bytes());
-    b.extend(s.as_bytes());
-}
-
-/// GGUF v3, alignment 32, tensors laid out in order, each at a multiple of 32.
-fn gguf_bytes(kv: &[(&str, Kv)], tensors: &[T]) -> Vec<u8> {
-    const ALIGN: usize = 32;
-    let mut b = b"GGUF".to_vec();
-    b.extend(3u32.to_le_bytes());
-    b.extend((tensors.len() as u64).to_le_bytes());
-    b.extend((kv.len() as u64).to_le_bytes());
-    for (key, value) in kv {
-        put_str(&mut b, key);
-        match value {
-            Kv::U32(x) => {
-                b.extend(4u32.to_le_bytes());
-                b.extend(x.to_le_bytes());
-            }
-            Kv::Str(s) => {
-                b.extend(8u32.to_le_bytes());
-                put_str(&mut b, s);
-            }
-            Kv::Strs(list) => {
-                b.extend(9u32.to_le_bytes());
-                b.extend(8u32.to_le_bytes());
-                b.extend((list.len() as u64).to_le_bytes());
-                list.iter().for_each(|s| put_str(&mut b, s));
-            }
-            Kv::I32s(list) => {
-                b.extend(9u32.to_le_bytes());
-                b.extend(5u32.to_le_bytes());
-                b.extend((list.len() as u64).to_le_bytes());
-                list.iter().for_each(|x| b.extend(x.to_le_bytes()));
-            }
-            Kv::F32(x) => {
-                b.extend(6u32.to_le_bytes());
-                b.extend(x.to_le_bytes());
-            }
-            Kv::Bool(x) => {
-                b.extend(7u32.to_le_bytes());
-                b.push(u8::from(*x));
-            }
-        }
-    }
-    let mut offsets = Vec::new();
-    let mut offset = 0usize;
-    for t in tensors {
-        offsets.push(offset);
-        offset = (offset + t.data.len()).next_multiple_of(ALIGN);
-    }
-    for (t, off) in tensors.iter().zip(&offsets) {
-        put_str(&mut b, &t.name);
-        b.extend((t.ne.len() as u32).to_le_bytes());
-        t.ne.iter().for_each(|d| b.extend(d.to_le_bytes()));
-        b.extend(t.ty.to_le_bytes());
-        b.extend((*off as u64).to_le_bytes());
-    }
-    b.resize(b.len().next_multiple_of(ALIGN), 0);
-    let data_start = b.len();
-    for (t, off) in tensors.iter().zip(&offsets) {
-        b.resize(data_start + off, 0);
-        b.extend(&t.data);
-    }
-    b
-}
-
-fn metadata() -> Vec<(&'static str, Kv)> {
-    vec![
-        ("general.architecture", Kv::Str("qwen2")),
-        ("general.name", Kv::Str("p12-fixture")),
-        ("general.alignment", Kv::U32(32)),
-        ("qwen2.block_count", Kv::U32(2)),
-        ("qwen2.rope.freq_base", Kv::F32(1e6)),
-        ("tokenizer.ggml.add_bos_token", Kv::Bool(false)),
-        (
-            "tokenizer.ggml.tokens",
-            Kv::Strs((0..40).map(|i| format!("tok{i}")).collect()),
-        ),
-        ("tokenizer.ggml.token_type", Kv::I32s((0..40).collect())),
-    ]
-}
-
-/// `rows x cols` weights ~ N(0, sigma²), encoded with the library's fresh quantizer.
-fn tensor_data(ty: u32, rows: usize, cols: usize, sigma: f32, rng: &mut Rng) -> Vec<u8> {
-    let c = codec(ty);
-    let w: Vec<f32> = (0..rows * cols).map(|_| sigma * rng.normal()).collect();
-    let mut data = vec![0u8; c.row_bytes(cols) * rows];
-    for (x, b) in w
-        .chunks(c.block_elems())
-        .zip(data.chunks_mut(c.block_bytes()))
-    {
-        quant::quantize_block(c, x, b).unwrap();
-    }
-    data
-}
 
 /// Qwen2-like MLP: gate/up `ne = [HIDDEN, INTER]`, down `ne = [INTER, HIDDEN]`, plus two
 /// untouched tensors (one of an unpatchable type).
@@ -210,127 +58,10 @@ fn mlp_gguf(types: [u32; 3], layers: usize, seed: u64) -> Vec<u8> {
     tensors.push(T {
         name: "blk.0.attn_q.weight".into(),
         ne: vec![32, 4],
-        ty: Q4_0,
+        ty: Q3_K,
         data: vec![0x5A; 4 * 18],
     });
     gguf_bytes(&metadata(), &tensors)
-}
-
-// ------------------------------------------------------------------ independent decoder
-
-/// Q4_K 6-bit (sc, m) of sub-block j, read as the spec describes the 12 bytes.
-fn q4k_scales(s: &[u8], j: usize) -> (f32, f32) {
-    let (sc, m) = match j {
-        0..=3 => (s[j] & 63, s[j + 4] & 63),
-        _ => (
-            (s[j + 4] & 15) + 16 * (s[j - 4] >> 6),
-            (s[j + 4] >> 4) + 16 * (s[j] >> 6),
-        ),
-    };
-    (f32::from(sc), f32::from(m))
-}
-
-/// Byte index and shift of element `e`'s low 4 bits (Q4_K nibble, Q6_K low part).
-fn q4k_nibble(e: usize) -> (usize, u32) {
-    (16 + 32 * (e / 64) + e % 32, if e % 64 < 32 { 0 } else { 4 })
-}
-
-fn q6k_low(e: usize) -> (usize, u32) {
-    let (n, r) = (e / 128, e % 128);
-    let (g, l) = (r / 32, r % 32);
-    (64 * n + l + 32 * (g & 1), 4 * (g as u32 >> 1))
-}
-
-fn q6k_high(e: usize) -> (usize, u32) {
-    let (n, r) = (e / 128, e % 128);
-    (128 + 32 * n + r % 32, 2 * (r as u32 / 32))
-}
-
-/// One block, element by element from index formulas.
-fn decode_block(ty: u32, b: &[u8]) -> Vec<f32> {
-    match ty {
-        F32 => vec![f32::from_le_bytes([b[0], b[1], b[2], b[3]])],
-        F16 => vec![f16v(b, 0)],
-        BF16 => vec![bf16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32()],
-        Q8_0 => (0..32)
-            .map(|j| f32::from(b[2 + j] as i8) * f16v(b, 0))
-            .collect(),
-        Q4_K => (0..256)
-            .map(|e| {
-                let (sc, m) = q4k_scales(&b[4..16], e / 32);
-                let (at, shift) = q4k_nibble(e);
-                let q = f32::from((b[at] >> shift) & 15);
-                f16v(b, 0) * sc * q - f16v(b, 2) * m
-            })
-            .collect(),
-        Q6_K => (0..256)
-            .map(|e| {
-                let ((lo_at, lo_shift), (hi_at, hi_shift)) = (q6k_low(e), q6k_high(e));
-                let q = ((b[lo_at] >> lo_shift) & 15) | (((b[hi_at] >> hi_shift) & 3) << 4);
-                let sc = f32::from(b[192 + e / 16] as i8);
-                f16v(b, 208) * sc * (i32::from(q) - 32) as f32
-            })
-            .collect(),
-        other => panic!("type {other}"),
-    }
-}
-
-fn decode_tensor(ty: u32, data: &[u8]) -> Vec<f32> {
-    data.chunks(codec(ty).block_bytes())
-        .flat_map(|b| decode_block(ty, b))
-        .collect()
-}
-
-/// Independent keep-scales requantization of one block: re-rounds the integer of every
-/// changed element on the stored grid. Returns the saturated count.
-fn requant_keep_scales(ty: u32, b: &mut [u8], before: &[f32], exact: &[f32]) -> u64 {
-    let mut saturated = 0;
-    for e in 0..before.len() {
-        if before[e].to_bits() == exact[e].to_bits() {
-            continue;
-        }
-        let x = exact[e];
-        match ty {
-            F32 => b.copy_from_slice(&x.to_le_bytes()),
-            F16 => b.copy_from_slice(&f16::from_f32(x).to_le_bytes()),
-            BF16 => b.copy_from_slice(&bf16::from_f32(x).to_le_bytes()),
-            Q8_0 => {
-                let d = f16v(b, 0);
-                if d == 0.0 {
-                    continue;
-                }
-                let r = (x / d).round();
-                saturated += u64::from(r.abs() > 127.0);
-                b[2 + e] = r.clamp(-127.0, 127.0) as i8 as u8;
-            }
-            Q4_K => {
-                let (sc, m) = q4k_scales(&b[4..16], e / 32);
-                let (d1, m1) = (f16v(b, 0) * sc, f16v(b, 2) * m);
-                if d1 == 0.0 {
-                    continue;
-                }
-                let r = ((x + m1) / d1).round_ties_even();
-                saturated += u64::from(!(0.0..=15.0).contains(&r));
-                let q = r.clamp(0.0, 15.0) as u8;
-                let (at, shift) = q4k_nibble(e);
-                b[at] = (b[at] & !(15 << shift)) | (q << shift);
-            }
-            Q6_K => {
-                let d1 = f16v(b, 208) * f32::from(b[192 + e / 16] as i8);
-                if d1 == 0.0 {
-                    continue;
-                }
-                let r = (x / d1).round_ties_even();
-                saturated += u64::from(!(-32.0..=31.0).contains(&r));
-                let u = (r.clamp(-32.0, 31.0) as i32 + 32) as u8;
-                let ((lo_at, lo_shift), (hi_at, hi_shift)) = (q6k_low(e), q6k_high(e));
-                b[lo_at] = (b[lo_at] & !(15 << lo_shift)) | ((u & 15) << lo_shift);
-                b[hi_at] = (b[hi_at] & !(3 << hi_shift)) | ((u >> 4) << hi_shift);
-            }
-            other => panic!("type {other}"),
-        }
-    }
-    saturated
 }
 
 // ------------------------------------------------------------------ codecs: known answers
@@ -508,7 +239,7 @@ fn parser_reads_the_writer_layout() {
         }
         other => panic!("{other:?}"),
     }
-    let found = gguf::mapping::mlp_tensors(
+    let found = gguf::mapping::targets(
         &file,
         &LayerSelection::List(vec![1]),
         &[Projection::Down, Projection::Gate],
@@ -522,9 +253,9 @@ fn layout_errors_name_the_tensor_and_its_type() {
     let tensors = [
         T {
             name: "blk.0.ffn_gate.weight".into(),
-            ne: vec![32, 2],
-            ty: Q4_0,
-            data: vec![0; 2 * 18],
+            ne: vec![256, 2],
+            ty: Q3_K,
+            data: vec![0; 2 * 110],
         },
         T {
             // 512 elements: whole Q8_0 blocks overall, but rows of 16 split a block.
@@ -538,7 +269,7 @@ fn layout_errors_name_the_tensor_and_its_type() {
     let err = gguf::mapping::layout(file.tensor("blk.0.ffn_gate.weight").unwrap()).unwrap_err();
     let text = err.to_string();
     assert!(
-        text.contains("unsupported_quant_type") && text.contains("Q4_0"),
+        text.contains("unsupported_quant_type") && text.contains("Q3_K"),
         "{text}"
     );
     assert!(text.contains("blk.0.ffn_gate.weight"), "{text}");
@@ -1104,14 +835,14 @@ fn usage_errors_are_explicit() {
     assert_eq!(code, 2, "{env}");
     assert!(std::fs::read(&f.model).unwrap() == f.original);
     assert!(!f.files().iter().any(|n| n.contains(".bak-")));
-    // Unsupported type on a target.
+    // Unsupported type on a target (Q3_K: 110 bytes per block of 256).
     let bytes = gguf_bytes(
         &metadata(),
         &[T {
             name: "blk.0.ffn_gate.weight".into(),
             ne: vec![HIDDEN as u64, 2],
-            ty: Q4_0,
-            data: vec![0; 2 * HIDDEN / 32 * 18],
+            ty: Q3_K,
+            data: vec![0; 2 * HIDDEN / 256 * 110],
         }],
     );
     let q4 = Fixture::new(bytes);
@@ -1120,7 +851,7 @@ fn usage_errors_are_explicit() {
     let (code, env) = apply_gguf_cli(&q4, &p, &[]);
     assert_eq!(code, 2, "{env}");
     assert_eq!(env["error"]["kind"], "unsupported_quant_type");
-    assert!(env["error"]["message"].as_str().unwrap().contains("Q4_0"));
+    assert!(env["error"]["message"].as_str().unwrap().contains("Q3_K"));
 }
 
 #[test]
@@ -1405,23 +1136,35 @@ fn injected_failure_rolls_back_and_the_marker_lives_only_during_the_write() {
 }
 
 #[test]
-fn project_out_is_refused_on_a_gguf() {
+fn project_out_without_its_read_direction_fails_before_any_write() {
+    // project_out is supported on a GGUF since the residual writers are (tests/p15); one
+    // that skipped validation and lacks its b tensor still never touches the file.
     let f = Fixture::new(mlp_gguf([Q4_K, Q8_0, Q6_K], 1, 28));
     f.vector("v.json", &hidden_vector(1, 1.0));
-    let patch = validated(f.dir.path(), OperationKind::ProjectOut);
+    let mut patch = validated(f.dir.path(), OperationKind::ProjectOut);
+    patch.operations[0].projections = vec![Projection::Down];
+    patch.operations[0].axis = Axis::Cols;
     let result = gguf::apply_gguf(
         &f.model,
         &patch,
         &GgufOptions::default(),
         false,
         Arc::new(AtomicBool::new(false)),
-        &mut |_, _| unreachable!("refused before running"),
+        &mut |backend, guard| apply_patch(&patch, backend, guard, false),
     );
     match result {
-        Err(e @ GgufApplyError::Usage(_)) => assert!(e.to_string().contains("project_out")),
+        Err(GgufApplyError::Patch(PatchError::ExecutionFailed {
+            cause,
+            left_modified,
+            ..
+        })) => {
+            assert!(cause.contains("project_out"), "{cause}");
+            assert!(!left_modified);
+        }
         other => panic!("{other:?}"),
     }
     assert!(std::fs::read(&f.model).unwrap() == f.original);
+    assert!(!gguf::marker_path(&f.model).exists());
 }
 
 #[test]
