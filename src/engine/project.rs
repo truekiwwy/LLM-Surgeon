@@ -385,6 +385,37 @@ where
         .reduce(ShiftStats::default, merge)
 }
 
+/// Fused experts `[E, out, in]` (a MoE `experts.down_proj`): [`project_out_subspace`] on
+/// each expert's `[out, in]` matrix, in expert order. Every expert has the same shape,
+/// dtype and directions, so the checks that pass for expert 0 pass for all: a refusal
+/// happens before the first write.
+pub fn project_out_experts(
+    tensor_bytes: &mut [u8],
+    dtype: DType,
+    shape: &[usize],
+    p: &SubspaceProjection<'_>,
+) -> Result<ShiftStats> {
+    let &[experts, rows, cols] = shape else {
+        return Err(EngineError::InvalidShape {
+            shape: shape.to_vec(),
+            reason: "experts fusionnés : tenseur 3D [experts, out, in] attendu".into(),
+        });
+    };
+    if experts == 0 || !tensor_bytes.len().is_multiple_of(experts) {
+        return Err(EngineError::InvalidShape {
+            shape: shape.to_vec(),
+            reason: "taille non divisible par le nombre d'experts".into(),
+        });
+    }
+    let per_expert = tensor_bytes.len() / experts;
+    tensor_bytes
+        .chunks_mut(per_expert)
+        .try_fold(ShiftStats::default(), |total, expert| {
+            let stats = project_out_subspace(expert, dtype.clone(), &[rows, cols], p)?;
+            Ok(merge(total, stats))
+        })
+}
+
 fn merge(x: ShiftStats, y: ShiftStats) -> ShiftStats {
     ShiftStats {
         elements_modified: x.elements_modified + y.elements_modified,

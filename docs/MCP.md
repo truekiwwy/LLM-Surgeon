@@ -46,7 +46,7 @@ Claude Code, en plugin : le dossier [`plugin/`](../plugin) déclare le même ser
 | Outil | Rôle | Annotations |
 | --- | --- | --- |
 | `surgeon_check` | Budget RAM/VRAM du modèle | lecture seule |
-| `surgeon_inspect` | Couches et matrices MLP (et `o_proj`, `embed_tokens` sur demande), statistiques en option, `max_tensors` (défaut 500) | lecture seule |
+| `surgeon_inspect` | Couches et matrices MLP (et `o_proj`, `embed_tokens` sur demande), statistiques en option, `max_tensors` (défaut 500), architecture détectée (`data.arch`), `arch_spec` | lecture seule |
 | `surgeon_apply` | Applique un patch en place (`dry_run` pour vérifier d'abord) ; `gguf: true` pour un GGUF quantifié | destructif |
 | `surgeon_eval` | Non-régression (boucles, attentes) et export GGUF conditionnel | écrit le GGUF |
 | `surgeon_extract` | Vecteur de direction depuis une couche Qwen2 (Rust pur, CPU) | écrit le `.safetensors`, idempotent |
@@ -256,6 +256,26 @@ vérifier, et renvoie le patch dans `data.patch` (écrit dans `out` seulement si
 validé par `validate_patch` avant). Les couches au-delà de la lecture sont exclues avec un
 avertissement ; `max_forwards` est vérifié avant tout calcul. Il ne mesure pas les effets
 secondaires : enchaîner avec `surgeon_bench` sur une copie.
+
+## Architectures (`arch_spec`, `accept_approximate`)
+
+Les cibles et leur orientation viennent de l'architecture du modèle : `model_type` de
+`config.json`, `general.architecture` d'un GGUF, ou une spécification JSON (`arch_spec`,
+chemin dans un dossier autorisé, schéma : `surgeon schema --kind arch`). `surgeon_inspect`
+et `surgeon_apply` la rapportent dans `data.arch` (`id`, `source`, `roles`, `writer_biases`,
+`tied_embeddings`, `exactness`). Pour un `project_out` :
+
+| Exactitude | Effet |
+| --- | --- |
+| `exact` (pré-norme : Llama, Mistral, Qwen2/3, MoE, Phi-3, Falcon, Command-R, DeepSeek) | appliqué |
+| `approximate` (post-normes de Gemma 2/3, biais d'écrivains du modèle) | refusé, `error.kind = "approximate_ablation"`, sauf `accept_approximate: true` (avertissement, `data.arch.accepted_approximate`) |
+| `unsupported` (écrivains non projetables déclarés par une spécification) | refusé, `error.kind = "unsupported_architecture"` |
+
+Une spécification invalide donne `error.kind = "invalid_arch_spec"`. `add` / `subtract` ne
+sont jamais filtrés. Les experts MoE (par expert, fusionnés `[E, hidden, inter]`, partagés)
+sont des cibles de `down_proj` ; le routeur ne l'est jamais. Extraction, génération et
+`surgeon_bench` en mode `dump` / `refusal` ont un forward natif pour Qwen2, Llama/Mistral et
+Qwen3 seulement (`unsupported_architecture` sinon).
 
 ## GGUF quantifié (`surgeon_apply` avec `gguf: true`)
 

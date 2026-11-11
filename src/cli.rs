@@ -64,7 +64,7 @@ pub enum Commands {
     Apply(ApplyArgs),
     /// Evaluate a model on prompts.
     Eval(EvalArgs),
-    /// Extract a steering vector from a Qwen2 layer (pure Rust, CPU).
+    /// Extract a steering vector from a Qwen2, Llama/Mistral or Qwen3 layer (pure Rust, CPU).
     Extract(ExtractCommand),
     /// Terminal dashboard: MLP weight inspector and steering vector viewer.
     Tui(TuiArgs),
@@ -82,6 +82,34 @@ pub enum Commands {
     Lora(crate::lora::cli_args::LoraArgs),
     /// Extension points of the engine and their registered implementations.
     Plugins(PluginsArgs),
+    /// Built-in model architectures, and the one detected for a model.
+    Arch(ArchArgs),
+}
+
+/// `surgeon arch`: the architecture descriptions (`src/arch`). Not exposed over MCP:
+/// `surgeon_inspect` reports the detected architecture.
+#[derive(Debug, Clone, Args)]
+pub struct ArchArgs {
+    #[command(subcommand)]
+    pub command: ArchCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum ArchCommand {
+    /// Built-in architectures: model types, GGUF names, project_out exactness, forward.
+    List,
+    /// The architecture of a model (config.json, GGUF metadata or --arch-spec) and the
+    /// roles of its tensors.
+    Detect(ArchDetectArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ArchDetectArgs {
+    #[arg(long)]
+    pub model: PathBuf,
+    /// Architecture spec (JSON, `surgeon schema --kind arch`) instead of detection.
+    #[arg(long)]
+    pub arch_spec: Option<PathBuf>,
 }
 
 /// `surgeon plugins`: always exit code 0. Not exposed over MCP.
@@ -164,7 +192,7 @@ fn method_ids() -> PossibleValuesParser {
 /// error), 70 internal.
 #[derive(Debug, Clone, Args)]
 pub struct AutotuneArgs {
-    /// Qwen2 directory (config.json, tokenizer.json, *.safetensors).
+    /// Qwen2, Llama/Mistral or Qwen3 directory (config.json, tokenizer.json, *.safetensors).
     #[arg(long)]
     pub model: PathBuf,
     /// Direction file from `surgeon extract` (tensor `direction` and its metadata).
@@ -238,9 +266,9 @@ pub enum BenchCommand {
     Ppl(BenchPplArgs),
     /// Exact-match Pass@1 on a GSM8K / MATH style dataset (greedy; llama.cpp or native).
     Eval(BenchEvalArgs),
-    /// Write the logits of a Qwen2 model on prompts (pure Rust, CPU).
+    /// Write the logits of a Qwen2, Llama/Mistral or Qwen3 model on prompts (pure Rust, CPU).
     Dump(BenchDumpArgs),
-    /// Refusal rate of a Qwen2 model on prompts (greedy, pure Rust, CPU).
+    /// Refusal rate of a Qwen2, Llama/Mistral or Qwen3 model on prompts (greedy, pure Rust, CPU).
     Refusal(BenchRefusalArgs),
     /// Sample the answers of a `bench refusal` run for human labelling.
     JudgeSample(BenchJudgeSampleArgs),
@@ -327,7 +355,7 @@ pub struct BenchEvalArgs {
     /// JSON array (or JSONL) of {question|problem, answer|solution, id?}.
     #[arg(long)]
     pub dataset: PathBuf,
-    /// Generator: llama.cpp on a GGUF, or pure Rust on a Qwen2 SafeTensors directory.
+    /// Generator: llama.cpp on a GGUF, or pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors directory.
     #[arg(long, value_enum, default_value_t = crate::bench::score::Backend::Llama)]
     pub backend: crate::bench::score::Backend,
     /// Reference model on the same questions (paired comparison).
@@ -358,7 +386,7 @@ pub struct BenchEvalArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct BenchDumpArgs {
-    /// Qwen2 directory (config.json, tokenizer.json, *.safetensors).
+    /// Qwen2, Llama/Mistral or Qwen3 directory (config.json, tokenizer.json, *.safetensors).
     #[arg(long)]
     pub model: PathBuf,
     /// JSON array of strings or of {"text": ...}, JSONL, or plain text.
@@ -384,7 +412,7 @@ pub struct BenchDumpArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct BenchRefusalArgs {
-    /// Qwen2 directory (config.json, tokenizer.json, *.safetensors).
+    /// Qwen2, Llama/Mistral or Qwen3 directory (config.json, tokenizer.json, *.safetensors).
     #[arg(long)]
     pub model: PathBuf,
     /// JSON array of strings or of {"text": ...}, JSONL, or plain text.
@@ -519,6 +547,9 @@ pub struct InspectArgs {
     pub projections: Vec<Projection>,
     #[arg(long)]
     pub show_stats: bool,
+    /// Architecture spec (JSON, `surgeon schema --kind arch`) instead of detection.
+    #[arg(long)]
+    pub arch_spec: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -628,6 +659,8 @@ pub enum SchemaKind {
     Tools,
     /// JSON Schema (draft-07) of the .surgery header.
     Surgery,
+    /// JSON Schema (draft-07) of an architecture spec (--arch-spec).
+    Arch,
 }
 
 #[derive(Debug, Clone, Args)]

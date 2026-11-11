@@ -13,14 +13,14 @@
 //! ```text
 //! error <- every module
 //! config -> error ; weights -> config, engine::ReadOnlyModel, hardware::compute_model_size
-//! hooked_qwen2 -> config, weights ; prompts -> eval::load_prompts, tokenizers
+//! decoder -> config, weights ; forward -> decoder ; prompts -> eval::load_prompts, tokenizers
 //! capture -> error ; stats -> error ; output -> safetensors (re-read check)
 //! method (MethodOptions, holdout_mask, compute) -> svd, leace
 //! svd -> linalg::gram (contrastive PCA on paired deltas)
 //! leace -> linalg::gram (Σ_λ^p y through the thin SVD of X̃/√n), svd::dot
 //! mod (run_extraction*) -> every module above, plugin::ExtractionMethod
 //! plugin::Builtin (mean_diff, svd, leace) -> stats::mean_diff_direction, method::compute
-//! consumers: patch::autotune (HookedQwen2, weights, prompts), bench::dump (forward_logits)
+//! consumers: patch::autotune (forward::build, weights, prompts), bench::dump (forward_logits)
 //! ```
 //!
 //! Tensors read for target layer L (nothing else, never `lm_head` nor `model.norm`):
@@ -44,10 +44,10 @@
 //!      -> config::load_config -> SafetensorsDir::open (engine maps)
 //!      -> weights::check_tensors -> plan_memory -> choose_dtype (BudgetPolicy, HardwareProbe)
 //!      -> prompts::load_tokenizer -> tokenize -> weights::load_tensors (candle)
-//!      -> HookedQwen2::from_tensors -> forward_capture per prompt -> capture::pool
+//!      -> forward::build (ResidualForward) -> forward_capture per prompt -> capture::pool
 //!      -> method.extract(ctx, ActivationSet) -> check_direction -> stats::separation_along
 //!      -> output::encode (+ encode_tensors per sidecar) -> write_pair_atomic | write_files_atomic
-//! autotune (patch::autotune) -> required_tensors, load_tensors, HookedQwen2::from_tensors
+//! autotune (patch::autotune) -> required_tensors, load_tensors, forward::build
 //!   per probe, forward_capture, pool ; engine::apply_vector_shift on the stored bytes
 //! ```
 //!
@@ -70,9 +70,10 @@
 
 mod capture;
 mod config;
+mod decoder;
 mod error;
+pub mod forward;
 pub mod generate;
-mod hooked_qwen2;
 mod leace;
 mod method;
 mod output;
@@ -93,9 +94,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use capture::{pool, Pooling};
-pub use config::{load_config, parse_config, Qwen2Config};
+pub use config::{
+    load_config, parse_config, DecoderConfig, Llama3Scaling, Qwen2Config, Variant,
+    SUPPORTED_MODEL_TYPES,
+};
+pub use decoder::{HookedDecoder, HookedQwen2, KvCache, Site};
 pub use error::{ExtractError, Result};
-pub use hooked_qwen2::{HookedQwen2, Site};
 pub use leace::{cross_cov_norm, erased_stats, fit as leace_fit, LeaceDiagnostics, LeaceFit};
 pub(crate) use method::compute_subspace as compute_method;
 pub use method::{
@@ -478,7 +482,13 @@ fn run_pipeline(
             total_tensors: total,
         })
     })?;
-    let model = HookedQwen2::from_tensors(tensors, &cfg, req.layer, dtype, &device)?;
+    let model = forward::build(
+        &cfg,
+        tensors,
+        forward::Depth::UpTo(req.layer),
+        dtype,
+        &device,
+    )?;
 
     let mut activations = |set: PromptSet, ids: &[Vec<u32>]| -> Result<Vec<Vec<f64>>> {
         let mut pooled = Vec::with_capacity(ids.len());

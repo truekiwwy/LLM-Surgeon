@@ -16,11 +16,12 @@
 //!
 //! app::core_apply (--gguf) -> backend::apply_gguf
 //!   -> parse::is_split_name, marker_path, kernel::map_read, parse::parse
-//!   -> preflight -> mapping::{targets, layout, tied_embeddings},
+//!   -> arch::detect_gguf (or --arch-spec) -> arch::Report -> arch::gate (approximate / unsupported)
+//!   -> preflight -> mapping::{targets_by, layout_as, tied_embeddings},
 //!                   engine::load_direction_{vector,matrix}, throughput (timed sample)
 //!   -> check_space (kernel::available_space) -> BackupGuard::create -> write_marker
 //!   -> kernel::map_write -> run(apply_patch) -> GgufBackend (PatchBackend):
-//!        resolve_targets -> mapping::targets
+//!        resolve_targets -> mapping::targets_by (ArchSpec GGUF names)
 //!        shift_tensor -> write_tensor (kernel::ChunkedPatcher::run) -> patch_chunk
 //!          (rayon, rows) -> verify::patch_row -> quant::{dequantize_row, requantize_row}
 //!        project_out_subspace -> project::Projector::plan (read-only: read_r, sweep x N)

@@ -343,28 +343,28 @@ fn load_from_a_directory_and_refuse_other_architectures() {
     let a = run(&mut loaded, &request(4, &[], None));
     let b = run(&mut direct, &request(4, &[], None));
     assert_eq!((a.tokens, a.logits), (b.tokens, b.logits));
-
-    // Another architecture is an invalid argument naming it, from a directory...
+    // An architecture without a native forward (Qwen2, Llama, Mistral and Qwen3 have one) is
+    // an invalid argument naming it, from a directory...
     std::fs::write(
         dir.path().join("config.json"),
-        config.replace("\"qwen2\"", "\"llama\""),
+        config.replace("\"qwen2\"", "\"gemma2\""),
     )
     .unwrap();
     let err = Qwen2State::load(dir.path(), DTypeChoice::F32, &Probe, 64)
         .err()
         .unwrap();
     assert!(
-        matches!(&err, ExtractError::InvalidArgument(m) if m.contains("llama")),
+        matches!(&err, ExtractError::InvalidArgument(m) if m.contains("gemma2")),
         "{err}"
     );
     // ... and from an in-memory config.
     let mut other = c.clone();
-    other.model_type = "qwen3".into();
+    other.model_type = "qwen3_moe".into();
     let err = Qwen2State::from_tensors(weights(&c, 1), &other, DType::F32)
         .err()
         .unwrap();
     assert!(
-        matches!(&err, ExtractError::InvalidArgument(m) if m.contains("qwen3")),
+        matches!(&err, ExtractError::InvalidArgument(m) if m.contains("qwen3_moe")),
         "{err}"
     );
 }

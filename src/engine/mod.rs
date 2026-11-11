@@ -33,7 +33,8 @@
 //! apply_vector_shift      -> ShiftPlan::new (validation) -> ShiftPlan::run
 //!                            -> kernel::shift_rows (rayon, SIMD level) -> kernel::simd
 //! load_direction_vector   -> ReadOnlyModel::open | serde_json, decode_f32
-//! find_mlp_tensors        -> parse_mlp, LayerSpec::contains
+//! find_by_roles           -> arch::ArchSpec::role_of, LayerSpec::contains
+//! find_mlp_tensors        -> find_by_roles (arch::legacy)
 //! ```
 //!
 //! Axis per projection, for Llama-style weights stored `[out_features, in_features]`
@@ -60,13 +61,13 @@ pub use mmap_file::{
     WritableModel,
 };
 pub use project::{
-    accumulate_r, local_deltas, project_out_embedding, project_out_subspace,
+    accumulate_r, local_deltas, project_out_embedding, project_out_experts, project_out_subspace,
     project_out_subspace_embedding, project_out_tensor, project_rows_inplace, row_deltas,
     SubspaceProjection, DEFAULT_MAX_RANK,
 };
 pub use selector::{
-    find_attn_out_tensors, find_embed_tokens, find_mlp_tensors, is_embed_tokens, parse_layer_index,
-    LayerSpec, MlpProj,
+    find_attn_out_tensors, find_by_roles, find_embed_tokens, find_mlp_tensors, is_embed_tokens,
+    parse_layer_index, LayerSpec, MlpProj,
 };
 pub use shift::{apply_vector_shift, apply_vector_shift_with, BroadcastAxis, ShiftOp, ShiftStats};
 

@@ -26,6 +26,7 @@ use serde::Serialize;
 
 use super::parse::{GgufFile, TensorEntry};
 use super::quant::Codec;
+use crate::arch::{ArchSpec, Format, Layout as ArchLayout, Role, TensorRole};
 use crate::patch::{LayerSelection, Projection};
 
 /// Name of the GGUF input embeddings.
@@ -60,42 +61,25 @@ pub fn tensor_name(layer: usize, projection: Projection) -> String {
     format!("blk.{layer}.ffn_{proj}.weight")
 }
 
-/// A target name -> `(layer, projection)`, no layer for `token_embd.weight`.
-pub fn parse_name(name: &str) -> Option<(Option<usize>, Projection)> {
-    if name == TOKEN_EMBD {
-        return Some((None, Projection::EmbedTokens));
-    }
-    let rest = name.strip_prefix("blk.")?;
-    let (layer, rest) = rest.split_once('.')?;
-    let projection = match rest {
-        "ffn_gate.weight" => Projection::Gate,
-        "ffn_up.weight" => Projection::Up,
-        "ffn_down.weight" => Projection::Down,
-        "attn_output.weight" => Projection::AttnOut,
-        _ => return None,
-    };
-    Some((Some(layer.parse().ok()?), projection))
-}
-
 /// How a target meets the residual stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Orientation {
     /// gate, up: read the residual stream through their columns (`ne0 = hidden`).
     Reader,
-    /// down, o_proj: write it through their rows (`ne1 = hidden`); `project_out` couples
-    /// the whole matrix.
+    /// down, o_proj, experts: write it through their rows (`ne1 = hidden`); `project_out`
+    /// couples the whole matrix (each expert's, for fused experts).
     Writer,
     /// token_embd: one residual vector per row (`ne0 = hidden`); `project_out` row by row.
     WriterLocal,
 }
 
 impl Orientation {
-    pub fn of(projection: Projection) -> Self {
-        match projection {
-            Projection::Gate | Projection::Up => Orientation::Reader,
-            Projection::Down | Projection::AttnOut => Orientation::Writer,
-            Projection::EmbedTokens => Orientation::WriterLocal,
+    pub fn of(role: Role) -> Self {
+        match role {
+            Role::Embed => Orientation::WriterLocal,
+            Role::AttnOut | Role::MlpOut => Orientation::Writer,
+            Role::MlpGate | Role::MlpUp | Role::Router => Orientation::Reader,
         }
     }
 }
@@ -122,42 +106,96 @@ fn selected(layers: &LayerSelection, layer: Option<usize>) -> bool {
     }
 }
 
-/// Patch targets of the file matching the selection (every projection when
-/// `projections` is empty), sorted by layer (the embeddings first) then projection.
+/// The patch projection of a role (`None`: the router, never a target).
+fn projection_of(role: Role) -> Option<Projection> {
+    [
+        Projection::Gate,
+        Projection::Up,
+        Projection::Down,
+        Projection::AttnOut,
+        Projection::EmbedTokens,
+    ]
+    .into_iter()
+    .find(|p| p.role() == role)
+}
+
+/// Patch targets of the file by the roles of `spec`, matching the selection (every
+/// projection when `projections` is empty), sorted by layer (the embeddings first),
+/// projection, expert, name.
+pub fn targets_by<'f>(
+    spec: &ArchSpec,
+    file: &'f GgufFile,
+    layers: &LayerSelection,
+    projections: &[Projection],
+) -> Vec<(TensorRole, Projection, &'f TensorEntry)> {
+    let mut found: Vec<_> = file
+        .tensors
+        .iter()
+        .filter_map(|t| {
+            let role = spec.role_of(&t.name, Format::Gguf)?;
+            Some((role, projection_of(role.role)?, t))
+        })
+        .filter(|(r, p, _)| {
+            selected(layers, r.layer) && (projections.is_empty() || projections.contains(p))
+        })
+        .collect();
+    found.sort_by(|(ra, pa, a), (rb, pb, b)| {
+        (ra.layer, *pa, ra.expert, &a.name).cmp(&(rb.layer, *pb, rb.expert, &b.name))
+    });
+    found
+}
+
+/// [`targets_by`] with the default naming (`arch::legacy`), as before architectures were
+/// described: `(layer, projection, tensor)`.
 pub fn targets<'f>(
     file: &'f GgufFile,
     layers: &LayerSelection,
     projections: &[Projection],
 ) -> Vec<(Option<usize>, Projection, &'f TensorEntry)> {
-    let mut found: Vec<_> = file
-        .tensors
-        .iter()
-        .filter_map(|t| parse_name(&t.name).map(|(l, p)| (l, p, t)))
-        .filter(|(l, p, _)| {
-            selected(layers, *l) && (projections.is_empty() || projections.contains(p))
-        })
-        .collect();
-    found.sort_by_key(|(l, p, _)| (*l, *p));
-    found
+    targets_by(crate::arch::legacy(), file, layers, projections)
+        .into_iter()
+        .map(|(r, p, t)| (r.layer, p, t))
+        .collect()
 }
 
-/// How a target is laid out and decoded.
+/// How a target is laid out and decoded: `experts` stacked `[rows, cols]` matrices (1 for a
+/// plain matrix; fused `ffn_down_exps` `ne = [inter, hidden, n_expert]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Layout {
     pub codec: Codec,
     pub rows: usize,
     pub cols: usize,
+    #[serde(skip)]
+    pub experts: usize,
 }
 
 impl Layout {
     pub fn row_bytes(&self) -> usize {
         self.codec.row_bytes(self.cols)
     }
+
+    /// Bytes of one expert's matrix (the whole tensor when `experts == 1`).
+    pub fn matrix_bytes(&self) -> usize {
+        self.rows * self.row_bytes()
+    }
+
+    /// The `[rows, cols]` matrix of one expert.
+    pub fn matrix(&self) -> Layout {
+        Layout {
+            experts: 1,
+            ..*self
+        }
+    }
 }
 
 /// Checks that a target can be patched: 2D (trailing dimensions of 1 allowed), patchable
 /// type, whole blocks per row.
 pub fn layout(t: &TensorEntry) -> Result<Layout, MappingError> {
+    layout_as(t, ArchLayout::OutIn)
+}
+
+/// [`layout`] for a role layout: `experts_out_in` also takes a 3D `[cols, rows, experts]`.
+pub fn layout_as(t: &TensorEntry, role_layout: ArchLayout) -> Result<Layout, MappingError> {
     let codec =
         Codec::from_type(t.ggml_type).ok_or_else(|| MappingError::UnsupportedQuantType {
             tensor: t.name.clone(),
@@ -167,8 +205,11 @@ pub fn layout(t: &TensorEntry) -> Result<Layout, MappingError> {
         tensor: t.name.clone(),
         ne: t.ne.clone(),
     };
-    let (cols, rows) = match t.ne.as_slice() {
-        [cols, rows, rest @ ..] if rest.iter().all(|&d| d == 1) => (*cols, *rows),
+    let (cols, rows, experts) = match (t.ne.as_slice(), role_layout) {
+        ([cols, rows, experts], ArchLayout::ExpertsOutIn) if *experts > 0 => {
+            (*cols, *rows, *experts)
+        }
+        ([cols, rows, rest @ ..], _) if rest.iter().all(|&d| d == 1) => (*cols, *rows, 1),
         _ => return Err(not_matrix()),
     };
     let block = codec.block_elems();
@@ -183,5 +224,6 @@ pub fn layout(t: &TensorEntry) -> Result<Layout, MappingError> {
         codec,
         rows: usize::try_from(rows).map_err(|_| not_matrix())?,
         cols: usize::try_from(cols).map_err(|_| not_matrix())?,
+        experts: usize::try_from(experts).map_err(|_| not_matrix())?,
     })
 }

@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use super::backend::GgufRun;
 use super::quant::Requant;
 use super::{mapping, parse};
+use crate::arch::{self, ArchSpec, Format};
 use crate::kernel;
 use crate::patch::{LayerSelection, Projection};
 use crate::ui::{self, Ui};
@@ -123,6 +124,7 @@ pub fn inspect(
     layers: &LayerSelection,
     projections: &[Projection],
     show_stats: bool,
+    arch_spec: Option<&ArchSpec>,
     ui: &Ui,
 ) -> Result<(Value, String), String> {
     let fail = |e: &dyn std::fmt::Display| format!("{} : {e}", model.display());
@@ -135,20 +137,37 @@ pub fn inspect(
         false => projections,
     };
     let tied = mapping::tied_embeddings(&parsed);
+    let resolution = match arch_spec {
+        Some(spec) => arch::Resolution {
+            spec: spec.clone(),
+            source: arch::Source::ArchSpecFile,
+            declared: parsed.architecture().map(str::to_owned),
+        },
+        None => arch::detect_gguf(parsed.architecture()),
+    };
+    let report = arch::Report::new(
+        &resolution,
+        parsed.tensors.iter().map(|t| t.name.as_str()),
+        Format::Gguf,
+        Some(tied),
+    );
     let mut rows = Vec::new();
     let mut tensors = Vec::new();
-    for (layer, projection, t) in mapping::targets(&parsed, layers, projections) {
+    for (role, projection, t) in mapping::targets_by(&resolution.spec, &parsed, layers, projections)
+    {
         // [rows, cols] like a SafeTensors [out, in] shape.
         let shape: Vec<u64> = t.ne.iter().rev().copied().collect();
-        let orientation = mapping::Orientation::of(projection);
-        let reason = match mapping::layout(t) {
+        let orientation = mapping::Orientation::of(role.role);
+        let layout = mapping::layout_as(t, role.layout);
+        let reason = match &layout {
             Err(e) => Some(e.to_string()),
-            Ok(_) if tied && t.name == mapping::TOKEN_EMBD => {
+            Ok(_) if tied && role.role == arch::Role::Embed => {
                 Some("lié à la tête de sortie : --allow-tied-embedding".to_owned())
             }
             Ok(_) => None,
         };
-        let patchable = mapping::layout(t).is_ok();
+        let patchable = layout.is_ok();
+        let layer = role.layer;
         rows.push(vec![
             ui::accent(ui, &layer.map_or("—".to_owned(), |l| l.to_string())),
             ui::metric(ui, short_name(projection)),
@@ -187,6 +206,11 @@ pub fn inspect(
         parsed.version,
         parsed.architecture().unwrap_or("?"),
     ));
+    human.push_str(&format!(
+        "{} {}\n",
+        ui::badge(ui, "ARCH"),
+        ui::text(ui, &report.summary())
+    ));
     if show_stats {
         human.push_str(&ui::dim(ui, "statistiques non disponibles pour un GGUF\n"));
     }
@@ -209,6 +233,7 @@ pub fn inspect(
         "tensor_count": parsed.tensors.len(),
         "tied_embeddings": tied,
         "tensors": tensors,
+        "arch": report,
     });
     Ok((data, human))
 }

@@ -7,8 +7,8 @@ use memmap2::{Mmap, MmapMut, MmapOptions};
 use super::error::{EngineError, Result};
 use super::index::{parse_index, ModelIndex, TensorInfo};
 use super::project::{
-    project_out_embedding, project_out_subspace, project_out_subspace_embedding,
-    project_out_tensor, SubspaceProjection,
+    project_out_embedding, project_out_experts, project_out_subspace,
+    project_out_subspace_embedding, project_out_tensor, SubspaceProjection,
 };
 use super::shift::{decode_f32, BroadcastAxis, ShiftOp, ShiftPlan, ShiftStats};
 use crate::kernel::{ChunkFailure, ChunkedPatcher, IoConfig, IoCounters, KernelConfig, OsHints};
@@ -240,6 +240,17 @@ impl WritableModel {
             true => project_out_subspace_embedding(bytes, info.dtype.clone(), &info.shape, p),
             false => project_out_subspace(bytes, info.dtype.clone(), &info.shape, p),
         }
+    }
+
+    /// Fused experts `[E, out, in]`, see [`project_out_experts`].
+    pub fn project_out_experts(
+        &mut self,
+        name: &str,
+        p: &SubspaceProjection<'_>,
+    ) -> Result<ShiftStats> {
+        let info = self.index.get(name)?;
+        let bytes = &mut self.mmap[info.byte_start..info.byte_end];
+        project_out_experts(bytes, info.dtype.clone(), &info.shape, p)
     }
 
     pub fn flush(&self) -> Result<()> {

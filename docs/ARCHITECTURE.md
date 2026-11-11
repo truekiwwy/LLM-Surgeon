@@ -28,13 +28,16 @@ enveloppe JSON (`--json`, résultats MCP).
                   app::core_* -> Outcome -> envelope_of (JSON partagé)
                                     |
  ----------------------------- Surgery Engine (bibliothèque) ------------------------------
-  extract  forward Qwen2 (candle, CPU) -> plugin::ExtractionMethod <- plugin::Registry
+  arch     ArchSpec : rôles des tenseurs par architecture (SafeTensors, GGUF), détection,
+           exactitude de project_out ; lu par engine::selector, patch, patch::gguf, app
+  extract  forward::ResidualForward (décodeur Qwen2 / Llama / Mistral / Qwen3, candle, CPU)
+           -> plugin::ExtractionMethod <- plugin::Registry
            (mean_diff, svd, leace intégrées ; méthodes tierces enregistrées)
   patch    patch.json, validation, sauvegarde, rollback, autotune ; patch::gguf (GGUF en place)
   engine   SafeTensors mmap, décalages de lignes ; kernel : noyaux SIMD, prefetch, E/S
   surgery  .surgery v1, SVD randomisée ; lora : fusion / extraction PEFT
   bench    KL et top-k entre dumps, perplexité (llama-perplexity), Pass@1 et taux de refus
-           (llama.cpp ou générateur natif Qwen2), juge LLM optionnel et sa calibration ;
+           (llama.cpp ou générateur natif), juge LLM optionnel et sa calibration ;
            eval : llama.cpp
   hardware budget RAM/VRAM ; linalg : QR, Cholesky, Jacobi, Gram
 ```
@@ -53,7 +56,8 @@ comptées entre fichiers de modules différents) : `app -> patch` 64, `mcp -> ap
 | Méthodes d'extraction | `plugin`, `extract` | Direction (vecteur unitaire) depuis les activations poolées de deux ensembles de prompts | **Oui** (API `v0`, instable) | `impl ExtractionMethod`, `Registry::register`, `extract::run_extraction_plugin` ; voir [docs/PLUGINS.md](PLUGINS.md) |
 | CLI front-end | `cli`, `app`, `ui`, `tui` | Commandes, rendu, codes de sortie | Non | `--method` accepte les identifiants du registre intégré |
 | Agent extension (MCP) | `mcp` | 9 outils typés, sandbox de chemins | Non | Schémas figés, vérifiés par `tests/compat.rs` ; `method` accepte les identifiants du registre intégré |
-| Forward Qwen2 et capture | `extract` | Activations d'une couche (site, pooling) | Non : interne, non remplaçable par un tiers à ce jour | aucun |
+| Architectures | `arch` | Rôles des tenseurs (écrivains, lecteurs, routeur), orientation, noms GGUF, détection, exactitude de `project_out` | **Oui**, par données : une `ArchSpec` JSON (`--arch-spec`, `surgeon schema --kind arch`) | Fichier JSON validé par schéma ; les intégrées sont dans `src/arch/builtin.rs` |
+| Forward et capture | `extract` | Activations d'une couche (site, pooling), logits, génération avec cache KV et injection, derrière le trait `ResidualForward` (Qwen2, Llama/Mistral, Qwen3) | Non : interne, une nouvelle architecture est une implémentation du trait vérifiée contre candle | aucun |
 | Moteur mmap et décalages | `engine` | Lecture et écriture en place des SafeTensors | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Noyaux SIMD et prefetch | `kernel` | AVX-512, AVX2, NEON ou scalaire, choisis à l'exécution par détection du CPU (`SURGEON_KERNEL` pour forcer) ; compilés dans le binaire | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Patch SafeTensors | `patch` | `patch.json` (`add`, `subtract`, `project_out` ; projections MLP, `o_proj`, `embed_tokens`), validation, sauvegarde, rollback, détachement de `lm_head` (`patch::untie`) | Non : interne, non remplaçable par un tiers à ce jour | Feuille de route |

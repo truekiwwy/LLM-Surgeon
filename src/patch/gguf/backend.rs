@@ -32,6 +32,7 @@ use super::parse::{self, GgufError, GgufFile};
 use super::project::{self, Projector, INTERRUPTED};
 use super::quant::Requant;
 use super::verify::{self, Fidelity, RowError, TensorFidelity, Written};
+use crate::arch::{self, ArchSpec, Format, Report, Resolution};
 use crate::engine::SubspaceProjection;
 use crate::kernel::{self, ChunkFailure, ChunkedPatcher, IoConfig, IoCounters, OsHints, RowDeltas};
 use crate::patch::{
@@ -57,6 +58,10 @@ pub struct GgufOptions {
     pub refine_passes: usize,
     /// `project_out`: refinement stops at this `requant_residual_fraction`, in `(0, 1]`.
     pub residual_target: f64,
+    /// Architecture from `--arch-spec` (else `general.architecture` decides).
+    pub arch_spec: Option<ArchSpec>,
+    /// Accept a `project_out` the architecture makes approximate.
+    pub accept_approximate: bool,
 }
 
 impl Default for GgufOptions {
@@ -70,6 +75,8 @@ impl Default for GgufOptions {
             allow_tied_embedding: false,
             refine_passes: project::DEFAULT_REFINE_PASSES,
             residual_target: project::DEFAULT_RESIDUAL_TARGET,
+            arch_spec: None,
+            accept_approximate: false,
         }
     }
 }
@@ -96,6 +103,10 @@ pub enum GgufApplyError {
     },
     #[error("erreur d'E/S sur {} : {message}", .path.display())]
     Io { path: PathBuf, message: String },
+    /// The architecture refuses this `project_out` (`unsupported_architecture`,
+    /// `approximate_ablation`).
+    #[error("{}", .0.message)]
+    Arch(arch::Refusal),
 }
 
 impl GgufApplyError {
@@ -112,6 +123,7 @@ impl GgufApplyError {
             GgufApplyError::InProgress { .. } => "apply_in_progress",
             GgufApplyError::NoSpace { .. } => "insufficient_resources",
             GgufApplyError::Io { .. } => "model_error",
+            GgufApplyError::Arch(refusal) => refusal.kind,
         })
     }
 
@@ -164,6 +176,7 @@ pub struct GgufBackend {
     verify: bool,
     refine_passes: usize,
     residual_target: f64,
+    spec: ArchSpec,
     cancel: Arc<AtomicBool>,
     header_sha256: [u8; 32],
     written: Vec<Written>,
@@ -185,6 +198,7 @@ impl GgufBackend {
         file: GgufFile,
         map: Mapping,
         opts: &GgufOptions,
+        spec: ArchSpec,
         cancel: Arc<AtomicBool>,
     ) -> Self {
         let data_start = file.data_start as usize;
@@ -198,6 +212,7 @@ impl GgufBackend {
             verify: opts.verify,
             refine_passes: opts.refine_passes,
             residual_target: opts.residual_target,
+            spec,
             cancel,
             header_sha256,
             written: Vec::new(),
@@ -225,9 +240,13 @@ impl GgufBackend {
             .file
             .tensor(name)
             .ok_or_else(|| backend_err(format!("tenseur introuvable : {name}")))?;
-        let layout = mapping::layout(entry).map_err(backend_err)?;
+        let role_layout = self
+            .spec
+            .role_of(name, Format::Gguf)
+            .map_or(arch::Layout::OutIn, |r| r.layout);
+        let layout = mapping::layout_as(entry, role_layout).map_err(backend_err)?;
         let start = usize::try_from(entry.start).map_err(backend_err)?;
-        let len = layout.rows * layout.row_bytes();
+        let len = layout.experts * layout.matrix_bytes();
         Ok((start..start + len, layout))
     }
 
@@ -292,7 +311,11 @@ impl GgufBackend {
 
     /// Records a tensor's fidelity, with the tied-embeddings warning when it applies.
     fn record(&mut self, mut fidelity: TensorFidelity) {
-        if fidelity.name == mapping::TOKEN_EMBD && mapping::tied_embeddings(&self.file) {
+        let embed = self
+            .spec
+            .role_of(&fidelity.name, Format::Gguf)
+            .is_some_and(|r| r.role == arch::Role::Embed);
+        if embed && mapping::tied_embeddings(&self.file) {
             fidelity.push_warning(TIED_WARNING.to_owned());
         }
         self.tensors.push(fidelity);
@@ -343,10 +366,12 @@ impl PatchBackend for GgufBackend {
         layers: &LayerSelection,
         projections: &[Projection],
     ) -> crate::patch::Result<Vec<String>> {
-        Ok(mapping::targets(&self.file, layers, projections)
-            .into_iter()
-            .map(|(_, _, t)| t.name.clone())
-            .collect())
+        Ok(
+            mapping::targets_by(&self.spec, &self.file, layers, projections)
+                .into_iter()
+                .map(|(_, _, t)| t.name.clone())
+                .collect(),
+        )
     }
 
     fn load_vector(&self, file: &Path, tensor: Option<&str>) -> crate::patch::Result<Vec<f32>> {
@@ -378,6 +403,12 @@ impl PatchBackend for GgufBackend {
             }
         };
         let (range, layout) = self.target(tensor_name)?;
+        if layout.experts > 1 {
+            return Err(backend_err(format!(
+                "{tensor_name} : experts fusionnés [experts, out, in] : seul project_out les \
+                 modifie (add/subtract n'a pas d'axe défini sur un tenseur 3D)"
+            )));
+        }
         let expected = match axis {
             Axis::Rows => layout.cols,
             Axis::Cols => layout.rows,
@@ -457,8 +488,8 @@ impl PatchBackend for GgufBackend {
         self.project_out_subspace(tensor_name, a, b, 1, alpha)
     }
 
-    /// `W ← W − α A (Bᵀ W)` (`token_embd`: each row `x ← x − α Σ (x·b_t) a_t`) on the
-    /// dequantized weights, requantized; see [`super::project`].
+    /// `W ← W − α A (Bᵀ W)` (`token_embd`: each row `x ← x − α Σ (x·b_t) a_t`; fused experts:
+    /// each expert's matrix) on the dequantized weights, requantized; see [`super::project`].
     fn project_out_subspace(
         &mut self,
         tensor_name: &str,
@@ -469,12 +500,17 @@ impl PatchBackend for GgufBackend {
     ) -> crate::patch::Result<OpStats> {
         self.cancelled()?;
         let (range, layout) = self.target(tensor_name)?;
-        let local = match mapping::parse_name(tensor_name).map(|(_, p)| Orientation::of(p)) {
+        let local = match self
+            .spec
+            .role_of(tensor_name, Format::Gguf)
+            .map(|r| Orientation::of(r.role))
+        {
             Some(Orientation::Writer) => false,
             Some(Orientation::WriterLocal) => true,
             _ => {
                 return Err(backend_err(format!(
-                    "{tensor_name} : project_out ne vise que down_proj, o_proj et embed_tokens"
+                    "{tensor_name} : project_out ne vise que les écrivains du flux résiduel \
+                     (down_proj, o_proj, embed_tokens)"
                 )))
             }
         };
@@ -492,9 +528,12 @@ impl PatchBackend for GgufBackend {
             return Err(backend_err("alpha dans [0, 1], a et b finis"));
         }
         let ggml_type = self.ggml_type(tensor_name);
+        let matrix = layout.matrix();
         if alpha == 0.0 {
-            let mut fidelity =
-                TensorFidelity::new(tensor_name, ggml_type, &layout, &unchanged(&layout));
+            let elements = unchanged(&matrix);
+            let mut total = Fidelity::default();
+            (0..layout.experts).for_each(|_| total.merge(&elements));
+            let mut fidelity = TensorFidelity::new(tensor_name, ggml_type, &matrix, &total);
             fidelity.residual_fraction = Some(1.0);
             fidelity.requant_residual_fraction = Some(0.0);
             fidelity.refine_passes = Some(0);
@@ -504,64 +543,87 @@ impl PatchBackend for GgufBackend {
         let projector = Projector {
             p: SubspaceProjection { a, b, alpha, k },
             local,
-            layout,
+            layout: matrix,
             mode: self.requant,
         };
-        let cancel = Arc::clone(&self.cancel);
-        let bytes = self
-            .map
-            .bytes()
-            .get(range.clone())
-            .ok_or_else(|| backend_err("plage hors du fichier"))?;
-        let plan = projector
-            .plan(bytes, self.refine_passes, self.residual_target, &|| {
-                cancel.load(Ordering::SeqCst)
-            })
-            .map_err(backend_err)?;
-        if plan.fidelity.nan_or_inf > 0 {
-            return Err(backend_err(format!(
-                "{} valeurs NaN/Inf produites",
-                plan.fidelity.nan_or_inf
-            )));
-        }
-        self.write_tensor(tensor_name, range, layout, |next, first_row| {
-            projector
-                .write_rows(next, first_row, &plan)
-                .map_err(backend_err)
-        })?;
-
-        let mut fidelity = TensorFidelity::new(tensor_name, ggml_type, &layout, &plan.fidelity);
-        fidelity.residual_fraction = plan.residual_fraction;
-        fidelity.requant_residual_fraction = plan.requant_residual_fraction;
-        fidelity.refine_passes = Some(plan.passes());
-        for (n, pair) in plan.history.windows(2).enumerate() {
-            if let [Some(prev), Some(next)] = pair {
-                if next >= prev {
-                    fidelity.push_warning(format!(
-                        "la passe de raffinement {} n'a pas diminué le résidu ({prev:.3e} -> \
-                         {next:.3e}) ; la meilleure passe est celle écrite",
-                        n + 2
-                    ));
-                }
+        // One plan per expert matrix (a single one for a plain matrix), all measured before
+        // the first write.
+        let step = matrix.matrix_bytes();
+        let mut plans = Vec::with_capacity(layout.experts);
+        for e in 0..layout.experts {
+            let cancel = Arc::clone(&self.cancel);
+            let start = range.start + e * step;
+            let bytes = self
+                .map
+                .bytes()
+                .get(start..start + step)
+                .ok_or_else(|| backend_err("plage hors du fichier"))?;
+            let plan = projector
+                .plan(bytes, self.refine_passes, self.residual_target, &|| {
+                    cancel.load(Ordering::SeqCst)
+                })
+                .map_err(backend_err)?;
+            if plan.fidelity.nan_or_inf > 0 {
+                return Err(backend_err(format!(
+                    "{} valeurs NaN/Inf produites",
+                    plan.fidelity.nan_or_inf
+                )));
             }
+            plans.push((start, plan));
         }
-        if let Some(r) = plan
-            .requant_residual_fraction
-            .filter(|r| *r > self.residual_target)
-        {
+        for (start, plan) in &plans {
+            self.write_tensor(
+                tensor_name,
+                *start..*start + step,
+                matrix,
+                |next, first_row| {
+                    projector
+                        .write_rows(next, first_row, plan)
+                        .map_err(backend_err)
+                },
+            )?;
+        }
+
+        let mut total = Fidelity::default();
+        let (mut base_sq, mut after_sq, mut err_sq, mut passes) = (0.0, 0.0, 0.0, 0);
+        let mut not_lowered = 0;
+        for (_, plan) in &plans {
+            total.merge(&plan.fidelity);
+            base_sq += plan.base_sq;
+            after_sq += plan.after_sq;
+            err_sq += plan.err_sq;
+            passes = passes.max(plan.passes());
+            not_lowered += plan
+                .history
+                .windows(2)
+                .filter(|pair| matches!(pair, [Some(prev), Some(next)] if next >= prev))
+                .count();
+        }
+        let fraction = |sq: f64| (base_sq > 0.0).then(|| (sq / base_sq).sqrt());
+        let requant = fraction(err_sq);
+        let mut fidelity = TensorFidelity::new(tensor_name, ggml_type, &matrix, &total);
+        fidelity.residual_fraction = fraction(after_sq);
+        fidelity.requant_residual_fraction = requant;
+        fidelity.refine_passes = Some(passes);
+        if not_lowered > 0 {
             fidelity.push_warning(format!(
-                "fraction résiduelle due à la re-quantification {r:.3} > cible {} après {} \
+                "{not_lowered} passe(s) de raffinement n'ont pas diminué le résidu ; la \
+                 meilleure passe de chaque matrice est celle écrite"
+            ));
+        }
+        if let Some(r) = requant.filter(|r| *r > self.residual_target) {
+            fidelity.push_warning(format!(
+                "fraction résiduelle due à la re-quantification {r:.3} > cible {} après {passes} \
                  passe(s) : une partie de la direction effacée revient ; --refine-passes plus \
                  grand, ou patchez le SafeTensors puis re-quantifiez",
-                self.residual_target,
-                plan.passes()
+                self.residual_target
             ));
         }
         self.record(fidelity);
         Ok(OpStats {
-            max_abs_delta: plan.fidelity.max_abs_delta,
-            elements_modified: plan.fidelity.modified(),
-            nan_or_inf_produced: plan.fidelity.nan_or_inf,
+            max_abs_delta: total.max_abs_delta,
+            elements_modified: total.modified(),
+            nan_or_inf_produced: total.nan_or_inf,
         })
     }
 
@@ -609,6 +671,13 @@ pub struct GgufRun {
     #[serde(skip)]
     pub io: IoCounters,
     pub preflight: Preflight,
+    /// The architecture used (`data.arch` of the outcome when the patch has a
+    /// `project_out`).
+    #[serde(skip)]
+    pub arch: Report,
+    /// Set when an approximate ablation was accepted.
+    #[serde(skip)]
+    pub arch_warning: Option<String>,
 }
 
 /// Runs a validated patch on a GGUF file (see the module doc). `run` executes the patch on
@@ -642,7 +711,28 @@ pub fn apply_gguf(
         path: model.to_path_buf(),
         source,
     })?;
-    let preflight = preflight(&gguf, &read, patch, opts)?;
+    let resolution = match &opts.arch_spec {
+        Some(spec) => Resolution {
+            spec: spec.clone(),
+            source: arch::Source::ArchSpecFile,
+            declared: gguf.architecture().map(str::to_owned),
+        },
+        None => arch::detect_gguf(gguf.architecture()),
+    };
+    let arch_report = Report::new(
+        &resolution,
+        gguf.tensors.iter().map(|t| t.name.as_str()),
+        Format::Gguf,
+        Some(mapping::tied_embeddings(&gguf)),
+    );
+    let project_out = patch
+        .operations
+        .iter()
+        .any(|op| op.kind == OperationKind::ProjectOut);
+    let arch_warning = arch::gate(&arch_report, project_out, opts.accept_approximate)
+        .map_err(GgufApplyError::Arch)?;
+    let spec = resolution.spec;
+    let preflight = preflight(&gguf, &spec, &read, patch, opts)?;
 
     let architecture = gguf.architecture().map(str::to_owned);
     let (version, data_start) = (gguf.version, gguf.data_start);
@@ -658,10 +748,13 @@ pub fn apply_gguf(
         backup,
         io: backend.counters,
         preflight: preflight.clone(),
+        arch: arch_report.clone(),
+        arch_warning: arch_warning.clone(),
     };
 
     if dry_run {
-        let mut backend = GgufBackend::new(model, gguf, Mapping::Read(read), opts, cancel);
+        let mut backend =
+            GgufBackend::new(model, gguf, Mapping::Read(read), opts, spec.clone(), cancel);
         let mut report = run(&mut backend, None).map_err(|e| match e {
             // Nothing was written, whatever apply_patch assumes without a guard.
             PatchError::ExecutionFailed { op_id, cause, .. } => PatchError::ExecutionFailed {
@@ -713,7 +806,7 @@ pub fn apply_gguf(
             return Err(GgufApplyError::io(model, &e));
         }
     };
-    let mut backend = GgufBackend::new(model, gguf, Mapping::Write(map), opts, cancel);
+    let mut backend = GgufBackend::new(model, gguf, Mapping::Write(map), opts, spec, cancel);
     let result = run(
         &mut backend,
         guard.as_mut().map(|g| g as &mut dyn RollbackHandle),
@@ -754,6 +847,7 @@ pub struct Preflight {
 /// then vector and direction lengths. Also estimates the work.
 fn preflight(
     gguf: &GgufFile,
+    spec: &ArchSpec,
     bytes: &[u8],
     patch: &ValidatedPatch,
     opts: &GgufOptions,
@@ -773,14 +867,15 @@ fn preflight(
     }
     let mut planned = Vec::new();
     for op in &patch.operations {
-        for (_, projection, t) in mapping::targets(gguf, &op.layers, &op.projections) {
-            planned.push((op, Orientation::of(projection), t, mapping::layout(t)?));
+        for (role, _, t) in mapping::targets_by(spec, gguf, &op.layers, &op.projections) {
+            let layout = mapping::layout_as(t, role.layout)?;
+            planned.push((op, Orientation::of(role.role), t, layout));
         }
     }
     let tied = mapping::tied_embeddings(gguf);
     if let Some((op, ..)) = planned
         .iter()
-        .find(|(_, _, t, _)| t.name == mapping::TOKEN_EMBD && tied && !opts.allow_tied_embedding)
+        .find(|(_, o, _, _)| *o == Orientation::WriterLocal && tied && !opts.allow_tied_embedding)
     {
         return Err(GgufApplyError::Usage(format!(
             "opération {} : token_embd.weight est aussi la tête de sortie de ce GGUF \
@@ -824,7 +919,7 @@ fn preflight(
                 op.id, t.name
             )));
         }
-        let size = (layout.rows * layout.row_bytes()) as u64;
+        let size = (layout.experts * layout.matrix_bytes()) as u64;
         let passes = match (project, orientation) {
             (false, _) => 1,
             // R(W), the measuring passes, the write.
@@ -835,7 +930,7 @@ fn preflight(
     }
     let target_bytes = planned
         .iter()
-        .map(|(.., l)| (l.rows * l.row_bytes()) as u64)
+        .map(|(.., l)| (l.experts * l.matrix_bytes()) as u64)
         .sum();
     let estimated_seconds = planned
         .first()

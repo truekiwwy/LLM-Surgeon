@@ -157,6 +157,18 @@ pub enum Projection {
 }
 
 impl Projection {
+    /// The architecture role this projection selects (`down_proj`: every MLP writer, dense,
+    /// per expert, fused or shared).
+    pub fn role(self) -> crate::arch::Role {
+        match self {
+            Self::Gate => crate::arch::Role::MlpGate,
+            Self::Up => crate::arch::Role::MlpUp,
+            Self::Down => crate::arch::Role::MlpOut,
+            Self::AttnOut => crate::arch::Role::AttnOut,
+            Self::EmbedTokens => crate::arch::Role::Embed,
+        }
+    }
+
     /// The matrices of the MLP, the only ones `autotune` can target.
     pub fn is_mlp(self) -> bool {
         matches!(self, Self::Gate | Self::Up | Self::Down)

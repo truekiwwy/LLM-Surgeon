@@ -79,28 +79,44 @@ impl TensorSource for SafetensorsDir {
 }
 
 /// Names and expected shapes needed to run layers `0..=layer`: no later layer, no final
-/// norm, no `lm_head`. q/k/v carry a bias in Qwen2, o_proj does not.
+/// norm, no `lm_head`. Biases and q/k norms as the model type has them (`Variant`): q/k/v
+/// biases and no o_proj bias in Qwen2, the order of the list unchanged for it.
 pub fn required_tensors(cfg: &Qwen2Config, layer: usize) -> Vec<(String, Vec<usize>)> {
-    let (h, i) = (cfg.hidden_size, cfg.intermediate_size);
-    let q = cfg.num_attention_heads * cfg.head_dim();
-    let kv = cfg.num_key_value_heads * cfg.head_dim();
+    let (h, i, d) = (cfg.hidden_size, cfg.intermediate_size, cfg.head_dim());
+    let q = cfg.num_attention_heads * d;
+    let kv = cfg.num_key_value_heads * d;
+    let v = cfg.variant();
     let mut names = vec![(
         "model.embed_tokens.weight".to_owned(),
         vec![cfg.vocab_size, h],
     )];
     for l in 0..=layer {
         let p = format!("model.layers.{l}");
+        for (proj, out) in [("q_proj", q), ("k_proj", kv), ("v_proj", kv)] {
+            names.push((format!("{p}.self_attn.{proj}.weight"), vec![out, h]));
+            if v.qkv_bias {
+                names.push((format!("{p}.self_attn.{proj}.bias"), vec![out]));
+            }
+        }
+        if v.qk_norm {
+            names.push((format!("{p}.self_attn.q_norm.weight"), vec![d]));
+            names.push((format!("{p}.self_attn.k_norm.weight"), vec![d]));
+        }
+        names.push((format!("{p}.self_attn.o_proj.weight"), vec![h, q]));
+        if v.o_bias {
+            names.push((format!("{p}.self_attn.o_proj.bias"), vec![h]));
+        }
+        for (proj, shape) in [
+            ("gate_proj", [i, h]),
+            ("up_proj", [i, h]),
+            ("down_proj", [h, i]),
+        ] {
+            names.push((format!("{p}.mlp.{proj}.weight"), shape.to_vec()));
+            if v.mlp_bias {
+                names.push((format!("{p}.mlp.{proj}.bias"), vec![shape[0]]));
+            }
+        }
         names.extend([
-            (format!("{p}.self_attn.q_proj.weight"), vec![q, h]),
-            (format!("{p}.self_attn.q_proj.bias"), vec![q]),
-            (format!("{p}.self_attn.k_proj.weight"), vec![kv, h]),
-            (format!("{p}.self_attn.k_proj.bias"), vec![kv]),
-            (format!("{p}.self_attn.v_proj.weight"), vec![kv, h]),
-            (format!("{p}.self_attn.v_proj.bias"), vec![kv]),
-            (format!("{p}.self_attn.o_proj.weight"), vec![h, q]),
-            (format!("{p}.mlp.gate_proj.weight"), vec![i, h]),
-            (format!("{p}.mlp.up_proj.weight"), vec![i, h]),
-            (format!("{p}.mlp.down_proj.weight"), vec![h, i]),
             (format!("{p}.input_layernorm.weight"), vec![h]),
             (format!("{p}.post_attention_layernorm.weight"), vec![h]),
         ]);

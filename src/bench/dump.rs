@@ -29,9 +29,9 @@ use super::logits_io::{LogitsDtype, LOGITS_TENSOR, OFFSETS_TENSOR};
 use super::report::{BenchDumpReport, BenchRun, DumpTiming};
 use super::sha256_file;
 use crate::extract::{
-    check_tensors, check_texts, choose_dtype, dtype_name, load_config, load_tensors,
+    check_tensors, check_texts, choose_dtype, dtype_name, forward, load_config, load_tensors,
     load_tokenizer, model_name, plan_memory, required_tensors_full, tokenize, DTypeChoice,
-    HookedQwen2, MemoryPlan, SafetensorsDir, TensorSource,
+    MemoryPlan, SafetensorsDir, TensorSource,
 };
 use crate::hardware::HardwareProbe;
 
@@ -254,7 +254,7 @@ pub fn run_with(
         true => std::ops::ControlFlow::Break(()),
         false => std::ops::ControlFlow::Continue(()),
     })?;
-    let model = HookedQwen2::from_tensors_full(tensors, &cfg, dtype, &device)?;
+    let model = forward::build(&cfg, tensors, forward::Depth::Full, dtype, &device)?;
 
     let name = req
         .out
