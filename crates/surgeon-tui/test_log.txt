@@ -1,0 +1,75 @@
+﻿cargo :    Compiling surgeon-tui v0.1.0 (C:\Users\kiwwy\projects\weight-surgeon\crates\surgeon-tui)
+Au caractère Ligne:1 : 1
++ cargo test 2>&1 | Out-File -FilePath test_log.txt -Encoding utf8; Sel ...
++ ~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling su...es\surgeon-tui):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.79s
+     Running unittests src\lib.rs (target\debug\deps\surgeon_tui-34472f8b41114e3d.exe)
+
+running 28 tests
+test context::tests::command_splitting_and_placeholder ... ok
+test model::dtype::tests::f32_and_halves_decode_element_wise ... ok
+test model::dtype::tests::q4_k_matches_an_independent_reference ... ok
+test model::dtype::tests::q6_k_matches_an_independent_reference ... ok
+test model::dtype::tests::q8_0_block_is_scale_times_integers ... ok
+test context::tests::markdown_lists_identity_topology_and_metrics ... ok
+test model::dtype::tests::block_layouts_follow_the_spec ... ok
+test context::tests::markdown_reports_unavailable_metrics ... ok
+test model::gguf::tests::block_byte_lengths_cover_the_common_types ... ok
+test context::tests::snippet_lands_in_a_real_temp_file ... ok
+test model::roles::tests::filters_and_exactness ... ok
+test model::roles::tests::gguf_names_classify_by_role ... ok
+test model::metrics::tests::q8_0_metrics_match_a_reference ... ok
+test model::roles::tests::hf_names_classify_by_role ... ok
+test model::metrics::tests::scalar_stats_match_a_reference_on_a_small_matrix ... ok
+test model::roles::tests::prefix_free_and_digit_gated ... ok
+test model::metrics::tests::unsupported_and_empty_tensors_are_reported_unavailable ... ok
+test model::metrics::tests::r_eff_sits_between_1_and_the_basis ... ok
+test model::safetensors::tests::dtype_mapping_covers_the_floats ... ok
+test model::tests::entries_expose_their_shape_and_numel ... ok
+test model::tests::hf_architectures_map_to_families ... ok
+test model::roles::tests::the_index_keeps_roles_sorted_and_findable ... ok
+test model::gguf::tests::corrupted_magic_and_truncation_are_typed_errors ... ok
+test ui::bridge::tests::sparkline_reuse_keeps_its_contract ... ok
+test ui::layers::tests::truncation_keeps_the_tail ... ok
+test ui::inspector::tests::sparkline_covers_the_full_width ... ok
+test model::gguf::tests::hand_built_gguf_parses_with_family_offsets_and_dtypes ... ok
+test model::metrics::tests::large_tensors_are_sampled_deterministically ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src\main.rs (target\debug\deps\surgeon_tui-0cbb5cf44ea4025a.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\ipc.rs (target\debug\deps\ipc-143fa0b4ebf27ead.exe)
+
+running 6 tests
+test targets_resolve_their_display_form ... ok
+test the_protocol_parses_typical_agent_payloads ... ok
+test snapshot_goes_through_the_oneshot_reply ... ok
+test multiple_commands_on_one_connection ... ok
+test malformed_and_unknown_commands_are_errors_not_crashes ... ok
+test commands_get_one_ack_each_and_reach_the_app ... FAILED
+
+failures:
+
+---- commands_get_one_ack_each_and_reach_the_app stdout ----
+
+thread 'commands_get_one_ack_each_and_reach_the_app' (23812) panicked at tests\ipc.rs:94:5:
+assertion `left == right` failed
+  left: ["ping", "highlight_layer", "preview_patch", "set_filter", "clear_preview"]
+ right: ["highlight_layer", "preview_patch", "set_filter", "clear_preview", "set_filter"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    commands_get_one_ack_each_and_reach_the_app
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `--test ipc`
