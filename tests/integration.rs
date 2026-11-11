@@ -1273,7 +1273,13 @@ fn schema_mirrors_serde_and_validation() {
     );
     assert_eq!(
         op["projections"]["items"]["enum"],
-        json!(["gate_proj", "up_proj", "down_proj"])
+        json!([
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+            "o_proj",
+            "embed_tokens"
+        ])
     );
     assert_eq!(op["axis"]["enum"], json!(["rows", "cols"]));
     assert_eq!(op["axis"]["default"], "cols");

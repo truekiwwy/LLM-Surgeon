@@ -90,7 +90,9 @@
             "enum": [
               "gate_proj",
               "up_proj",
-              "down_proj"
+              "down_proj",
+              "o_proj",
+              "embed_tokens"
             ],
             "type": "string"
           },
@@ -165,6 +167,9 @@
               "items": {
                 "additionalProperties": false,
                 "properties": {
+                  "allow_non_projector": {
+                    "type": "boolean"
+                  },
                   "alpha": {
                     "format": "float",
                     "maximum": 100.0,
@@ -231,13 +236,23 @@
                       "enum": [
                         "gate_proj",
                         "up_proj",
-                        "down_proj"
+                        "down_proj",
+                        "o_proj",
+                        "embed_tokens"
                       ],
                       "type": "string"
                     },
                     "minItems": 1,
                     "type": "array",
                     "uniqueItems": true
+                  },
+                  "rank": {
+                    "format": "uint",
+                    "minimum": 1.0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
                   },
                   "vector_file": {
                     "type": "string"
@@ -460,6 +475,13 @@
             "null"
           ]
         },
+        "labels_file": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "layer": {
           "default": 20,
           "format": "uint32",
@@ -581,6 +603,16 @@
             "null"
           ]
         },
+        "rank": {
+          "default": null,
+          "format": "uint32",
+          "maximum": 64.0,
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "site": {
           "default": "resid_post",
           "oneOf": [
@@ -629,6 +661,30 @@
             "null"
           ]
         },
+        "backend": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "llama"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "native"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "baseline_model": {
           "default": null,
           "type": [
@@ -658,6 +714,30 @@
             "string",
             "null"
           ]
+        },
+        "chat_template": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "none"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "chatml"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "chunks": {
           "default": null,
@@ -820,6 +900,12 @@
             {
               "enum": [
                 "dump"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "refusal"
               ],
               "type": "string"
             }
@@ -1140,7 +1226,9 @@
           "enum": [
             "gate_proj",
             "up_proj",
-            "down_proj"
+            "down_proj",
+            "o_proj",
+            "embed_tokens"
           ],
           "type": [
             "string",

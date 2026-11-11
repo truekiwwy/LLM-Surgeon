@@ -14,7 +14,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use super::error::{ExtractError, Result};
-use crate::linalg::gram::thin_svd;
+use crate::linalg::gram::{thin_svd, ThinSvd};
 
 /// Fewer pairs than this give an unstable direction.
 pub const MIN_RECOMMENDED_PAIRS: usize = 8;
@@ -37,6 +37,9 @@ pub struct SvdDiagnostics {
     pub cosine_with_mean_diff: Option<f64>,
     /// Cosinus entre les directions des paires d'indices pairs et impairs (stabilité) ; null sous 2 paires.
     pub split_half_cosine: Option<f64>,
+    /// Sous-espace de rang k (--rank > 1) : diagnostics par composante ; absent au rang 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subspace: Option<super::subspace::SubspaceDiagnostics>,
 }
 
 pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -70,7 +73,17 @@ type Leading = Option<(Vec<f64>, Vec<f64>, usize)>;
 /// First right singular vector of the (optionally centered) deltas, oriented along
 /// `mean_diff`, with the singular values; `None` when the deltas have rank 0.
 fn leading(deltas: &[Vec<f64>], center: bool, mean_diff: &[f64]) -> Result<Leading> {
-    let (n, d) = (deltas.len(), mean_diff.len());
+    let svd = deltas_svd(deltas, center, mean_diff.len())?;
+    if svd.rank == 0 {
+        return Ok(None);
+    }
+    let mut v = svd.vector(0).to_vec();
+    orient(&mut v, mean_diff);
+    Ok(Some((v, svd.sigma, svd.rank)))
+}
+
+/// Thin SVD of the (optionally centered) deltas.
+fn deltas_svd(deltas: &[Vec<f64>], center: bool, d: usize) -> Result<ThinSvd> {
     let offset = match center {
         true => mean_rows(deltas, d),
         false => vec![0.0; d],
@@ -79,13 +92,43 @@ fn leading(deltas: &[Vec<f64>], center: bool, mean_diff: &[f64]) -> Result<Leadi
         .iter()
         .flat_map(|r| r.iter().zip(&offset).map(|(x, o)| x - o))
         .collect();
-    let svd = thin_svd(&flat, n, d).map_err(|e| ExtractError::Compute(e.to_string()))?;
-    if svd.rank == 0 {
-        return Ok(None);
+    thin_svd(&flat, deltas.len(), d).map_err(|e| ExtractError::Compute(e.to_string()))
+}
+
+/// The first `k` right singular vectors of the deltas (orthonormal rows, each oriented
+/// along `μ₊ − μ₋` like the direction of [`svd_direction`], which is the first one), and
+/// every singular value. Fewer than `k` rows when the deltas have a lower rank.
+pub fn svd_subspace(
+    pos: &[Vec<f64>],
+    neg: &[Vec<f64>],
+    center: bool,
+    k: usize,
+) -> Result<(Vec<Vec<f64>>, Vec<f64>)> {
+    if pos.len() != neg.len() {
+        return Err(ExtractError::UnpairedPrompts {
+            pos: pos.len(),
+            neg: neg.len(),
+        });
     }
-    let mut v = svd.vector(0).to_vec();
-    orient(&mut v, mean_diff);
-    Ok(Some((v, svd.sigma, svd.rank)))
+    let d = pos.first().map_or(0, Vec::len);
+    let deltas: Vec<Vec<f64>> = pos
+        .iter()
+        .zip(neg)
+        .map(|(p, q)| p.iter().zip(q).map(|(a, b)| a - b).collect())
+        .collect();
+    let mean_diff = mean_rows(&deltas, d);
+    let svd = deltas_svd(&deltas, center, d)?;
+    if svd.rank == 0 || k == 0 {
+        return Err(ExtractError::DegenerateDirection { norm: 0.0 });
+    }
+    let directions = (0..k.min(svd.rank))
+        .map(|t| {
+            let mut v = svd.vector(t).to_vec();
+            orient(&mut v, &mean_diff);
+            v
+        })
+        .collect();
+    Ok((directions, svd.sigma))
 }
 
 /// Unit direction, diagnostics and warnings. `pos[i]` is paired with `neg[i]`.
@@ -152,6 +195,7 @@ pub fn svd_direction(
         cosine_with_mean_diff: (md_norm > 0.0)
             .then(|| (dot(&v, &mean_diff) / md_norm).clamp(-1.0, 1.0)),
         split_half_cosine,
+        subspace: None,
     };
     Ok((v, diagnostics, warnings))
 }
@@ -287,5 +331,58 @@ mod tests {
         let (_, diag, warnings) = svd_direction(&pos, &neg, true).unwrap();
         assert!(diag.sigma.len() == 5 && diag.sigma.windows(2).all(|w| w[0] >= w[1]));
         assert!(warnings.iter().any(|w| w.contains("σ₂/σ₁")), "{warnings:?}");
+    }
+
+    #[test]
+    fn rank_k_recovers_a_planted_subspace_within_the_perturbation_bound() {
+        // Deltas = Σ_t s_t c_t e_{axis_t}ᵀ + E. The columns c_t are Walsh signs, orthogonal
+        // over 16 pairs, so the signal has the singular values s_t · √16 exactly.
+        let (n, d, k) = (16, 40, 3);
+        let (strengths, axes) = ([3.0, 2.0, 1.5], [5usize, 17, 29]);
+        let sign = |i: usize, t: usize| if (i >> t) & 1 == 0 { 1.0 } else { -1.0 };
+        let mut rng = Lcg(11);
+        let mut noise_energy = 0.0;
+        let (mut pos, mut neg) = (Vec::new(), Vec::new());
+        for i in 0..n {
+            let base: Vec<f64> = (0..d).map(|_| rng.next()).collect();
+            let mut with = base.clone();
+            for (t, axis) in axes.iter().enumerate() {
+                with[*axis] += strengths[t] * sign(i, t);
+            }
+            for x in &mut with {
+                let e = 0.01 * rng.next();
+                noise_energy += e * e;
+                *x += e;
+            }
+            pos.push(with);
+            neg.push(base);
+        }
+        let (v, sigma) = svd_subspace(&pos, &neg, false, k).unwrap();
+        assert_eq!(v.len(), k);
+        for (s, a) in v.iter().enumerate() {
+            for (t, b) in v.iter().enumerate() {
+                let expected = f64::from(u8::from(s == t));
+                assert!((dot(a, b) - expected).abs() < 1e-12, "V orthonormal");
+            }
+        }
+        assert!((sigma[0] - 12.0).abs() < 0.1 && (sigma[2] - 6.0).abs() < 0.1);
+
+        // Wedin: sin of the largest principal angle ≤ ‖E‖ / (σ_k(signal) − ‖E‖), with
+        // ‖E‖₂ ≤ ‖E‖_F and σ_k(signal) = 1.5 · 4.
+        let e = noise_energy.sqrt();
+        let bound = e / (6.0 - e);
+        assert!(bound < 0.05, "the bound means something: {bound}");
+        for axis in axes {
+            let inside: f64 = v.iter().map(|direction| direction[axis].powi(2)).sum();
+            let sine = (1.0 - inside).max(0.0).sqrt();
+            assert!(sine <= bound, "axis {axis}: sin = {sine} > {bound}");
+        }
+
+        // The first direction is the one `svd_direction` writes, bit for bit.
+        assert_eq!(v[0], svd_direction(&pos, &neg, false).unwrap().0);
+        // Deterministic, and never more directions than the deltas have.
+        assert_eq!(svd_subspace(&pos, &neg, false, k).unwrap().0, v);
+        assert_eq!(svd_subspace(&pos, &neg, false, 64).unwrap().0.len(), n);
+        assert!(svd_subspace(&pos, &neg[..3], false, k).is_err(), "unpaired");
     }
 }

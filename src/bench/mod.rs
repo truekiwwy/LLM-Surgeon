@@ -1,10 +1,13 @@
-//! `surgeon bench`: measures what a weight surgery changed. Four modes, pure Rust apart
-//! from the llama.cpp binaries that `ppl` and `eval` drive:
+//! `surgeon bench`: measures what a weight surgery changed. Five modes, pure Rust apart
+//! from the llama.cpp binaries that `ppl` and `eval` (default backend) drive:
 //!
 //! - `dump`: full Qwen2 forward (candle, CPU) on prompts, logits written to a SafeTensors.
 //! - `logits`: KL(before‖after), cosine, top-1 / top-k shifts between two dumps.
 //! - `ppl`: perplexity of a GGUF through `llama-perplexity`, delta against a baseline.
-//! - `eval`: exact-match Pass@1 on GSM8K / MATH style datasets through `llama-cli`.
+//! - `eval`: exact-match Pass@1 on GSM8K / MATH style datasets through `llama-cli`, or
+//!   through the native generator (`--backend native`, Qwen2 SafeTensors, CPU).
+//! - `refusal`: refusal rate on prompts (native generator, canonical refusal markers),
+//!   paired against a baseline with Newcombe's interval.
 //!
 //! Exit codes (mapped by `app`): 0 ok (warnings included); 1 insufficient resources,
 //! llama.cpp binary not found, or cancelled; 2 invalid arguments or files; 8 bench
@@ -19,6 +22,8 @@
 //! ppl_runner -> ppl_parse -> report              (eval::CommandRunner::run_streaming)
 //! dataset -> prompt -> score(generate) -> extract_answer -> score -> report
 //! dump -> extract::HookedQwen2::forward_logits   (extract::SafetensorsDir, TensorSource)
+//! native (eval::TextGenerator over extract::generate::Qwen2State) <- score, refusal
+//! refusal -> native -> score::wilson -> report
 //! ```
 //!
 //! (b) Call graph shared by the CLI and the MCP server:
@@ -34,14 +39,16 @@
 //!   eval   -> dataset::load -> prompt::Template -> eval::ensure_gguf -> generator_factory
 //!          -> TextGenerator::configure(Decoding) -> score::run_suite (LoopDetector per
 //!             question) -> extract_answer -> score::{matches, wilson, paired}
+//!   refusal -> native::NativeGenerator::load -> refusal::run_prompts (ChatTemplate,
+//!             refusal_marker) -> refusal::{score, paired, newcombe_paired}
 //!   dump   -> extract::{load_config, SafetensorsDir, check_tensors, choose_dtype}
 //!          -> tokenize -> HookedQwen2::from_tensors_full -> forward_logits per prompt
 //!          -> streamed .tmp -> rename
 //! every core -> report::*Report (Serialize + JsonSchema) -> Outcome.data / report::*_text
 //! ```
 //!
-//! (c) Report schemas: `BenchLogitsReport`, `BenchPplReport`, `BenchEvalReport` and
-//! `BenchDumpReport` (`report.rs`) are the `data` of the JSON envelope, identical for the
+//! (c) Report schemas: `BenchLogitsReport`, `BenchPplReport`, `BenchEvalReport`,
+//! `BenchRefusalReport` and `BenchDumpReport` (`report.rs`) are the `data` of the JSON envelope, identical for the
 //! CLI `--json` and the MCP `structuredContent.data`; durations live in `timing_ms` only.
 
 pub mod dataset;
@@ -50,9 +57,11 @@ mod error;
 pub mod extract_answer;
 pub mod logits_io;
 pub mod logits_metrics;
+pub mod native;
 pub mod ppl_parse;
 pub mod ppl_runner;
 pub mod prompt;
+pub mod refusal;
 pub mod report;
 pub mod score;
 
@@ -72,7 +81,11 @@ pub const DEFAULT_LIMIT: usize = 50;
 pub const DEFAULT_MAX_NEW_TOKENS: u32 = 512;
 pub const DEFAULT_DUMP_MAX_TOKENS: usize = 256;
 pub const DEFAULT_MAX_TOTAL_POSITIONS: usize = 4096;
-pub use report::{BenchDumpReport, BenchEvalReport, BenchLogitsReport, BenchPplReport, Verdict};
+pub const DEFAULT_REFUSAL_MAX_NEW_TOKENS: u32 = 256;
+pub use report::{
+    BenchDumpReport, BenchEvalReport, BenchLogitsReport, BenchPplReport, BenchRefusalReport,
+    Verdict,
+};
 
 /// Compensated (Neumaier) sum: the result depends only on the order of the terms, which
 /// every caller keeps fixed (position order), never on the number of threads.

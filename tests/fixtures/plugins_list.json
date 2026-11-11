@@ -26,10 +26,18 @@
                 "kind": "boolean",
                 "name": "svd_center",
                 "summary": "centre les différences appariées (paires d'ordre arbitraire)"
+              },
+              {
+                "default": 1,
+                "kind": "integer",
+                "name": "rank",
+                "summary": "nombre de vecteurs singuliers gardés ; au-delà de 1, écrit a = b = V_k dans <out>.subspace.safetensors"
               }
             ],
             "requires_paired": true,
-            "sidecars": [],
+            "sidecars": [
+              "subspace"
+            ],
             "summary": "Premier vecteur singulier droit des différences appariées.",
             "title": "SVD des différences appariées"
           },
@@ -54,6 +62,18 @@
                 "kind": "number",
                 "name": "holdout_frac",
                 "summary": "fraction hors-échantillon (par index) des diagnostics, 10 prompts par classe au moins"
+              },
+              {
+                "default": null,
+                "kind": "array",
+                "name": "labels",
+                "summary": "un label par prompt, positifs puis négatifs : indice de classe entier ou tableau de m nombres ; absent : concept binaire positif / négatif"
+              },
+              {
+                "default": null,
+                "kind": "integer",
+                "name": "rank",
+                "summary": "avec labels : nombre maximal de directions ; absent : toutes celles de la covariance croisée"
               }
             ],
             "requires_paired": false,

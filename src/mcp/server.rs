@@ -441,6 +441,9 @@ impl<W: Write> ProgressSink for McpProgress<'_, W> {
             ProgressEvent::BenchEvalQuestion { done, total } => {
                 (done, total, format!("question {done}/{total}"))
             }
+            ProgressEvent::BenchRefusalPrompt { done, total } => {
+                (done, total, format!("prompt {done}/{total}"))
+            }
             ProgressEvent::AutotuneForward { done, total } => {
                 (done, total, format!("forward {done}/{total}"))
             }

@@ -11,8 +11,8 @@ use super::{
     ParamInfo, ParamKind, PluginError, Sidecar,
 };
 use crate::extract::{
-    compute_method, mean_diff_direction, Method, MethodOptions, DEFAULT_LEACE_RCOND,
-    DEFAULT_LEACE_SHRINKAGE,
+    check_subspace, compute_method, mean_diff_direction, Method, MethodOptions, SubspaceFit,
+    SubspaceOptions, DEFAULT_LEACE_RCOND, DEFAULT_LEACE_SHRINKAGE,
 };
 
 /// One built-in method. They share the four options of [`MethodOptions`], all checked
@@ -27,6 +27,13 @@ impl Builtin {
 
     fn options(self, params: &Value) -> Result<MethodOptions, PluginError> {
         Ok(MethodOptions::from_params(self.0, params)?)
+    }
+
+    /// `rank` and `labels`, refused when the method cannot honor them.
+    fn subspace(self, params: &Value) -> Result<SubspaceOptions, PluginError> {
+        let sub = SubspaceOptions::from_params(params)?;
+        check_subspace(self.0, &sub)?;
+        Ok(sub)
     }
 }
 
@@ -62,14 +69,22 @@ impl ExtractionMethod for Builtin {
             Method::Svd => MethodInfo {
                 title: "SVD des différences appariées",
                 summary: "Premier vecteur singulier droit des différences appariées.",
-                params: vec![param(
-                    "svd_center",
-                    ParamKind::Boolean,
-                    json!(false),
-                    "centre les différences appariées (paires d'ordre arbitraire)",
-                )],
+                params: vec![
+                    param(
+                        "svd_center",
+                        ParamKind::Boolean,
+                        json!(false),
+                        "centre les différences appariées (paires d'ordre arbitraire)",
+                    ),
+                    param(
+                        "rank",
+                        ParamKind::Integer,
+                        json!(1),
+                        "nombre de vecteurs singuliers gardés ; au-delà de 1, écrit a = b = V_k dans <out>.subspace.safetensors",
+                    ),
+                ],
                 requires_paired: true,
-                sidecars: vec![],
+                sidecars: vec!["subspace"],
             },
             Method::Leace => MethodInfo {
                 title: "Effaceur LEACE",
@@ -88,6 +103,18 @@ impl ExtractionMethod for Builtin {
                         "avec λ = 0 : seuil relatif des valeurs propres conservées",
                     ),
                     holdout,
+                    param(
+                        "labels",
+                        ParamKind::Array,
+                        Value::Null,
+                        "un label par prompt, positifs puis négatifs : indice de classe entier ou tableau de m nombres ; absent : concept binaire positif / négatif",
+                    ),
+                    param(
+                        "rank",
+                        ParamKind::Integer,
+                        Value::Null,
+                        "avec labels : nombre maximal de directions ; absent : toutes celles de la covariance croisée",
+                    ),
                 ],
                 requires_paired: false,
                 sidecars: vec!["leace"],
@@ -96,6 +123,7 @@ impl ExtractionMethod for Builtin {
     }
 
     fn validate(&self, params: &Value) -> Result<(), PluginError> {
+        self.subspace(params)?;
         Ok(self.options(params)?.validate()?)
     }
 
@@ -105,12 +133,13 @@ impl ExtractionMethod for Builtin {
         acts: &ActivationSet,
         _cancel: &AtomicBool,
     ) -> Result<ExtractionOutput, PluginError> {
+        let sub = self.subspace(ctx.params)?;
         if self.0 == Method::MeanDiff {
             let direction = mean_diff_direction(acts.pos, acts.neg)?;
             return Ok(ExtractionOutput::new(direction));
         }
         let opts = self.options(ctx.params)?;
-        let out = compute_method(acts.pos, acts.neg, &opts)?;
+        let out = compute_method(acts.pos, acts.neg, &opts, &sub)?;
         let mut metadata =
             BTreeMap::from([("holdout_frac".to_owned(), opts.holdout_frac.to_string())]);
         match self.0 {
@@ -123,6 +152,12 @@ impl ExtractionMethod for Builtin {
             }
         }
         let as_f32 = |v: &[f64]| v.iter().map(|&x| x as f32).collect::<Vec<f32>>();
+        let mut sidecar_rows = BTreeMap::new();
+        let subspace = out.subspace.as_ref().map(|fit| {
+            let (sidecar, rows) = subspace_sidecar(fit);
+            sidecar_rows = rows;
+            sidecar
+        });
         let sidecars: Vec<Sidecar> = out
             .leace
             .iter()
@@ -142,13 +177,54 @@ impl ExtractionMethod for Builtin {
                     ("bTa".to_owned(), fit.b_dot_a.to_string()),
                 ]),
             })
+            .chain(subspace)
             .collect();
         Ok(ExtractionOutput {
             direction: out.direction,
             diagnostics: out.diagnostics.map(Diagnostics::Builtin),
             metadata,
             sidecars,
+            sidecar_rows,
             warnings: out.warnings,
         })
     }
+}
+
+/// The file of a rank-k eraser and the rows of its 2D tensors: `<out>.leace.safetensors`
+/// for `leace` with labels (`a`, `b`, `mean`, `u_whitened`), `<out>.subspace.safetensors`
+/// for `svd` (`a = b = V_k`). One direction keeps the historical 1D tensors.
+fn subspace_sidecar(fit: &SubspaceFit) -> (Sidecar, BTreeMap<(String, String), usize>) {
+    let flat =
+        |rows: &[Vec<f64>]| -> Vec<f32> { rows.iter().flatten().map(|&x| x as f32).collect() };
+    let k = fit.a.len();
+    let suffix = match fit.leace {
+        Some(_) => "leace",
+        None => "subspace",
+    };
+    let mut tensors = vec![
+        ("a".to_owned(), flat(&fit.a)),
+        ("b".to_owned(), flat(&fit.b)),
+    ];
+    let mut ranked = vec!["a", "b"];
+    let mut metadata = BTreeMap::from([("subspace_rank".to_owned(), k.to_string())]);
+    if let Some(leace) = &fit.leace {
+        tensors.push(("mean".to_owned(), flat(std::slice::from_ref(&leace.mean))));
+        tensors.push(("u_whitened".to_owned(), flat(&leace.u_whitened)));
+        ranked.push("u_whitened");
+        metadata.insert("rank".to_owned(), leace.cov_rank.to_string());
+        metadata.insert("kappa".to_owned(), leace.kappa.to_string());
+    }
+    let rows = match k {
+        1 => BTreeMap::new(),
+        _ => ranked
+            .into_iter()
+            .map(|name| ((suffix.to_owned(), name.to_owned()), k))
+            .collect(),
+    };
+    let sidecar = Sidecar {
+        suffix,
+        tensors,
+        metadata,
+    };
+    (sidecar, rows)
 }

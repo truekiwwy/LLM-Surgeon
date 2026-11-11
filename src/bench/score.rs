@@ -320,10 +320,33 @@ pub fn paired(main: &[ItemResult], baseline: &[ItemResult]) -> PairedComparison 
     p
 }
 
+/// What generates the answers of `bench eval`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    /// llama.cpp (`llama-completion` / `llama-cli`) sur un GGUF, converti au besoin.
+    #[default]
+    Llama,
+    /// Génération gloutonne en Rust pur sur CPU, sur un dossier Qwen2 SafeTensors.
+    Native,
+}
+
 #[derive(Debug, Clone)]
 pub struct EvalRequest {
     pub model: PathBuf,
     pub dataset: PathBuf,
+    pub backend: Backend,
     pub baseline_model: Option<PathBuf>,
     pub limit: usize,
     pub max_new_tokens: u32,
@@ -335,7 +358,8 @@ pub struct EvalRequest {
     pub min_accuracy: Option<f64>,
 }
 
-/// Builds a generator for a GGUF (the app's `generator_factory`).
+/// Builds a generator for a model: a GGUF with [`Backend::Llama`] (the app's
+/// `generator_factory`), the SafeTensors directory itself with [`Backend::Native`].
 pub type MakeGenerator<'a> = dyn FnMut(&Path) -> Result<Box<dyn TextGenerator>> + 'a;
 
 fn gguf_error(e: EvalError) -> BenchError {
@@ -375,9 +399,15 @@ pub fn run(
     let dataset_sha256 = sha256_file(&req.dataset)?;
     let mut evaluate = |model: &Path, tag: &str| -> Result<(Vec<ItemResult>, u64)> {
         let started = Instant::now();
-        let gguf =
-            ensure_gguf(model, req.llama_cpp_dir.as_deref(), tag, runner).map_err(gguf_error)?;
-        let mut generator = make_generator(gguf.path())?;
+        // Kept until the suite ends: a converted GGUF is a temporary file.
+        let gguf = match req.backend {
+            Backend::Llama => Some(
+                ensure_gguf(model, req.llama_cpp_dir.as_deref(), tag, runner)
+                    .map_err(gguf_error)?,
+            ),
+            Backend::Native => None,
+        };
+        let mut generator = make_generator(gguf.as_ref().map_or(model, |g| g.path()))?;
         generator.configure(&Decoding {
             seed: SEED,
             timeout: req.timeout,
@@ -580,6 +610,7 @@ mod tests {
         let req = EvalRequest {
             model: dir.path().join("after.gguf"),
             dataset,
+            backend: Backend::Llama,
             baseline_model: None,
             limit: 50,
             max_new_tokens: 64,

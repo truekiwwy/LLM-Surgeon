@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::error::{ExtractError, Result};
-use super::leace::{self, LeaceDiagnostics, LeaceFit};
-use super::svd::{svd_direction, SvdDiagnostics};
+use super::leace::{self, LeaceDiagnostics, LeaceFit, LeaceSubspace};
+use super::subspace::{self, SubspaceOptions};
+use super::svd::{svd_direction, svd_subspace, SvdDiagnostics};
 
 pub const MIN_HOLDOUT_PER_CLASS: usize = 10;
 
@@ -105,6 +106,9 @@ impl MethodOptions {
             leace_shrinkage: f64,
             leace_rcond: f64,
             holdout_frac: f64,
+            // Read by `SubspaceOptions::from_params`: accepted here, not kept.
+            rank: Option<Value>,
+            labels: Option<Value>,
         }
         impl Default for Params {
             fn default() -> Self {
@@ -114,6 +118,8 @@ impl MethodOptions {
                     leace_shrinkage: d.leace_shrinkage,
                     leace_rcond: d.leace_rcond,
                     holdout_frac: d.holdout_frac,
+                    rank: None,
+                    labels: None,
                 }
             }
         }
@@ -145,7 +151,35 @@ pub struct MethodOutput {
     pub direction: Vec<f64>,
     pub diagnostics: Option<MethodDiagnostics>,
     pub leace: Option<LeaceFit>,
+    /// The rank-k eraser, when one was asked for (`direction` is its first direction).
+    pub subspace: Option<SubspaceFit>,
     pub warnings: Vec<String>,
+}
+
+/// `k` write and read directions, one per row: `a` and `b` of `project_out`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubspaceFit {
+    pub a: Vec<Vec<f64>>,
+    pub b: Vec<Vec<f64>>,
+    /// `leace` with labels: its mean, whitened directions and covariance diagnostics.
+    pub leace: Option<LeaceSubspace>,
+}
+
+/// `opts.params()` plus the rank-k keys, as a front-end passes them to a method. Without
+/// `rank` nor `labels` this is `opts.params()`, unchanged.
+pub fn params_with_subspace(
+    opts: &MethodOptions,
+    rank: Option<usize>,
+    labels: Option<Value>,
+) -> Value {
+    let mut params = opts.params();
+    if let Some(rank) = rank {
+        params["rank"] = json!(rank);
+    }
+    if let Some(labels) = labels {
+        params["labels"] = labels;
+    }
+    params
 }
 
 pub fn holdout_mask(n: usize, frac: f64) -> Vec<bool> {
@@ -202,6 +236,7 @@ pub fn compute(pos: &[Vec<f64>], neg: &[Vec<f64>], opts: &MethodOptions) -> Resu
                 direction: unit(v)?,
                 diagnostics: Some(MethodDiagnostics::Svd(diagnostics)),
                 leace: None,
+                subspace: None,
                 warnings,
             })
         }
@@ -242,15 +277,217 @@ pub fn compute(pos: &[Vec<f64>], neg: &[Vec<f64>], opts: &MethodOptions) -> Resu
                 holdout_cross_cov_ratio,
                 n_pos: pos.len(),
                 n_neg: neg.len(),
+                subspace: None,
             };
             Ok(MethodOutput {
                 direction: unit(fit.a.clone())?,
                 diagnostics: Some(MethodDiagnostics::Leace(diagnostics)),
                 leace: Some(fit),
+                subspace: None,
                 warnings,
             })
         }
     }
+}
+
+/// What a method cannot do with these options, whatever the activations: checked before
+/// the forward pass.
+pub fn check_subspace(method: Method, sub: &SubspaceOptions) -> Result<()> {
+    let bad = |m: &str| Err(ExtractError::InvalidArgument(m.to_owned()));
+    let rank = sub.rank.unwrap_or(1);
+    match (method, sub.labels.is_some()) {
+        (Method::MeanDiff, _) if !sub.is_default() => {
+            bad("mean_diff reste de rang 1 : --rank et --labels-file demandent svd ou leace")
+        }
+        (Method::Svd, true) => bad("--labels-file ne s'applique qu'à --method leace"),
+        (Method::Leace, false) if rank > 1 => bad(
+            "leace sans --labels-file efface un concept binaire, une seule direction : \
+             --rank > 1 demande --labels-file",
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// [`compute`] with the rank-k options: `svd` keeps its first `rank` singular vectors,
+/// `leace` with labels erases every label at once. Without them, [`compute`] unchanged.
+pub fn compute_subspace(
+    pos: &[Vec<f64>],
+    neg: &[Vec<f64>],
+    opts: &MethodOptions,
+    sub: &SubspaceOptions,
+) -> Result<MethodOutput> {
+    check_subspace(opts.method, sub)?;
+    match (&sub.labels, sub.rank.unwrap_or(1)) {
+        (Some(labels), _) => leace_with_labels(pos, neg, opts, labels, sub.rank),
+        (None, 1) => compute(pos, neg, opts),
+        (None, k) => {
+            let mut out = compute(pos, neg, opts)?;
+            let (v, sigma) = svd_subspace(pos, neg, opts.svd_center, k)?;
+            if v.len() < k {
+                out.warnings.push(format!(
+                    "rang demandé {k}, rang numérique des différences {} : {} direction(s) écrite(s)",
+                    v.len(),
+                    v.len()
+                ));
+            }
+            out.warnings
+                .extend(subspace::rank_warning(v.len(), pos.len(), "paires"));
+            if let Some(MethodDiagnostics::Svd(diagnostics)) = &mut out.diagnostics {
+                diagnostics.subspace = Some(subspace::diagnostics(&v, &v, &sigma, pos, neg, None));
+            }
+            out.subspace = Some(SubspaceFit {
+                a: v.clone(),
+                b: v,
+                leace: None,
+            });
+            Ok(out)
+        }
+    }
+}
+
+/// Mean of `rows` (non-empty).
+fn mean_of(rows: &[Vec<f64>]) -> Vec<f64> {
+    let mut mean = vec![0.0; rows.first().map_or(0, Vec::len)];
+    for row in rows {
+        mean.iter_mut().zip(row).for_each(|(m, v)| *m += v);
+    }
+    mean.iter_mut().for_each(|m| *m /= rows.len().max(1) as f64);
+    mean
+}
+
+fn leace_with_labels(
+    pos: &[Vec<f64>],
+    neg: &[Vec<f64>],
+    opts: &MethodOptions,
+    labels: &[Vec<f64>],
+    max_rank: Option<usize>,
+) -> Result<MethodOutput> {
+    opts.validate()?;
+    let n = pos.len() + neg.len();
+    if labels.len() != n {
+        return Err(ExtractError::InvalidArgument(format!(
+            "labels : {} lignes pour {n} prompts (les positifs puis les négatifs, dans l'ordre \
+             des fichiers)",
+            labels.len()
+        )));
+    }
+    fn refs(rows: &[Vec<f64>]) -> Vec<&[f64]> {
+        rows.iter().map(Vec::as_slice).collect()
+    }
+    let all: Vec<Vec<f64>> = pos.iter().chain(neg).cloned().collect();
+    let (x, z) = (refs(&all), refs(labels));
+    let (shrinkage, rcond) = (opts.leace_shrinkage, opts.leace_rcond);
+    let fit = leace::fit_multi(&x, &z, shrinkage, rcond, max_rank)?;
+
+    let erased: Vec<Vec<f64>> = all.iter().map(|row| fit.erase(row)).collect();
+    let before = leace::frobenius(&leace::cross_cov(&x, &z));
+    let after = leace::frobenius(&leace::cross_cov(&refs(&erased), &z));
+    let gap: Vec<f64> = mean_of(&erased[..pos.len()])
+        .iter()
+        .zip(mean_of(&erased[pos.len()..]))
+        .map(|(p, q)| p - q)
+        .collect();
+    let mut warnings = Vec::new();
+
+    // Hold-out: the eraser refitted without the held rows, measured on them.
+    let mut mask = holdout_mask(pos.len(), opts.holdout_frac);
+    mask.extend(holdout_mask(neg.len(), opts.holdout_frac));
+    let held_out = match opts.holdout_frac > 0.0 {
+        false => None,
+        true if pos.len() < MIN_HOLDOUT_PER_CLASS || neg.len() < MIN_HOLDOUT_PER_CLASS => {
+            warnings.push(format!(
+                "--holdout-frac ignoré : au moins {MIN_HOLDOUT_PER_CLASS} prompts par classe requis"
+            ));
+            None
+        }
+        true => {
+            let pick = |rows: &[&[f64]], held: bool| -> Vec<Vec<f64>> {
+                let kept = rows.iter().zip(&mask).filter(|(_, h)| **h == held);
+                kept.map(|(row, _)| row.to_vec()).collect()
+            };
+            let (x_train, z_train) = (pick(&x, false), pick(&z, false));
+            let (x_held, z_held) = (pick(&x, true), pick(&z, true));
+            let train =
+                leace::fit_multi(&refs(&x_train), &refs(&z_train), shrinkage, rcond, max_rank)?;
+            let held_erased: Vec<Vec<f64>> = x_held.iter().map(|row| train.erase(row)).collect();
+            let cov_before = leace::cross_cov(&refs(&x_held), &refs(&z_held));
+            let cov_after = leace::cross_cov(&refs(&held_erased), &refs(&z_held));
+            // Per component: what b_t still reads of the held-out cross covariance.
+            let read = |b: &[f64], cov: &[Vec<f64>]| -> f64 {
+                let along = cov.iter().map(|c| super::svd::dot(b, c).powi(2));
+                along.sum::<f64>().sqrt()
+            };
+            let residual: Vec<f64> = train
+                .b
+                .iter()
+                .map(|b| match read(b, &cov_before) {
+                    base if base > 0.0 => read(b, &cov_after) / base,
+                    _ => 0.0,
+                })
+                .collect();
+            let total = leace::frobenius(&cov_before);
+            let ratio = (total > 0.0).then(|| leace::frobenius(&cov_after) / total);
+            Some((ratio, residual))
+        }
+    };
+
+    let d = fit.mean.len();
+    if n <= d {
+        warnings.push(format!(
+            "n = {n} ≤ d = {d} : la covariance croisée s'annule en échantillon, mais un \
+             classifieur linéaire peut encore séparer ; seul holdout_cross_cov_ratio \
+             dit si l'effacement généralise"
+        ));
+    }
+    let rank = fit.a.len();
+    if let Some(asked) = max_rank.filter(|k| *k > rank) {
+        warnings.push(format!(
+            "rang demandé {asked}, rang de la covariance croisée {rank} : {rank} direction(s) écrite(s)"
+        ));
+    }
+    warnings.extend(subspace::rank_warning(rank, n, "prompts"));
+    let trace: f64 = fit
+        .b
+        .iter()
+        .zip(&fit.a)
+        .map(|(b, a)| super::svd::dot(b, a))
+        .sum();
+    let (holdout_ratio, residual) = match held_out {
+        Some((ratio, residual)) => (ratio, Some(residual)),
+        None => (None, None),
+    };
+    let diagnostics = LeaceDiagnostics {
+        shrinkage: fit.shrinkage,
+        rcond,
+        rank: fit.cov_rank,
+        kappa: fit.kappa,
+        // Mean of the diagonal of BᵀA: 1 by construction, like bᵀa of one direction.
+        b_dot_a: trace / rank as f64,
+        cross_cov_before: before,
+        cross_cov_after: after,
+        class_mean_gap_after: super::svd::dot(&gap, &gap).sqrt(),
+        in_sample_cross_cov_ratio: match before > 0.0 {
+            true => after / before,
+            false => 0.0,
+        },
+        holdout_cross_cov_ratio: holdout_ratio,
+        n_pos: pos.len(),
+        n_neg: neg.len(),
+        subspace: Some(subspace::diagnostics(
+            &fit.a, &fit.b, &fit.sigma, pos, neg, residual,
+        )),
+    };
+    Ok(MethodOutput {
+        direction: unit(fit.a[0].clone())?,
+        diagnostics: Some(MethodDiagnostics::Leace(diagnostics)),
+        leace: None,
+        subspace: Some(SubspaceFit {
+            a: fit.a.clone(),
+            b: fit.b.clone(),
+            leace: Some(fit),
+        }),
+        warnings,
+    })
 }
 
 #[cfg(test)]
@@ -354,5 +591,205 @@ mod tests {
             panic!()
         };
         assert_eq!(d.holdout_cross_cov_ratio, None);
+    }
+
+    // ------------------------------------------------------------------ rank k
+
+    /// `n` pairs of dimension 12: three planted axes of decreasing strength plus noise.
+    fn planted(n: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+        let mut rng = crate::linalg::Lcg(17);
+        let (mut pos, mut neg) = (Vec::new(), Vec::new());
+        for i in 0..n {
+            let base: Vec<f64> = (0..12).map(|_| rng.next()).collect();
+            let mut with = base.clone();
+            for (t, strength) in [4.0, 2.0, 1.0].iter().enumerate() {
+                let sign = if (i >> t) & 1 == 0 { 1.0 } else { -0.5 };
+                with[3 * t] += strength * sign + 0.01 * rng.next();
+            }
+            pos.push(with);
+            neg.push(base);
+        }
+        (pos, neg)
+    }
+
+    fn sub(rank: Option<usize>, labels: Option<Vec<Vec<f64>>>) -> SubspaceOptions {
+        SubspaceOptions { rank, labels }
+    }
+
+    #[test]
+    fn svd_rank_k_adds_the_subspace_and_keeps_the_rank_one_output() {
+        let (pos, neg) = planted(16);
+        let opts = MethodOptions {
+            method: Method::Svd,
+            ..MethodOptions::default()
+        };
+        let one = compute(&pos, &neg, &opts).unwrap();
+        // No option, or rank 1: `compute`, unchanged.
+        assert_eq!(
+            compute_subspace(&pos, &neg, &opts, &sub(None, None)).unwrap(),
+            one
+        );
+        assert_eq!(
+            compute_subspace(&pos, &neg, &opts, &sub(Some(1), None)).unwrap(),
+            one
+        );
+
+        let three = compute_subspace(&pos, &neg, &opts, &sub(Some(3), None)).unwrap();
+        assert_eq!(three.direction, one.direction, "the first direction");
+        let fit = three.subspace.as_ref().unwrap();
+        assert_eq!(
+            (fit.a.len(), fit.a == fit.b, fit.leace.is_none()),
+            (3, true, true)
+        );
+        let Some(MethodDiagnostics::Svd(d)) = &three.diagnostics else {
+            panic!("svd diagnostics expected");
+        };
+        let s = d.subspace.as_ref().unwrap();
+        assert_eq!((s.rank, s.sigma_t.len(), s.d_prime.len()), (3, 3, 3));
+        assert!(s.gram_bta_error < 1e-6 && s.holdout_cross_cov_residual.is_none());
+        assert!(s.sigma_t.windows(2).all(|w| w[0] >= w[1]));
+        let cumulative = &s.explained_variance_cumulative;
+        assert!(cumulative.windows(2).all(|w| w[0] < w[1]) && cumulative[2] <= 1.0);
+        assert!(cumulative[2] > 0.9, "three planted axes carry the energy");
+        // The rank-1 diagnostics do not move, and say nothing of a subspace.
+        let Some(MethodDiagnostics::Svd(alone)) = &one.diagnostics else {
+            panic!("svd diagnostics expected");
+        };
+        assert!(alone.subspace.is_none() && alone.sigma == d.sigma);
+        assert!(serde_json::to_value(alone)
+            .unwrap()
+            .get("subspace")
+            .is_none());
+
+        // 4 k ≥ n: said. More directions than the deltas have: said too.
+        let few = compute_subspace(&pos[..8], &neg[..8], &opts, &sub(Some(3), None)).unwrap();
+        assert!(
+            few.warnings.iter().any(|w| w.contains("n/4")),
+            "{:?}",
+            few.warnings
+        );
+        assert!(!three.warnings.iter().any(|w| w.contains("n/4")));
+        let all = compute_subspace(&pos[..4], &neg[..4], &opts, &sub(Some(9), None)).unwrap();
+        assert_eq!(
+            all.subspace.unwrap().a.len(),
+            3,
+            "the deltas live on three axes"
+        );
+        assert!(all.warnings.iter().any(|w| w.contains("rang demandé 9")));
+    }
+
+    #[test]
+    fn leace_with_labels_erases_every_label_and_reports_each_component() {
+        let (pos, neg) = planted(20);
+        let n = pos.len() + neg.len();
+        // Two continuous labels: the planted signs of the first two axes.
+        let labels: Vec<Vec<f64>> = (0..n)
+            .map(|i| {
+                let positive = i < pos.len();
+                let pair = i % pos.len();
+                (0..2)
+                    .map(|t| match (positive, (pair >> t) & 1 == 0) {
+                        (false, _) => 0.0,
+                        (true, true) => 1.0,
+                        (true, false) => -0.5,
+                    })
+                    .collect()
+            })
+            .collect();
+        let opts = MethodOptions {
+            method: Method::Leace,
+            holdout_frac: 0.5,
+            ..MethodOptions::default()
+        };
+        let out = compute_subspace(&pos, &neg, &opts, &sub(None, Some(labels.clone()))).unwrap();
+        let fit = out.subspace.as_ref().unwrap();
+        assert_eq!((fit.a.len(), fit.b.len()), (2, 2));
+        assert!(fit.leace.is_some() && out.leace.is_none());
+        let norm: f64 = out.direction.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-12);
+        let Some(MethodDiagnostics::Leace(d)) = &out.diagnostics else {
+            panic!("leace diagnostics expected");
+        };
+        assert!(d.cross_cov_before > 0.05);
+        assert!(
+            d.in_sample_cross_cov_ratio < 1e-9,
+            "{}",
+            d.in_sample_cross_cov_ratio
+        );
+        assert!((d.b_dot_a - 1.0).abs() < 1e-9);
+        let s = d.subspace.as_ref().unwrap();
+        assert_eq!(s.rank, 2);
+        assert!(s.gram_bta_error < 1e-5, "{}", s.gram_bta_error);
+        let residual = s.holdout_cross_cov_residual.as_ref().unwrap();
+        assert_eq!(residual.len(), 2);
+        assert!(residual.iter().all(|r| r.is_finite() && *r >= 0.0));
+        assert!(d.holdout_cross_cov_ratio.is_some());
+        // Deterministic.
+        let again = compute_subspace(&pos, &neg, &opts, &sub(None, Some(labels.clone()))).unwrap();
+        assert_eq!(out, again);
+
+        // One direction at most on request; a wrong label count is refused.
+        let one = compute_subspace(&pos, &neg, &opts, &sub(Some(1), Some(labels.clone()))).unwrap();
+        assert_eq!(one.subspace.unwrap().a.len(), 1);
+        let err = compute_subspace(&pos, &neg, &opts, &sub(None, Some(labels[..5].to_vec())))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("5 lignes pour 40 prompts"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn options_a_method_cannot_honor_are_refused_before_any_computation() {
+        let labels = Some(vec![vec![1.0], vec![0.0]]);
+        for (method, options, why) in [
+            (
+                Method::MeanDiff,
+                sub(Some(2), None),
+                "mean_diff reste de rang 1",
+            ),
+            (
+                Method::MeanDiff,
+                sub(None, labels.clone()),
+                "mean_diff reste de rang 1",
+            ),
+            (Method::Svd, sub(Some(2), labels.clone()), "--method leace"),
+            (Method::Leace, sub(Some(2), None), "--labels-file"),
+        ] {
+            let err = check_subspace(method, &options).unwrap_err().to_string();
+            assert!(err.contains(why), "{method:?}: {err}");
+        }
+        for (method, options) in [
+            (Method::MeanDiff, sub(Some(1), None)),
+            (Method::Svd, sub(Some(64), None)),
+            (Method::Leace, sub(Some(1), None)),
+            (Method::Leace, sub(Some(3), labels.clone())),
+            (Method::Leace, sub(None, labels)),
+        ] {
+            assert!(check_subspace(method, &options).is_ok(), "{method:?}");
+        }
+    }
+
+    #[test]
+    fn the_rank_k_keys_travel_in_the_params_and_leave_them_unchanged_when_absent() {
+        let opts = MethodOptions {
+            method: Method::Svd,
+            svd_center: true,
+            ..MethodOptions::default()
+        };
+        assert_eq!(params_with_subspace(&opts, None, None), opts.params());
+        let params = params_with_subspace(&opts, Some(4), Some(json!([0, 1])));
+        assert_eq!(
+            (&params["rank"], &params["labels"]),
+            (&json!(4), &json!([0, 1]))
+        );
+        // The frozen options still read their four keys from it.
+        assert_eq!(
+            MethodOptions::from_params(Method::Svd, &params).unwrap(),
+            opts
+        );
+        let read = SubspaceOptions::from_params(&params).unwrap();
+        assert_eq!(read.rank, Some(4));
+        assert_eq!(read.labels.unwrap(), [[1.0, 0.0], [0.0, 1.0]]);
     }
 }

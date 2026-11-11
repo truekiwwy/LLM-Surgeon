@@ -15,14 +15,15 @@ use serde_json::{json, Map, Value};
 use super::server::McpConfig;
 use crate::app::{
     core_apply_routed, core_autotune, core_bench_dump, core_bench_eval, core_bench_logits,
-    core_bench_ppl, core_check, core_eval, core_extract_method, core_inspect, envelope_of, exit,
-    AppDeps, ApplyRequest, CoreResult, Outcome, ProgressSink,
+    core_bench_ppl, core_bench_refusal, core_check, core_eval, core_extract_method, core_inspect,
+    envelope_of, exit, AppDeps, ApplyRequest, CoreResult, Outcome, ProgressSink,
 };
 use crate::bench;
 use crate::bench::dump::DumpRequest;
 use crate::bench::logits_metrics::LogitsRequest;
 use crate::bench::ppl_runner::{PplBaseline, PplRequest};
 use crate::bench::prompt::Template;
+use crate::bench::refusal::RefusalRequest;
 use crate::bench::score::EvalRequest;
 use crate::cli::{CheckArgs, EvalArgs, InspectArgs, SchemaKind};
 use crate::eval::{load_prompts, EvalPrompt};
@@ -246,6 +247,17 @@ pub struct ExtractToolArgs {
         description = "Fraction hors-échantillon (par index) pour les diagnostics ; 10 prompts par classe au moins."
     )]
     pub holdout_frac: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1, max = 64),
+        description = "Rang du sous-espace. svd : nombre de vecteurs singuliers gardés (défaut 1) ; au-delà de 1, a = b = V_k (forme [rank, hidden]) sont écrits dans <out>.subspace.safetensors. leace avec labels_file : nombre maximal de directions (défaut : toutes). mean_diff reste de rang 1."
+    )]
+    pub rank: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "leace : fichier JSON dans un dossier autorisé, un label par prompt (les positifs puis les négatifs) : indice de classe entier, ou tableau de m nombres. Efface tous les labels à la fois ; a et b de <out>.leace.safetensors sont alors de forme [k, hidden], à passer tels quels à project_out."
+    )]
+    pub labels_file: Option<PathBuf>,
 }
 
 /// `method` of `surgeon_extract`: an identifier of the built-in registry. Its schema lists
@@ -392,14 +404,14 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_INSPECT,
             "Topologie MLP",
-            "Liste les matrices MLP (gate_proj, up_proj, down_proj) par couche : dtype, forme, taille, et en option statistiques min/max/moyenne/L2. Sert à choisir les couches et l'axe d'un patch. Lecture seule.",
+            "Liste les matrices MLP (gate_proj, up_proj, down_proj) par couche, et sur demande (projections) o_proj et embed_tokens : dtype, forme, taille, et en option statistiques min/max/moyenne/L2. Sert à choisir les couches et l'axe d'un patch. Lecture seule.",
             schema_value::<InspectToolArgs>(),
             json!({ "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true }),
         ),
         tool(
             TOOL_APPLY,
             "Chirurgie de poids",
-            "Applique un patch (W ∓= alpha·v) EN PLACE sur les poids du modèle. Sauvegarde vérifiée imposée avant écriture, rollback automatique en cas d'erreur ou d'annulation. Faire d'abord un dry_run: true pour vérifier les cibles.",
+            "Applique un patch (W ∓= alpha·v, ou project_out sur les écrivains du flux résiduel : down_proj, o_proj, embed_tokens) EN PLACE sur les poids du modèle. Si embed_tokens est visé et partagé avec lm_head, la tête est d'abord détachée : lm_head.weight (copie non patchée) est ajouté au modèle et tie_word_embeddings passe à false ; le dry_run l'annonce dans data.untie_lm_head. Sauvegarde vérifiée imposée avant écriture, rollback automatique en cas d'erreur ou d'annulation. Faire d'abord un dry_run: true pour vérifier les cibles.",
             schema_value::<ApplyToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false }),
         ),
@@ -420,7 +432,7 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_BENCH,
             "Mesure d'une chirurgie",
-            "Mesure l'effet d'une chirurgie, selon mode : dump (logits d'un modèle Qwen2 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH, intervalle de Wilson, comparaison appariée). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision.",
+            "Mesure l'effet d'une chirurgie, selon mode : dump (logits d'un modèle Qwen2 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision.",
             schema_value::<BenchToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
@@ -672,14 +684,23 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         dtype: args.dtype,
         overwrite: args.overwrite,
     };
-    let params = MethodOptions {
+    let labels = match &args.labels_file {
+        Some(file) => {
+            let path = sandboxed(ctx, "labels_file", file, &root)?;
+            let labels = extract::load_labels(&path)
+                .map_err(|m| invalid("invalid_input", format!("labels_file : {m}")))?;
+            Some(labels)
+        }
+        None => None,
+    };
+    let options = MethodOptions {
         svd_center: args.svd_center,
         leace_shrinkage: args.leace_shrinkage.unwrap_or(DEFAULT_LEACE_SHRINKAGE),
         leace_rcond: args.leace_rcond.unwrap_or(DEFAULT_LEACE_RCOND),
         holdout_frac: args.holdout_frac.unwrap_or(0.0),
         ..MethodOptions::default()
-    }
-    .params();
+    };
+    let params = extract::params_with_subspace(&options, args.rank.map(|r| r as usize), labels);
     let method = args.method.map_or(DEFAULT_METHOD.to_owned(), |m| m.0);
     core_extract_method(&request, &method, &params, ctx.deps, &Ui::off(), ctx.sink)
 }
@@ -863,6 +884,8 @@ pub enum BenchMode {
     Eval,
     /// Écrit les logits d'un modèle Qwen2 sur des prompts (model, prompts, out).
     Dump,
+    /// Taux de refus d'un modèle Qwen2 sur des prompts, génération native (model, prompts).
+    Refusal,
 }
 
 /// Flat on purpose (no `oneOf` at the top): which fields a mode takes is checked at
@@ -870,7 +893,7 @@ pub enum BenchMode {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Arguments de surgeon_bench : mode, puis les champs de ce mode (logits : before, after ; ppl : model, text ; eval : model, dataset ; dump : model, prompts, out)."
+    description = "Arguments de surgeon_bench : mode, puis les champs de ce mode (logits : before, after ; ppl : model, text ; eval : model, dataset ; dump : model, prompts, out ; refusal : model, prompts)."
 )]
 pub struct BenchToolArgs {
     pub mode: BenchMode,
@@ -905,14 +928,14 @@ pub struct BenchToolArgs {
     pub fail_on_warn: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "ppl, eval : .gguf ou dossier SafeTensors (converti en GGUF temporaire) ; dump : dossier Qwen2."
+        description = "ppl, eval : .gguf ou dossier SafeTensors (converti en GGUF temporaire, sauf eval avec backend native) ; dump, refusal : dossier Qwen2."
     )]
     pub model: Option<PathBuf>,
     #[serde(default)]
     #[schemars(description = "ppl : fichier texte évalué.")]
     pub text: Option<PathBuf>,
     #[serde(default)]
-    #[schemars(description = "ppl, eval : modèle de référence, mesuré en premier.")]
+    #[schemars(description = "ppl, eval, refusal : modèle de référence, mesuré en premier.")]
     pub baseline_model: Option<PathBuf>,
     #[serde(default)]
     #[schemars(
@@ -964,7 +987,7 @@ pub struct BenchToolArgs {
     #[serde(default)]
     #[schemars(
         range(min = 1),
-        description = "eval : tokens générés au plus par question (défaut 512)."
+        description = "eval : tokens générés au plus par question (défaut 512) ; refusal : par prompt (défaut 256)."
     )]
     pub max_new_tokens: Option<u32>,
     #[serde(default)]
@@ -977,7 +1000,17 @@ pub struct BenchToolArgs {
     pub min_accuracy: Option<f64>,
     #[serde(default)]
     #[schemars(
-        description = "dump : fichier de prompts (tableau JSON de chaînes ou de {text}, JSONL ou texte)."
+        description = "eval : llama (défaut, llama.cpp sur un GGUF) ou native (génération gloutonne en Rust pur sur un dossier Qwen2, sans llama.cpp)."
+    )]
+    pub backend: Option<crate::bench::score::Backend>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal : gabarit appliqué à chaque prompt, chatml (défaut) ou none."
+    )]
+    pub chat_template: Option<ChatTemplate>,
+    #[serde(default)]
+    #[schemars(
+        description = "dump, refusal : fichier de prompts (tableau JSON de chaînes ou de {text}, JSONL ou texte)."
     )]
     pub prompts: Option<PathBuf>,
     #[serde(default)]
@@ -1005,7 +1038,7 @@ pub struct BenchToolArgs {
 }
 
 /// (mode, required fields, optional fields).
-const BENCH_FIELDS: [(&str, &[&str], &[&str]); 4] = [
+const BENCH_FIELDS: [(&str, &[&str], &[&str]); 5] = [
     (
         "logits",
         &["before", "after"],
@@ -1048,7 +1081,13 @@ const BENCH_FIELDS: [(&str, &[&str], &[&str]); 4] = [
             "timeout_secs",
             "min_accuracy",
             "fail_on_warn",
+            "backend",
         ],
+    ),
+    (
+        "refusal",
+        &["model", "prompts"],
+        &["baseline_model", "max_new_tokens", "chat_template"],
     ),
     (
         "dump",
@@ -1069,6 +1108,7 @@ fn bench_command(arguments: &Value) -> &'static str {
         Some("ppl") => "bench ppl",
         Some("eval") => "bench eval",
         Some("dump") => "bench dump",
+        Some("refusal") => "bench refusal",
         _ => "bench",
     }
 }
@@ -1213,6 +1253,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             let req = EvalRequest {
                 model: path(ctx, "model", &args.model)?,
                 dataset: path(ctx, "dataset", &args.dataset)?,
+                backend: args.backend.unwrap_or_default(),
                 baseline_model: optional_path(ctx, "baseline_model", &args.baseline_model)?,
                 limit: args.limit.map_or(bench::DEFAULT_LIMIT, |l| l as usize),
                 max_new_tokens: args.max_new_tokens.unwrap_or(bench::DEFAULT_MAX_NEW_TOKENS),
@@ -1243,6 +1284,21 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 overwrite: args.overwrite.unwrap_or(false),
             };
             core_bench_dump(&req, ctx.deps, &ui, ctx.sink)
+        }
+        BenchMode::Refusal => {
+            let prompts_file = path(ctx, "prompts", &args.prompts)?;
+            let prompts = extract::load_prompt_texts(&prompts_file)
+                .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?;
+            let req = RefusalRequest {
+                model: path(ctx, "model", &args.model)?,
+                prompts,
+                baseline_model: optional_path(ctx, "baseline_model", &args.baseline_model)?,
+                max_new_tokens: args
+                    .max_new_tokens
+                    .unwrap_or(bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
+                chat_template: args.chat_template.unwrap_or(ChatTemplate::Chatml),
+            };
+            core_bench_refusal(&req, ctx.deps, &ui, ctx.sink)
         }
     }
 }

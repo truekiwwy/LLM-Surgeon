@@ -65,15 +65,35 @@ pub fn encode_tensors(
     tensors: &[(&str, &[f32])],
     metadata: &BTreeMap<String, String>,
 ) -> Result<Vec<u8>> {
+    let shaped: Vec<(&str, &[f32], usize)> = tensors.iter().map(|(n, v)| (*n, *v, 0)).collect();
+    encode_shaped(&shaped, metadata)
+}
+
+/// [`encode_tensors`] with 2D tensors: `(name, values, rows)` is written with the shape
+/// `[rows, values.len() / rows]`, one direction per row; `rows = 0` keeps the 1D shape.
+pub fn encode_shaped(
+    tensors: &[(&str, &[f32], usize)],
+    metadata: &BTreeMap<String, String>,
+) -> Result<Vec<u8>> {
+    let shape_of = |values: &[f32], rows: usize| match rows {
+        0 => vec![values.len()],
+        _ => vec![rows, values.len() / rows],
+    };
     let mut header = serde_json::Map::new();
     header.insert("__metadata__".into(), serde_json::json!(metadata));
     let mut data: Vec<u8> = Vec::new();
-    for (name, values) in tensors {
+    for (name, values, rows) in tensors {
+        if *rows > 0 && !values.len().is_multiple_of(*rows) {
+            return Err(ExtractError::Compute(format!(
+                "tenseur {name} : {} valeurs ne font pas {rows} lignes",
+                values.len()
+            )));
+        }
         let start = data.len();
         data.extend(values.iter().flat_map(|v| v.to_le_bytes()));
         header.insert(
             (*name).to_owned(),
-            serde_json::json!({ "dtype": "F32", "shape": [values.len()], "data_offsets": [start, data.len()] }),
+            serde_json::json!({ "dtype": "F32", "shape": shape_of(values, *rows), "data_offsets": [start, data.len()] }),
         );
     }
     let mut header = serde_json::Value::Object(header).to_string();
@@ -87,11 +107,11 @@ pub fn encode_tensors(
 
     let parsed = safetensors::SafeTensors::deserialize(&bytes)
         .map_err(|e| ExtractError::Compute(format!("fichier produit illisible : {e}")))?;
-    for (name, values) in tensors {
+    for (name, values, rows) in tensors {
         let view = parsed
             .tensor(name)
             .map_err(|e| ExtractError::Compute(e.to_string()))?;
-        if view.shape() != [values.len()] || view.dtype() != safetensors::Dtype::F32 {
+        if view.shape() != shape_of(values, *rows) || view.dtype() != safetensors::Dtype::F32 {
             return Err(ExtractError::Compute(format!("tenseur {name} incohérent")));
         }
     }

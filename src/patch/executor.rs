@@ -4,7 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{PatchError, Result};
 use super::schema::{Axis, LayerSelection, OperationKind, Projection};
-use super::validate::{ValidatedPatch, VectorTensor};
+use super::validate::{ValidatedOperation, ValidatedPatch, VectorTensor, DEFAULT_MAX_RANK};
+use crate::engine::SubspaceProjection;
+
+/// `‖BᵀA − I‖_F` above this at full strength: `a` and `b` are not a projector.
+pub const PROJECTOR_TOLERANCE: f64 = 1e-3;
 
 /// What the executor needs from the tensor engine. The integration implements it on top of
 /// `engine` and converts its errors with `PatchError::Backend(e.to_string())`.
@@ -34,6 +38,33 @@ pub trait PatchBackend {
         Err(PatchError::Backend(format!(
             "{tensor_name} : project_out non supporté par ce backend"
         )))
+    }
+    /// The directions of a `project_out` tensor: `Some(k)` and `k × len` values for a
+    /// `[k, len]` tensor (one direction per row), `None` for the historical 1D form. The
+    /// default only knows 1D vectors.
+    fn load_directions(
+        &self,
+        file: &Path,
+        tensor: Option<&str>,
+    ) -> Result<(Option<usize>, Vec<f32>)> {
+        Ok((None, self.load_vector(file, tensor)?))
+    }
+    /// `W ← W − α A (Bᵀ W)` in one pass, `a` and `b` holding `k` directions each. The
+    /// default sends one direction to `project_out_tensor` and refuses more.
+    fn project_out_subspace(
+        &mut self,
+        tensor_name: &str,
+        a: &[f32],
+        b: &[f32],
+        k: usize,
+        alpha: f32,
+    ) -> Result<OpStats> {
+        match k {
+            1 => self.project_out_tensor(tensor_name, a, b, alpha),
+            _ => Err(PatchError::Backend(format!(
+                "{tensor_name} : project_out de rang {k} non supporté par ce backend"
+            ))),
+        }
     }
     fn flush(&mut self) -> Result<()>;
 }
@@ -65,7 +96,11 @@ pub struct TensorReport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperationReport {
     pub id: String,
+    /// Length of one direction.
     pub vector_len: usize,
+    /// `project_out` with `[k, len]` tensors: the rank k. Absent for the 1D form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<usize>,
     pub tensors: Vec<TensorReport>,
 }
 
@@ -77,6 +112,32 @@ pub struct ApplyReport {
     /// Always `false` in an `Ok` report: a rollback is reported through
     /// `PatchError::ExecutionFailed { rolled_back: true, .. }`.
     pub rolled_back: bool,
+    /// Found while loading the vectors (a `project_out` that is not a projector).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Limits of a run that the patch file does not carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApplyOptions {
+    /// Largest `project_out` rank accepted (`--max-rank`).
+    pub max_rank: usize,
+}
+
+impl Default for ApplyOptions {
+    fn default() -> Self {
+        Self {
+            max_rank: DEFAULT_MAX_RANK,
+        }
+    }
+}
+
+/// The read side of a checked `project_out`: `k` directions, as long as those of `a`.
+struct Subspace {
+    b: Vec<f32>,
+    k: usize,
+    /// `[k, len]` tensors rather than the 1D form.
+    ranked: bool,
 }
 
 /// Runs a validated patch.
@@ -95,6 +156,85 @@ pub fn apply_patch(
     guard: Option<&mut dyn RollbackHandle>,
     dry_run: bool,
 ) -> Result<ApplyReport> {
+    apply_patch_with(patch, backend, guard, dry_run, &ApplyOptions::default())
+}
+
+/// The preflight of one `project_out`: both tensors, their rank against the declared one
+/// and the limit, and whether they form a projector. Nothing is written.
+fn load_subspace(
+    backend: &dyn PatchBackend,
+    op: &ValidatedOperation,
+    names: (&str, &str),
+    opts: &ApplyOptions,
+    warnings: &mut Vec<String>,
+) -> std::result::Result<(Vec<f32>, Subspace), String> {
+    let (rank, allow_non_projector) = match &op.vector_tensor {
+        Some(VectorTensor::Subspace {
+            rank,
+            allow_non_projector,
+            ..
+        }) => (*rank, *allow_non_projector),
+        _ => (None, false),
+    };
+    let load = |name: &str| {
+        backend
+            .load_directions(&op.vector_file, Some(name))
+            .map_err(|e| e.to_string())
+    };
+    let ((ka, a), (kb, b)) = (load(names.0)?, load(names.1)?);
+    if b.len() != a.len() {
+        return Err(format!(
+            "a et b de tailles différentes ({} et {})",
+            a.len(),
+            b.len()
+        ));
+    }
+    let (k, kb) = (ka.unwrap_or(1), kb.unwrap_or(1));
+    if k != kb || k == 0 {
+        return Err(format!("a et b de rangs différents ou nuls ({k} et {kb})"));
+    }
+    if let Some(declared) = rank.filter(|declared| *declared != k) {
+        return Err(format!(
+            "rank = {declared} mais les tenseurs a et b ont {k} direction(s)"
+        ));
+    }
+    if k > opts.max_rank {
+        return Err(format!("rang {k} > plafond {} (--max-rank)", opts.max_rank));
+    }
+    let gram = SubspaceProjection {
+        a: &a,
+        b: &b,
+        alpha: op.alpha,
+        k,
+    }
+    .gram_error();
+    let ranked = ka.is_some();
+    // Not `gram > tolerance`: an undefined error is not a projector either.
+    if op.alpha == 1.0 && !gram.le(&PROJECTOR_TOLERANCE) {
+        let message = format!(
+            "‖BᵀA − I‖ = {gram:.3e} > {PROJECTOR_TOLERANCE:e} : a et b ne forment pas un \
+             projecteur, alpha = 1 retire autre chose que le sous-espace lu par b"
+        );
+        // The 1D form was always accepted: it keeps working, with the warning.
+        if ranked && !allow_non_projector {
+            return Err(format!(
+                "{message} (alpha < 1, ou allow_non_projector: true pour passer outre)"
+            ));
+        }
+        warnings.push(format!("opération {} : {message}", op.id));
+    }
+    Ok((a, Subspace { b, k, ranked }))
+}
+
+/// [`apply_patch`] with explicit limits.
+pub fn apply_patch_with(
+    patch: &ValidatedPatch,
+    backend: &mut dyn PatchBackend,
+    guard: Option<&mut dyn RollbackHandle>,
+    dry_run: bool,
+    opts: &ApplyOptions,
+) -> Result<ApplyReport> {
+    let mut warnings = Vec::new();
     let mut plans = Vec::with_capacity(patch.operations.len());
     for op in &patch.operations {
         let untouched = |cause: String| PatchError::ExecutionFailed {
@@ -112,30 +252,23 @@ pub fn apply_patch(
                 op.layers, op.projections
             )));
         }
-        let vector = backend
-            .load_vector(
-                &op.vector_file,
-                op.vector_tensor.as_ref().map(VectorTensor::direction),
-            )
-            .map_err(|e| untouched(e.to_string()))?;
-        let read = match (&op.kind, &op.vector_tensor) {
-            (OperationKind::ProjectOut, Some(VectorTensor::Pair { b, .. })) => {
-                let b = backend
-                    .load_vector(&op.vector_file, Some(b))
-                    .map_err(|e| untouched(e.to_string()))?;
-                if b.len() != vector.len() {
-                    return Err(untouched(format!(
-                        "a et b de tailles différentes ({} et {})",
-                        vector.len(),
-                        b.len()
-                    )));
-                }
-                Some(b)
+        let tensors = op.vector_tensor.as_ref();
+        let (vector, read) = match (&op.kind, tensors.and_then(|t| Some((t, t.read()?)))) {
+            (OperationKind::ProjectOut, Some((a, b))) => {
+                let names = (a.direction(), b);
+                let (a, subspace) =
+                    load_subspace(&*backend, op, names, opts, &mut warnings).map_err(untouched)?;
+                (a, Some(subspace))
             }
-            (OperationKind::ProjectOut, _) => {
+            (OperationKind::ProjectOut, None) => {
                 return Err(untouched("project_out sans vecteur b".into()));
             }
-            _ => None,
+            _ => {
+                let vector = backend
+                    .load_vector(&op.vector_file, tensors.map(VectorTensor::direction))
+                    .map_err(|e| untouched(e.to_string()))?;
+                (vector, None)
+            }
         };
         plans.push((op, targets, vector, read));
     }
@@ -145,14 +278,19 @@ pub fn apply_patch(
         backup_path: guard.as_ref().and_then(|g| g.backup_path()),
         dry_run,
         rolled_back: false,
+        warnings,
     };
+    let rank = |read: &Option<Subspace>| read.as_ref().filter(|s| s.ranked).map(|s| s.k);
+    let direction_len =
+        |vector: &[f32], read: &Option<Subspace>| vector.len() / read.as_ref().map_or(1, |s| s.k);
 
     if dry_run {
         report.operations = plans
             .into_iter()
-            .map(|(op, targets, vector, _)| OperationReport {
+            .map(|(op, targets, vector, read)| OperationReport {
                 id: op.id.clone(),
-                vector_len: vector.len(),
+                vector_len: direction_len(&vector, &read),
+                rank: rank(&read),
                 tensors: targets
                     .into_iter()
                     .map(|name| TensorReport { name, stats: None })
@@ -169,7 +307,7 @@ pub fn apply_patch(
         let mut tensors = Vec::with_capacity(targets.len());
         for name in targets {
             let shifted = match &read {
-                Some(b) => backend.project_out_tensor(&name, &vector, b, op.alpha),
+                Some(s) => backend.project_out_subspace(&name, &vector, &s.b, s.k, op.alpha),
                 None => backend.shift_tensor(&name, &vector, op.alpha, op.kind, op.axis),
             }
             .and_then(|stats| match stats.nan_or_inf_produced {
@@ -188,7 +326,8 @@ pub fn apply_patch(
         }
         report.operations.push(OperationReport {
             id: op.id.clone(),
-            vector_len: vector.len(),
+            vector_len: direction_len(&vector, &read),
+            rank: rank(&read),
             tensors,
         });
     }
@@ -578,5 +717,257 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// `[k, len]` tensors by name, and a rank-k `project_out` that records what it gets.
+    struct Ranked {
+        tensors: Vec<(&'static str, Option<usize>, Vec<f32>)>,
+        calls: Vec<(String, usize, usize)>,
+        nan: bool,
+    }
+
+    impl Ranked {
+        fn new(tensors: Vec<(&'static str, Option<usize>, Vec<f32>)>) -> Self {
+            Self {
+                tensors,
+                calls: Vec::new(),
+                nan: false,
+            }
+        }
+    }
+
+    impl PatchBackend for Ranked {
+        fn resolve_targets(&self, _: &LayerSelection, _: &[Projection]) -> Result<Vec<String>> {
+            Ok(vec!["t0".into()])
+        }
+        fn load_vector(&self, _: &Path, _: Option<&str>) -> Result<Vec<f32>> {
+            Err(PatchError::Backend("vecteur 1D inattendu".into()))
+        }
+        fn load_directions(
+            &self,
+            _: &Path,
+            tensor: Option<&str>,
+        ) -> Result<(Option<usize>, Vec<f32>)> {
+            self.tensors
+                .iter()
+                .find(|t| Some(t.0) == tensor)
+                .map(|t| (t.1, t.2.clone()))
+                .ok_or_else(|| PatchError::Backend(format!("tenseur absent : {tensor:?}")))
+        }
+        fn shift_tensor(
+            &mut self,
+            _: &str,
+            _: &[f32],
+            _: f32,
+            _: OperationKind,
+            _: Axis,
+        ) -> Result<OpStats> {
+            Err(PatchError::Backend("shift inattendu".into()))
+        }
+        fn project_out_subspace(
+            &mut self,
+            name: &str,
+            a: &[f32],
+            b: &[f32],
+            k: usize,
+            _: f32,
+        ) -> Result<OpStats> {
+            assert_eq!(a.len(), b.len());
+            self.calls.push((name.to_owned(), k, a.len()));
+            Ok(OpStats {
+                max_abs_delta: 0.1,
+                elements_modified: 4,
+                nan_or_inf_produced: u64::from(self.nan),
+            })
+        }
+        fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn subspace_patch(
+        alpha: f32,
+        rank: Option<usize>,
+        allow_non_projector: bool,
+    ) -> ValidatedPatch {
+        let mut p = project_patch();
+        p.operations[0].alpha = alpha;
+        p.operations[0].vector_tensor = Some(VectorTensor::Subspace {
+            a: "a".into(),
+            b: "b".into(),
+            rank,
+            allow_non_projector,
+        });
+        p
+    }
+
+    /// Two orthonormal directions of length 3, `[2, 3]`.
+    const E12: [f32; 6] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+
+    fn orthonormal_pair() -> Vec<(&'static str, Option<usize>, Vec<f32>)> {
+        vec![("a", Some(2), E12.to_vec()), ("b", Some(2), E12.to_vec())]
+    }
+
+    fn untouched_cause(err: PatchError) -> String {
+        match err {
+            PatchError::ExecutionFailed {
+                cause,
+                rolled_back: false,
+                left_modified: false,
+                ..
+            } => cause,
+            other => panic!("expected a preflight failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rank_k_project_out_goes_to_the_backend_in_one_call_per_tensor() {
+        // A plain a/b pair (no new field), the declared rank, and a dry run.
+        for (patch, dry_run) in [
+            (project_patch(), false),
+            (subspace_patch(1.0, Some(2), false), false),
+            (subspace_patch(1.0, None, false), true),
+        ] {
+            let mut backend = Ranked::new(orthonormal_pair());
+            let report = apply_patch(&patch, &mut backend, None, dry_run).unwrap();
+            let op = &report.operations[0];
+            assert_eq!((op.vector_len, op.rank), (3, Some(2)));
+            assert!(report.warnings.is_empty());
+            match dry_run {
+                true => assert!(backend.calls.is_empty() && op.tensors[0].stats.is_none()),
+                false => assert_eq!(backend.calls, [("t0".to_owned(), 2, 6)]),
+            }
+            let json = serde_json::to_value(&report).unwrap();
+            assert_eq!(json["operations"][0]["rank"], 2);
+            assert!(json.get("warnings").is_none(), "absent when empty");
+        }
+    }
+
+    #[test]
+    fn the_rank_is_checked_against_the_tensors_before_any_write() {
+        let run = |patch: &ValidatedPatch, tensors, max_rank: usize| {
+            let mut backend = Ranked::new(tensors);
+            let options = ApplyOptions { max_rank };
+            let result = apply_patch_with(patch, &mut backend, None, false, &options);
+            assert!(
+                result.is_ok() || backend.calls.is_empty(),
+                "nothing written"
+            );
+            result
+        };
+        // The declared rank is not the one of the tensors.
+        let declared = subspace_patch(1.0, Some(3), false);
+        let cause = untouched_cause(run(&declared, orthonormal_pair(), 64).unwrap_err());
+        assert!(
+            cause.contains("rank = 3") && cause.contains("2 direction"),
+            "{cause}"
+        );
+        // Above the limit, and exactly at it.
+        let cause = untouched_cause(run(&project_patch(), orthonormal_pair(), 1).unwrap_err());
+        assert!(cause.contains("rang 2 > plafond 1"), "{cause}");
+        assert!(run(&project_patch(), orthonormal_pair(), 2).is_ok());
+        // a and b of different ranks, although they hold as many values.
+        let mixed = vec![("a", Some(2), E12.to_vec()), ("b", None, E12.to_vec())];
+        let cause = untouched_cause(run(&project_patch(), mixed, 64).unwrap_err());
+        assert!(cause.contains("rangs différents"), "{cause}");
+        let short = vec![
+            ("a", Some(2), E12.to_vec()),
+            ("b", Some(1), E12[..3].to_vec()),
+        ];
+        let cause = untouched_cause(run(&project_patch(), short, 64).unwrap_err());
+        assert!(cause.contains("tailles différentes"), "{cause}");
+    }
+
+    /// `Ranked` without its rank-k kernel: only the trait defaults.
+    struct OneDirection(Ranked);
+
+    impl PatchBackend for OneDirection {
+        fn resolve_targets(&self, l: &LayerSelection, p: &[Projection]) -> Result<Vec<String>> {
+            self.0.resolve_targets(l, p)
+        }
+        fn load_vector(&self, f: &Path, t: Option<&str>) -> Result<Vec<f32>> {
+            self.0.load_vector(f, t)
+        }
+        fn load_directions(&self, f: &Path, t: Option<&str>) -> Result<(Option<usize>, Vec<f32>)> {
+            self.0.load_directions(f, t)
+        }
+        fn shift_tensor(
+            &mut self,
+            n: &str,
+            d: &[f32],
+            a: f32,
+            o: OperationKind,
+            x: Axis,
+        ) -> Result<OpStats> {
+            self.0.shift_tensor(n, d, a, o, x)
+        }
+        fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_backend_without_a_rank_k_kernel_refuses_more_than_one_direction() {
+        let mut one = OneDirection(Ranked::new(orthonormal_pair()));
+        let err = apply_patch(&project_patch(), &mut one, None, false).unwrap_err();
+        assert!(err.to_string().contains("rang 2 non supporté"), "{err}");
+    }
+
+    #[test]
+    fn full_strength_needs_a_projector_unless_explicitly_allowed() {
+        // a = 2 b: BᵀA = 2 I, ‖BᵀA − I‖ = √2.
+        let doubled: Vec<f32> = E12.iter().map(|x| 2.0 * x).collect();
+        let run = |patch: &ValidatedPatch| {
+            let tensors = vec![
+                ("a", Some(2), doubled.clone()),
+                ("b", Some(2), E12.to_vec()),
+            ];
+            let mut backend = Ranked::new(tensors);
+            apply_patch(patch, &mut backend, None, false).map(|report| (report, backend.calls))
+        };
+        let cause = untouched_cause(run(&subspace_patch(1.0, None, false)).unwrap_err());
+        assert!(
+            cause.contains("projecteur") && cause.contains("allow_non_projector"),
+            "{cause}"
+        );
+        assert!(cause.contains("1.414e0"), "the measured error: {cause}");
+        // Allowed on request, with a warning that names the operation.
+        let (report, calls) = run(&subspace_patch(1.0, None, true)).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("erase") && report.warnings[0].contains("projecteur"));
+        // Below full strength nothing claims to be a projection: no check, no warning.
+        let (report, _) = run(&subspace_patch(0.5, None, false)).unwrap();
+        assert!(report.warnings.is_empty());
+        // The 1D form was never checked: it still applies, now with the warning.
+        let one_d = vec![
+            ("a", None, vec![2.0, 0.0, 0.0]),
+            ("b", None, vec![1.0, 0.0, 0.0]),
+        ];
+        let mut backend = Ranked::new(one_d);
+        let patch = subspace_patch(1.0, None, false);
+        let report = apply_patch(&patch, &mut backend, None, false).unwrap();
+        assert_eq!((report.operations[0].rank, backend.calls[0].1), (None, 1));
+        assert_eq!(report.warnings.len(), 1);
+    }
+
+    #[test]
+    fn rank_k_nan_or_inf_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = model(dir.path());
+        let mut backend = Ranked::new(orthonormal_pair());
+        backend.nan = true;
+        let mut guard = BackupGuard::create(&file, None).unwrap();
+        let err = apply_patch(&project_patch(), &mut backend, Some(&mut guard), false).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PatchError::ExecutionFailed {
+                    rolled_back: true,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
     }
 }

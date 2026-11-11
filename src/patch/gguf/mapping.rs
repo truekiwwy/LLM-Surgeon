@@ -28,11 +28,15 @@ pub enum MappingError {
     },
 }
 
+/// The GGUF name of a patch target. Only the MLP ones are patchable in a GGUF: `parse_name`
+/// never yields `o_proj` nor `embed_tokens`, and `apply --gguf` refuses them upfront.
 pub fn tensor_name(layer: usize, projection: Projection) -> String {
     let proj = match projection {
         Projection::Gate => "gate",
         Projection::Up => "up",
         Projection::Down => "down",
+        Projection::AttnOut => return format!("blk.{layer}.attn_output.weight"),
+        Projection::EmbedTokens => return "token_embd.weight".to_owned(),
     };
     format!("blk.{layer}.ffn_{proj}.weight")
 }

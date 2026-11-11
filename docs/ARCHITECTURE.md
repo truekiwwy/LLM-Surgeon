@@ -33,7 +33,8 @@ enveloppe JSON (`--json`, résultats MCP).
   patch    patch.json, validation, sauvegarde, rollback, autotune ; patch::gguf (GGUF en place)
   engine   SafeTensors mmap, décalages de lignes ; kernel : noyaux SIMD, prefetch, E/S
   surgery  .surgery v1, SVD randomisée ; lora : fusion / extraction PEFT
-  bench    KL et top-k entre dumps, perplexité (llama-perplexity), Pass@1 ; eval : llama.cpp
+  bench    KL et top-k entre dumps, perplexité (llama-perplexity), Pass@1 et taux de refus
+           (llama.cpp ou générateur natif Qwen2) ; eval : llama.cpp
   hardware budget RAM/VRAM ; linalg : QR, Cholesky, Jacobi, Gram
 ```
 
@@ -54,7 +55,7 @@ comptées entre fichiers de modules différents) : `app -> patch` 64, `mcp -> ap
 | Forward Qwen2 et capture | `extract` | Activations d'une couche (site, pooling) | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Moteur mmap et décalages | `engine` | Lecture et écriture en place des SafeTensors | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Noyaux SIMD et prefetch | `kernel` | AVX-512, AVX2, NEON ou scalaire, choisis à l'exécution par détection du CPU (`SURGEON_KERNEL` pour forcer) ; compilés dans le binaire | Non : interne, non remplaçable par un tiers à ce jour | aucun |
-| Patch SafeTensors | `patch` | `patch.json` (`add`, `subtract`, `project_out`), validation, sauvegarde, rollback | Non : interne, non remplaçable par un tiers à ce jour | Feuille de route |
+| Patch SafeTensors | `patch` | `patch.json` (`add`, `subtract`, `project_out` ; projections MLP, `o_proj`, `embed_tokens`), validation, sauvegarde, rollback, détachement de `lm_head` (`patch::untie`) | Non : interne, non remplaçable par un tiers à ce jour | Feuille de route |
 | Patch GGUF en place | `patch::gguf` | Déquantification, décalage, requantification | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Formats d'adaptation | `engine`, `patch::gguf`, `surgery`, `lora` | SafeTensors, GGUF, `.surgery` v1, adaptateurs PEFT | Non : interne, non remplaçable par un tiers à ce jour | Feuille de route |
 | Fusion et extraction LoRA | `lora` | `W += scale · (alpha / r) · B A`, extraction de rang `r` | Non : interne, non remplaçable par un tiers à ce jour | aucun |

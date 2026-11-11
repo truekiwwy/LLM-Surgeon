@@ -6,7 +6,10 @@ use memmap2::{Mmap, MmapMut, MmapOptions};
 
 use super::error::{EngineError, Result};
 use super::index::{parse_index, ModelIndex, TensorInfo};
-use super::project::project_out_tensor;
+use super::project::{
+    project_out_embedding, project_out_subspace, project_out_subspace_embedding,
+    project_out_tensor, SubspaceProjection,
+};
 use super::shift::{decode_f32, BroadcastAxis, ShiftOp, ShiftPlan, ShiftStats};
 use crate::kernel::{ChunkFailure, ChunkedPatcher, IoConfig, IoCounters, KernelConfig, OsHints};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -210,11 +213,60 @@ impl WritableModel {
         project_out_tensor(bytes, info.dtype.clone(), &info.shape, a, b, alpha)
     }
 
+    /// `W ← W − α (W b) aᵀ`, see [`project_out_embedding`].
+    pub fn project_out_embedding(
+        &mut self,
+        name: &str,
+        a: &[f32],
+        b: &[f32],
+        alpha: f32,
+    ) -> Result<ShiftStats> {
+        let info = self.index.get(name)?;
+        let bytes = &mut self.mmap[info.byte_start..info.byte_end];
+        project_out_embedding(bytes, info.dtype.clone(), &info.shape, a, b, alpha)
+    }
+
+    /// `W ← W − α A (Bᵀ W)` in one pass, see [`project_out_subspace`]; the embedding
+    /// side (`[vocab, hidden]`) when `embedding`.
+    pub fn project_out_subspace(
+        &mut self,
+        name: &str,
+        p: &SubspaceProjection<'_>,
+        embedding: bool,
+    ) -> Result<ShiftStats> {
+        let info = self.index.get(name)?;
+        let bytes = &mut self.mmap[info.byte_start..info.byte_end];
+        match embedding {
+            true => project_out_subspace_embedding(bytes, info.dtype.clone(), &info.shape, p),
+            false => project_out_subspace(bytes, info.dtype.clone(), &info.shape, p),
+        }
+    }
+
     pub fn flush(&self) -> Result<()> {
         self.mmap
             .flush()
             .map_err(|e| EngineError::io(&self.path, &e))
     }
+}
+
+/// The directions of a `project_out` tensor: `Some(k)` and `k × len` values for a 2D
+/// `[k, len]` tensor of a `.safetensors` file (one direction per row), `None` and the
+/// vector for anything [`load_direction_vector`] reads (the 1D form).
+pub fn load_direction_matrix(
+    path: &Path,
+    tensor_name: Option<&str>,
+) -> Result<(Option<usize>, Vec<f32>)> {
+    let is_safetensors = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"));
+    if let (true, Some(name)) = (is_safetensors, tensor_name) {
+        let model = ReadOnlyModel::open(path)?;
+        let view = model.tensor(name)?;
+        if let [k, _] = view.info.shape[..] {
+            return Ok((Some(k), decode_f32(view.bytes, &view.info.dtype)?));
+        }
+    }
+    Ok((None, load_direction_vector(path, tensor_name)?))
 }
 
 /// Loads a 1D direction from a `.safetensors` file (bf16/f16/f32, `tensor_name` required

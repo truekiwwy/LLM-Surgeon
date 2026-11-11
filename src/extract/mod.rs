@@ -59,9 +59,13 @@
 //! <out>.stats.json          per-prompt projections on direction, d′, accuracy, threshold;
 //!                           method_diagnostics for svd/leace (absent for mean_diff)
 //! <out>.leace.safetensors   a, b, mean, u_whitened (1D f32, size d) + shrinkage, rank,
-//!                           kappa, bTa, n_pos, n_neg, layer, site, pooling (leace only)
+//!                           kappa, bTa, n_pos, n_neg, layer, site, pooling (leace only) ;
+//!                           with --labels-file and k > 1 directions: a, b, u_whitened are
+//!                           [k, d] (one direction per row) + subspace_rank
+//! <out>.subspace.safetensors  a = b = V_k, [k, d] (svd --rank k > 1 only)
 //! consumers: patch vector_file (direction) ; project_out (a = vector_tensor,
-//!            b = vector_tensor_b) ; autotune --vector (direction + metadata + stats.json)
+//!            b = vector_tensor_b, 1D or [k, d]) ; autotune --vector (direction + metadata
+//!            + stats.json)
 //! ```
 
 mod capture;
@@ -74,6 +78,7 @@ mod method;
 mod output;
 mod prompts;
 mod stats;
+mod subspace;
 mod svd;
 mod weights;
 
@@ -92,14 +97,14 @@ pub use config::{load_config, parse_config, Qwen2Config};
 pub use error::{ExtractError, Result};
 pub use hooked_qwen2::{HookedQwen2, Site};
 pub use leace::{cross_cov_norm, erased_stats, fit as leace_fit, LeaceDiagnostics, LeaceFit};
-pub(crate) use method::compute as compute_method;
+pub(crate) use method::compute_subspace as compute_method;
 pub use method::{
-    holdout_mask, Method, MethodDiagnostics, MethodOptions, MethodOutput, DEFAULT_LEACE_RCOND,
-    DEFAULT_LEACE_SHRINKAGE, MIN_HOLDOUT_PER_CLASS,
+    check_subspace, holdout_mask, params_with_subspace, Method, MethodDiagnostics, MethodOptions,
+    MethodOutput, SubspaceFit, DEFAULT_LEACE_RCOND, DEFAULT_LEACE_SHRINKAGE, MIN_HOLDOUT_PER_CLASS,
 };
 pub use output::{
-    check_output, companion_path, encode, encode_tensors, leace_path, sidecar_path, write_atomic,
-    write_files_atomic, write_pair_atomic, TENSOR_NAME,
+    check_output, companion_path, encode, encode_shaped, encode_tensors, leace_path, sidecar_path,
+    write_atomic, write_files_atomic, write_pair_atomic, TENSOR_NAME,
 };
 pub use prompts::{
     check_texts, load_prompt_texts, load_tokenizer, tokenize, ChatTemplate, Tokenized,
@@ -108,7 +113,8 @@ pub use stats::{
     mean_diff_direction, separation, separation_along, separation_with_projections, Separation,
     SeparationStats, MIN_DIFF_NORM,
 };
-pub use svd::{svd_direction, SvdDiagnostics};
+pub use subspace::{load_labels, parse_labels, SubspaceDiagnostics, SubspaceOptions};
+pub use svd::{svd_direction, svd_subspace, SvdDiagnostics};
 pub use weights::{
     check_tensors, load_tensors, required_tensors, required_tensors_full, RawTensor,
     SafetensorsDir, TensorSource, TensorTotals,
@@ -586,12 +592,27 @@ fn run_pipeline(
     let mut sidecars: Vec<(&str, PathBuf, Vec<u8>)> = Vec::new();
     for sidecar in &out.sidecars {
         let header = sidecar_header(&info, sidecar, &method_meta, &provenance, &sidecars)?;
-        let tensors: Vec<(&str, &[f32])> = sidecar
+        // A tensor listed in `sidecar_rows` holds that many directions, one per row.
+        let rows_of = |name: &String| {
+            let key = (sidecar.suffix.to_owned(), name.clone());
+            out.sidecar_rows.get(&key).copied().unwrap_or(0)
+        };
+        let tensors: Vec<(&str, &[f32], usize)> = sidecar
             .tensors
             .iter()
-            .map(|(name, values)| (name.as_str(), values.as_slice()))
+            .map(|(name, values)| (name.as_str(), values.as_slice(), rows_of(name)))
             .collect();
-        let bytes = encode_tensors(&tensors, &header)?;
+        if let Some((name, values, rows)) = tensors
+            .iter()
+            .find(|(_, values, rows)| *rows > 0 && values.len() != rows * cfg.hidden_size)
+        {
+            return Err(invalid_output(format!(
+                "tenseur {name} : {} valeurs pour {rows} directions de taille {}",
+                values.len(),
+                cfg.hidden_size
+            )));
+        }
+        let bytes = encode_shaped(&tensors, &header)?;
         sidecars.push((
             sidecar.suffix,
             sidecar_path(&req.out, sidecar.suffix),

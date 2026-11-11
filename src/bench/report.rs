@@ -1,4 +1,4 @@
-//! The four reports (the `data` of the JSON envelope, CLI and MCP alike) and their
+//! The five reports (the `data` of the JSON envelope, CLI and MCP alike) and their
 //! terminal rendering. Every float that can be undefined is an `Option` (`null` in JSON):
 //! no NaN or infinity ever reaches the JSON. Durations live in `timing_ms` only, so two
 //! runs on the same inputs serialize identically once `timing_ms` is removed.
@@ -302,6 +302,96 @@ pub struct BenchEvalReport {
     pub timing_ms: EvalTiming,
 }
 
+// ------------------------------------------------------------------ refusal
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct RefusalItem {
+    /// Index du prompt (base 0) dans le fichier.
+    pub index: usize,
+    /// La réponse contient un marqueur de refus.
+    pub refused: bool,
+    /// Premier marqueur trouvé ; null si aucun.
+    pub marker: Option<String>,
+    /// Réponse générée, entière.
+    pub output: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct RefusalScore {
+    /// Prompts évalués.
+    pub n: usize,
+    /// Réponses comptées comme refus.
+    pub refused: usize,
+    /// refused / n.
+    pub refusal_rate: f64,
+    /// Borne basse de l'intervalle de Wilson à 95 %.
+    pub ci95_low: f64,
+    /// Borne haute de l'intervalle de Wilson à 95 %.
+    pub ci95_high: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct RefusalBaseline {
+    /// Modèle de référence.
+    pub model: PathBuf,
+    /// Score de la référence.
+    #[serde(flatten)]
+    pub score: RefusalScore,
+    /// Résultat par prompt de la référence.
+    pub items: Vec<RefusalItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct RefusalPaired {
+    /// Prompts refusés des deux côtés.
+    pub both_refused: usize,
+    /// Prompts acceptés des deux côtés.
+    pub both_complied: usize,
+    /// Index refusés par la référence et acceptés après chirurgie.
+    pub unblocked: Vec<usize>,
+    /// Index acceptés par la référence et refusés après chirurgie.
+    pub newly_refused: Vec<usize>,
+    /// refusal_rate − refusal_rate de la référence (négatif : moins de refus).
+    pub delta_rate: f64,
+    /// Borne basse à 95 % de delta_rate (Newcombe apparié, méthode 10).
+    pub delta_ci95_low: f64,
+    /// Borne haute à 95 % de delta_rate (Newcombe apparié, méthode 10).
+    pub delta_ci95_high: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct RefusalTiming {
+    /// Durée du modèle évalué (chargement compris).
+    pub total: u64,
+    /// Durée de la référence, si --baseline-model.
+    pub baseline: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct BenchRefusalReport {
+    /// Modèle évalué.
+    pub model: PathBuf,
+    /// sha256 des prompts (tableau JSON des textes, avant gabarit).
+    pub prompts_sha256: String,
+    /// Gabarit appliqué à chaque prompt : chatml ou none.
+    pub chat_template: String,
+    /// Tokens générés au plus par prompt.
+    pub max_new_tokens: u32,
+    /// Marqueurs de refus cherchés (sans casse, aux frontières de mots).
+    pub markers: Vec<String>,
+    /// Score du modèle évalué.
+    #[serde(flatten)]
+    pub score: RefusalScore,
+    /// Résultat par prompt, dans l'ordre du fichier.
+    pub items: Vec<RefusalItem>,
+    /// Référence, si --baseline-model.
+    pub baseline: Option<RefusalBaseline>,
+    /// Comparaison appariée prompt par prompt, si --baseline-model.
+    pub paired: Option<RefusalPaired>,
+    /// Durées en millisecondes.
+    pub timing_ms: RefusalTiming,
+}
+
 // ------------------------------------------------------------------ dump
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -503,6 +593,51 @@ pub fn eval_text(ui: &Ui, run: &BenchRun<BenchEvalReport>) -> String {
         ));
     }
     lines.push(verdict_line(ui, r.verdict, &run.threshold_warnings));
+    finish(ui, lines, &run.warnings, &run.threshold_warnings)
+}
+
+fn refusal_line(ui: &Ui, label: &str, s: &RefusalScore) -> String {
+    format!(
+        "{} {label}{}/{} · {} · IC95 [{} ; {}]",
+        ui::badge(ui, "REFUS"),
+        ui::metric(ui, s.refused),
+        ui::metric(ui, s.n),
+        ui::metric(ui, pct(s.refusal_rate)),
+        ui::metric(ui, format!("{:.1}", s.ci95_low * 100.0)),
+        ui::metric(ui, format!("{:.1}", s.ci95_high * 100.0))
+    )
+}
+
+pub fn refusal_text(ui: &Ui, run: &BenchRun<BenchRefusalReport>) -> String {
+    let r = &run.report;
+    let mut lines = vec![
+        format!(
+            "{} refusal · {} prompts · {} · {} tokens max  {}",
+            ui::badge(ui, "BENCH"),
+            ui::metric(ui, r.score.n),
+            ui::metric(ui, &r.chat_template),
+            ui::metric(ui, r.max_new_tokens),
+            ui::path(ui, &r.model)
+        ),
+        refusal_line(ui, "", &r.score),
+    ];
+    if let (Some(b), Some(p)) = (&r.baseline, &r.paired) {
+        lines.push(refusal_line(ui, "référence ", &b.score));
+        lines.push(format!(
+            "  {}",
+            ui::dim(
+                ui,
+                &format!(
+                    "appariement : débloqués {} · nouveaux refus {} · Δ {:+.1} points, IC95 [{:+.1} ; {:+.1}]",
+                    p.unblocked.len(),
+                    p.newly_refused.len(),
+                    p.delta_rate * 100.0,
+                    p.delta_ci95_low * 100.0,
+                    p.delta_ci95_high * 100.0
+                )
+            )
+        ));
+    }
     finish(ui, lines, &run.warnings, &run.threshold_warnings)
 }
 

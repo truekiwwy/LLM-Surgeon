@@ -10,6 +10,9 @@ pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 pub const MAX_ABS_ALPHA: f32 = 100.0;
 /// Above this |alpha| the patch is accepted with a warning.
 pub const WARN_ABS_ALPHA: f32 = 5.0;
+/// Largest rank of a `project_out` subspace unless `--max-rank` says otherwise (checked
+/// by the executor, on the tensors).
+pub const DEFAULT_MAX_RANK: usize = crate::engine::DEFAULT_MAX_RANK;
 
 /// Build with `ValidationOptions { no_backup: true, ..Default::default() }`.
 #[derive(Debug, Clone)]
@@ -61,6 +64,15 @@ pub enum VectorTensor {
     Named(String),
     /// `vector_tensor` (a) and `vector_tensor_b` (b) of project_out.
     Pair { a: String, b: String },
+    /// project_out with `rank` or `allow_non_projector` (a patch without them stays a
+    /// `Pair`, as it always was).
+    Subspace {
+        a: String,
+        b: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rank: Option<usize>,
+        allow_non_projector: bool,
+    },
 }
 
 impl VectorTensor {
@@ -68,7 +80,15 @@ impl VectorTensor {
     pub fn direction(&self) -> &str {
         match self {
             Self::Named(name) => name,
-            Self::Pair { a, .. } => a,
+            Self::Pair { a, .. } | Self::Subspace { a, .. } => a,
+        }
+    }
+
+    /// `b` of project_out.
+    pub fn read(&self) -> Option<&str> {
+        match self {
+            Self::Named(_) => None,
+            Self::Pair { b, .. } | Self::Subspace { b, .. } => Some(b),
         }
     }
 }
@@ -125,11 +145,19 @@ pub fn validate_patch(
         let project_out = op.operation == OperationKind::ProjectOut;
         if project_out {
             check_project_out(op, &mut |field, message| issue(at(field), message));
-        } else if op.vector_tensor_b.is_some() {
-            issue(
-                at("vector_tensor_b"),
-                "vector_tensor_b ne s'applique qu'à operation = project_out".into(),
-            );
+        } else {
+            for (field, set) in [
+                ("vector_tensor_b", op.vector_tensor_b.is_some()),
+                ("rank", op.rank.is_some()),
+                ("allow_non_projector", op.allow_non_projector),
+            ] {
+                if set {
+                    issue(
+                        at(field),
+                        format!("{field} ne s'applique qu'à operation = project_out"),
+                    );
+                }
+            }
         }
         if !(op.alpha.is_finite() && op.alpha.abs() <= MAX_ABS_ALPHA) {
             issue(
@@ -210,6 +238,16 @@ pub fn validate_patch(
                 kind: op.operation,
                 vector_file,
                 vector_tensor: match (&op.vector_tensor, &op.vector_tensor_b) {
+                    (Some(a), Some(b))
+                        if project_out && (op.rank.is_some() || op.allow_non_projector) =>
+                    {
+                        Some(VectorTensor::Subspace {
+                            a: a.clone(),
+                            b: b.clone(),
+                            rank: op.rank,
+                            allow_non_projector: op.allow_non_projector,
+                        })
+                    }
                     (Some(a), Some(b)) if project_out => Some(VectorTensor::Pair {
                         a: a.clone(),
                         b: b.clone(),
@@ -234,11 +272,16 @@ pub fn validate_patch(
     })
 }
 
-/// project_out: strength in [0, 1], down_proj only (it writes into the residual stream,
-/// the space of a and b), both tensors named in a .safetensors, and no axis other than
-/// the default `cols` (serde cannot tell an explicit `"cols"` from an absent axis; `cols`
-/// is also the matching convention: a and b have the length of the rows).
+/// project_out: strength in [0, 1], only the matrices that write into the residual stream,
+/// the space of a and b (down_proj, o_proj, embed_tokens; gate_proj and up_proj read from
+/// it), both tensors named in a .safetensors, and no axis other than the default `cols`
+/// (serde cannot tell an explicit `"cols"` from an absent axis; the orientation follows
+/// the matrix: a and b index the rows of down_proj / o_proj, the columns of embed_tokens).
 fn check_project_out(op: &Operation, issue: &mut dyn FnMut(&str, String)) {
+    // The limit (`--max-rank`) is checked against the tensors themselves, at load time.
+    if op.rank == Some(0) {
+        issue("rank", "rank doit être ≥ 1".into());
+    }
     if !(op.alpha.is_finite() && (0.0..=1.0).contains(&op.alpha)) {
         issue(
             "alpha",
@@ -248,16 +291,20 @@ fn check_project_out(op: &Operation, issue: &mut dyn FnMut(&str, String)) {
             ),
         );
     }
-    if op.projections != [Projection::Down] {
+    if op
+        .projections
+        .iter()
+        .any(|p| matches!(p, Projection::Gate | Projection::Up))
+    {
         issue(
             "projections",
-            "project_out ne s'applique qu'à [\"down_proj\"] : seule cette matrice écrit dans le flux résiduel où vivent a et b (o_proj et les embeddings ne sont pas couverts)".into(),
+            "project_out ne s'applique qu'aux matrices qui écrivent dans le flux résiduel où vivent a et b : down_proj, o_proj et embed_tokens (gate_proj et up_proj le lisent)".into(),
         );
     }
     if op.axis != Axis::Cols {
         issue(
             "axis",
-            "axis n'a pas de sens pour project_out (a et b ont la taille des lignes) : retirer le champ".into(),
+            "axis n'a pas de sens pour project_out (l'orientation suit la matrice) : retirer le champ".into(),
         );
     }
     if op.vector_tensor.is_none() || op.vector_tensor_b.is_none() {
@@ -371,6 +418,35 @@ mod tests {
     }
 
     #[test]
+    fn project_out_takes_every_residual_writer_and_refuses_the_readers() {
+        let project = |projections: &str| {
+            patch(&[op("p", r#","vector_tensor":"a","vector_tensor_b":"b""#)
+                .replace(r#"["gate_proj"]"#, projections)
+                .replace("subtract", "project_out")
+                .replace("v.json", "v.safetensors")])
+        };
+        let writers = project(r#"["down_proj","o_proj","embed_tokens"]"#);
+        let v = validate_patch(&writers, Path::new("."), &no_files()).unwrap();
+        assert_eq!(
+            v.operations[0].projections,
+            [
+                Projection::Down,
+                Projection::AttnOut,
+                Projection::EmbedTokens
+            ]
+        );
+        for readers in [r#"["gate_proj"]"#, r#"["o_proj","up_proj"]"#] {
+            let got = issues(validate_patch(
+                &project(readers),
+                Path::new("."),
+                &no_files(),
+            ));
+            assert_eq!(got.len(), 1, "{got:?}");
+            assert_eq!(got[0].0, "operations[0].projections");
+        }
+    }
+
+    #[test]
     fn empty_operations_missing_file_and_refused_no_backup() {
         let empty = parse_patch(r#"{"schema_version":1,"operations":[]}"#).unwrap();
         assert_eq!(
@@ -394,5 +470,78 @@ mod tests {
         optional.backup = false;
         let v = validate_patch(&optional, dir.path(), &no_files()).unwrap();
         assert!(!v.backup);
+    }
+
+    #[test]
+    fn rank_and_allow_non_projector_belong_to_project_out() {
+        let project = |extra: &str| {
+            let tensors = format!(r#","vector_tensor":"a","vector_tensor_b":"b"{extra}"#);
+            patch(&[op("p", &tensors)
+                .replace(r#"["gate_proj"]"#, r#"["down_proj"]"#)
+                .replace("subtract", "project_out")
+                .replace("v.json", "v.safetensors")])
+        };
+        let tensors_of = |p: &PatchFile| {
+            let validated = validate_patch(p, Path::new("."), &no_files()).unwrap();
+            validated.operations[0].vector_tensor.clone().unwrap()
+        };
+        // Without the new fields: the pair it always was, serialized as it always was.
+        let plain = tensors_of(&project(""));
+        assert_eq!(
+            plain,
+            VectorTensor::Pair {
+                a: "a".into(),
+                b: "b".into()
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            r#"{"a":"a","b":"b"}"#
+        );
+        // Absent fields are not written back: a patch round-trips to what it was.
+        let written = serde_json::to_string(&project("")).unwrap();
+        assert!(!written.contains("rank") && !written.contains("allow_non_projector"));
+        // With them: carried to the executor.
+        let ranked = tensors_of(&project(r#","rank":4,"allow_non_projector":true"#));
+        assert_eq!(
+            ranked,
+            VectorTensor::Subspace {
+                a: "a".into(),
+                b: "b".into(),
+                rank: Some(4),
+                allow_non_projector: true
+            }
+        );
+        assert_eq!((ranked.direction(), ranked.read()), ("a", Some("b")));
+        assert_eq!(VectorTensor::Named("v".into()).read(), None);
+        // The limit is the executor's, on the tensors: a large declared rank is not an
+        // issue of the patch itself.
+        assert!(validate_patch(&project(r#","rank":4096"#), Path::new("."), &no_files()).is_ok());
+        let zero = issues(validate_patch(
+            &project(r#","rank":0"#),
+            Path::new("."),
+            &no_files(),
+        ));
+        assert_eq!(zero[0].0, "operations[0].rank");
+
+        // On a shift they mean nothing: refused, field by field.
+        for (extra, field) in [
+            (r#","rank":1"#, "operations[0].rank"),
+            (
+                r#","allow_non_projector":true"#,
+                "operations[0].allow_non_projector",
+            ),
+        ] {
+            let got = issues(validate_patch(
+                &patch(&[op("a", extra)]),
+                Path::new("."),
+                &no_files(),
+            ));
+            assert_eq!(got.len(), 1, "{got:?}");
+            assert_eq!(got[0].0, field);
+        }
+        // `allow_non_projector: false` is the default, not a use of the field.
+        let explicit = patch(&[op("a", r#","allow_non_projector":false"#)]);
+        assert!(validate_patch(&explicit, Path::new("."), &no_files()).is_ok());
     }
 }

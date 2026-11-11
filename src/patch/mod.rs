@@ -21,6 +21,8 @@
 //! BackupGuard::rollback -> sha256_file(backup), restore (rename | in-place), sha256_file
 //! BackupGuard::drop     -> rollback (state Created only)
 //! BackupSet::{create_many, rollback_all, commit_all} -> BackupGuard::*
+//! untie::plan -> safetensors headers, config.json            (read only)
+//! UntiePlan::execute -> append_copy (lm_head.weight), write_json (config, index)
 //! ```
 //!
 //! Guarantee: whatever happens in `apply_patch`, the original is either intact, restored
@@ -33,12 +35,14 @@ mod error;
 mod executor;
 pub mod gguf;
 mod schema;
+pub mod untie;
 mod validate;
 
 pub use backup::{BackupGuard, BackupSet};
 pub use error::{exit_code, PatchError, Result, ValidationIssue};
 pub use executor::{
-    apply_patch, ApplyReport, OpStats, OperationReport, PatchBackend, RollbackHandle, TensorReport,
+    apply_patch, apply_patch_with, ApplyOptions, ApplyReport, OpStats, OperationReport,
+    PatchBackend, RollbackHandle, TensorReport, PROJECTOR_TOLERANCE,
 };
 pub use schema::{
     load_patch, parse_patch, Axis, LayerRange, LayerSelection, LayersField, Operation,
@@ -46,5 +50,5 @@ pub use schema::{
 };
 pub use validate::{
     validate_patch, ValidatedOperation, ValidatedPatch, ValidationOptions, VectorTensor,
-    MAX_ABS_ALPHA, SUPPORTED_SCHEMA_VERSION, WARN_ABS_ALPHA,
+    DEFAULT_MAX_RANK, MAX_ABS_ALPHA, SUPPORTED_SCHEMA_VERSION, WARN_ABS_ALPHA,
 };

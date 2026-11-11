@@ -17,7 +17,7 @@ use super::error::{PatchError, Result};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Patch de chirurgie de poids (patch.json, version 1) : liste d'opérations qui décalent des matrices MLP d'un modèle SafeTensors (W ∓= alpha·v)."
+    description = "Patch de chirurgie de poids (patch.json, version 1) : liste d'opérations qui modifient des matrices d'un modèle SafeTensors (MLP, o_proj, embed_tokens ; W ∓= alpha·v ou project_out)."
 )]
 pub struct PatchFile {
     #[schemars(schema_with = "schema_version_schema")]
@@ -54,7 +54,9 @@ fn schema_version_schema(_: &mut SchemaGenerator) -> Schema {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(description = "Une opération : un vecteur direction appliqué à des projections MLP.")]
+#[schemars(
+    description = "Une opération : un vecteur direction appliqué à des matrices du modèle (projections MLP, o_proj, embed_tokens)."
+)]
 pub struct Operation {
     #[schemars(
         length(min = 1),
@@ -81,6 +83,19 @@ pub struct Operation {
         description = "project_out uniquement (obligatoire) : tenseur b du fichier .leace.safetensors (vector_tensor désigne alors a)."
     )]
     pub vector_tensor_b: Option<String>,
+    /// `project_out` only: the rank the tensors must have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        range(min = 1),
+        description = "project_out uniquement : rang attendu du sous-espace, c'est-à-dire le nombre de lignes des tenseurs a et b de forme [rank, hidden] (1 pour la forme 1D [hidden]). L'opération est refusée si les tenseurs ont un autre rang. Absent : le rang est celui des tenseurs."
+    )]
+    pub rank: Option<usize>,
+    /// `project_out` only: accept `alpha = 1` when `a` and `b` are not a projector.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(
+        description = "project_out uniquement : accepte alpha = 1 quand ‖BᵀA − I‖ > 1e-3 (a et b ne forment pas un projecteur), avec un avertissement. Défaut false : l'opération est refusée."
+    )]
+    pub allow_non_projector: bool,
     #[schemars(
         range(min = -100.0, max = 100.0),
         description = "Intensité du décalage W ∓= alpha·v, dans [-100, 100] ; |alpha| > 5 déclenche un avertissement. project_out : force dans [0, 1] (1 = effacement complet)."
@@ -88,7 +103,7 @@ pub struct Operation {
     pub alpha: f32,
     #[serde(default)]
     #[schemars(
-        description = "Axe de diffusion du vecteur. Pour des poids [out, in] (Llama) et une direction du flux résiduel : rows pour gate_proj/up_proj, cols pour down_proj. Défaut cols."
+        description = "Axe de diffusion du vecteur. Pour des poids [out, in] (Llama) et une direction du flux résiduel : rows pour gate_proj/up_proj/embed_tokens, cols pour down_proj/o_proj. Défaut cols."
     )]
     pub axis: Axis,
 }
@@ -103,14 +118,14 @@ fn projections_schema(gen: &mut SchemaGenerator) -> Schema {
     array.min_items = Some(1);
     array.unique_items = Some(true);
     schema.metadata().description =
-        Some("Projections MLP visées, sans doublon (un doublon décalerait deux fois).".into());
+        Some("Matrices visées, sans doublon (un doublon décalerait deux fois).".into());
     schema.into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[schemars(
-    description = "subtract retire alpha·v des poids, add l'ajoute ; project_out applique l'effaceur LEACE W ← W − alpha·a(bᵀW) (down_proj seulement)."
+    description = "subtract retire alpha·v des poids, add l'ajoute ; project_out retire la direction lue par b des écrivains du flux résiduel : W ← W − alpha·a(bᵀW) pour down_proj et o_proj, W ← W − alpha·(W b)aᵀ pour embed_tokens (a = b = v unitaire : ablation directionnelle ; a et b d'un .leace.safetensors : effaceur LEACE)."
 )]
 pub enum OperationKind {
     Subtract,
@@ -120,11 +135,14 @@ pub enum OperationKind {
     ProjectOut,
 }
 
-/// Declaration order is the canonical order (gate, up, down).
+/// Declaration order is the canonical order (gate, up, down, then the residual writers
+/// outside the MLP).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
-#[schemars(description = "Matrice MLP : gate_proj, up_proj ou down_proj.")]
+#[schemars(
+    description = "Matrice visée : gate_proj, up_proj, down_proj (MLP de chaque couche), o_proj (sortie de l'attention de chaque couche) ou embed_tokens (plongements d'entrée, hors couches : sélectionné quel que soit layers)."
+)]
 pub enum Projection {
     #[serde(rename = "gate_proj")]
     Gate,
@@ -132,6 +150,17 @@ pub enum Projection {
     Up,
     #[serde(rename = "down_proj")]
     Down,
+    #[serde(rename = "o_proj")]
+    AttnOut,
+    #[serde(rename = "embed_tokens")]
+    EmbedTokens,
+}
+
+impl Projection {
+    /// The matrices of the MLP, the only ones a GGUF patch or `autotune` can target.
+    pub fn is_mlp(self) -> bool {
+        matches!(self, Self::Gate | Self::Up | Self::Down)
+    }
 }
 
 impl FromStr for Projection {
@@ -141,15 +170,18 @@ impl FromStr for Projection {
             "gate" | "gate_proj" => Ok(Self::Gate),
             "up" | "up_proj" => Ok(Self::Up),
             "down" | "down_proj" => Ok(Self::Down),
+            "o" | "o_proj" => Ok(Self::AttnOut),
+            "embed" | "embed_tokens" => Ok(Self::EmbedTokens),
             other => Err(format!(
-                "projection inconnue « {other} » (gate, up ou down)"
+                "projection inconnue « {other} » (gate, up, down, o_proj ou embed_tokens)"
             )),
         }
     }
 }
 
 // Cols is the default per the patch contract. For a residual-stream direction on
-// Llama-style `[out, in]` weights, gate/up expect `rows` and down expects `cols`. (A plain
+// Llama-style `[out, in]` weights, gate/up and the embeddings (`[vocab, hidden]`) expect
+// `rows`, down and o_proj expect `cols`. (A plain
 // comment: a variant doc comment would turn the schema enum into a oneOf.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -389,6 +421,24 @@ mod tests {
     fn projection_from_str() {
         assert_eq!("gate".parse(), Ok(Projection::Gate));
         assert_eq!("Down_Proj".parse(), Ok(Projection::Down));
+        assert_eq!("o_proj".parse(), Ok(Projection::AttnOut));
+        assert_eq!("embed_tokens".parse(), Ok(Projection::EmbedTokens));
         assert!("q_proj".parse::<Projection>().is_err());
+        assert!(Projection::Down.is_mlp() && !Projection::AttnOut.is_mlp());
+        let patch = parse_patch(
+            r#"{"schema_version":1,"operations":[{"id":"w","layers":"all",
+                "projections":["down_proj","o_proj","embed_tokens"],"operation":"project_out",
+                "vector_file":"v.safetensors","vector_tensor":"direction",
+                "vector_tensor_b":"direction","alpha":0.6}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            patch.operations[0].projections,
+            [
+                Projection::Down,
+                Projection::AttnOut,
+                Projection::EmbedTokens
+            ]
+        );
     }
 }

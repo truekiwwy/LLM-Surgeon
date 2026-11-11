@@ -66,14 +66,16 @@ use serde_json::{json, Value};
 
 use crate::bench::dump::DumpRequest;
 use crate::bench::logits_metrics::LogitsRequest;
+use crate::bench::native::NativeGenerator;
 use crate::bench::ppl_runner::{PplBaseline, PplRequest};
 use crate::bench::prompt::Template;
+use crate::bench::refusal::RefusalRequest;
 use crate::bench::report::{self as bench_report, BenchRun};
-use crate::bench::score::EvalRequest;
+use crate::bench::score::{Backend, EvalRequest};
 use crate::bench::{self, BenchError};
 use crate::cli::{
     ApplyArgs, AutotuneArgs, BenchArgs, BenchCommand, CheckArgs, Cli, Commands, EvalArgs,
-    ExtractArgs, InspectArgs,
+    ExtractArgs, ExtractCommand, InspectArgs,
 };
 use crate::engine::stats::TensorStats;
 use crate::engine::{
@@ -97,9 +99,9 @@ use crate::kernel::{self, IoConfig, IoMeter, KernelChoice, Level};
 use crate::patch::autotune::{self, AutotuneError, AutotuneEvent, AutotuneRequest, AutotuneRun};
 use crate::patch::gguf::{self, GgufApplyArgs, GgufApplyError, Requant};
 use crate::patch::{
-    self, apply_patch, load_patch, validate_patch, ApplyReport, Axis, BackupSet, LayerSelection,
-    OpStats, OperationKind, PatchBackend, PatchError, PatchFile, Projection, RollbackHandle,
-    ValidationIssue, ValidationOptions,
+    self, apply_patch, apply_patch_with, load_patch, untie, validate_patch, ApplyOptions,
+    ApplyReport, Axis, BackupSet, LayerSelection, OpStats, OperationKind, PatchBackend, PatchError,
+    PatchFile, Projection, RollbackHandle, ValidationIssue, ValidationOptions,
 };
 use crate::plugin::{unknown_method_message, Diagnostics, Registry, DEFAULT_METHOD};
 use crate::ui::{self, ColorMode, Ui, UiConfig};
@@ -342,8 +344,31 @@ fn command_name(command: &Commands) -> &'static str {
             BenchCommand::Ppl(_) => "bench ppl",
             BenchCommand::Eval(_) => "bench eval",
             BenchCommand::Dump(_) => "bench dump",
+            BenchCommand::Refusal(_) => "bench refusal",
         },
     }
+}
+
+/// `surgeon extract`: the method parameters of the command line (the labels file is read
+/// here, before anything is loaded), then the extraction.
+fn extract_cli(cmd: &ExtractCommand, deps: &AppDeps, io: &mut Io) -> CoreResult {
+    let labels = match &cmd.method.labels_file {
+        Some(path) => Some(extract::load_labels(path).map_err(|message| {
+            let message = format!("--labels-file {} : {message}", path.display());
+            Outcome::fail(exit::INVALID_INPUT, message).with_kind("invalid_input")
+        })?),
+        None => None,
+    };
+    let rank = cmd.method.rank.map(|r| r as usize);
+    let ui = io.ui;
+    core_extract_with(
+        &cmd.args,
+        &cmd.method.method,
+        &extract::params_with_subspace(&cmd.method.options(), rank, labels),
+        deps,
+        &ui,
+        &mut CliSink::new(io),
+    )
 }
 
 fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
@@ -352,17 +377,7 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         Commands::Inspect(args) => core_inspect(args, deps, &io.ui),
         Commands::Apply(args) => apply(args, deps, io),
         Commands::Eval(args) => eval(args, deps, &io.ui),
-        Commands::Extract(cmd) => {
-            let ui = io.ui;
-            core_extract_with(
-                &cmd.args,
-                &cmd.method.method,
-                &cmd.method.options().params(),
-                deps,
-                &ui,
-                &mut CliSink::new(io),
-            )
-        }
+        Commands::Extract(cmd) => extract_cli(cmd, deps, io),
         Commands::Plugins(_) => plugins_list(&io.ui),
         Commands::Autotune(args) => {
             let ui = io.ui;
@@ -665,21 +680,16 @@ pub fn core_inspect(args: &InspectArgs, deps: &AppDeps, ui: &Ui) -> CoreResult {
     }
     let shards = hardware::compute_model_size(&args.model)?.shard_files;
     let layers = LayerSpec::from(&args.layers);
-    let projs: Vec<MlpProj> = match args.projections.is_empty() {
-        true => vec![MlpProj::Gate, MlpProj::Up, MlpProj::Down],
-        false => args
-            .projections
-            .iter()
-            .copied()
-            .map(MlpProj::from)
-            .collect(),
+    let projs = match args.projections.is_empty() {
+        true => vec![Projection::Gate, Projection::Up, Projection::Down],
+        false => args.projections.clone(),
     };
     let sharded = shards.len() > 1;
     let mut tensors = Vec::new();
     let mut rows = Vec::new();
     for shard in &shards {
         let model = ReadOnlyModel::open(shard)?;
-        for info in engine::find_mlp_tensors(model.index(), &layers, &projs) {
+        for info in find_targets(model.index(), &layers, &projs) {
             if deps.interrupted.load(Ordering::SeqCst) {
                 return Err(Outcome::fail(exit::GENERAL, INTERRUPTED).with_kind("cancelled"));
             }
@@ -756,7 +766,7 @@ fn layer_label(name: &str) -> String {
 
 fn projection_label(name: &str) -> &str {
     name.split('.')
-        .find(|part| part.ends_with("_proj"))
+        .find(|part| part.ends_with("_proj") || *part == "embed_tokens")
         .unwrap_or("—")
 }
 
@@ -803,14 +813,33 @@ impl From<&LayerSelection> for LayerSpec {
     }
 }
 
-impl From<Projection> for MlpProj {
-    fn from(p: Projection) -> Self {
-        match p {
-            Projection::Gate => MlpProj::Gate,
-            Projection::Up => MlpProj::Up,
-            Projection::Down => MlpProj::Down,
-        }
+/// Tensors of one shard matching a selection: the embeddings first (they belong to no
+/// layer, so `layers` does not filter them), then layer by layer the MLP projections
+/// (gate, up, down) and `o_proj`.
+fn find_targets<'a>(
+    index: &'a engine::ModelIndex,
+    layers: &LayerSpec,
+    projections: &[Projection],
+) -> Vec<&'a engine::TensorInfo> {
+    let mlp: Vec<MlpProj> = projections
+        .iter()
+        .filter_map(|p| match p {
+            Projection::Gate => Some(MlpProj::Gate),
+            Projection::Up => Some(MlpProj::Up),
+            Projection::Down => Some(MlpProj::Down),
+            Projection::AttnOut | Projection::EmbedTokens => None,
+        })
+        .collect();
+    let mut found = engine::find_mlp_tensors(index, layers, &mlp);
+    if projections.contains(&Projection::AttnOut) {
+        found.extend(engine::find_attn_out_tensors(index, layers));
     }
+    if projections.contains(&Projection::EmbedTokens) {
+        found.extend(engine::find_embed_tokens(index));
+    }
+    // Stable: inside a layer the MLP stays before o_proj; `None` (embeddings) sorts first.
+    found.sort_by_key(|t| engine::parse_layer_index(&t.name));
+    found
 }
 
 /// `project_out` is not a shift: it goes through `PatchBackend::project_out_tensor`.
@@ -903,12 +932,11 @@ impl PatchBackend for EngineBackend {
         projections: &[Projection],
     ) -> patch::Result<Vec<String>> {
         let spec = LayerSpec::from(layers);
-        let projs: Vec<MlpProj> = projections.iter().copied().map(MlpProj::from).collect();
         let mut names: Vec<String> = self
             .shards
             .iter()
             .flat_map(|(_, model)| {
-                engine::find_mlp_tensors(model.index(), &spec, &projs)
+                find_targets(model.index(), &spec, projections)
                     .into_iter()
                     .map(|t| t.name.clone())
                     .collect::<Vec<_>>()
@@ -958,15 +986,41 @@ impl PatchBackend for EngineBackend {
         b: &[f32],
         alpha: f32,
     ) -> patch::Result<OpStats> {
+        self.project_out_subspace(tensor_name, a, b, 1, alpha)
+    }
+
+    fn load_directions(
+        &self,
+        file: &Path,
+        tensor: Option<&str>,
+    ) -> patch::Result<(Option<usize>, Vec<f32>)> {
+        engine::load_direction_matrix(file, tensor).map_err(backend_error)
+    }
+
+    fn project_out_subspace(
+        &mut self,
+        tensor_name: &str,
+        a: &[f32],
+        b: &[f32],
+        k: usize,
+        alpha: f32,
+    ) -> patch::Result<OpStats> {
         if self.interrupted.load(Ordering::SeqCst) {
             return Err(PatchError::Backend(INTERRUPTED.into()));
         }
         let shard = self
             .shard_of(tensor_name)
             .ok_or_else(|| backend_error(EngineError::TensorNotFound(tensor_name.into())))?;
+        // The embeddings hold the residual stream in their rows, the other writers in
+        // their columns: same eraser, the other side of the matrix.
+        let projection = engine::SubspaceProjection { a, b, alpha, k };
         self.shards[shard]
             .1
-            .project_out_tensor(tensor_name, a, b, alpha)
+            .project_out_subspace(
+                tensor_name,
+                &projection,
+                engine::is_embed_tokens(tensor_name),
+            )
             .map(OpStats::from)
             .map_err(backend_error)
     }
@@ -996,6 +1050,8 @@ pub enum ProgressEvent {
         op_id: String,
         tensors: Vec<String>,
         vector_len: usize,
+        /// `project_out` with `[k, len]` tensors: k.
+        rank: Option<usize>,
     },
     Backup {
         path: PathBuf,
@@ -1067,6 +1123,11 @@ pub enum ProgressEvent {
     },
     /// `bench eval`: questions answered (per model when a baseline runs first).
     BenchEvalQuestion {
+        done: usize,
+        total: usize,
+    },
+    /// `bench refusal`: prompts answered (per model when a baseline runs first).
+    BenchRefusalPrompt {
         done: usize,
         total: usize,
     },
@@ -1224,6 +1285,28 @@ impl<B: PatchBackend> PatchBackend for ObservedBackend<'_, B> {
         Ok(self.track(tensor_name, stats))
     }
 
+    fn load_directions(
+        &self,
+        file: &Path,
+        tensor: Option<&str>,
+    ) -> patch::Result<(Option<usize>, Vec<f32>)> {
+        self.inner.load_directions(file, tensor)
+    }
+
+    fn project_out_subspace(
+        &mut self,
+        tensor_name: &str,
+        a: &[f32],
+        b: &[f32],
+        k: usize,
+        alpha: f32,
+    ) -> patch::Result<OpStats> {
+        let stats = self
+            .inner
+            .project_out_subspace(tensor_name, a, b, k, alpha)?;
+        Ok(self.track(tensor_name, stats))
+    }
+
     fn flush(&mut self) -> patch::Result<()> {
         self.inner.flush()
     }
@@ -1371,6 +1454,9 @@ impl ProgressSink for CliSink<'_, '_> {
             }
             ProgressEvent::BenchPplChunk { done, total } => Some(("ppl", *done, *total)),
             ProgressEvent::BenchEvalQuestion { done, total } => Some(("eval", *done, Some(*total))),
+            ProgressEvent::BenchRefusalPrompt { done, total } => {
+                Some(("refusal", *done, Some(*total)))
+            }
             ProgressEvent::AutotuneForward { done, total } => {
                 Some(("autotune", *done, Some(*total)))
             }
@@ -1407,9 +1493,14 @@ impl ProgressSink for CliSink<'_, '_> {
                 op_id,
                 tensors,
                 vector_len,
+                rank,
             } => {
+                let what = match rank {
+                    Some(k) => format!("{k} directions de"),
+                    None => "vecteur de".to_owned(),
+                };
                 self.io.line(&format!(
-                    "{} {} · {} tenseurs · vecteur de {}",
+                    "{} {} · {} tenseurs · {what} {}",
                     ui::badge(&ui, "DRY-RUN"),
                     ui::metric(&ui, &op_id),
                     ui::metric(&ui, tensors.len()),
@@ -1504,6 +1595,7 @@ impl ProgressSink for CliSink<'_, '_> {
             | ProgressEvent::BenchLogitsBlock { .. }
             | ProgressEvent::BenchPplChunk { .. }
             | ProgressEvent::BenchEvalQuestion { .. }
+            | ProgressEvent::BenchRefusalPrompt { .. }
             | ProgressEvent::AutotuneForward { .. }
             | ProgressEvent::AutotuneSolve
             | ProgressEvent::Surgery(_) => {}
@@ -1593,13 +1685,15 @@ pub fn core_apply(
     deps: &AppDeps,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
-    core_apply_io(request, IoConfig::default(), deps, sink)
+    let limits = ApplyOptions::default();
+    core_apply_io(request, IoConfig::default(), limits, deps, sink)
 }
 
 /// [`core_apply`] with explicit chunking / prefetch; a real run reports `data.io`.
 fn core_apply_io(
     request: &ApplyRequest,
     io: IoConfig,
+    limits: ApplyOptions,
     deps: &AppDeps,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
@@ -1631,18 +1725,70 @@ fn core_apply_io(
         sink.event(ProgressEvent::Warn(w.clone()));
     }
 
-    let mut backend = EngineBackend::open(&shards, Arc::clone(&deps.interrupted))?;
-    backend.set_io(io);
-    let preview = apply_patch(&patch, &mut backend, None, true)?;
+    // Preflight on its own mapping, released before any file is replaced or restored.
+    let (preview, mut touched) = {
+        let mut backend = EngineBackend::open(&shards, Arc::clone(&deps.interrupted))?;
+        let preview = apply_patch_with(&patch, &mut backend, None, true, &limits)?;
+        let touched = backend.shards_holding(
+            preview
+                .operations
+                .iter()
+                .flat_map(|op| op.tensors.iter().map(|t| t.name.as_str())),
+        );
+        (preview, touched)
+    };
+    // What only the vectors can tell: a project_out that is not a projector.
+    for warning in &preview.warnings {
+        sink.event(ProgressEvent::Warn(warning.clone()));
+        warnings.push(warning.clone());
+    }
+    // Patching tied embeddings would also deform the output projection: detach it first.
+    let embed = preview
+        .operations
+        .iter()
+        .flat_map(|op| &op.tensors)
+        .find(|t| engine::is_embed_tokens(&t.name));
+    let untie = match embed {
+        Some(embed) => untie::plan(&shards, &embed.name)?,
+        None => None,
+    };
+    if let Some(plan) = &untie {
+        let what = match plan.copy_embeddings {
+            true => format!(
+                "embed_tokens est partagé avec lm_head : {} (copie non patchée des plongements) \
+                 est ajouté à {} et",
+                untie::LM_HEAD,
+                plan.shard.display()
+            ),
+            false => format!(
+                "{} existe mais la config lie encore les plongements :",
+                untie::LM_HEAD
+            ),
+        };
+        let warning = format!(
+            "{what} tie_word_embeddings passe à false dans {}, pour que la projection de sortie \
+             reste intacte",
+            plan.config.display()
+        );
+        sink.event(ProgressEvent::Warn(warning.clone()));
+        warnings.push(warning);
+    }
+    let with_untie = |mut outcome: Outcome| {
+        if let Some(plan) = &untie {
+            outcome.data["untie_lm_head"] = json!(plan);
+        }
+        outcome
+    };
     if request.dry_run {
         for op in &preview.operations {
             sink.event(ProgressEvent::DryRun {
                 op_id: op.id.clone(),
                 tensors: op.tensors.iter().map(|t| t.name.clone()).collect(),
                 vector_len: op.vector_len,
+                rank: op.rank,
             });
         }
-        return Ok(apply_outcome(&preview, &[], &warnings));
+        return Ok(with_untie(apply_outcome(&preview, &[], &warnings)));
     }
     if deps.interrupted.load(Ordering::SeqCst) {
         return Err(PatchError::ExecutionFailed {
@@ -1654,12 +1800,11 @@ fn core_apply_io(
         .into());
     }
 
-    let touched = backend.shards_holding(
-        preview
-            .operations
-            .iter()
-            .flat_map(|op| op.tensors.iter().map(|t| t.name.as_str())),
-    );
+    for file in untie.iter().flat_map(untie::UntiePlan::files) {
+        if !touched.contains(&file) {
+            touched.push(file);
+        }
+    }
     let mut backup = match patch.backup {
         true => Some(BackupSet::create_many_in(
             &touched,
@@ -1677,39 +1822,128 @@ fn core_apply_io(
     }
 
     let started = Instant::now();
+    // Declared after `backup`, so dropped before it: a restore on unwind can rename.
+    let prepared = untie
+        .as_ref()
+        .map_or(Ok(()), untie::UntiePlan::execute)
+        .and_then(|()| {
+            EngineBackend::open(&shards, Arc::clone(&deps.interrupted)).map_err(backend_error)
+        });
+    let mut backend = match prepared {
+        Ok(backend) => backend,
+        Err(e) => {
+            let e = restored(UNTIE_OP, e.to_string(), backup.as_mut());
+            if let Some(outcome) = rollback_outcome(&e, &backup_files) {
+                sink.event(ProgressEvent::Rollback(outcome));
+            }
+            return Err(e.into());
+        }
+    };
+    backend.set_io(io);
     let ops = patch
         .operations
         .iter()
         .map(|op| (op.id.clone(), op.kind))
         .collect();
-    let guard = backup.as_mut().map(|b| b as &mut dyn RollbackHandle);
+    // Once the shard has grown, restoring it means shrinking it, which Windows refuses
+    // while the backend maps it: the rollback is then recorded and done after the drop.
+    let mut deferred = untie
+        .as_ref()
+        .zip(backup.as_ref())
+        .map(|(_, b)| DeferredRollback {
+            backup_path: b.backup_path(),
+            requested: false,
+        });
+    let guard = match &mut deferred {
+        Some(deferred) => Some(deferred as &mut dyn RollbackHandle),
+        None => backup.as_mut().map(|b| b as &mut dyn RollbackHandle),
+    };
     let kernel = kernel::from_env();
     if let Some(w) = &kernel.warning {
         sink.event(ProgressEvent::Warn(w.clone()));
     }
     let meter = IoMeter::start();
-    let result = apply_patch(
+    let result = apply_patch_with(
         &patch,
         &mut ObservedBackend::new(&mut backend, sink, ops),
         guard,
         false,
+        &limits,
     );
     match result {
         Ok(report) => {
+            if let (Some(_), Some(backup)) = (&deferred, backup.as_mut()) {
+                backup.commit_all();
+            }
             sink.event(ProgressEvent::Commit {
                 seconds: started.elapsed().as_secs_f64(),
             });
             let io_report = meter.finish(kernel, io, backend.io_counters());
-            let mut outcome = apply_outcome(&report, &backup_files, &warnings);
+            let mut outcome = with_untie(apply_outcome(&report, &backup_files, &warnings));
             outcome.data["io"] = json!(io_report);
             Ok(outcome)
         }
         Err(e) => {
+            let e = match (deferred, e) {
+                (
+                    Some(DeferredRollback {
+                        requested: true, ..
+                    }),
+                    PatchError::ExecutionFailed { op_id, cause, .. },
+                ) => {
+                    drop(backend);
+                    restored(&op_id, cause, backup.as_mut())
+                }
+                (_, e) => e,
+            };
             if let Some(outcome) = rollback_outcome(&e, &backup_files) {
                 sink.event(ProgressEvent::Rollback(outcome));
             }
             Err(e.into())
         }
+    }
+}
+
+const UNTIE_OP: &str = "untie_lm_head";
+
+/// Stands in for the `BackupSet` in `apply_patch` after an untie; see `core_apply_io`.
+struct DeferredRollback {
+    backup_path: Option<PathBuf>,
+    requested: bool,
+}
+
+impl RollbackHandle for DeferredRollback {
+    fn rollback(&mut self) -> patch::Result<()> {
+        self.requested = true;
+        Ok(())
+    }
+    fn commit(&mut self) {}
+    fn backup_path(&self) -> Option<PathBuf> {
+        self.backup_path.clone()
+    }
+}
+
+/// Restores the backups after a failure outside `apply_patch`'s own rollback, with the
+/// same three outcomes: restored, rollback failed (critical), or no backup to restore.
+fn restored(op_id: &str, cause: String, backup: Option<&mut BackupSet>) -> PatchError {
+    let op_id = op_id.to_owned();
+    match backup.map(BackupSet::rollback_all) {
+        Some(Ok(())) => PatchError::ExecutionFailed {
+            op_id,
+            cause,
+            rolled_back: true,
+            left_modified: false,
+        },
+        Some(Err(e)) => PatchError::RollbackFailed {
+            op_id,
+            cause: format!("{cause} ; rollback : {e}"),
+        },
+        None => PatchError::ExecutionFailed {
+            op_id,
+            cause: format!("{cause} (pas de backup)"),
+            rolled_back: false,
+            left_modified: true,
+        },
     }
 }
 
@@ -1754,7 +1988,12 @@ pub fn core_apply_routed(
                 "--requant, --no-verify et --force-no-backup ne s'appliquent qu'avec --gguf".into(),
             ))
         }
-        (false, false) => core_apply_io(request, opts.io(), deps, sink),
+        (false, false) => {
+            let limits = ApplyOptions {
+                max_rank: opts.max_rank,
+            };
+            core_apply_io(request, opts.io(), limits, deps, sink)
+        }
     }
 }
 
@@ -1780,6 +2019,21 @@ fn core_apply_gguf(
         ..Default::default()
     };
     let patch = validate_patch(&request.patch, &request.base_dir, &validation)?;
+    if let Some(op) = patch
+        .operations
+        .iter()
+        .find(|op| op.projections.iter().any(|p| !p.is_mlp()))
+    {
+        return Err(Outcome::fail(
+            exit::INVALID_INPUT,
+            format!(
+                "opération {} : o_proj et embed_tokens ne sont patchables que dans un modèle \
+                 SafeTensors, pas dans un GGUF (seules gate_proj, up_proj et down_proj le sont)",
+                op.id
+            ),
+        )
+        .with_kind("invalid_input"));
+    }
     sink.event(ProgressEvent::ApplyStart {
         patch: request.patch_label.clone(),
         operations: patch.operations.len(),
@@ -1851,6 +2105,7 @@ fn core_apply_gguf(
                     op_id: op.id.clone(),
                     tensors: op.tensors.iter().map(|t| t.name.clone()).collect(),
                     vector_len: op.vector_len,
+                    rank: op.rank,
                 });
             }
         }
@@ -2418,6 +2673,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
             let req = EvalRequest {
                 model: a.model.clone(),
                 dataset: a.dataset.clone(),
+                backend: a.backend,
                 baseline_model: a.baseline_model.clone(),
                 limit: a.limit,
                 max_new_tokens: a.max_new_tokens,
@@ -2443,6 +2699,18 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 overwrite: a.overwrite,
             };
             core_bench_dump(&req, deps, &ui, &mut sink)
+        }
+        BenchCommand::Refusal(a) => {
+            let prompts = extract::load_prompt_texts(&a.prompts)
+                .map_err(|m| invalid(BenchError::input(&a.prompts, m)))?;
+            let req = RefusalRequest {
+                model: a.model.clone(),
+                prompts,
+                baseline_model: a.baseline_model.clone(),
+                max_new_tokens: a.max_new_tokens,
+                chat_template: a.chat_template,
+            };
+            core_bench_refusal(&req, deps, &ui, &mut sink)
         }
     }
 }
@@ -2483,8 +2751,29 @@ pub fn core_bench_ppl(
     bench_outcome(&run, fail_on_warn, bench_report::ppl_text(ui, &run))
 }
 
-/// Shared by the CLI and the MCP tool. Generators come from `deps.generator_factory`, set
-/// to greedy seeded decoding; cancellation stops the running generation.
+/// The pure Rust generator on a Qwen2 directory; its loading notes (bf16 fallback) go to
+/// the sink as warnings.
+fn native_generator(
+    model: &Path,
+    deps: &AppDeps,
+    sink: &RefCell<&mut dyn ProgressSink>,
+) -> bench::Result<Box<dyn TextGenerator>> {
+    let generator = NativeGenerator::load(
+        model,
+        extract::DTypeChoice::Auto,
+        deps.probe.as_ref(),
+        Arc::clone(&deps.interrupted),
+    )?;
+    for warning in generator.warnings() {
+        sink.borrow_mut()
+            .event(ProgressEvent::Warn(warning.clone()));
+    }
+    Ok(Box::new(generator))
+}
+
+/// Shared by the CLI and the MCP tool. Generators come from `deps.generator_factory` (or
+/// the native backend), set to greedy seeded decoding; cancellation stops the running
+/// generation.
 pub fn core_bench_eval(
     req: &EvalRequest,
     fail_on_warn: bool,
@@ -2492,7 +2781,11 @@ pub fn core_bench_eval(
     ui: &Ui,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
+    let sink = RefCell::new(sink);
     let mut make = |gguf: &Path| -> bench::Result<Box<dyn TextGenerator>> {
+        if req.backend == Backend::Native {
+            return native_generator(gguf, deps, &sink);
+        }
         let args = EvalArgs {
             model: gguf.to_path_buf(),
             prompts: PathBuf::new(),
@@ -2509,10 +2802,35 @@ pub fn core_bench_eval(
         deps.runner.as_ref(),
         &mut make,
         &deps.interrupted,
-        &mut |done, total| sink.event(ProgressEvent::BenchEvalQuestion { done, total }),
+        &mut |done, total| {
+            sink.borrow_mut()
+                .event(ProgressEvent::BenchEvalQuestion { done, total })
+        },
     )
     .map_err(|e| bench_failure(&e))?;
     bench_outcome(&run, fail_on_warn, bench_report::eval_text(ui, &run))
+}
+
+/// Shared by the CLI and the MCP tool: native greedy generation, refusal markers, paired
+/// comparison against a baseline. Nothing is written.
+pub fn core_bench_refusal(
+    req: &RefusalRequest,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let sink = RefCell::new(sink);
+    let run = bench::refusal::run(
+        req,
+        &mut |model| native_generator(model, deps, &sink),
+        &deps.interrupted,
+        &mut |done, total| {
+            sink.borrow_mut()
+                .event(ProgressEvent::BenchRefusalPrompt { done, total })
+        },
+    )
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, false, bench_report::refusal_text(ui, &run))
 }
 
 /// Shared by the CLI and the MCP tool; nothing is written unless the whole dump succeeds.
@@ -2535,24 +2853,35 @@ pub fn core_bench_dump(
 /// `[METHOD]` line of an svd / leace extraction (mean_diff output is unchanged).
 fn method_line(ui: &Ui, diag: &Diagnostics) -> String {
     let opt = |v: Option<f64>| v.map_or("—".to_owned(), |x| format!("{x:.3}"));
+    // Nothing more without a subspace: the line of one direction is what it was.
+    let subspace = |s: &Option<extract::SubspaceDiagnostics>| match s {
+        Some(s) => format!(
+            " · sous-espace de rang {} · ‖BᵀA−I‖ {}",
+            ui::metric(ui, s.rank),
+            ui::metric(ui, format!("{:.1e}", s.gram_bta_error))
+        ),
+        None => String::new(),
+    };
     let body = match diag {
         // Registered methods never run here: the front-end only knows the built-in registry.
         Diagnostics::Json(_) => return String::new(),
         Diagnostics::Builtin(MethodDiagnostics::Svd(d)) => format!(
-            "svd · {} paires · σ₁²/Σσ² {} · cos(μ₊−μ₋) {} · split-half {}",
+            "svd · {} paires · σ₁²/Σσ² {} · cos(μ₊−μ₋) {} · split-half {}{}",
             ui::metric(ui, d.n_pairs),
             ui::metric(ui, format!("{:.3}", d.explained_variance_ratio)),
             ui::metric(ui, opt(d.cosine_with_mean_diff)),
-            ui::metric(ui, opt(d.split_half_cosine))
+            ui::metric(ui, opt(d.split_half_cosine)),
+            subspace(&d.subspace)
         ),
         Diagnostics::Builtin(MethodDiagnostics::Leace(d)) => format!(
-            "leace · rang {} · λ {} · κ {} · cov(x,z) {} → {} · hors-échantillon {}",
+            "leace · rang {} · λ {} · κ {} · cov(x,z) {} → {} · hors-échantillon {}{}",
             ui::metric(ui, d.rank),
             ui::metric(ui, d.shrinkage),
             ui::metric(ui, format!("{:.3e}", d.kappa)),
             ui::metric(ui, format!("{:.3e}", d.cross_cov_before)),
             ui::metric(ui, format!("{:.3e}", d.cross_cov_after)),
-            ui::metric(ui, opt(d.holdout_cross_cov_ratio))
+            ui::metric(ui, opt(d.holdout_cross_cov_ratio)),
+            subspace(&d.subspace)
         ),
     };
     format!("{} {body}\n", ui::badge(ui, "METHOD"))

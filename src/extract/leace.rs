@@ -15,6 +15,18 @@
 //! `λ = 0` this is the pseudo-inverse restricted to the data subspace: eigenvalues below
 //! `rcond · λ_max` are dropped and the complement term vanishes.
 //!
+//! Several labels (`z ∈ R^m`, [`fit_multi`]): the same eraser with a subspace instead of
+//! a direction.
+//!
+//! ```text
+//! Σ_XZ = X̃ᵀZ̃ / n (d × m) ; M = Σ_λ^{-1/2} Σ_XZ = U S Vᵀ (thin) ; r = #{s_i > rcond · s_1}
+//! A = Σ_λ^{1/2} U_r ; B = Σ_λ^{-1/2} U_r (BᵀA = I_r) ; r(x) = x − A Bᵀ (x − μ)
+//! ```
+//!
+//! `A Bᵀ Σ_XZ = Σ_λ^{1/2} U_r U_rᵀ M = Σ_XZ` when no singular value is cut, so the cross
+//! covariance with every label vanishes in sample. `U` comes from the m × m Gram matrix of
+//! the columns of `M`: still no d×d matrix.
+//!
 //! Honest limits: `cov(r(x), z) = p(1−p)(c − a bᵀ c) = 0` holds EXACTLY in sample for any
 //! positive definite `Σ_λ` (since `a bᵀ c = c`). The guarantee that no linear predictor
 //! beats a constant is a population statement: with n < d a classifier can still separate
@@ -27,7 +39,7 @@ use serde::Serialize;
 
 use super::error::{ExtractError, Result};
 use super::svd::dot;
-use crate::linalg::gram::thin_svd;
+use crate::linalg::gram::{thin_svd, ThinSvd};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LeaceFit {
@@ -67,6 +79,10 @@ pub struct LeaceDiagnostics {
     pub holdout_cross_cov_ratio: Option<f64>,
     pub n_pos: usize,
     pub n_neg: usize,
+    /// Effaceur de plusieurs labels (--labels-file) : diagnostics par composante ; absent
+    /// pour le concept binaire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subspace: Option<super::subspace::SubspaceDiagnostics>,
 }
 
 fn mean_of<'a>(rows: impl Iterator<Item = &'a Vec<f64>>, d: usize) -> Vec<f64> {
@@ -108,65 +124,247 @@ pub fn fit(pos: &[Vec<f64>], neg: &[Vec<f64>], shrinkage: f64, rcond: f64) -> Re
     let centered: Vec<f64> = all()
         .flat_map(|x| x.iter().zip(&mean).map(move |(v, m)| (v - m) * scale))
         .collect();
-    let svd = thin_svd(&centered, n, d).map_err(|e| ExtractError::Compute(e.to_string()))?;
-    let eig: Vec<f64> = svd.sigma.iter().map(|s| s * s).collect();
-    let e_max = eig.first().copied().unwrap_or(0.0);
-    let s = eig.iter().sum::<f64>() / d as f64;
-    let lam = shrinkage;
-    let rank = match lam > 0.0 {
-        true => svd.rank,
-        false => eig[..svd.rank]
-            .iter()
-            .take_while(|&&e| e > rcond * e_max)
-            .count(),
-    };
-    let floor = lam * s;
-    let power = |p: f64, y: &[f64]| -> Vec<f64> {
-        let coeffs = svd.project(y);
-        let scaled: Vec<f64> = coeffs
-            .iter()
-            .zip(&eig)
-            .take(rank)
-            .map(|(cf, e)| cf * ((1.0 - lam) * e + floor).powf(p))
-            .collect();
-        let mut out = svd.combine(&scaled);
-        if lam > 0.0 {
-            // Complement of the kept subspace: eigenvalue λ s.
-            let inside = svd.combine(&coeffs[..rank]);
-            let f = floor.powf(p);
-            out.iter_mut()
-                .zip(y.iter().zip(&inside))
-                .for_each(|(o, (yi, vi))| *o += f * (yi - vi));
-        }
-        out
-    };
-    let w = power(-0.5, &c);
+    let whitener = Whitener::new(&centered, n, d, shrinkage, rcond)?;
+    let w = whitener.power(-0.5, &c);
     let w_norm = dot(&w, &w).sqrt();
     if !(w_norm > 0.0 && w_norm.is_finite()) {
         return Err(ExtractError::DegenerateDirection { norm: w_norm });
     }
     let u: Vec<f64> = w.iter().map(|x| x / w_norm).collect();
-    let a = power(0.5, &u);
-    let b = power(-0.5, &u);
-    let kept = &eig[..rank];
-    let top = (1.0 - lam) * e_max + floor;
-    let bottom = match (lam > 0.0, rank < d) {
-        (true, true) => floor,
-        _ => (1.0 - lam) * kept.last().copied().unwrap_or(0.0) + floor,
-    };
+    let a = whitener.power(0.5, &u);
+    let b = whitener.power(-0.5, &u);
     Ok(LeaceFit {
         b_dot_a: dot(&b, &a),
         a,
         b,
         mean,
         u_whitened: u,
-        rank,
-        kappa: match bottom > 0.0 {
+        rank: whitener.rank,
+        kappa: whitener.kappa(),
+        shrinkage,
+    })
+}
+
+/// `Σ_λ^p y` without any d×d matrix (see the module documentation).
+struct Whitener {
+    svd: ThinSvd,
+    eig: Vec<f64>,
+    /// Kept eigen-directions of Σ.
+    rank: usize,
+    lam: f64,
+    floor: f64,
+    d: usize,
+}
+
+impl Whitener {
+    /// `centered`: the rows of `X̃ / √n`, n × d.
+    fn new(centered: &[f64], n: usize, d: usize, shrinkage: f64, rcond: f64) -> Result<Self> {
+        let svd = thin_svd(centered, n, d).map_err(|e| ExtractError::Compute(e.to_string()))?;
+        let eig: Vec<f64> = svd.sigma.iter().map(|s| s * s).collect();
+        let e_max = eig.first().copied().unwrap_or(0.0);
+        let s = eig.iter().sum::<f64>() / d as f64;
+        let lam = shrinkage;
+        let rank = match lam > 0.0 {
+            true => svd.rank,
+            false => eig[..svd.rank]
+                .iter()
+                .take_while(|&&e| e > rcond * e_max)
+                .count(),
+        };
+        Ok(Self {
+            svd,
+            eig,
+            rank,
+            lam,
+            floor: lam * s,
+            d,
+        })
+    }
+
+    fn power(&self, p: f64, y: &[f64]) -> Vec<f64> {
+        let (lam, floor, rank) = (self.lam, self.floor, self.rank);
+        let coeffs = self.svd.project(y);
+        let scaled: Vec<f64> = coeffs
+            .iter()
+            .zip(&self.eig)
+            .take(rank)
+            .map(|(cf, e)| cf * ((1.0 - lam) * e + floor).powf(p))
+            .collect();
+        let mut out = self.svd.combine(&scaled);
+        if lam > 0.0 {
+            // Complement of the kept subspace: eigenvalue λ s.
+            let inside = self.svd.combine(&coeffs[..rank]);
+            let f = floor.powf(p);
+            out.iter_mut()
+                .zip(y.iter().zip(&inside))
+                .for_each(|(o, (yi, vi))| *o += f * (yi - vi));
+        }
+        out
+    }
+
+    /// λ_max(Σ_λ) / λ_min(Σ_λ) (on the kept subspace when λ = 0).
+    fn kappa(&self) -> f64 {
+        let e_max = self.eig.first().copied().unwrap_or(0.0);
+        let kept = &self.eig[..self.rank];
+        let top = (1.0 - self.lam) * e_max + self.floor;
+        let bottom = match (self.lam > 0.0, self.rank < self.d) {
+            (true, true) => self.floor,
+            _ => (1.0 - self.lam) * kept.last().copied().unwrap_or(0.0) + self.floor,
+        };
+        match bottom > 0.0 {
             true => top / bottom,
             false => f64::INFINITY,
-        },
-        shrinkage: lam,
+        }
+    }
+}
+
+/// The LEACE eraser of several labels: `r` write and read directions, `BᵀA = I_r`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeaceSubspace {
+    /// Write directions `Σ_λ^{1/2} u_t`, one per row.
+    pub a: Vec<Vec<f64>>,
+    /// Read directions `Σ_λ^{-1/2} u_t`, one per row.
+    pub b: Vec<Vec<f64>>,
+    pub mean: Vec<f64>,
+    /// Left singular vectors `u_t` of `Σ_λ^{-1/2} Σ_XZ`, orthonormal.
+    pub u_whitened: Vec<Vec<f64>>,
+    /// Every singular value of `Σ_λ^{-1/2} Σ_XZ`, decreasing.
+    pub sigma: Vec<f64>,
+    /// Kept eigen-directions of Σ.
+    pub cov_rank: usize,
+    pub kappa: f64,
+    pub shrinkage: f64,
+}
+
+/// `(1/n) Σ_i (x_i − x̄)(z_il − z̄_l)`: one vector of size d per label.
+pub fn cross_cov(x: &[&[f64]], z: &[&[f64]]) -> Vec<Vec<f64>> {
+    let (n, d) = (x.len(), x.first().map_or(0, |r| r.len()));
+    let m = z.first().map_or(0, |r| r.len());
+    let mean = |rows: &[&[f64]], size: usize| {
+        let mut sum = vec![0.0; size];
+        for row in rows {
+            sum.iter_mut().zip(*row).for_each(|(s, v)| *s += v);
+        }
+        sum.iter_mut().for_each(|s| *s /= n.max(1) as f64);
+        sum
+    };
+    let (x_bar, z_bar) = (mean(x, d), mean(z, m));
+    let mut cov = vec![vec![0.0; d]; m];
+    for (row, labels) in x.iter().zip(z) {
+        for ((c, zl), zm) in cov.iter_mut().zip(*labels).zip(&z_bar) {
+            let weight = zl - zm;
+            for ((cj, xj), mj) in c.iter_mut().zip(*row).zip(&x_bar) {
+                *cj += (xj - mj) * weight;
+            }
+        }
+    }
+    for c in &mut cov {
+        c.iter_mut().for_each(|v| *v /= n.max(1) as f64);
+    }
+    cov
+}
+
+/// Frobenius norm of a cross covariance.
+pub fn frobenius(cov: &[Vec<f64>]) -> f64 {
+    cov.iter().map(|c| dot(c, c)).sum::<f64>().sqrt()
+}
+
+/// The largest component of `v` in absolute value is made positive (the first one on a
+/// tie): a sign that does not depend on rounding noise.
+fn fix_sign(v: &mut [f64]) {
+    let mut largest = 0.0f64;
+    for x in v.iter() {
+        if x.abs() > largest.abs() {
+            largest = *x;
+        }
+    }
+    if largest < 0.0 {
+        v.iter_mut().for_each(|x| *x = -*x);
+    }
+}
+
+/// LEACE for labels `z ∈ R^m` (one row of `z` per row of `x`): at most `max_rank`
+/// directions, fewer when `Σ_λ^{-1/2} Σ_XZ` has a lower rank.
+pub fn fit_multi(
+    x: &[&[f64]],
+    z: &[&[f64]],
+    shrinkage: f64,
+    rcond: f64,
+    max_rank: Option<usize>,
+) -> Result<LeaceSubspace> {
+    let (n, d) = (x.len(), x.first().map_or(0, |r| r.len()));
+    let m = z.first().map_or(0, |r| r.len());
+    if n < 2 || d == 0 || m == 0 || z.len() != n || z.iter().any(|r| r.len() != m) {
+        return Err(ExtractError::Compute(format!(
+            "labels incohérents : {n} activations, {} lignes de labels de taille {m}",
+            z.len()
+        )));
+    }
+    if !(0.0..=1.0).contains(&shrinkage) || !(rcond > 0.0 && rcond < 1.0) {
+        return Err(ExtractError::InvalidArgument(
+            "--leace-shrinkage doit être dans [0, 1] et --leace-rcond dans ]0, 1[".into(),
+        ));
+    }
+    let mut mean = vec![0.0; d];
+    for row in x {
+        mean.iter_mut().zip(*row).for_each(|(s, v)| *s += v);
+    }
+    mean.iter_mut().for_each(|s| *s /= n as f64);
+    let scale = 1.0 / (n as f64).sqrt();
+    let centered: Vec<f64> = x
+        .iter()
+        .flat_map(|row| row.iter().zip(&mean).map(move |(v, mu)| (v - mu) * scale))
+        .collect();
+    let whitener = Whitener::new(&centered, n, d, shrinkage, rcond)?;
+    // The columns of M = Σ_λ^{-1/2} Σ_XZ, as the m rows of Mᵀ: the right singular vectors
+    // of Mᵀ are the left singular vectors of M.
+    let columns: Vec<f64> = cross_cov(x, z)
+        .iter()
+        .flat_map(|c| whitener.power(-0.5, c))
+        .collect();
+    let svd = thin_svd(&columns, m, d).map_err(|e| ExtractError::Compute(e.to_string()))?;
+    let s1 = svd.sigma.first().copied().unwrap_or(0.0);
+    let numerical = svd.sigma[..svd.rank]
+        .iter()
+        .take_while(|s| **s > rcond * s1)
+        .count();
+    let rank = max_rank.map_or(numerical, |k| numerical.min(k));
+    if rank == 0 || !s1.is_finite() {
+        return Err(ExtractError::DegenerateDirection { norm: s1 });
+    }
+    let u_whitened: Vec<Vec<f64>> = (0..rank)
+        .map(|t| {
+            let mut u = svd.vector(t).to_vec();
+            fix_sign(&mut u);
+            u
+        })
+        .collect();
+    Ok(LeaceSubspace {
+        a: u_whitened.iter().map(|u| whitener.power(0.5, u)).collect(),
+        b: u_whitened.iter().map(|u| whitener.power(-0.5, u)).collect(),
+        mean,
+        u_whitened,
+        sigma: svd.sigma,
+        cov_rank: whitener.rank,
+        kappa: whitener.kappa(),
+        shrinkage,
     })
+}
+
+impl LeaceSubspace {
+    /// `r(x) = x − A Bᵀ (x − μ)`.
+    pub fn erase(&self, x: &[f64]) -> Vec<f64> {
+        let mut out = x.to_vec();
+        for (a, b) in self.a.iter().zip(&self.b) {
+            let read: f64 = b
+                .iter()
+                .zip(x.iter().zip(&self.mean))
+                .map(|(b, (x, m))| b * (x - m))
+                .sum();
+            out.iter_mut().zip(a).for_each(|(o, a)| *o -= a * read);
+        }
+        out
+    }
 }
 
 impl LeaceFit {
@@ -348,5 +546,158 @@ mod tests {
             cosine(&full.a, &full.b) > 1.0 - 1e-12,
             "λ = 1: whitening is the identity"
         );
+    }
+
+    // ------------------------------------------------------------------ several labels
+
+    fn refs(rows: &[Vec<f64>]) -> Vec<&[f64]> {
+        rows.iter().map(Vec::as_slice).collect()
+    }
+
+    /// `n` continuous label rows of size `m`.
+    fn random_labels(n: usize, m: usize, seed: u64) -> Vec<Vec<f64>> {
+        let mut rng = Lcg(seed);
+        (0..n)
+            .map(|_| (0..m).map(|_| rng.next()).collect())
+            .collect()
+    }
+
+    /// One row per label row: anisotropic noise plus `z_l` times a fixed pattern per label.
+    fn labelled(d: usize, z: &[Vec<f64>], seed: u64) -> Vec<Vec<f64>> {
+        let mut rng = Lcg(seed);
+        z.iter()
+            .map(|labels| {
+                (0..d)
+                    .map(|j| {
+                        let noise = (0.3 + j as f64 / d as f64) * (rng.next() + rng.next());
+                        let signal: f64 = labels
+                            .iter()
+                            .enumerate()
+                            .map(|(l, z)| z * (((j * (l + 2)) % 7) as f64 - 3.0) / 3.0)
+                            .sum();
+                        noise + signal
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn gram_error(fit: &LeaceSubspace) -> f64 {
+        let mut worst = 0.0f64;
+        for (s, b) in fit.b.iter().enumerate() {
+            for (t, a) in fit.a.iter().enumerate() {
+                worst = worst.max((dot(b, a) - f64::from(u8::from(s == t))).abs());
+            }
+        }
+        worst
+    }
+
+    fn erased_cross_cov(fit: &LeaceSubspace, x: &[Vec<f64>], z: &[Vec<f64>]) -> f64 {
+        let erased: Vec<Vec<f64>> = x.iter().map(|row| fit.erase(row)).collect();
+        frobenius(&cross_cov(&refs(&erased), &refs(z)))
+    }
+
+    #[test]
+    fn several_labels_are_erased_at_once_by_a_projector() {
+        let (n, d, m) = (80, 12, 3);
+        let z = random_labels(n, m, 5);
+        let x = labelled(d, &z, 9);
+        let before = frobenius(&cross_cov(&refs(&x), &refs(&z)));
+        assert!(before > 0.1, "the labels are in the activations: {before}");
+        for shrinkage in [0.1, 0.0] {
+            let fit = fit_multi(&refs(&x), &refs(&z), shrinkage, 1e-10, None).unwrap();
+            assert_eq!((fit.a.len(), fit.b.len(), fit.sigma.len()), (m, m, m));
+            assert!(fit.sigma.windows(2).all(|s| s[0] >= s[1]));
+            assert!(gram_error(&fit) < 1e-9, "BᵀA = I: {}", gram_error(&fit));
+            let after = erased_cross_cov(&fit, &x, &z);
+            assert!(
+                after < 1e-9 * before,
+                "λ = {shrinkage}: {after:e} of {before:e}"
+            );
+            // Same inputs, same bits.
+            let again = fit_multi(&refs(&x), &refs(&z), shrinkage, 1e-10, None).unwrap();
+            assert_eq!(fit, again);
+        }
+    }
+
+    #[test]
+    fn one_hot_classes_lose_one_rank_and_a_capped_rank_erases_less() {
+        let (n, d, classes) = (80, 12, 4);
+        let z: Vec<Vec<f64>> = (0..n)
+            .map(|i| {
+                (0..classes)
+                    .map(|c| f64::from(u8::from(i % classes == c)))
+                    .collect()
+            })
+            .collect();
+        let x = labelled(d, &z, 3);
+        let before = frobenius(&cross_cov(&refs(&x), &refs(&z)));
+        // Centered one-hot labels sum to zero: m classes, m − 1 directions.
+        let full = fit_multi(&refs(&x), &refs(&z), 0.1, 1e-10, None).unwrap();
+        assert_eq!(full.a.len(), classes - 1);
+        assert!(erased_cross_cov(&full, &x, &z) < 1e-9 * before);
+        assert!(gram_error(&full) < 1e-9);
+
+        let capped = fit_multi(&refs(&x), &refs(&z), 0.1, 1e-10, Some(1)).unwrap();
+        assert_eq!(capped.a.len(), 1);
+        assert_eq!(capped.u_whitened[0], full.u_whitened[0], "the leading one");
+        let left = erased_cross_cov(&capped, &x, &z);
+        assert!(
+            left < before && left > 1e-3 * before,
+            "{left:e} of {before:e}"
+        );
+        // Asking for more than there is gives what there is.
+        let more = fit_multi(&refs(&x), &refs(&z), 0.1, 1e-10, Some(9)).unwrap();
+        assert_eq!(more.a.len(), classes - 1);
+    }
+
+    #[test]
+    fn one_binary_label_gives_the_eraser_of_the_binary_fit() {
+        let (pos, neg, _) = classes(30, 10, 21);
+        let binary = fit(&pos, &neg, 0.1, 1e-10).unwrap();
+        let x: Vec<Vec<f64>> = pos.iter().chain(&neg).cloned().collect();
+        let z: Vec<Vec<f64>> = (0..x.len())
+            .map(|i| vec![f64::from(u8::from(i < pos.len()))])
+            .collect();
+        let multi = fit_multi(&refs(&x), &refs(&z), 0.1, 1e-10, None).unwrap();
+        assert_eq!(multi.a.len(), 1);
+        assert_eq!(multi.mean, binary.mean);
+        // The same operator a bᵀ (the sign of u is free, the product is not).
+        for i in 0..10 {
+            for j in 0..10 {
+                let (m, b) = (multi.a[0][i] * multi.b[0][j], binary.a[i] * binary.b[j]);
+                assert!((m - b).abs() < 1e-9, "a bᵀ[{i}][{j}]: {m} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_model_with_few_prompts_is_fitted_quickly_without_any_d_by_d_matrix() {
+        let (n, d, m) = (64, 8192, 3);
+        let z = random_labels(n, m, 2);
+        let x = labelled(d, &z, 4);
+        let started = std::time::Instant::now();
+        let fit = fit_multi(&refs(&x), &refs(&z), 0.1, 1e-10, None).unwrap();
+        let elapsed = started.elapsed();
+        assert!(elapsed.as_secs_f64() < 5.0, "{elapsed:?}");
+        assert_eq!(fit.a.len(), m);
+        assert!(gram_error(&fit) < 1e-8, "{}", gram_error(&fit));
+        let before = frobenius(&cross_cov(&refs(&x), &refs(&z)));
+        assert!(erased_cross_cov(&fit, &x, &z) < 1e-8 * before);
+    }
+
+    #[test]
+    fn inconsistent_labels_are_refused() {
+        let x = vec![vec![1.0, 2.0], vec![0.0, 1.0], vec![2.0, 0.0]];
+        let short = vec![vec![1.0], vec![0.0]];
+        assert!(fit_multi(&refs(&x), &refs(&short), 0.1, 1e-10, None).is_err());
+        let ragged = vec![vec![1.0], vec![0.0, 1.0], vec![0.0]];
+        assert!(fit_multi(&refs(&x), &refs(&ragged), 0.1, 1e-10, None).is_err());
+        // A constant label carries nothing to erase.
+        let constant = vec![vec![1.0], vec![1.0], vec![1.0]];
+        assert!(matches!(
+            fit_multi(&refs(&x), &refs(&constant), 0.1, 1e-10, None),
+            Err(ExtractError::DegenerateDirection { .. })
+        ));
     }
 }
