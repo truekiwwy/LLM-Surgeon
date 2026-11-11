@@ -7,7 +7,11 @@
 //! - `eval`: exact-match Pass@1 on GSM8K / MATH style datasets through `llama-cli`, or
 //!   through the native generator (`--backend native`, Qwen2 SafeTensors, CPU).
 //! - `refusal`: refusal rate on prompts (native generator, canonical refusal markers),
-//!   paired against a baseline with Newcombe's interval.
+//!   paired against a baseline with Newcombe's interval. Opt-in: markers in other
+//!   languages, and a llama.cpp judge model that labels every answer.
+//!
+//! `judge-sample` and `judge-eval` are not modes: they calibrate that judge against human
+//! labels, and are CLI only.
 //!
 //! Exit codes (mapped by `app`): 0 ok (warnings included); 1 insufficient resources,
 //! llama.cpp binary not found, or cancelled; 2 invalid arguments or files; 8 bench
@@ -24,6 +28,9 @@
 //! dump -> extract::HookedQwen2::forward_logits   (extract::SafetensorsDir, TensorSource)
 //! native (eval::TextGenerator over extract::generate::Qwen2State) <- score, refusal
 //! refusal -> native -> score::wilson -> report
+//! markers <- refusal, calibration                (English by default, fr/es/de or a file)
+//! judge -> calibration::gate, agreement -> report  (eval::TextGenerator::constrain, GBNF)
+//! calibration (sample, eval, gate) -> judge::Judge, agreement::Confusion
 //! ```
 //!
 //! (b) Call graph shared by the CLI and the MCP server:
@@ -39,8 +46,11 @@
 //!   eval   -> dataset::load -> prompt::Template -> eval::ensure_gguf -> generator_factory
 //!          -> TextGenerator::configure(Decoding) -> score::run_suite (LoopDetector per
 //!             question) -> extract_answer -> score::{matches, wilson, paired}
-//!   refusal -> native::NativeGenerator::load -> refusal::run_prompts (ChatTemplate,
-//!             refusal_marker) -> refusal::{score, paired, newcombe_paired}
+//!   refusal -> judge::prepare (judge file, rubric, calibration::gate: before any generation)
+//!          -> native::NativeGenerator::load -> refusal::run_prompts (ChatTemplate,
+//!             markers::Markers) -> refusal::{score, paired, newcombe_paired}
+//!          -> judge::annotate (generator_factory, verdict cache, parse_verdict)
+//!             -> judge::{score, paired, agreement} (Wilson, McNemar exact, Cohen's kappa)
 //!   dump   -> extract::{load_config, SafetensorsDir, check_tensors, choose_dtype}
 //!          -> tokenize -> HookedQwen2::from_tensors_full -> forward_logits per prompt
 //!          -> streamed .tmp -> rename
@@ -51,12 +61,18 @@
 //! `BenchRefusalReport` and `BenchDumpReport` (`report.rs`) are the `data` of the JSON envelope, identical for the
 //! CLI `--json` and the MCP `structuredContent.data`; durations live in `timing_ms` only.
 
+#![forbid(unsafe_code)]
+
+pub mod agreement;
+pub mod calibration;
 pub mod dataset;
 pub mod dump;
 mod error;
 pub mod extract_answer;
+pub mod judge;
 pub mod logits_io;
 pub mod logits_metrics;
+pub mod markers;
 pub mod native;
 pub mod ppl_parse;
 pub mod ppl_runner;
@@ -82,6 +98,12 @@ pub const DEFAULT_MAX_NEW_TOKENS: u32 = 512;
 pub const DEFAULT_DUMP_MAX_TOKENS: usize = 256;
 pub const DEFAULT_MAX_TOTAL_POSITIONS: usize = 4096;
 pub const DEFAULT_REFUSAL_MAX_NEW_TOKENS: u32 = 256;
+/// Human labels a calibration file must hold before a judge is called calibrated.
+pub const DEFAULT_MIN_CALIBRATION_N: usize = 100;
+/// Lower end of the "substantial agreement" band of Landis and Koch (1977): a convention,
+/// not a guarantee.
+pub const DEFAULT_MIN_KAPPA: f64 = 0.6;
+pub const DEFAULT_SAMPLE_N: usize = 100;
 pub use report::{
     BenchDumpReport, BenchEvalReport, BenchLogitsReport, BenchPplReport, BenchRefusalReport,
     Verdict,
