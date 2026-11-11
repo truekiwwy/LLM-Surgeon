@@ -60,8 +60,9 @@ pub use mmap_file::{
     WritableModel,
 };
 pub use project::{
-    accumulate_r, project_out_embedding, project_out_subspace, project_out_subspace_embedding,
-    project_out_tensor, project_rows_inplace, SubspaceProjection, DEFAULT_MAX_RANK,
+    accumulate_r, local_deltas, project_out_embedding, project_out_subspace,
+    project_out_subspace_embedding, project_out_tensor, project_rows_inplace, row_deltas,
+    SubspaceProjection, DEFAULT_MAX_RANK,
 };
 pub use selector::{
     find_attn_out_tensors, find_embed_tokens, find_mlp_tensors, is_embed_tokens, parse_layer_index,

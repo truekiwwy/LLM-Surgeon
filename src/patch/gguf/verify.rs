@@ -92,6 +92,17 @@ pub struct TensorFidelity {
     pub nmse_vs_exact: Option<f64>,
     pub nan_or_inf_produced: u64,
     pub warning: Option<String>,
+    /// project_out: `‖R(deq W')‖ / ‖R(W)‖`, `R = Bᵀ·` (embeddings: `· B`), the share of the
+    /// read component still there (`1 − α` ideally). Absent for add / subtract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub residual_fraction: Option<f64>,
+    /// project_out: `‖R(deq W' − W_exact)‖ / ‖R(W)‖`, the part brought back by the
+    /// requantization, bounded by `--residual-target`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requant_residual_fraction: Option<f64>,
+    /// project_out: quantization passes measured (1 + refinements).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refine_passes: Option<usize>,
 }
 
 impl TensorFidelity {
@@ -132,7 +143,17 @@ impl TensorFidelity {
             nmse_vs_exact: (f.exact_sq > 0.0).then(|| f.err_sq / f.exact_sq),
             nan_or_inf_produced: f.nan_or_inf,
             warning: (!warnings.is_empty()).then(|| warnings.join(" ; ")),
+            residual_fraction: None,
+            requant_residual_fraction: None,
+            refine_passes: None,
         }
+    }
+
+    pub fn push_warning(&mut self, warning: String) {
+        self.warning = Some(match self.warning.take() {
+            Some(w) => format!("{w} ; {warning}"),
+            None => warning,
+        });
     }
 }
 
@@ -143,25 +164,59 @@ pub fn patch_row(
     row: &mut [u8],
     deltas: RowDeltas<'_>,
 ) -> Result<Fidelity, RowError> {
-    let codec = layout.codec;
-    if !scales_finite(codec, row) {
+    let fill = |_: &[f32], out: &mut [f32]| match deltas {
+        RowDeltas::Splat(d) => out.fill(d),
+        RowDeltas::Each(ds) => {
+            for (c, d) in out.iter_mut().enumerate() {
+                *d = ds.get(c).copied().unwrap_or(0.0);
+            }
+        }
+    };
+    patch_row_with(layout, mode, row, fill, |_| {}).map(|r| r.fidelity)
+}
+
+/// The decoded values of an original row, its scales and values checked finite.
+pub fn decode_checked(layout: &Layout, row: &[u8]) -> Result<Vec<f32>, RowError> {
+    if !scales_finite(layout.codec, row) {
         return Err(RowError::OriginalScale);
     }
-    let mut before = vec![0.0f32; layout.cols];
-    dequantize_row(codec, row, &mut before);
-    if before.iter().any(|x| !x.is_finite()) {
-        return Err(RowError::OriginalValue);
+    let mut values = vec![0.0f32; layout.cols];
+    dequantize_row(layout.codec, row, &mut values);
+    match values.iter().all(|x| x.is_finite()) {
+        true => Ok(values),
+        false => Err(RowError::OriginalValue),
     }
-    let delta = |c: usize| match deltas {
-        RowDeltas::Splat(d) => d,
-        RowDeltas::Each(ds) => ds.get(c).copied().unwrap_or(0.0),
-    };
-    let exact: Vec<f32> = before
-        .iter()
-        .enumerate()
-        .map(|(c, &w)| w + delta(c))
-        .collect();
-    let requant = requantize_row(codec, mode, &before, &exact, row);
+}
+
+/// A row patched by [`patch_row_with`]: its fidelity sums, the float result and the
+/// dequantized written values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatchedRow {
+    pub fidelity: Fidelity,
+    pub before: Vec<f32>,
+    pub exact: Vec<f32>,
+    pub after: Vec<f32>,
+}
+
+/// Patches one row in place. `deltas(before, out)` fills the float shift, so `exact =
+/// before + delta` (one IEEE addition, as the SafeTensors kernels); `correct` turns a copy
+/// of `exact` into the values actually requantized (the refinement of `project_out`). The
+/// fidelity always measures the written values against `exact`.
+pub fn patch_row_with(
+    layout: &Layout,
+    mode: Requant,
+    row: &mut [u8],
+    deltas: impl FnOnce(&[f32], &mut [f32]),
+    correct: impl FnOnce(&mut [f32]),
+) -> Result<PatchedRow, RowError> {
+    let codec = layout.codec;
+    let before = decode_checked(layout, row)?;
+    let mut delta = vec![0.0f32; layout.cols];
+    deltas(&before, &mut delta);
+    let exact: Vec<f32> = before.iter().zip(&delta).map(|(&w, &d)| w + d).collect();
+    let mut target = exact.clone();
+    correct(&mut target);
+    let requant = requantize_row(codec, mode, &before, &target, row);
     if requant.nonfinite_scale || !scales_finite(codec, row) {
         return Err(RowError::RecomputedScale);
     }
@@ -177,7 +232,7 @@ pub fn patch_row(
         if a.to_bits() == b.to_bits() {
             f.unchanged += 1;
         }
-        let d = f64::from(delta(c));
+        let d = f64::from(delta[c]);
         f.intended_sq += d * d;
         if !a.is_finite() {
             f.nan_or_inf += 1;
@@ -192,7 +247,12 @@ pub fn patch_row(
         f.err_sq += err * err;
         f.exact_sq += exact * exact;
     }
-    Ok(f)
+    Ok(PatchedRow {
+        fidelity: f,
+        before,
+        exact,
+        after,
+    })
 }
 
 pub fn sha256(bytes: &[u8]) -> [u8; 32] {

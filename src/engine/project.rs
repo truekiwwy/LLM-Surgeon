@@ -268,8 +268,9 @@ pub fn project_rows_inplace(
 }
 
 /// `deltas[j] = −Σ_t (α a[t][row]) · r[t][j]`. The first term starts the sum (not `0 +`):
-/// with one direction this is `−(α a[row] · r[j])`, the historical expression.
-fn row_deltas(p: &SubspaceProjection<'_>, row: usize, r: &[f32], deltas: &mut [f32]) {
+/// with one direction this is `−(α a[row] · r[j])`, the historical expression. `r` is `R`
+/// rounded to f32, `[k, deltas.len()]`: pass 2 is `row[j] + deltas[j]`.
+pub fn row_deltas(p: &SubspaceProjection<'_>, row: usize, r: &[f32], deltas: &mut [f32]) {
     let len = p.direction_len();
     for (t, r_t) in r.chunks_exact(deltas.len()).enumerate() {
         let coef = p.alpha * p.a[t * len + row];
@@ -281,8 +282,9 @@ fn row_deltas(p: &SubspaceProjection<'_>, row: usize, r: &[f32], deltas: &mut [f
     deltas.iter_mut().for_each(|d| *d = -*d);
 }
 
-/// `deltas[j] = −Σ_t (α (x · b_t)) · a_t[j]` for one row `x` of an embedding matrix.
-fn local_deltas(p: &SubspaceProjection<'_>, x: &[f32], deltas: &mut [f32]) {
+/// `deltas[j] = −Σ_t (α (x · b_t)) · a_t[j]` for one row `x` of an embedding matrix: the
+/// projected row is `x[j] + deltas[j]`.
+pub fn local_deltas(p: &SubspaceProjection<'_>, x: &[f32], deltas: &mut [f32]) {
     let cols = x.len();
     let directions = p.a.chunks_exact(cols).zip(p.b.chunks_exact(cols));
     for (t, (a_t, b_t)) in directions.enumerate() {

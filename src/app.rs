@@ -1994,10 +1994,17 @@ pub fn core_apply_routed(
             request.model.display()
         ))),
         (false, false)
-            if opts.force_no_backup || opts.no_verify || opts.requant != Requant::KeepScales =>
+            if opts.force_no_backup
+                || opts.no_verify
+                || opts.requant != Requant::KeepScales
+                || opts.allow_tied_embedding
+                || opts.refine_passes != gguf::project::DEFAULT_REFINE_PASSES
+                || opts.residual_target != gguf::project::DEFAULT_RESIDUAL_TARGET =>
         {
             Err(usage(
-                "--requant, --no-verify et --force-no-backup ne s'appliquent qu'avec --gguf".into(),
+                "--requant, --no-verify, --force-no-backup, --allow-tied-embedding, \
+                 --refine-passes et --residual-target ne s'appliquent qu'avec --gguf"
+                    .into(),
             ))
         }
         (false, false) => {
@@ -2031,21 +2038,6 @@ fn core_apply_gguf(
         ..Default::default()
     };
     let patch = validate_patch(&request.patch, &request.base_dir, &validation)?;
-    if let Some(op) = patch
-        .operations
-        .iter()
-        .find(|op| op.projections.iter().any(|p| !p.is_mlp()))
-    {
-        return Err(Outcome::fail(
-            exit::INVALID_INPUT,
-            format!(
-                "opération {} : o_proj et embed_tokens ne sont patchables que dans un modèle \
-                 SafeTensors, pas dans un GGUF (seules gate_proj, up_proj et down_proj le sont)",
-                op.id
-            ),
-        )
-        .with_kind("invalid_input"));
-    }
     sink.event(ProgressEvent::ApplyStart {
         patch: request.patch_label.clone(),
         operations: patch.operations.len(),

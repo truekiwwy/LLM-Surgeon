@@ -9,7 +9,10 @@
 //!   operation, `rank` and `labels_file` of `surgeon_extract`;
 //! - the semantic judges of `bench refusal`: fifteen options of `bench refusal`, the
 //!   subcommands `bench judge-sample` and `bench judge-eval`, twelve optional properties of
-//!   `surgeon_bench`.
+//!   `surgeon_bench`;
+//! - the GGUF residual writers: `apply --allow-tied-embedding`, `--refine-passes` and
+//!   `--residual-target`, the same three optional properties of `surgeon_apply` (only the
+//!   tool schema hash moved).
 //!
 //! No entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

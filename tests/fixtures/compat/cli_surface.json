@@ -511,6 +511,66 @@
           "env": null,
           "global": false,
           "hidden": false,
+          "id": "allow_tied_embedding",
+          "long": "allow-tied-embedding",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "ALLOW_TIED_EMBEDDING"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "1"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "refine_passes",
+          "long": "refine-passes",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "REFINE_PASSES"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0.05"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "residual_target",
+          "long": "residual-target",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "RESIDUAL_TARGET"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
           "id": "dry_run",
           "long": "dry-run",
           "num_args": "0",

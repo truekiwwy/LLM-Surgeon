@@ -41,6 +41,8 @@ pub fn apply_text(ui: &Ui, model: &Path, run: &GgufRun, dry_run: bool, no_verify
                     ui,
                     t.nmse_vs_exact.map_or("—".into(), |x| format!("{x:.2e}")),
                 ),
+                ui::metric(ui, opt(t.residual_fraction)),
+                ui::metric(ui, t.refine_passes.map_or("—".into(), |n| n.to_string())),
             ]
         })
         .collect();
@@ -65,8 +67,27 @@ pub fn apply_text(ui: &Ui, model: &Path, run: &GgufRun, dry_run: bool, no_verify
         "inchangés",
         "saturés",
         "nmse",
+        "résiduel",
+        "passes",
     ];
     text.push_str(&ui::table(ui, &headers, &rows));
+    let p = &run.preflight;
+    text.push_str(&format!(
+        "{} {} tenseurs, {} ciblés, {} à traiter{}{}
+",
+        ui::badge(ui, "PRÉ-VOL"),
+        ui::metric(ui, p.tensors),
+        ui::metric(ui, size(p.target_bytes)),
+        ui::metric(ui, size(p.work_bytes)),
+        p.estimated_seconds.map_or(String::new(), |s| format!(
+            ", ~{} estimées",
+            ui::metric(ui, format!("{s:.1} s"))
+        )),
+        p.backup_bytes.map_or(String::new(), |b| format!(
+            ", backup {}",
+            ui::metric(ui, size(b))
+        )),
+    ));
     let verify = match (dry_run, no_verify) {
         (true, _) => "dry-run : rien n'a été écrit".to_owned(),
         (false, true) => "relecture désactivée (--no-verify) ; en-tête inchangé".to_owned(),
@@ -83,7 +104,19 @@ pub fn apply_text(ui: &Ui, model: &Path, run: &GgufRun, dry_run: bool, no_verify
     text
 }
 
-/// `inspect` on a GGUF: MLP tensors with their quantization type (no statistics).
+/// The `proj` column of `inspect`.
+fn short_name(projection: Projection) -> &'static str {
+    match projection {
+        Projection::Gate => "gate",
+        Projection::Up => "up",
+        Projection::Down => "down",
+        Projection::AttnOut => "o_proj",
+        Projection::EmbedTokens => "embed_tokens",
+    }
+}
+
+/// `inspect` on a GGUF: patch targets (the MLP unless `projections` says otherwise) with
+/// their quantization type, orientation and whether they can be patched (no statistics).
 /// Returns `(data, human)`; `Err` is the message of an unreadable file.
 pub fn inspect(
     model: &Path,
@@ -96,28 +129,52 @@ pub fn inspect(
     let file = std::fs::File::open(model).map_err(|e| fail(&e))?;
     let map = kernel::map_read(&file).map_err(|e| fail(&e))?;
     let parsed = parse::parse(&map).map_err(|e| fail(&e))?;
+    // The MLP by default, as the SafeTensors inspect; o_proj and embed_tokens on request.
+    let projections = match projections.is_empty() {
+        true => &[Projection::Gate, Projection::Up, Projection::Down][..],
+        false => projections,
+    };
+    let tied = mapping::tied_embeddings(&parsed);
     let mut rows = Vec::new();
     let mut tensors = Vec::new();
-    for (layer, projection, t) in mapping::mlp_tensors(&parsed, layers, projections) {
+    for (layer, projection, t) in mapping::targets(&parsed, layers, projections) {
         // [rows, cols] like a SafeTensors [out, in] shape.
         let shape: Vec<u64> = t.ne.iter().rev().copied().collect();
+        let orientation = mapping::Orientation::of(projection);
+        let reason = match mapping::layout(t) {
+            Err(e) => Some(e.to_string()),
+            Ok(_) if tied && t.name == mapping::TOKEN_EMBD => {
+                Some("lié à la tête de sortie : --allow-tied-embedding".to_owned())
+            }
+            Ok(_) => None,
+        };
         let patchable = mapping::layout(t).is_ok();
         rows.push(vec![
-            ui::accent(ui, &layer.to_string()),
-            ui::metric(ui, format!("{projection:?}").to_lowercase()),
+            ui::accent(ui, &layer.map_or("—".to_owned(), |l| l.to_string())),
+            ui::metric(ui, short_name(projection)),
             ui::metric(ui, t.ggml_type.name()),
+            ui::metric(ui, json!(orientation).as_str().unwrap_or_default()),
             ui::metric(ui, format!("{shape:?}")),
             ui::metric(ui, t.size.map_or("—".into(), size)),
-            ui::dim(ui, if patchable { "oui" } else { "non" }),
+            ui::dim(
+                ui,
+                &match (patchable, &reason) {
+                    (true, None) => "oui".to_owned(),
+                    (true, Some(r)) => format!("oui ({r})"),
+                    (false, r) => format!("non ({})", r.as_deref().unwrap_or_default()),
+                },
+            ),
         ]);
         tensors.push(json!({
             "name": t.name,
             "layer": layer,
             "projection": projection,
             "ggml_type": t.ggml_type.name(),
+            "orientation": orientation,
             "shape": shape,
             "bytes": t.size,
             "patchable": patchable,
+            "patchable_reason": reason,
         }));
     }
     let mut banner = Vec::new();
@@ -133,7 +190,15 @@ pub fn inspect(
     if show_stats {
         human.push_str(&ui::dim(ui, "statistiques non disponibles pour un GGUF\n"));
     }
-    let headers = ["couche", "proj", "type", "shape", "taille", "patchable"];
+    let headers = [
+        "couche",
+        "proj",
+        "type",
+        "orientation",
+        "shape",
+        "taille",
+        "patchable",
+    ];
     human.push_str(&ui::table(ui, &headers, &rows));
     let data = json!({
         "format": "gguf",
@@ -142,6 +207,7 @@ pub fn inspect(
         "alignment": parsed.alignment,
         "data_start": parsed.data_start,
         "tensor_count": parsed.tensors.len(),
+        "tied_embeddings": tied,
         "tensors": tensors,
     });
     Ok((data, human))
