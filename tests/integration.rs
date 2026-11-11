@@ -5129,10 +5129,15 @@ fn mcp_binary_bench_speaks_only_json_rpc() {
 #[test]
 fn bench_module_has_no_print_and_no_unsafe() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bench");
+    // `unsafe` is also a judge label (Llama-Guard): the compiler checks, not a text search.
+    let root = std::fs::read_to_string(dir.join("mod.rs")).unwrap();
+    assert!(
+        root.lines().any(|l| l == "#![forbid(unsafe_code)]"), // `lines` also handles CRLF checkouts
+        "src/bench/mod.rs: unsafe code is no longer forbidden"
+    );
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         let source = std::fs::read_to_string(&path).unwrap();
-        assert!(!source.contains("unsafe"), "{}: unsafe", path.display());
         let code = source.split("#[cfg(test)]").next().unwrap();
         for (n, line) in code.lines().enumerate() {
             if line.trim_start().starts_with("//") {

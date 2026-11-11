@@ -20,7 +20,9 @@ use crate::app::{
 };
 use crate::bench;
 use crate::bench::dump::DumpRequest;
+use crate::bench::judge::{JudgeMode, JudgeSetup, RefusalJudging, Role};
 use crate::bench::logits_metrics::LogitsRequest;
+use crate::bench::markers::Markers;
 use crate::bench::ppl_runner::{PplBaseline, PplRequest};
 use crate::bench::prompt::Template;
 use crate::bench::refusal::RefusalRequest;
@@ -924,7 +926,9 @@ pub struct BenchToolArgs {
     )]
     pub warn_top1_shift: Option<f64>,
     #[serde(default)]
-    #[schemars(description = "logits, ppl, eval : seuil dépassé => exit_code 9 (isError).")]
+    #[schemars(
+        description = "logits, ppl, eval, refusal (max_unparsable) : seuil dépassé => exit_code 9 (isError)."
+    )]
     pub fail_on_warn: Option<bool>,
     #[serde(default)]
     #[schemars(
@@ -959,7 +963,7 @@ pub struct BenchToolArgs {
     pub n_gpu_layers: Option<u32>,
     #[serde(default)]
     #[schemars(
-        description = "ppl, eval : racine de llama.cpp ; défaut : $LLAMA_CPP_DIR du serveur."
+        description = "ppl, eval, refusal (juge) : racine de llama.cpp ; défaut : $LLAMA_CPP_DIR du serveur."
     )]
     pub llama_cpp_dir: Option<PathBuf>,
     #[serde(default)]
@@ -970,7 +974,7 @@ pub struct BenchToolArgs {
     #[serde(default)]
     #[schemars(
         range(min = 1),
-        description = "ppl : délai par run ; eval : délai par question (secondes)."
+        description = "ppl : délai par run ; eval : délai par question ; refusal : délai par verdict du juge (secondes)."
     )]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
@@ -1035,6 +1039,62 @@ pub struct BenchToolArgs {
     #[serde(default)]
     #[schemars(description = "dump : remplace out s'il existe.")]
     pub overwrite: Option<bool>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal : rules (défaut, marqueurs seuls), llm (marqueurs et juge LLM) ou both (plus leur accord, kappa de Cohen). llm et both demandent judge_model ; un juge sans calibration est rapporté « JUGE NON CALIBRÉ »."
+    )]
+    pub judge: Option<JudgeMode>,
+    #[serde(default)]
+    #[schemars(description = "refusal : fichier .gguf du juge, lancé par llama-completion.")]
+    pub judge_model: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal : question posée au juge, refusal (défaut : la réponse refuse-t-elle ?) ou harm (contient-elle du contenu nocif ? pour Llama-Guard et semblables)."
+    )]
+    pub judge_role: Option<Role>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal : fichier de rubrique avec {prompt} et {response} ; défaut : la rubrique intégrée du rôle."
+    )]
+    pub judge_template: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal : cache JSONL des verdicts, lu puis complété (refusé en --read-only)."
+    )]
+    pub judge_cache: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal : fichier de calibration écrit par surgeon bench judge-eval --out."
+    )]
+    pub judge_calibration: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal : étiquettes humaines exigées de la calibration (défaut 100)."
+    )]
+    pub min_calibration_n: Option<u32>,
+    #[serde(default)]
+    #[schemars(description = "refusal : kappa de Cohen exigé de la calibration (défaut 0.6).")]
+    pub min_kappa: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal : compte les réponses partial comme des refus dans le taux du juge (défaut false)."
+    )]
+    pub partial_as_refusal: Option<bool>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal : avertit au-delà de ce nombre de verdicts illisibles (jamais comptés comme non-refus)."
+    )]
+    pub max_unparsable: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal : langues de marqueurs en plus de l'anglais (fr, es, de, all)."
+    )]
+    pub marker_langs: Option<Vec<String>>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal : fichier JSON {\"<langue>\": [\"marqueur\", ...]} qui ajoute des langues ou remplace une liste intégrée."
+    )]
+    pub markers_file: Option<PathBuf>,
 }
 
 /// (mode, required fields, optional fields).
@@ -1087,7 +1147,26 @@ const BENCH_FIELDS: [(&str, &[&str], &[&str]); 5] = [
     (
         "refusal",
         &["model", "prompts"],
-        &["baseline_model", "max_new_tokens", "chat_template"],
+        &[
+            "baseline_model",
+            "max_new_tokens",
+            "chat_template",
+            "judge",
+            "judge_model",
+            "judge_role",
+            "judge_template",
+            "judge_cache",
+            "judge_calibration",
+            "min_calibration_n",
+            "min_kappa",
+            "partial_as_refusal",
+            "max_unparsable",
+            "marker_langs",
+            "markers_file",
+            "llama_cpp_dir",
+            "timeout_secs",
+            "fail_on_warn",
+        ],
     ),
     (
         "dump",
@@ -1166,6 +1245,12 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         return Err(invalid(
             "read_only",
             "serveur lancé avec --read-only : surgeon_bench mode dump écrit un fichier, il est désactivé",
+        ));
+    }
+    if ctx.cfg.read_only && args.judge_cache.is_some() {
+        return Err(invalid(
+            "read_only",
+            "serveur lancé avec --read-only : judge_cache écrit un fichier, il est désactivé",
         ));
     }
     let mode = bench_command(&arguments).trim_start_matches("bench ");
@@ -1289,6 +1374,12 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             let prompts_file = path(ctx, "prompts", &args.prompts)?;
             let prompts = extract::load_prompt_texts(&prompts_file)
                 .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?;
+            let markers_file = optional_path(ctx, "markers_file", &args.markers_file)?;
+            let markers = Markers::new(
+                args.marker_langs.as_deref().unwrap_or_default(),
+                markers_file.as_deref(),
+            )
+            .map_err(|e| invalid("invalid_arguments", e))?;
             let req = RefusalRequest {
                 model: path(ctx, "model", &args.model)?,
                 prompts,
@@ -1297,8 +1388,45 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                     .max_new_tokens
                     .unwrap_or(bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
                 chat_template: args.chat_template.unwrap_or(ChatTemplate::Chatml),
+                markers,
             };
-            core_bench_refusal(&req, ctx.deps, &ui, ctx.sink)
+            // Every judge path is sandboxed; nothing an agent writes reaches llama.cpp but
+            // the rubric text, the prompts and the answers.
+            let judging = match args.judge.unwrap_or_default() {
+                JudgeMode::Rules if args.judge_model.is_some() => {
+                    return Err(invalid(
+                        "invalid_arguments",
+                        "judge_model demande judge llm ou both",
+                    ))
+                }
+                JudgeMode::Rules => None,
+                mode => Some(RefusalJudging {
+                    setup: JudgeSetup {
+                        model: path(ctx, "judge_model", &args.judge_model)?,
+                        role: args.judge_role.unwrap_or_default(),
+                        template: optional_path(ctx, "judge_template", &args.judge_template)?,
+                        cache: optional_path(ctx, "judge_cache", &args.judge_cache)?,
+                        partial_as_refusal: args.partial_as_refusal.unwrap_or(false),
+                        timeout,
+                    },
+                    compare_rules: mode == JudgeMode::Both,
+                    max_unparsable: args.max_unparsable.map(|m| m as usize),
+                    calibration: optional_path(ctx, "judge_calibration", &args.judge_calibration)?,
+                    min_calibration_n: args
+                        .min_calibration_n
+                        .map_or(bench::DEFAULT_MIN_CALIBRATION_N, |n| n as usize),
+                    min_kappa: args.min_kappa.unwrap_or(bench::DEFAULT_MIN_KAPPA),
+                }),
+            };
+            core_bench_refusal(
+                &req,
+                judging.as_ref(),
+                llama_cpp_dir.as_deref(),
+                fail_on_warn,
+                ctx.deps,
+                &ui,
+                ctx.sink,
+            )
         }
     }
 }

@@ -826,6 +826,88 @@
           ],
           "default": null
         },
+        "judge": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "rules"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "llm"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "both"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "judge_cache": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "judge_calibration": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "judge_model": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "judge_role": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "refusal"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "harm"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "judge_template": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "limit": {
           "default": null,
           "format": "uint32",
@@ -836,6 +918,23 @@
           ]
         },
         "llama_cpp_dir": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "marker_langs": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "markers_file": {
           "default": null,
           "type": [
             "string",
@@ -869,7 +968,33 @@
             "null"
           ]
         },
+        "max_unparsable": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "min_accuracy": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "min_calibration_n": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min_kappa": {
           "default": null,
           "format": "double",
           "type": [
@@ -946,6 +1071,13 @@
           ]
         },
         "overwrite": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "partial_as_refusal": {
           "default": null,
           "type": [
             "boolean",

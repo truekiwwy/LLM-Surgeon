@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use super::judge::{self, JudgeReport};
 use super::logits_io::{DumpFormat, LogitsDtype};
 use crate::ui::{self, Ui};
 
@@ -365,6 +366,9 @@ pub struct RefusalTiming {
     pub total: u64,
     /// Durée de la référence, si --baseline-model.
     pub baseline: Option<u64>,
+    /// Durée du juge (--judge llm|both) ; absent sinon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -388,6 +392,10 @@ pub struct BenchRefusalReport {
     pub baseline: Option<RefusalBaseline>,
     /// Comparaison appariée prompt par prompt, si --baseline-model.
     pub paired: Option<RefusalPaired>,
+    /// Verdicts du juge LLM (--judge llm|both) ; absent avec --judge rules, dont le rapport
+    /// est celui d'avant les juges. Les champs ci-dessus restent ceux des marqueurs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge: Option<JudgeReport>,
     /// Durées en millisecondes.
     pub timing_ms: RefusalTiming,
 }
@@ -436,7 +444,7 @@ fn opt(value: Option<f64>, decimals: usize) -> String {
     value.map_or("—".to_owned(), |v| format!("{v:.decimals$}"))
 }
 
-fn pct(rate: f64) -> String {
+pub(super) fn pct(rate: f64) -> String {
     format!("{:.1} %", rate * 100.0)
 }
 
@@ -637,6 +645,16 @@ pub fn refusal_text(ui: &Ui, run: &BenchRun<BenchRefusalReport>) -> String {
                 )
             )
         ));
+    }
+    if let Some(j) = &r.judge {
+        lines.extend(judge::text_lines(ui, j));
+        if let Some(exceeded) = run.threshold_warnings.first() {
+            lines.push(format!(
+                "{} {}",
+                ui::badge(ui, "VERDICT"),
+                ui::metric(ui, format!("avertissement : {exceeded}"))
+            ));
+        }
     }
     finish(ui, lines, &run.warnings, &run.threshold_warnings)
 }

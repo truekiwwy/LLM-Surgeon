@@ -3,12 +3,17 @@
 //! steering extensions; every earlier output hash was unchanged by that rewrite except the
 //! two schemas). Only human texts may change: clap help, MCP `description` / `title`.
 //!
-//! Last rewrite: rank-k subspaces of `project_out`. Additions only, checked entry by entry
-//! against the previous references: `apply --max-rank`, `extract --rank` and
-//! `extract --labels-file`, the properties `rank` and `allow_non_projector` of a patch
-//! operation, `rank` and `labels_file` of `surgeon_extract`. No entry changed or
-//! disappeared, and the only output hashes that moved are the two schemas, which list those
-//! properties; every extraction file is still byte for byte what it was.
+//! Last rewrites, additions only, checked entry by entry against the previous references:
+//! - rank-k subspaces of `project_out`: `apply --max-rank`, `extract --rank` and
+//!   `extract --labels-file`, the properties `rank` and `allow_non_projector` of a patch
+//!   operation, `rank` and `labels_file` of `surgeon_extract`;
+//! - the semantic judges of `bench refusal`: fifteen options of `bench refusal`, the
+//!   subcommands `bench judge-sample` and `bench judge-eval`, twelve optional properties of
+//!   `surgeon_bench`.
+//!
+//! No entry changed or disappeared, and the only output hashes that moved are the two
+//! schemas, which list those properties; every extraction file is still byte for byte what
+//! it was.
 //!
 //! - `cli_surface.json`: every subcommand and option of `Cli::command()` (names, short and
 //!   long flags, actions, value counts, defaults, possible values, required, global, env).

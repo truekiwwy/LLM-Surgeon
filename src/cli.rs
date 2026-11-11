@@ -242,6 +242,10 @@ pub enum BenchCommand {
     Dump(BenchDumpArgs),
     /// Refusal rate of a Qwen2 model on prompts (greedy, pure Rust, CPU).
     Refusal(BenchRefusalArgs),
+    /// Sample the answers of a `bench refusal` run for human labelling.
+    JudgeSample(BenchJudgeSampleArgs),
+    /// Agreement of a judge model with human labels; writes the calibration file.
+    JudgeEval(BenchJudgeEvalArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -394,6 +398,104 @@ pub struct BenchRefusalArgs {
     /// Wrapping of each prompt before generation.
     #[arg(long, value_enum, default_value_t = ChatTemplate::Chatml)]
     pub chat_template: ChatTemplate,
+    /// Verdict: rules (refusal markers), llm (markers and a judge model) or both (plus
+    /// their agreement).
+    #[arg(long, value_enum, default_value_t = crate::bench::judge::JudgeMode::Rules)]
+    pub judge: crate::bench::judge::JudgeMode,
+    #[command(flatten)]
+    pub markers: MarkerArgs,
+    #[command(flatten)]
+    pub judge_args: JudgeArgs,
+    /// Calibration file written by `bench judge-eval --out`; without one the judge is
+    /// reported as not calibrated.
+    #[arg(long)]
+    pub judge_calibration: Option<PathBuf>,
+    /// Human labels the calibration must hold.
+    #[arg(long, default_value_t = crate::bench::DEFAULT_MIN_CALIBRATION_N)]
+    pub min_calibration_n: usize,
+    /// Cohen's kappa (judge against human) the calibration must reach.
+    #[arg(long, default_value_t = crate::bench::DEFAULT_MIN_KAPPA, allow_negative_numbers = true)]
+    pub min_kappa: f64,
+    /// Warn when more judge verdicts than this are unparsable.
+    #[arg(long)]
+    pub max_unparsable: Option<usize>,
+    /// Exit with code 9 when --max-unparsable is exceeded.
+    #[arg(long)]
+    pub fail_on_warn: bool,
+}
+
+/// Refusal markers of the rule-based verdict.
+#[derive(Debug, Clone, Args)]
+pub struct MarkerArgs {
+    /// Marker languages on top of English: fr, es, de or all, comma-separated.
+    #[arg(long, value_delimiter = ',')]
+    pub marker_langs: Vec<String>,
+    /// JSON object {"<lang>": ["marker", ...]}: adds languages, replaces built-in lists.
+    #[arg(long)]
+    pub markers_file: Option<PathBuf>,
+}
+
+/// The judge model of `bench refusal --judge llm|both` and of `bench judge-eval`.
+#[derive(Debug, Clone, Args)]
+pub struct JudgeArgs {
+    /// GGUF of the judge, run by llama-completion (greedy, grammar-constrained).
+    #[arg(long)]
+    pub judge_model: Option<PathBuf>,
+    /// Question asked: refusal (does the answer refuse?) or harm (is it harmful?).
+    #[arg(long, value_enum, default_value_t = crate::bench::judge::Role::Refusal)]
+    pub judge_role: crate::bench::judge::Role,
+    /// Rubric file with {prompt} and {response}; default: the built-in rubric of the role.
+    #[arg(long)]
+    pub judge_template: Option<PathBuf>,
+    /// JSONL cache of verdicts, read then appended.
+    #[arg(long)]
+    pub judge_cache: Option<PathBuf>,
+    /// Count `partial` answers as refusals in the binary rate.
+    #[arg(long)]
+    pub partial_as_refusal: bool,
+    #[arg(long, env = "LLAMA_CPP_DIR")]
+    pub llama_cpp_dir: Option<PathBuf>,
+    /// Per judge verdict.
+    #[arg(long)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchJudgeSampleArgs {
+    /// `--json` output of a `bench refusal` run.
+    #[arg(long)]
+    pub responses: PathBuf,
+    /// Prompts file of that run (its report only keeps their hash).
+    #[arg(long)]
+    pub prompts: PathBuf,
+    /// Sample size.
+    #[arg(long, default_value_t = crate::bench::DEFAULT_SAMPLE_N)]
+    pub n: usize,
+    #[arg(long, default_value_t = u64::from(crate::bench::score::SEED))]
+    pub seed: u64,
+    /// Sample file to label: no model name, no condition.
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Replace an existing --out.
+    #[arg(long)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchJudgeEvalArgs {
+    /// Labelled sample: the file of `bench judge-sample` with every "label" filled.
+    #[arg(long)]
+    pub labels: PathBuf,
+    #[command(flatten)]
+    pub judge_args: JudgeArgs,
+    #[command(flatten)]
+    pub markers: MarkerArgs,
+    /// Calibration file to write, read by `bench refusal --judge-calibration`.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Replace an existing --out.
+    #[arg(long)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -1,0 +1,4 @@
+[BENCH]    refusal · 6 prompts · chatml · 8 tokens max  qwen2-mini
+[REFUS]    0/6 · 0.0 % · IC95 [0.0 ; 39.0]
+[REFUS]    référence 0/6 · 0.0 % · IC95 [0.0 ; 39.0]
+  appariement : débloqués 0 · nouveaux refus 0 · Δ +0.0 points, IC95 [-39.0 ; +39.0]

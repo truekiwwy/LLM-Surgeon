@@ -6,6 +6,10 @@
 //!   newline), then `Final estimate: PPL = X +/- 0.0400`, X derived from the model bytes.
 //! - completion: answers `#### <sum of the integers of the problem>` on stdout; a model
 //!   whose bytes contain `broken` answers one more.
+//! - scripted judge (`bench refusal --judge llm|both`, `bench judge-eval`): when
+//!   `FAKE_LLAMA_JUDGE` names a JSON file `[["needle", "output"], ...]`, the completion
+//!   role prints the output of the first needle found in the prompt, or `???` (an
+//!   unparsable verdict) when none is. A judge call without `--grammar` exits with code 1.
 //!
 //! `FAKE_LLAMA_SLEEP_MS` slows every chunk down (timeout tests), `FAKE_LLAMA_FAIL=1`
 //! exits with code 1 after a few log lines.
@@ -68,6 +72,25 @@ fn main() {
     }
 
     let prompt = arg_after(&args, "-p").unwrap_or_default();
+    if let Ok(script) = std::env::var("FAKE_LLAMA_JUDGE") {
+        if arg_after(&args, "--grammar").is_none() {
+            let _ = writeln!(err, "error: judge called without --grammar");
+            std::process::exit(1);
+        }
+        let script: Vec<(String, String)> = std::fs::read_to_string(&script)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        let verdict = script
+            .iter()
+            .find(|(needle, _)| prompt.contains(needle))
+            .map_or("???", |(_, output)| output);
+        if let Some(p) = pause {
+            std::thread::sleep(p);
+        }
+        let _ = write!(std::io::stdout(), "{verdict}");
+        return;
+    }
     let problem = prompt
         .lines()
         .find_map(|l| l.strip_prefix("Problem: "))

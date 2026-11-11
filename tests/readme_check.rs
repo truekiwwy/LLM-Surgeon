@@ -82,8 +82,10 @@ fn invocations(line: &str) -> Vec<(String, Vec<String>)> {
     found
 }
 
+/// A subcommand name: lowercase letters, hyphens inside (`judge-sample`).
 fn lowercase_word(token: &str) -> bool {
-    !token.is_empty() && token.chars().all(|c| c.is_ascii_lowercase())
+    token.starts_with(|c: char| c.is_ascii_lowercase())
+        && token.chars().all(|c| c.is_ascii_lowercase() || c == '-')
 }
 
 fn long_options(command: &clap::Command) -> BTreeSet<String> {
@@ -203,8 +205,23 @@ fn nested_bench_commands_and_mcp_tool_count_are_checked() {
     assert!(long_options(ppl).contains("--warn-delta"));
     assert!(!long_options(cli.find_subcommand("bench").unwrap()).contains("--warn-delta"));
 
+    assert_eq!(
+        invocations("surgeon bench judge-sample --responses run.json --n 6"),
+        [(
+            "bench judge-sample".into(),
+            vec!["--responses".into(), "--n".into()]
+        )]
+    );
+
     let english = check_readme("README.md");
-    for leaf in ["logits", "ppl", "eval", "dump"] {
+    for leaf in [
+        "logits",
+        "ppl",
+        "eval",
+        "dump",
+        "judge-sample",
+        "judge-eval",
+    ] {
         assert!(
             english.contains(&format!("bench {leaf}")),
             "README.md never runs `surgeon bench {leaf}`"

@@ -108,7 +108,7 @@ est une erreur JSON-RPC `-32602` (les cinq autres outils la signalent en
 | `logits` | `before`, `after` | `tensor`, `top_k` (5), `worst` (5), `warn_kl`, `warn_top1_shift`, `fail_on_warn` |
 | `ppl` | `model`, `text` | `baseline_model` ou `baseline_ppl` (+ `baseline_ppl_err`), `ctx` (512), `chunks`, `threads`, `n_gpu_layers` (0), `llama_cpp_dir`, `warn_delta` (0.2), `timeout_secs`, `fail_on_warn` |
 | `eval` | `model`, `dataset` | `backend` (`llama`, `native`), `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn` |
-| `refusal` | `model`, `prompts` (fichier) | `baseline_model`, `max_new_tokens` (256), `chat_template` (`chatml`, `none`) |
+| `refusal` | `model`, `prompts` (fichier) | `baseline_model`, `max_new_tokens` (256), `chat_template` (`chatml`, `none`), `marker_langs`, `markers_file`, `judge` (`rules`, `llm`, `both`), `judge_model`, `judge_role` (`refusal`, `harm`), `judge_template`, `judge_cache`, `judge_calibration`, `min_calibration_n` (100), `min_kappa` (0.6), `partial_as_refusal`, `max_unparsable`, `llama_cpp_dir`, `timeout_secs`, `fail_on_warn` |
 | `dump` | `model`, `prompts` (fichier), `out` | `dtype`, `out_dtype` (`f32`, `f16`), `max_tokens` (256), `max_total_positions` (4096), `overwrite` |
 
 `data` reçoit le rapport (`BenchLogitsReport`, `BenchPplReport`, `BenchEvalReport`,
@@ -116,15 +116,31 @@ est une erreur JSON-RPC `-32602` (les cinq autres outils la signalent en
 `data.timing_ms`. Un seuil dépassé avec `fail_on_warn: true` donne `exit_code` 9 et
 `isError: true`, le rapport restant dans `data`. Aucun argument libre n'atteint llama.cpp
 par MCP (l'option `--llama-arg` n'existe qu'en ligne de commande, sur liste blanche).
-`--read-only` refuse le mode `dump` mais laisse `logits`, `ppl`, `eval` et `refusal`.
+`--read-only` refuse le mode `dump` et le champ `judge_cache` (il écrit un fichier) mais
+laisse `logits`, `ppl`, `eval` et `refusal`, juge compris.
 
 `eval` avec `backend: "native"` et `refusal` génèrent en Rust pur sur le CPU, sur un dossier
 Qwen2 SafeTensors, sans llama.cpp (décodage glouton, donc déterministe). `refusal` compte
-comme refus une réponse qui contient un marqueur canonique (`data.markers`, anglais, sans
-casse, aux frontières de mots) ; il n'y a pas de modèle juge, les réponses entières sont
-dans `data.items[].output`. Avec `baseline_model`, `data.paired` donne les prompts débloqués
-(`unblocked`), les nouveaux refus (`newly_refused`), `delta_rate` et son intervalle à 95 %
-(Newcombe apparié).
+comme refus une réponse qui contient un marqueur canonique (`data.markers`, anglais par
+défaut, sans casse, aux frontières de mots ; `marker_langs` et `markers_file` ajoutent
+d'autres langues) ; les réponses entières sont dans `data.items[].output`. Avec
+`baseline_model`, `data.paired` donne les prompts débloqués (`unblocked`), les nouveaux refus
+(`newly_refused`), `delta_rate` et son intervalle à 95 % (Newcombe apparié).
+
+Avec `judge: "llm"` ou `"both"`, un modèle juge (`judge_model`, un `.gguf` lancé par
+`llama-completion`) étiquette ensuite chaque réponse ; les champs des marqueurs ne changent
+pas et les verdicts vont dans `data.judge`. Rôle `refusal` : `complied`, `refused_explicit`,
+`refused_soft`, `partial`, `degenerate`, `other`. Rôle `harm` (Llama-Guard et semblables) :
+`safe`, `unsafe`. Un verdict illisible est `unparsable` : exclu de `rate`, jamais compté comme
+non-refus, encadré par `rate_min` et `rate_max` ; `max_unparsable` avec `fail_on_warn` en fait
+un `exit_code` 9. `data.judge.calibration.status` vaut « JUGE NON CALIBRÉ : <raison> » tant
+que `judge_calibration` ne désigne pas une calibration du même juge, de la même rubrique, du
+même rôle et du même réglage `partial_as_refusal`, avec `min_calibration_n` étiquettes et un
+kappa d'au moins `min_kappa` ; le même texte est dans `warnings`. Tous les chemins du juge
+(`judge_model`, `judge_template`, `judge_cache`, `judge_calibration`, `markers_file`) passent
+par le bac à sable `--allow-dir`. Les sous-commandes `bench judge-sample` et
+`bench judge-eval`, qui produisent l'échantillon à étiqueter et le fichier de calibration, ne
+sont pas exposées par MCP : la calibration reste un geste humain, en ligne de commande.
 
 Recette d'un agent :
 

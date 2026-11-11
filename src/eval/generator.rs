@@ -33,6 +33,13 @@ pub trait TextGenerator {
     fn configure(&mut self, _decoding: &Decoding) -> bool {
         false
     }
+
+    /// Restricts the output to a GBNF grammar (call once, before the first `generate`).
+    /// Returns false when the generator cannot constrain its output: the caller must then
+    /// parse free text.
+    fn constrain(&mut self, _gbnf: &str) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -99,6 +106,13 @@ impl TextGenerator for LlamaCliGenerator {
         if let Some(timeout) = decoding.timeout {
             self.timeout = timeout;
         }
+        true
+    }
+
+    /// `--grammar <GBNF>`, inline: no grammar file to write or clean up.
+    fn constrain(&mut self, gbnf: &str) -> bool {
+        self.extra_args
+            .extend(["--grammar".to_owned(), gbnf.to_owned()]);
         true
     }
 }

@@ -34,7 +34,8 @@ enveloppe JSON (`--json`, résultats MCP).
   engine   SafeTensors mmap, décalages de lignes ; kernel : noyaux SIMD, prefetch, E/S
   surgery  .surgery v1, SVD randomisée ; lora : fusion / extraction PEFT
   bench    KL et top-k entre dumps, perplexité (llama-perplexity), Pass@1 et taux de refus
-           (llama.cpp ou générateur natif Qwen2) ; eval : llama.cpp
+           (llama.cpp ou générateur natif Qwen2), juge LLM optionnel et sa calibration ;
+           eval : llama.cpp
   hardware budget RAM/VRAM ; linalg : QR, Cholesky, Jacobi, Gram
 ```
 

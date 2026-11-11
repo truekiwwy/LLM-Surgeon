@@ -64,8 +64,11 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::bench::calibration::{JudgeEvalRequest, SampleRequest};
 use crate::bench::dump::DumpRequest;
+use crate::bench::judge::{JudgeMode, JudgeSetup, RefusalJudging};
 use crate::bench::logits_metrics::LogitsRequest;
+use crate::bench::markers::Markers;
 use crate::bench::native::NativeGenerator;
 use crate::bench::ppl_runner::{PplBaseline, PplRequest};
 use crate::bench::prompt::Template;
@@ -75,7 +78,7 @@ use crate::bench::score::{Backend, EvalRequest};
 use crate::bench::{self, BenchError};
 use crate::cli::{
     ApplyArgs, AutotuneArgs, BenchArgs, BenchCommand, CheckArgs, Cli, Commands, EvalArgs,
-    ExtractArgs, ExtractCommand, InspectArgs,
+    ExtractArgs, ExtractCommand, InspectArgs, JudgeArgs, MarkerArgs,
 };
 use crate::engine::stats::TensorStats;
 use crate::engine::{
@@ -345,6 +348,8 @@ fn command_name(command: &Commands) -> &'static str {
             BenchCommand::Eval(_) => "bench eval",
             BenchCommand::Dump(_) => "bench dump",
             BenchCommand::Refusal(_) => "bench refusal",
+            BenchCommand::JudgeSample(_) => "bench judge-sample",
+            BenchCommand::JudgeEval(_) => "bench judge-eval",
         },
     }
 }
@@ -1131,6 +1136,11 @@ pub enum ProgressEvent {
         done: usize,
         total: usize,
     },
+    /// `bench refusal --judge llm|both`, `bench judge-eval`: answers judged.
+    BenchJudgeVerdict {
+        done: usize,
+        total: usize,
+    },
     /// `autotune`: forwards done out of the planned total.
     AutotuneForward {
         done: usize,
@@ -1457,6 +1467,7 @@ impl ProgressSink for CliSink<'_, '_> {
             ProgressEvent::BenchRefusalPrompt { done, total } => {
                 Some(("refusal", *done, Some(*total)))
             }
+            ProgressEvent::BenchJudgeVerdict { done, total } => Some(("juge", *done, Some(*total))),
             ProgressEvent::AutotuneForward { done, total } => {
                 Some(("autotune", *done, Some(*total)))
             }
@@ -1596,6 +1607,7 @@ impl ProgressSink for CliSink<'_, '_> {
             | ProgressEvent::BenchPplChunk { .. }
             | ProgressEvent::BenchEvalQuestion { .. }
             | ProgressEvent::BenchRefusalPrompt { .. }
+            | ProgressEvent::BenchJudgeVerdict { .. }
             | ProgressEvent::AutotuneForward { .. }
             | ProgressEvent::AutotuneSolve
             | ProgressEvent::Surgery(_) => {}
@@ -2709,10 +2721,100 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 baseline_model: a.baseline_model.clone(),
                 max_new_tokens: a.max_new_tokens,
                 chat_template: a.chat_template,
+                markers: markers(&a.markers).map_err(invalid)?,
             };
-            core_bench_refusal(&req, deps, &ui, &mut sink)
+            let judging = match a.judge {
+                JudgeMode::Rules if a.judge_args.judge_model.is_some() => {
+                    return Err(invalid(BenchError::InvalidArgument(
+                        "--judge-model demande --judge llm ou --judge both".into(),
+                    )))
+                }
+                JudgeMode::Rules => None,
+                mode => Some(RefusalJudging {
+                    setup: judge_setup(&a.judge_args, timeout(a.judge_args.timeout_secs)?)
+                        .map_err(invalid)?,
+                    compare_rules: mode == JudgeMode::Both,
+                    max_unparsable: a.max_unparsable,
+                    calibration: a.judge_calibration.clone(),
+                    min_calibration_n: a.min_calibration_n,
+                    min_kappa: a.min_kappa,
+                }),
+            };
+            let llama_cpp_dir = a.judge_args.llama_cpp_dir.as_deref();
+            core_bench_refusal(
+                &req,
+                judging.as_ref(),
+                llama_cpp_dir,
+                a.fail_on_warn,
+                deps,
+                &ui,
+                &mut sink,
+            )
+        }
+        BenchCommand::JudgeSample(a) => {
+            let prompts = extract::load_prompt_texts(&a.prompts)
+                .map_err(|m| invalid(BenchError::input(&a.prompts, m)))?;
+            let req = SampleRequest {
+                responses: a.responses.clone(),
+                prompts,
+                n: a.n,
+                seed: a.seed,
+                out: a.out.clone(),
+                overwrite: a.overwrite,
+            };
+            let run = bench::calibration::sample(&req).map_err(invalid)?;
+            let text = bench::calibration::sample_text(&ui, &run);
+            bench_outcome(&run, false, text)
+        }
+        BenchCommand::JudgeEval(a) => {
+            let req = JudgeEvalRequest {
+                labels: a.labels.clone(),
+                setup: judge_setup(&a.judge_args, timeout(a.judge_args.timeout_secs)?)
+                    .map_err(invalid)?,
+                markers: markers(&a.markers).map_err(invalid)?,
+                out: a.out.clone(),
+                overwrite: a.overwrite,
+            };
+            let llama_cpp_dir = a.judge_args.llama_cpp_dir.as_deref();
+            core_bench_judge_eval(&req, llama_cpp_dir, deps, &ui, &mut sink)
         }
     }
+}
+
+fn markers(args: &MarkerArgs) -> bench::Result<Markers> {
+    Markers::new(&args.marker_langs, args.markers_file.as_deref())
+}
+
+fn judge_setup(args: &JudgeArgs, timeout: Option<Duration>) -> bench::Result<JudgeSetup> {
+    let model = args.judge_model.clone().ok_or_else(|| {
+        BenchError::InvalidArgument("--judge-model <GGUF> est requis pour un juge LLM".into())
+    })?;
+    Ok(JudgeSetup {
+        model,
+        role: args.judge_role,
+        template: args.judge_template.clone(),
+        cache: args.judge_cache.clone(),
+        partial_as_refusal: args.partial_as_refusal,
+        timeout,
+    })
+}
+
+/// The llama.cpp generator of a judge GGUF, from `deps.generator_factory`.
+fn judge_generator(
+    gguf: &Path,
+    llama_cpp_dir: Option<&Path>,
+    deps: &AppDeps,
+) -> bench::Result<Box<dyn TextGenerator>> {
+    let args = EvalArgs {
+        model: gguf.to_path_buf(),
+        prompts: PathBuf::new(),
+        max_new_tokens: 0,
+        export_gguf: None,
+        quant: "Q4_K_M".into(),
+        llama_cpp_dir: llama_cpp_dir.map(Path::to_path_buf),
+        allow_degraded: false,
+    };
+    (deps.generator_factory)(gguf, &args).map_err(BenchError::from)
 }
 
 /// Shared by the CLI and the MCP tool; cancellation checked before each block.
@@ -2812,15 +2914,24 @@ pub fn core_bench_eval(
 }
 
 /// Shared by the CLI and the MCP tool: native greedy generation, refusal markers, paired
-/// comparison against a baseline. Nothing is written.
+/// comparison against a baseline; with `judging`, a llama.cpp judge then labels every
+/// answer. Nothing is written but the verdict cache of the judge, when one is given.
 pub fn core_bench_refusal(
     req: &RefusalRequest,
+    judging: Option<&RefusalJudging>,
+    llama_cpp_dir: Option<&Path>,
+    fail_on_warn: bool,
     deps: &AppDeps,
     ui: &Ui,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
     let sink = RefCell::new(sink);
-    let run = bench::refusal::run(
+    // Before the generation: a wrong judge file must not cost a full run.
+    let judging = judging
+        .map(bench::judge::prepare)
+        .transpose()
+        .map_err(|e| bench_failure(&e))?;
+    let mut run = bench::refusal::run(
         req,
         &mut |model| native_generator(model, deps, &sink),
         &deps.interrupted,
@@ -2830,7 +2941,40 @@ pub fn core_bench_refusal(
         },
     )
     .map_err(|e| bench_failure(&e))?;
-    bench_outcome(&run, false, bench_report::refusal_text(ui, &run))
+    if let Some(judging) = judging {
+        bench::judge::annotate(
+            &mut run,
+            &req.prompts,
+            judging,
+            &mut |gguf| judge_generator(gguf, llama_cpp_dir, deps),
+            &deps.interrupted,
+            &mut |done, total| {
+                sink.borrow_mut()
+                    .event(ProgressEvent::BenchJudgeVerdict { done, total })
+            },
+        )
+        .map_err(|e| bench_failure(&e))?;
+    }
+    bench_outcome(&run, fail_on_warn, bench_report::refusal_text(ui, &run))
+}
+
+/// `bench judge-eval`: a llama.cpp judge against human labels. Writes the calibration
+/// file when the request has one.
+pub fn core_bench_judge_eval(
+    req: &JudgeEvalRequest,
+    llama_cpp_dir: Option<&Path>,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let run = bench::calibration::eval(
+        req,
+        &mut |gguf| judge_generator(gguf, llama_cpp_dir, deps),
+        &deps.interrupted,
+        &mut |done, total| sink.event(ProgressEvent::BenchJudgeVerdict { done, total }),
+    )
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, false, bench::calibration::eval_text(ui, &run))
 }
 
 /// Shared by the CLI and the MCP tool; nothing is written unless the whole dump succeeds.
