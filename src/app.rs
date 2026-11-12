@@ -344,6 +344,7 @@ fn command_name(command: &Commands) -> &'static str {
             crate::lora::cli_args::LoraCommand::Extract(_) => "lora extract",
         },
         Commands::Plugins(_) => "plugins list",
+        Commands::Graph(_) => "graph",
         Commands::Arch(args) => match args.command {
             crate::cli::ArchCommand::List => "arch list",
             crate::cli::ArchCommand::Detect(_) => "arch detect",
@@ -401,6 +402,7 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         Commands::Bench(args) => bench_cli(args, deps, io),
         Commands::Diff(args) => crate::surgery::core_diff(args, deps, &mut CliSink::new(io)),
         Commands::Lora(args) => crate::lora::core_lora(args, deps, &mut CliSink::new(io)),
+        Commands::Graph(args) => crate::graph::core_graph(args, deps, &mut CliSink::new(io)),
         // Routed by run_with before dispatch: they have no envelope.
         Commands::Schema(_) | Commands::Mcp(_) | Commands::Tui(_) => Err(Outcome::fail(
             exit::INTERNAL,
@@ -1218,6 +1220,33 @@ pub enum ProgressEvent {
     },
     /// `autotune`: responses measured, ridge being solved.
     AutotuneSolve,
+    /// `graph`: the model is open, the SVD loop is about to start.
+    GraphStart {
+        model: PathBuf,
+        matrices: usize,
+        rank: usize,
+    },
+    /// `graph`: one matrix analysed (`done/total`).
+    GraphNode {
+        id: String,
+        done: usize,
+        total: usize,
+    },
+    /// `graph`: every writer/reader pair scored, edges selected.
+    GraphEdges {
+        nodes: usize,
+        edges: usize,
+    },
+    /// `graph`: output files written.
+    GraphWrite {
+        files: usize,
+    },
+    /// `graph`: done.
+    GraphDone {
+        nodes: usize,
+        edges: usize,
+        seconds: f64,
+    },
     /// `.surgery` and LoRA engines (diff, apply, merge, extract).
     Surgery(crate::surgery::SurgeryEvent),
 }
@@ -1517,6 +1546,9 @@ impl ProgressSink for CliSink<'_, '_> {
         {
             return self.progress(op_id, tensor, *done, *total);
         }
+        if let ProgressEvent::GraphNode { id, done, total } = &event {
+            return self.progress("graph", id, *done, *total);
+        }
         if let ProgressEvent::Surgery(ev) = &event {
             if let Some((label, name, done, total)) = crate::surgery::events::counter(ev) {
                 return self.progress(label, name, done, total);
@@ -1669,7 +1701,41 @@ impl ProgressSink for CliSink<'_, '_> {
                 let line = self.forward_line(&ui, false);
                 self.io.line(&line);
             }
+            ProgressEvent::GraphStart {
+                model,
+                matrices,
+                rank,
+            } => self.io.line(&format!(
+                "{} {} · {} matrices · rang {}",
+                ui::badge(&ui, "GRAPH"),
+                ui::path(&ui, &model),
+                ui::metric(&ui, matrices),
+                ui::metric(&ui, rank)
+            )),
+            ProgressEvent::GraphEdges { nodes, edges } => self.io.line(&format!(
+                "{} {} nœuds · {} arêtes",
+                ui::badge(&ui, "EDGES"),
+                ui::metric(&ui, nodes),
+                ui::metric(&ui, edges)
+            )),
+            ProgressEvent::GraphWrite { files } => self.io.line(&format!(
+                "{} {} fichiers écrits",
+                ui::badge(&ui, "GRAPH"),
+                ui::metric(&ui, files)
+            )),
+            ProgressEvent::GraphDone {
+                nodes,
+                edges,
+                seconds,
+            } => self.io.line(&format!(
+                "{} {} nœuds · {} arêtes · {}",
+                ui::badge(&ui, "GRAPH"),
+                ui::metric(&ui, nodes),
+                ui::metric(&ui, edges),
+                ui::dim(&ui, &format!("{seconds:.1} s"))
+            )),
             ProgressEvent::Shift { .. }
+            | ProgressEvent::GraphNode { .. }
             | ProgressEvent::EvalPrompt { .. }
             | ProgressEvent::ExtractWriting
             | ProgressEvent::BenchDumpPrompt { .. }

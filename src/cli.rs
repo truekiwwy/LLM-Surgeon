@@ -84,6 +84,8 @@ pub enum Commands {
     Plugins(PluginsArgs),
     /// Built-in model architectures, and the one detected for a model.
     Arch(ArchArgs),
+    /// Weight graph: residual-stream write/read alignment with certified spectral bounds.
+    Graph(crate::graph::GraphArgs),
 }
 
 /// `surgeon arch`: the architecture descriptions (`src/arch`). Not exposed over MCP:
@@ -733,6 +735,8 @@ pub enum SchemaKind {
     Surgery,
     /// JSON Schema (draft-07) of an architecture spec (--arch-spec).
     Arch,
+    /// JSON Schema (draft-07) of graph.json.
+    Graph,
 }
 
 #[derive(Debug, Clone, Args)]

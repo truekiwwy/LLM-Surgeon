@@ -1789,5 +1789,238 @@
       "type": "object"
     },
     "name": "surgeon_lora"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "cache_dir": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "color_scale": {
+          "default": null,
+          "enum": [
+            "quantile",
+            "log",
+            "linear"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "edge_weight": {
+          "default": null,
+          "enum": [
+            "alignment",
+            "coupling"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "edges": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "estimate": {
+          "default": false,
+          "type": "boolean"
+        },
+        "format": {
+          "default": null,
+          "items": {
+            "enum": [
+              "json",
+              "dot",
+              "mmd",
+              "csv"
+            ],
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "full_spectrum_max_dim": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "jobs": {
+          "default": null,
+          "format": "uint32",
+          "maximum": 1024.0,
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kurtosis_threshold": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "layers": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "matrices": {
+          "default": null,
+          "items": {
+            "enum": [
+              "q",
+              "k",
+              "v",
+              "o",
+              "gate",
+              "up",
+              "down",
+              "embed",
+              "lm_head"
+            ],
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "max_nodes": {
+          "default": null,
+          "format": "uint",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_seconds": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "min_alignment": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "no_cache": {
+          "default": false,
+          "type": "boolean"
+        },
+        "out_dir": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "oversample": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "overwrite": {
+          "default": false,
+          "type": "boolean"
+        },
+        "palette": {
+          "default": null,
+          "enum": [
+            "diverging",
+            "cb-safe"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "power_iters": {
+          "default": null,
+          "format": "uint32",
+          "maximum": 64.0,
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rank": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "resume": {
+          "default": false,
+          "type": "boolean"
+        },
+        "seed": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "vector": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_graph"
   }
 ]

@@ -231,10 +231,10 @@ fn nested_bench_commands_and_mcp_tool_count_are_checked() {
     let tools = weight_surgeon::mcp::tool_definitions();
     let count = tools.as_array().unwrap().len();
     let words = [
-        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
     ];
     let mots = [
-        "zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf",
+        "zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf", "dix",
     ];
     let (en, fr) = (read("README.md"), read("README.fr.md"));
     assert!(

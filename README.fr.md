@@ -689,14 +689,15 @@ surgeon schema [OPTIONS]
 
 | Option | Défaut | Rôle |
 | --- | --- | --- |
-| `--kind` | `patch` | `patch` (schéma de `patch.json`), `tools` (les définitions d'outils exactement comme `tools/list` les renvoie), `surgery` (schéma de l'en-tête `.surgery`), `arch` (schéma d'une spécification d'architecture, `--arch-spec`). |
+| `--kind` | `patch` | `patch` (schéma de `patch.json`), `tools` (les définitions d'outils exactement comme `tools/list` les renvoie), `surgery` (schéma de l'en-tête `.surgery`), `arch` (schéma d'une spécification d'architecture, `--arch-spec`), `graph` (schéma de `graph.json`). |
 
 ```bash
-# les quatre schémas, en JSON brut
+# les cinq schémas, en JSON brut
 surgeon schema --kind patch
 surgeon schema --kind tools
 surgeon schema --kind surgery
 surgeon schema --kind arch
+surgeon schema --kind graph
 ```
 
 <a id="cmd-autotune"></a>
@@ -1386,6 +1387,65 @@ surgeon arch detect --model tiny-q8.gguf
 [ARCH]     qwen2 (general.architecture) · project_out exact · mlp_gate 2, mlp_up 2, mlp_out 2
 ```
 
+<a id="cmd-graph"></a>
+#### `surgeon graph`
+
+Transforme les matrices du flux résiduel en graphe orienté pondéré : les écrivains (`embed_tokens`, `o_proj`, `down_proj`) pointent vers les lecteurs strictement postérieurs (`q/k/v`, `gate/up`, `lm_head`). Chaque nœud reçoit un sous-espace par SVD randomisé, des bornes certifiées pour `sigma1`, le rang stable et le rang effectif par entropie d'énergie, un kurtosis en flux et ses canaux outliers. Aucun passage avant, aucune activation. Deux exécutions avec les mêmes arguments et la même graine donnent des fichiers identiques octet pour octet, quel que soit `--jobs`. Formules, schéma et limites : [docs/GRAPH.md](docs/GRAPH.md).
+
+```text
+surgeon graph [OPTIONS] --model <MODEL>
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--model` | obligatoire | Fichier `.safetensors`, dossier shardé ou `.gguf`. |
+| `--out-dir` | aucun | Dossier des sorties ; sans lui, seule une synthèse bornée est renvoyée et rien n'est écrit. |
+| `--format` | `json` | `json`, `dot`, `mmd`, `csv`, séparés par des virgules. |
+| `--layers` | `all` | `all`, une plage `1-3`, ou une liste `0,2,4`. |
+| `--matrices` | tous les rôles du graphe | `q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head` ; répétable ou séparé par des virgules. |
+| `--rank` | 32 | Rang cible du SVD randomisé (au moins 1). |
+| `--oversample` | 10 | Colonnes aléatoires supplémentaires du sous-espace. |
+| `--power-iters` | 3 | Itérations de puissance du SVD randomisé (0 à 64). |
+| `--seed` | 0 | Graine du SVD ; même graine, mêmes octets. |
+| `--full-spectrum-max-dim` | 2048 | Plus grand `min(m,n)` pour le spectre exact (0 le désactive ; plafonné à 1024 et `m*n <= 4_000_000`). |
+| `--edges` | `adjacent` | `adjacent`, `all` ou `topk:N` (arêtes adjacentes plus les `N` plus fortes arêtes longue portée de chaque écrivain). |
+| `--min-alignment` | 0 | Plus petit alignement brut conservé ; 0 garde tout. |
+| `--edge-weight` | `alignment` | `alignment` ou `coupling`. |
+| `--vector` | aucun | Vecteur résiduel (JSON `[f32]` ou `.bin` f32 brut) pour `e_write`/`e_read`. |
+| `--kurtosis-threshold` | 10 | Kurtosis par canal au-delà duquel un canal est outlier (fini, > 0). |
+| `--color-scale` | `quantile` | Échelle de couleur des arêtes : `quantile`, `log` ou `linear`. |
+| `--palette` | `diverging` | `diverging` ou `cb-safe`. |
+| `--max-nodes` | aucun | Seulement les plus grosses matrices, jusqu'à ce nombre. |
+| `--cache-dir` | aucun | Dossier du cache JSONL (cache désactivé par défaut). |
+| `--no-cache` | désactivé | Ni lecture ni écriture du cache ; incompatible avec `--cache-dir`. |
+| `--resume` | désactivé | Réutilise un cache partiel ; exige `--cache-dir`. |
+| `--estimate` | désactivé | Estime passes, octets et durée sans exécuter les SVD ni écrire. |
+| `--jobs` | 0 | Fils Rayon locaux (0 : pool global). |
+| `--overwrite` | désactivé | Remplace les sorties existantes. |
+
+`data` est une synthèse bornée : `model`, `parameters`, `global`, au plus 200 `nodes`, au plus 20 `top_edges`, `outputs` et `truncated` ; le graphe complet n'existe que dans `graph.json`. Codes de sortie : 2 entrée invalide ou sortie existante sans `--overwrite`, 7 échec de calcul, 1 annulation.
+
+```bash
+# écrit les quatre formats sur le mini-modèle factice, spectres exacts jusqu'à 64
+surgeon graph --model qwen2-mini --out-dir graph-demo --format json,dot,mmd,csv \
+  --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64
+```
+
+```text
+[GRAPH]    qwen2-mini · 30 matrices · rang 8
+[EDGES]    30 nœuds · 45 arêtes
+[GRAPH]    5 fichiers écrits
+[GRAPH]    30 nœuds · 45 arêtes · 0.0 s
+surgeon graph · 30 matrices · 45 edges
+[...]
+outputs:
+  graph-demo\graph.json
+  graph-demo\graph.dot
+  graph-demo\graph.mmd
+  graph-demo\matrices.csv
+  graph-demo\edges.csv
+```
+
 <a id="patch-format"></a>
 ### 3.3 `patch.json` et les axes `rows` / `cols`
 
@@ -1789,7 +1849,7 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 <a id="tools"></a>
 ### 4.2 Outils
 
-`surgeon mcp` sert neuf outils (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
+`surgeon mcp` sert dix outils (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
 
 | Outil | Rôle |
 | --- | --- |
@@ -1802,6 +1862,7 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 | `surgeon_autotune` | Coefficients par couche par régression ridge. |
 | `surgeon_diff` | Différence de deux checkpoints écrite dans un nouveau `.surgery`. |
 | `surgeon_lora` | `mode` `merge` (adaptateur fusionné en place) ou `extract` (adaptateur écrit). |
+| `surgeon_graph` | Graphe écritures/lectures du flux résiduel avec bornes spectrales certifiées ; synthèse bornée, ou fichiers avec `out_dir`. |
 
 Une vraie session sur le faux modèle : le client envoie `initialize`, `notifications/initialized`, puis un `tools/call`. Le serveur écrit une ligne sur stderr, puis répond sur stdout (la réponse à `initialize` est omise, et les lignes de réponse sont coupées) :
 
@@ -1822,7 +1883,7 @@ Le premier appel (`surgeon_check` sur `qwen2-mini`) réussit ; le second demande
 ### 4.3 Garde-fous
 
 - `--allow-dir` (répétable, sinon `SURGEON_MCP_ALLOW_DIRS`, sinon le dossier courant) : chaque chemin est résolu par le système (liens symboliques, `..`) et doit tomber sous un dossier autorisé ; les chemins relatifs le sont par rapport au premier.
-- `--read-only` : refuse tout outil qui écrit (`surgeon_apply`, `surgeon_extract`, exports GGUF, `surgeon_bench` en mode `dump`, `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora`).
+- `--read-only` : refuse tout outil qui écrit (`surgeon_apply`, `surgeon_extract`, exports GGUF, `surgeon_bench` en mode `dump`, `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora`, `surgeon_graph` avec `out_dir` ou `cache_dir`).
 - Sauvegarde imposée : une sauvegarde vérifiée par SHA-256 précède toute écriture, et une sauvegarde échouée bloque l'écriture. `backup: false` dans un patch n'est respecté qu'avec `--allow-no-backup`.
 - Annulation : `notifications/cancelled` arrête l'appel en cours, annule un patch partiel et tue le processus llama.cpp en cours ; une extraction ou un dump annulé ne laisse aucun fichier.
 - Progression : avec un `progressToken`, une `notifications/progress` est envoyée par tenseur, prompt ou bloc.
