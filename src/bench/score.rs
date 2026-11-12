@@ -878,6 +878,41 @@ mod tests {
         }
     }
 
+    /// ÉCART-1: endings of the three Qwen2.5-0.5B Dev outputs the old `hashes` rule failed
+    /// (`N`, `Final Line: 3000`, `N", this is written as 150.`), plus prefixed amounts.
+    #[test]
+    fn judge_reads_noisy_hash_markers() {
+        for (gold, output) in [
+            (
+                "62",
+                "\\[ 200 - 138 = 62 \\]\n\nSo, Marco still has to read 62 pages. In the final \
+                 line, we write:\n\n#### 62\n\n#### N",
+            ),
+            (
+                "3000",
+                "The baker needs 3000 grams of flour for 12 loaves.\n\n#### Final Line: 3000\n\n\
+                 So, the final numeric answer is 3000 grams.",
+            ),
+            (
+                "150",
+                "\\[ 250 - 100 = 150 \\]\n\nTherefore, the number of guests who did not choose \
+                 the vegetarian menu is 150. In the form \"#### N\", this is written as 150.",
+            ),
+            ("1250.5", "#### Answer: $1,250.50"),
+            ("-1250.5", "#### Total = -1,250.50 euros"),
+            ("18", "#### 18 hours."),
+        ] {
+            let item = Item {
+                id: "x".into(),
+                question: "q".into(),
+                gold: gold.into(),
+            };
+            let r = judge(&item, output, false);
+            assert!(r.correct, "{output}: {r:?}");
+            assert_eq!(r.rule.as_deref(), Some("hashes"));
+        }
+    }
+
     #[test]
     fn scoring_a_thousand_outputs_is_fast() {
         let item = Item {

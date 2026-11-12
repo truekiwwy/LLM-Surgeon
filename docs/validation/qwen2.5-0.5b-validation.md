@@ -338,3 +338,56 @@ devient `a_template_with_changing_numbers_is_not_a_word_block_loop` : une phrase
 des nombres qui changent a la forme d'un raisonnement sain et n'est plus coupée.
 
 SHA-256 des fichiers du modèle d'origine inchangés.
+
+## 10. Addendum du 2026-11-12 : extraction `####` bruitée (ÉCART-1)
+
+Branche `fix/gsm8k-hashes`. Aucune inférence relancée : vérification hors ligne sur les sorties
+brutes déjà enregistrées.
+
+**Cause.** La règle `hashes` rendait le reste de la ligne du dernier `####` non vide, tel
+quel. Les 3 faux négatifs du Dev (section 9) :
+
+| Item | Fin de la sortie | Ancienne extraction | Nouvelle |
+| --- | --- | --- | --- |
+| item-3 | `#### 62` puis `#### N` recopié de la consigne | `N` | `62` |
+| item-10 | `#### Final Line: 3000` | `Final Line: 3000` | `3000` |
+| item-29 | `In the form "#### N", this is written as 150.` | `N", this is written as 150.` | `150` |
+
+**Nouvelle règle** (`src/bench/extract_answer.rs`, fonction `hashes`) :
+
+- un marqueur est une suite d'exactement quatre `#` ; `#####` et plus ouvrent un titre
+  Markdown et ne comptent pas ;
+- les marqueurs sont lus du dernier au premier ; le candidat est le reste de la ligne ;
+- un candidat que le scoreur lit déjà comme un nombre (`18`, `1,234`, `\frac{1}{2}`,
+  `160 minutes`, `60%`) est rendu tel quel, comme avant ;
+- sinon son dernier nombre ou sa dernière fraction `a/b`, signe, milliers et décimales
+  conservés (`#### Total = -1,250.50 euros` donne `-1,250.50`) ;
+- un candidat sans chiffre (`#### N`, `#### <nombre>`, `####` seul) est ignoré : un
+  marqueur plus haut répond, sinon les règles suivantes (`boxed`, `bold`, `phrase`,
+  `last_number`).
+
+Ordre des règles inchangé. Effet de bord assumé : une réponse non numérique derrière `####`
+(`#### blue`) n'est plus prise par `hashes` et passe aux règles suivantes. GSM8K n'a que
+des réponses numériques.
+
+**Recalcul du Dev GSM** (rapport `outputs/runs/loop-calibration/gsm_dev_after.json`, relu
+hors dépôt). Seuls 6 items sur 30 passent par `hashes` ; les 24 autres ne sont pas touchés
+par le correctif. Sorties brutes complètes rejugées pour item-3, item-8, item-10 et item-29
+(`.jobs/qwen-test/logs/42-raw-dev10.json` et `55-raw-loops.json`, début identique à
+l'extrait du rapport), extraction du rapport rejugée pour item-17 et item-25.
+
+| Mesure | Avant | Après |
+| --- | --- | --- |
+| Exactitude | 23/30 = 0,767 | 26/30 = 0,867 |
+| Faux négatifs d'extraction | 3 | 0 |
+
+Les 4 échecs restants : 2 réponses coupées par le budget (item-9, item-11), 2 erreurs du
+modèle (item-2, item-24). Le score rejoint la relecture manuelle (26/30).
+
+**Tests.** Ajoutés dans `extract_answer.rs` : `digit_free_hash_markers_are_skipped`,
+`text_around_the_number_of_a_hash_marker`,
+`last_numeric_hash_marker_wins_and_headings_are_not_markers` ; dans `score.rs` :
+`judge_reads_noisy_hash_markers` (fins exactes des trois sorties réelles). Les tests
+existants de l'extracteur passent sans modification. `cargo test` : 870 réussis, 0 échec,
+9 ignorés ; `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` et
+`deps_purity` au vert, aucune dépendance ajoutée.
