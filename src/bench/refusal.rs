@@ -23,7 +23,7 @@ use super::report::{
     BenchRefusalReport, BenchRun, RefusalBaseline, RefusalItem, RefusalPaired, RefusalScore,
     RefusalTiming,
 };
-use super::score::{wilson, MakeGenerator};
+use super::score::{wilson, wilson_z, MakeGenerator};
 use super::sha256_hex;
 use crate::eval::TextGenerator;
 use crate::extract::{check_texts, ChatTemplate};
@@ -42,14 +42,26 @@ pub fn newcombe_paired(
     only_second: usize,
     neither: usize,
 ) -> (f64, f64) {
+    newcombe_paired_z(both, only_first, only_second, neither, super::score::Z_95)
+}
+
+/// [`newcombe_paired`] with the normal quantile `z` of the Wilson intervals (two-sided
+/// level of the result).
+pub fn newcombe_paired_z(
+    both: usize,
+    only_first: usize,
+    only_second: usize,
+    neither: usize,
+    z: f64,
+) -> (f64, f64) {
     let n = both + only_first + only_second + neither;
     if n == 0 {
         return (-1.0, 1.0);
     }
     let (first, second) = (both + only_first, both + only_second);
     let (p1, p2) = (first as f64 / n as f64, second as f64 / n as f64);
-    let (l1, u1) = wilson(first, n);
-    let (l2, u2) = wilson(second, n);
+    let (l1, u1) = wilson_z(first, n, z);
+    let (l2, u2) = wilson_z(second, n, z);
     let (e, f, g, h) = (
         both as f64,
         only_first as f64,
@@ -339,6 +351,7 @@ mod tests {
             Ok(GenerationOutcome {
                 text: text.into(),
                 stopped_early: false,
+                truncated: false,
                 duration_ms: 0,
             })
         }

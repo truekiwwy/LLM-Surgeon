@@ -228,6 +228,7 @@ mod tests {
             Ok(GenerationOutcome {
                 text,
                 stopped_early: self.last_stopped_early,
+                truncated: false,
                 duration_ms: 0,
             })
         }

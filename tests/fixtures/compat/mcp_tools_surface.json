@@ -1789,5 +1789,75 @@
       "type": "object"
     },
     "name": "surgeon_lora"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "oneOf": [
+            {
+              "enum": [
+                "plan"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "start"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "status"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "cancel"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "report"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "promote_patch"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "config": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "job_dir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "job_dir"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_pipeline"
   }
 ]

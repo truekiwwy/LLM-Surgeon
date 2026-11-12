@@ -420,6 +420,7 @@ pub fn tool_definitions() -> Value {
     let mut tools = base_tool_definitions();
     if let Some(list) = tools.as_array_mut() {
         list.extend(super::tools_p13::definitions());
+        list.push(super::tools_pipeline::definition());
     }
     sorted(tools)
 }
@@ -485,6 +486,7 @@ pub fn render_schema(kind: SchemaKind) -> String {
         SchemaKind::Tools => tool_definitions(),
         SchemaKind::Surgery => crate::surgery::schema::header_schema(),
         SchemaKind::Arch => crate::arch::schema(),
+        SchemaKind::Pipeline => crate::pipeline::config::schema(),
     };
     let mut text = serde_json::to_string_pretty(&value).unwrap_or_default();
     text.push('\n');
@@ -492,13 +494,17 @@ pub fn render_schema(kind: SchemaKind) -> String {
 }
 
 pub(crate) fn is_known(name: &str) -> bool {
-    TOOLS.contains(&name) || super::tools_p13::NAMES.contains(&name)
+    TOOLS.contains(&name)
+        || super::tools_p13::NAMES.contains(&name)
+        || name == super::tools_pipeline::TOOL_PIPELINE
 }
 
 pub(crate) struct ToolContext<'a> {
     pub deps: &'a AppDeps,
     pub cfg: &'a McpConfig,
     pub sink: &'a mut dyn ProgressSink,
+    /// The pipeline worker started by this server (stopped with it).
+    pub pipeline: &'a super::tools_pipeline::PipelineJobs,
 }
 
 /// `tools/call` result for a known tool. Every failure here is a tool execution error
@@ -514,6 +520,10 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         super::tools_p13::TOOL_DIFF | super::tools_p13::TOOL_LORA => {
             super::tools_p13::call(name, arguments, ctx)
         }
+        super::tools_pipeline::TOOL_PIPELINE => (
+            super::tools_pipeline::command_name(&arguments),
+            super::tools_pipeline::call(arguments, ctx),
+        ),
         _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);

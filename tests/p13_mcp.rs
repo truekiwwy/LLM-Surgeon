@@ -144,10 +144,10 @@ fn tools_list(dir: &Path) -> Vec<Value> {
 // ------------------------------------------------------------------ tools/list and schemas
 
 #[test]
-fn tools_list_has_nine_tools_and_the_two_new_schemas_are_valid() {
+fn tools_list_has_ten_tools_and_the_two_p13_schemas_are_valid() {
     let dir = tempfile::tempdir().unwrap();
     let tools = tools_list(dir.path());
-    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.len(), 10);
     let by_name = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap();
     for name in ["surgeon_diff", "surgeon_lora"] {
         let tool = by_name(name);
@@ -256,7 +256,10 @@ fn schema_kind_tools_equals_tools_list_for_the_new_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(&names[7..], ["surgeon_diff", "surgeon_lora"]);
+    assert_eq!(
+        &names[7..],
+        ["surgeon_diff", "surgeon_lora", "surgeon_pipeline"]
+    );
 }
 
 // ------------------------------------------------------------------ sandbox, read-only

@@ -488,6 +488,7 @@ impl TextGenerator for LlamaServerGenerator {
         Ok(GenerationOutcome {
             text,
             stopped_early: stopped,
+            truncated: false,
             duration_ms: started.elapsed().as_millis(),
         })
     }
@@ -543,6 +544,7 @@ impl TextGenerator for LlamaServerGenerator {
                     .map(|(text, stopped)| GenerationOutcome {
                         text,
                         stopped_early: stopped,
+                        truncated: false,
                         duration_ms: started.elapsed().as_millis(),
                     });
                     let result = result.map_err(|e| match e {

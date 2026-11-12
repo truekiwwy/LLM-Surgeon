@@ -426,6 +426,32 @@ mod tests {
         assert_eq!(reason_of(&mut d, &text), Some(LoopReason::NgramRepetition));
     }
 
+    /// Known false positive (docs/validation/qwen2.5-0.5b-validation.md, ÉCART-3): a
+    /// finished, correct step-by-step answer that reuses one stock phrase five times is
+    /// cut as an n-gram loop. Left red on purpose: no threshold is retuned on the data
+    /// that revealed it.
+    #[test]
+    #[ignore = "known false positive of the n-gram rule on structured reasoning"]
+    fn a_step_by_step_answer_reusing_a_stock_phrase_is_not_a_loop() {
+        let answer = "To solve the problem, we need to follow these steps:
+
+            1. Calculate the total number of pear trees.
+            2. Determine the total number of boxes from the trees and the boxes per tree.
+
+            **Step 1: Calculate the total number of pear trees.**
+
+            The grower has 7 rows of 11 pear trees. Therefore, the total number of pear             trees is 7 x 11 = 77 trees.
+
+            **Step 2: Determine the total number of boxes.**
+
+            Each tree gives 2 boxes of pears, so the grower gets 77 x 2 = 154 boxes.
+
+            #### 154
+";
+        let mut d = LoopDetector::new(LoopDetectorConfig::default());
+        assert_eq!(d.push(answer), LoopVerdict::Ok);
+    }
+
     #[test]
     fn identical_lines() {
         let mut d = LoopDetector::new(LoopDetectorConfig::default());

@@ -173,6 +173,9 @@ pub struct PromptShift {
     pub end: usize,
     pub kl_mean: Option<f64>,
     pub infinite_positions: usize,
+    /// Positions of the prompt whose argmax changed (not in the report; the pipeline's
+    /// per-prompt top-1 drift).
+    pub top1_shifts: usize,
 }
 
 /// Aggregates in position order; every field is free of NaN/Inf (`None` instead).
@@ -207,7 +210,8 @@ struct Accumulator {
     top1: usize,
     topk: usize,
     overlap: Neumaier,
-    prompt_kl: Vec<(Neumaier, usize, usize)>,
+    /// Per prompt: KL sum, finite positions, infinite positions, top-1 changes.
+    prompt_kl: Vec<(Neumaier, usize, usize, usize)>,
 }
 
 impl Accumulator {
@@ -231,6 +235,7 @@ impl Accumulator {
                 }
                 Kl::Infinite => entry.2 += 1,
             }
+            entry.3 += usize::from(m.top1_changed);
         }
         self.cos_p.add(m.cosine_probs);
         if let Some(c) = m.cosine_logits {
@@ -289,7 +294,7 @@ pub(crate) fn compare_rows(
     let blocks = positions.div_ceil(BLOCK_POSITIONS);
     let mut acc = Accumulator {
         prompt_kl: vec![
-            (Neumaier::default(), 0, 0);
+            (Neumaier::default(), 0, 0, 0);
             offsets.map_or(0, |o| o.len().saturating_sub(1))
         ],
         ..Accumulator::default()
@@ -353,7 +358,7 @@ pub(crate) fn compare_rows(
             acc.prompt_kl
                 .iter()
                 .enumerate()
-                .map(|(index, (sum, count, infinite))| PromptShift {
+                .map(|(index, (sum, count, infinite, top1))| PromptShift {
                     index,
                     start: o[index],
                     end: o[index + 1],
@@ -361,6 +366,7 @@ pub(crate) fn compare_rows(
                         .then(|| sum.total() / *count as f64)
                         .and_then(finite),
                     infinite_positions: *infinite,
+                    top1_shifts: *top1,
                 })
                 .collect()
         })
@@ -788,6 +794,7 @@ mod tests {
             end: 1,
             kl_mean,
             infinite_positions,
+            top1_shifts: 0,
         };
         let all = [
             p(0, Some(0.1), 0),

@@ -241,6 +241,10 @@ mod tests {
                 let _ = writer.flush();
                 thread::sleep(pause);
             }
+            // A graceful end (FIN, then wait for the client to close): dropping the socket
+            // at once may reach the client as a reset on Windows under load.
+            let _ = writer.shutdown(std::net::Shutdown::Write);
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
             head + &String::from_utf8(body).unwrap()
         });
         (port, handle)

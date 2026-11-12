@@ -190,7 +190,7 @@ impl TextGenerator for NativeGenerator {
         let mut stopped_early = false;
         let mut timed_out = false;
         let mut decode_error = None;
-        state
+        let stats = state
             .generate_sampled(&request, &sequence, cancel, &mut |id| {
                 match stream.push(tokenizer, id) {
                     Ok(Some(chunk)) => {
@@ -225,9 +225,13 @@ impl TextGenerator for NativeGenerator {
         // The streamed chunks may lag behind (held-back characters): the final text is the
         // decoding of everything generated.
         let text = tokenizer.decode(&ids, true).map_err(|e| failed(&e))?;
+        let stopped_early = stopped_early || cancel.load(std::sync::atomic::Ordering::SeqCst);
         Ok(GenerationOutcome {
             text,
-            stopped_early: stopped_early || cancel.load(std::sync::atomic::Ordering::SeqCst),
+            stopped_early,
+            truncated: !stopped_early
+                && !stats.stopped_on_eos
+                && stats.generated >= request.max_new_tokens,
             duration_ms,
         })
     }
@@ -291,7 +295,7 @@ impl TextGenerator for NativeGenerator {
             workers: *workers,
             pool: pool.as_deref(),
         };
-        state
+        let stats = state
             .generate_batch(
                 &batch,
                 layout,
@@ -339,6 +343,9 @@ impl TextGenerator for NativeGenerator {
                         .decode(&stream.ids, true)
                         .map_err(|e| failed(&e))?,
                     stopped_early: ends[j].0,
+                    truncated: !ends[j].0
+                        && !stats[j].stopped_on_eos
+                        && stats[j].generated >= batch[j].request.max_new_tokens,
                     duration_ms: durations[j],
                 }),
             });

@@ -1297,6 +1297,7 @@ pub(crate) mod tests {
             Ok(GenerationOutcome {
                 text: text.into(),
                 stopped_early: false,
+                truncated: false,
                 duration_ms: 0,
             })
         }
@@ -1478,6 +1479,7 @@ pub(crate) mod tests {
             Ok(GenerationOutcome {
                 text: text.into(),
                 stopped_early: false,
+                truncated: false,
                 duration_ms: 0,
             })
         }

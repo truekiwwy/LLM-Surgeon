@@ -78,6 +78,13 @@ impl Sandbox {
             false => base.join(path),
         };
         let resolved = resolve_lenient(&joined).ok_or_else(refused)?;
+        // The Test items of a pipeline job (`<job>/private/`) are never served.
+        let private = resolved
+            .ancestors()
+            .any(|dir| dir.join(crate::pipeline::job::PRIVATE_MARKER).is_file());
+        if private {
+            return Err(refused());
+        }
         match self.roots.iter().any(|root| within(&resolved, root)) {
             true => Ok(simplify(resolved)),
             false => Err(refused()),

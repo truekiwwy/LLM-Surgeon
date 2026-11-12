@@ -25,6 +25,9 @@
 //!   ones kept), eight optional properties of `surgeon_bench` and the same two values of
 //!   its `backend` (`top_k`, `threads`, `n_gpu_layers` and `ctx` reused). Only the tool
 //!   schema hash moved; every reference output with the default options is unchanged.
+//! - the decision pipeline: the subcommand `pipeline` (plan, run, status, cancel, report,
+//!   promote), the value `pipeline` of `schema --kind`, the tenth tool `surgeon_pipeline`.
+//!   Only the tool schema hash moved; no existing option, property or output changed.
 //!
 //! No entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
@@ -196,7 +199,7 @@ fn mcp_tools_surface() -> Value {
 #[test]
 fn mcp_tools_surface_is_unchanged() {
     let current = mcp_tools_surface();
-    assert_eq!(current.as_array().unwrap().len(), 9, "nine MCP tools");
+    assert_eq!(current.as_array().unwrap().len(), 10, "ten MCP tools");
     let reference = read_fixture("mcp_tools_surface.json");
     assert!(
         current == reference,

@@ -292,7 +292,7 @@ fn display_name(path: &Path) -> String {
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` (civil-from-days of H. Hinnant, no date dependency).
-fn rfc3339_utc(secs: u64) -> String {
+pub(crate) fn rfc3339_utc(secs: u64) -> String {
     let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

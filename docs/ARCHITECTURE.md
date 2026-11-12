@@ -22,7 +22,7 @@ enveloppe JSON (`--json`, résultats MCP).
 ## Vue d'ensemble
 
 ```text
-   surgeon (CLI front-end)                       surgeon mcp (Agent extension, 9 outils)
+   surgeon (CLI front-end)                       surgeon mcp (Agent extension, 10 outils)
    cli.rs -> app::dispatch, ui.rs, tui/          mcp/ : sandbox, protocole, tools.rs
                  \                                  /
                   app::core_* -> Outcome -> envelope_of (JSON partagé)
@@ -40,6 +40,8 @@ enveloppe JSON (`--json`, résultats MCP).
            (générateur natif par lots, llama-completion ou llama-server), statistiques par
            prompt, juge LLM optionnel et sa calibration ;
            eval : llama.cpp (processus ou serveur local), échantillonnage, client HTTP local
+  pipeline décision atomique sur un patch : candidats sur les jeux Dev, portes appariées,
+           une consultation du Test Set ; travailleur reprenable (docs/PIPELINE.md)
   hardware budget RAM/VRAM ; linalg : QR, Cholesky, Jacobi, Gram
 ```
 
@@ -56,7 +58,7 @@ comptées entre fichiers de modules différents) : `app -> patch` 64, `mcp -> ap
 | --- | --- | --- | --- | --- |
 | Méthodes d'extraction | `plugin`, `extract` | Direction (vecteur unitaire) depuis les activations poolées de deux ensembles de prompts | **Oui** (API `v0`, instable) | `impl ExtractionMethod`, `Registry::register`, `extract::run_extraction_plugin` ; voir [docs/PLUGINS.md](PLUGINS.md) |
 | CLI front-end | `cli`, `app`, `ui`, `tui` | Commandes, rendu, codes de sortie | Non | `--method` accepte les identifiants du registre intégré |
-| Agent extension (MCP) | `mcp` | 9 outils typés, sandbox de chemins | Non | Schémas figés, vérifiés par `tests/compat.rs` ; `method` accepte les identifiants du registre intégré |
+| Agent extension (MCP) | `mcp` | 10 outils typés, sandbox de chemins | Non | Schémas figés, vérifiés par `tests/compat.rs` ; `method` accepte les identifiants du registre intégré |
 | Architectures | `arch` | Rôles des tenseurs (écrivains, lecteurs, routeur), orientation, noms GGUF, détection, exactitude de `project_out` | **Oui**, par données : une `ArchSpec` JSON (`--arch-spec`, `surgeon schema --kind arch`) | Fichier JSON validé par schéma ; les intégrées sont dans `src/arch/builtin.rs` |
 | Forward et capture | `extract` | Activations d'une couche (site, pooling), logits, génération avec cache KV et injection, derrière le trait `ResidualForward` (Qwen2, Llama/Mistral, Qwen3) | Non : interne, une nouvelle architecture est une implémentation du trait vérifiée contre candle | aucun |
 | Moteur mmap et décalages | `engine` | Lecture et écriture en place des SafeTensors | Non : interne, non remplaçable par un tiers à ce jour | aucun |
@@ -68,6 +70,7 @@ comptées entre fichiers de modules différents) : `app -> patch` 64, `mcp -> ap
 | Diff de faible rang | `surgery` | Patch `.surgery` entre deux checkpoints | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Mesure | `bench` | KL, top-k, perplexité, Pass@1, dumps de logits ; lecture best-effort de `.npy` et `.pt`/`.pth` pour les seuls dumps de logits | Non : interne, non remplaçable par un tiers à ce jour | Feuille de route |
 | Évaluation | `eval` | Génération via llama.cpp (`llama-completion` ou `llama-server` sur liste blanche, client HTTP/1.1 local en std), échantillonnage reproductible (`eval::sampling`), détection de boucles, export GGUF | Non : interne, non remplaçable par un tiers à ce jour | aucun |
+| Pipeline de décision | `pipeline` | Configuration (schéma), plan, travailleur reprenable, portes (Newcombe apparié, bootstrap), registre du Test Set, promotion sans application | Non : interne | aucun |
 | Budget matériel | `hardware` | RAM, VRAM (NVML), verdict | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Algèbre linéaire | `linalg` | QR, Cholesky, Jacobi, Gram, en Rust pur | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 

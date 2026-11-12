@@ -214,6 +214,9 @@ pub struct ItemResult {
     pub reason: String,
     /// Génération interrompue par le détecteur de boucles.
     pub loop_detected: bool,
+    /// Génération coupée par max_new_tokens avant toute fin de séquence (backend natif ;
+    /// toujours false avec llama.cpp, qui ne le rapporte pas ici).
+    pub truncated: bool,
     /// Début de la sortie (200 caractères au plus, coupé proprement en UTF-8).
     pub output_excerpt: String,
     /// Index de l'échantillon (base 0), si --samples > 1.
@@ -239,6 +242,8 @@ pub struct EvalScore {
     pub no_answer: usize,
     /// Générations arrêtées par le délai (comptées fausses).
     pub timeouts: usize,
+    /// Générations coupées par max_new_tokens (backend natif ; scorées telles quelles).
+    pub truncated: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]

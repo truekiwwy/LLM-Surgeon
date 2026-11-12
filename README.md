@@ -689,14 +689,15 @@ surgeon schema [OPTIONS]
 
 | Option | Default | Role |
 | --- | --- | --- |
-| `--kind` | `patch` | `patch` (schema of `patch.json`), `tools` (the tool definitions exactly as `tools/list` returns them), `surgery` (schema of the `.surgery` header), `arch` (schema of an architecture spec, `--arch-spec`). |
+| `--kind` | `patch` | `patch` (schema of `patch.json`), `tools` (the tool definitions exactly as `tools/list` returns them), `surgery` (schema of the `.surgery` header), `arch` (schema of an architecture spec, `--arch-spec`), `pipeline` (schema of `pipeline.json`). |
 
 ```bash
-# the four schemas, as raw JSON
+# the five schemas, as raw JSON
 surgeon schema --kind patch
 surgeon schema --kind tools
 surgeon schema --kind surgery
 surgeon schema --kind arch
+surgeon schema --kind pipeline
 ```
 
 <a id="cmd-autotune"></a>
@@ -1386,6 +1387,131 @@ surgeon arch detect --model tiny-q8.gguf
 [ARCH]     qwen2 (general.architecture) · project_out exact · mlp_gate 2, mlp_up 2, mlp_out 2
 ```
 
+<a id="cmd-pipeline"></a>
+#### `surgeon pipeline`
+
+Parent command of the decision pipeline ([docs/PIPELINE.md](docs/PIPELINE.md)); it has no option of its own. One configuration (`pipeline.json`, `surgeon schema --kind pipeline`) names the model, a patch template and its candidate `alpha` values, and the pillars (`safety`, `unblocking`, `gsm8k`, `kl`, `logits`), each with a Dev set, a Test set and a gate (`non_inferiority`, `superiority`, `max_drift`; every threshold comes from the configuration). The worker applies each candidate to a working copy (the original model is never written, its SHA-256 before and after is in the report), measures the pillars on the Dev sets in array order and stops a candidate at its first gate that is not GO, selects on the Dev only, then consults the Test sets once, for the selected candidate. Verdicts are `GO`, `NO_GO` or `INCONCLUSIVE` (sample too small for the margin: never GO, with the size that would be needed). A safety pillar is mandatory.
+
+<a id="cmd-pipeline-plan"></a>
+#### `surgeon pipeline plan`
+
+Disk, time and power, before anything runs; written to `<job>/plan.json`.
+
+```text
+surgeon pipeline plan [OPTIONS] --config <CONFIG> --job-dir <JOB_DIR>
+```
+
+| Option | Default | Role |
+| --- | --- | --- |
+| `--config` | required | `pipeline.json`. |
+| `--job-dir` | required | Job folder. |
+| `--allow-disable-safety` | off | Accept a configuration without a `safety` pillar (logged in the report; CLI only). |
+| `--no-calibration` | off | Skip the decoding-rate measurement (no time estimate). |
+
+`data`: `pillars[]` (`n_dev`, `n_test`, `min_n_for_go`: the smallest size at which a non-inferiority gate can be GO at all, `dev_underpowered`, `test_underpowered`), `disk` (working copy, logits dumps, backups), `units_total`, `calibration`, `estimated_secs` (upper estimate), `warnings`.
+
+<a id="cmd-pipeline-run"></a>
+#### `surgeon pipeline run`
+
+The worker: runs the job, or resumes it from its checkpoints (a resumed job writes the same `results.json`, byte for byte).
+
+```text
+surgeon pipeline run [OPTIONS] --job-dir <JOB_DIR>
+```
+
+| Option | Default | Role |
+| --- | --- | --- |
+| `--config` | the job's | `pipeline.json`; omitted, the job resumes with the configuration it is bound to (another one is refused). |
+| `--job-dir` | required | Job folder. |
+| `--allow-disable-safety` | off | Accept a configuration without a `safety` pillar (logged; CLI only). |
+| `--allow-test-reuse` | off | Consult a Test set already in the registry; the report is marked `test_contaminated` and cannot be GO (CLI only). |
+| `--detach` | off | Run the worker in the background (output in `<job>/worker.log`) and return. |
+| `--watch-stdin` | off | Stop when stdin closes; set by the MCP server for the workers it starts. |
+
+`data` is `results.json`: `verdict`, `verdict_reason`, `model` (hashes, `unchanged`), `candidates[]` (Dev gates up to the first that is not GO, `stopped_at`), `selected`, `test` (aggregates only: the answers stay in `<job>/private/`), `test_contaminated`, `safety_disabled`, `budget_exceeded`. Gates: paired Newcombe interval (the one of `bench refusal`) at the gate's confidence for the binary pillars, with McNemar's exact p; percentile bootstrap over prompts with the configuration's seed for the drifts. `<job>/report.json` adds the reproducibility manifest (hashes of the model, sets, vectors, configuration; seed; surgeon version) and the timings.
+
+<a id="cmd-pipeline-status"></a>
+#### `surgeon pipeline status`
+
+Stage, progress, remaining time and the Dev gates decided so far, read from `<job>/state.json`.
+
+```text
+surgeon pipeline status [OPTIONS] --job-dir <JOB_DIR>
+```
+
+| Option | Default | Role |
+| --- | --- | --- |
+| `--job-dir` | required | Job folder. |
+
+<a id="cmd-pipeline-cancel"></a>
+#### `surgeon pipeline cancel`
+
+Asks the worker to stop at its next check; it removes its working copy and leaves only complete checkpoints (`run` resumes the job).
+
+```text
+surgeon pipeline cancel [OPTIONS] --job-dir <JOB_DIR>
+```
+
+| Option | Default | Role |
+| --- | --- | --- |
+| `--job-dir` | required | Job folder. |
+
+<a id="cmd-pipeline-report"></a>
+#### `surgeon pipeline report`
+
+`<job>/report.json` of a finished job.
+
+```text
+surgeon pipeline report [OPTIONS] --job-dir <JOB_DIR>
+```
+
+| Option | Default | Role |
+| --- | --- | --- |
+| `--job-dir` | required | Job folder. |
+
+<a id="cmd-pipeline-promote"></a>
+#### `surgeon pipeline promote`
+
+After a GO only: writes the selected patch to `<job>/promoted/patch.json`, validated by a dry run on the original model. It is never applied: `surgeon apply` remains a separate decision.
+
+```text
+surgeon pipeline promote [OPTIONS] --job-dir <JOB_DIR>
+```
+
+| Option | Default | Role |
+| --- | --- | --- |
+| `--job-dir` | required | Job folder. |
+
+A real run on the mini model with the configuration of [docs/PIPELINE.md](docs/PIPELINE.md) (its sets are generated by `tests/p19_pipeline.rs`; random weights: the gates pass because the margins are wide, not because the patch is good):
+
+```bash
+# estimates, decision, state, report, promotion
+surgeon pipeline plan --config pipeline.json --job-dir job --no-calibration
+surgeon pipeline run --config pipeline.json --job-dir job
+surgeon pipeline status --job-dir job
+surgeon pipeline report --job-dir job
+surgeon pipeline promote --job-dir job
+```
+
+```text
+[PLAN]     job cfd2f5d8019efe20 · 2 candidat(s) · 4 pilier(s) · disque 0 Mio · durée estimée non calibrée
+[PIPELINE] GO · le candidat retenu passe toutes les portes sur le Test
+[STATUT]   done · end  · 1760/1760 unités · reste 0 s
+[PIPELINE] GO · le candidat retenu passe toutes les portes sur le Test
+[PIPELINE] patch promu : job\promoted\patch.json (non appliqué ; surgeon apply le fera sur décision)
+```
+
+A second job on the same Test sets is refused, whatever its candidate:
+
+```bash
+# same Test sets, another job folder
+surgeon pipeline run --config pipeline.json --job-dir job2
+```
+
+```text
+erreur : Test Set déjà consulté (registre des accès) : seconde consultation refusée ; --allow-test-reuse (ligne de commande) la permet et marque le rapport comme contaminé
+```
+
 <a id="patch-format"></a>
 ### 3.3 `patch.json` and the `rows` / `cols` axes
 
@@ -1789,7 +1915,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 <a id="tools"></a>
 ### 4.2 Tools
 
-`surgeon mcp` serves nine tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
+`surgeon mcp` serves ten tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
 
 | Tool | Role |
 | --- | --- |
@@ -1802,6 +1928,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 | `surgeon_autotune` | Per-layer coefficients by ridge regression. |
 | `surgeon_diff` | Difference of two checkpoints written to a new `.surgery`. |
 | `surgeon_lora` | `mode` `merge` (adapter folded in place) or `extract` (adapter written). |
+| `surgeon_pipeline` | Decision on a patch: `action` `plan`, `start` (background worker, returns a `job_id` at once), `status`, `cancel`, `report`, `promote_patch` ([docs/PIPELINE.md](docs/PIPELINE.md)). |
 
 A real session on the fake model: the client sends `initialize`, `notifications/initialized`, then a `tools/call`. The server writes one line on stderr, then answers on stdout (the `initialize` answer is left out, and the answer line is cut):
 
@@ -1822,11 +1949,12 @@ The first call (`surgeon_check` on `qwen2-mini`) succeeds; the second asks for `
 ### 4.3 Guardrails
 
 - `--allow-dir` (repeatable, else `SURGEON_MCP_ALLOW_DIRS`, else the current folder): every path is resolved by the system (symbolic links, `..`) and must fall under an allowed folder; relative paths are relative to the first one.
-- `--read-only`: refuses every tool that writes (`surgeon_apply`, `surgeon_extract`, GGUF exports, `surgeon_bench` in `dump` mode, `surgeon_autotune` with `out`, `surgeon_diff`, `surgeon_lora`).
+- `--read-only`: refuses every tool that writes (`surgeon_apply`, `surgeon_extract`, GGUF exports, `surgeon_bench` in `dump` mode, `surgeon_autotune` with `out`, `surgeon_diff`, `surgeon_lora`, `surgeon_pipeline` `start`, `cancel` and `promote_patch`).
 - Backup imposed: a verified SHA-256 backup precedes any write, and a failed backup blocks the write. `backup: false` in a patch is honored only with `--allow-no-backup`.
 - Cancellation: `notifications/cancelled` stops the running call, rolls back a partial patch and kills the running llama.cpp process; a cancelled extraction or dump leaves no file.
 - Progress: with a `progressToken`, a `notifications/progress` is sent per tensor, prompt or chunk.
 - A panic during a tool becomes a JSON-RPC error and the server keeps running.
+- `surgeon_pipeline`: one worker at a time, stopped with the server; no free argument and no `--allow-*` option (the safety gate cannot be disabled, a Test set cannot be reused); every file the configuration names goes through the sandbox, and the Test answers of a job (`<job>/private/`) are refused to every tool.
 
 Details and the protocol versions accepted: [docs/MCP.md](docs/MCP.md) (written in French).
 

@@ -84,6 +84,74 @@ pub enum Commands {
     Plugins(PluginsArgs),
     /// Built-in model architectures, and the one detected for a model.
     Arch(ArchArgs),
+    /// Decide on a patch: candidates on the Dev sets, gates, one Test Set consultation.
+    Pipeline(PipelineArgs),
+}
+
+/// `surgeon pipeline`: the atomic decision on a patch (`src/pipeline`, docs/PIPELINE.md).
+#[derive(Debug, Clone, Args)]
+pub struct PipelineArgs {
+    #[command(subcommand)]
+    pub command: PipelineCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum PipelineCommand {
+    /// Disk, time and power estimates, before anything runs.
+    Plan(PipelinePlanArgs),
+    /// Run (or resume) the job: the worker process.
+    Run(PipelineRunArgs),
+    /// Stage, progress, remaining time and Dev gates of a job.
+    Status(PipelineJobArgs),
+    /// Ask the worker to stop; its working copy is removed.
+    Cancel(PipelineJobArgs),
+    /// The report of a finished job (Test Set aggregates only).
+    Report(PipelineJobArgs),
+    /// Write the selected patch after a GO (never applied).
+    Promote(PipelineJobArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct PipelinePlanArgs {
+    /// pipeline.json (`surgeon schema --kind pipeline`).
+    #[arg(long)]
+    pub config: PathBuf,
+    /// Job directory (plan.json is written there).
+    #[arg(long)]
+    pub job_dir: PathBuf,
+    /// Accept a configuration without a safety pillar (logged in the report).
+    #[arg(long)]
+    pub allow_disable_safety: bool,
+    /// Skip the decoding-rate measurement (no time estimate).
+    #[arg(long)]
+    pub no_calibration: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct PipelineRunArgs {
+    /// pipeline.json; omitted, the job resumes with the configuration it is bound to.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    #[arg(long)]
+    pub job_dir: PathBuf,
+    /// Accept a configuration without a safety pillar (logged in the report).
+    #[arg(long)]
+    pub allow_disable_safety: bool,
+    /// Consult a Test Set already consulted; the report is marked as contaminated.
+    #[arg(long)]
+    pub allow_test_reuse: bool,
+    /// Run the worker in the background (output in <job>/worker.log) and return.
+    #[arg(long)]
+    pub detach: bool,
+    /// Stop when stdin closes (set by the MCP server for the workers it starts).
+    #[arg(long, hide = true)]
+    pub watch_stdin: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct PipelineJobArgs {
+    #[arg(long)]
+    pub job_dir: PathBuf,
 }
 
 /// `surgeon arch`: the architecture descriptions (`src/arch`). Not exposed over MCP:
@@ -733,6 +801,8 @@ pub enum SchemaKind {
     Surgery,
     /// JSON Schema (draft-07) of an architecture spec (--arch-spec).
     Arch,
+    /// JSON Schema (draft-07) of pipeline.json.
+    Pipeline,
 }
 
 #[derive(Debug, Clone, Args)]

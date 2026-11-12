@@ -348,6 +348,14 @@ fn command_name(command: &Commands) -> &'static str {
             crate::cli::ArchCommand::List => "arch list",
             crate::cli::ArchCommand::Detect(_) => "arch detect",
         },
+        Commands::Pipeline(args) => match args.command {
+            crate::cli::PipelineCommand::Plan(_) => "pipeline plan",
+            crate::cli::PipelineCommand::Run(_) => "pipeline run",
+            crate::cli::PipelineCommand::Status(_) => "pipeline status",
+            crate::cli::PipelineCommand::Cancel(_) => "pipeline cancel",
+            crate::cli::PipelineCommand::Report(_) => "pipeline report",
+            crate::cli::PipelineCommand::Promote(_) => "pipeline promote",
+        },
         Commands::Bench(args) => match args.command {
             BenchCommand::Logits(_) => "bench logits",
             BenchCommand::Ppl(_) => "bench ppl",
@@ -401,6 +409,7 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         Commands::Bench(args) => bench_cli(args, deps, io),
         Commands::Diff(args) => crate::surgery::core_diff(args, deps, &mut CliSink::new(io)),
         Commands::Lora(args) => crate::lora::core_lora(args, deps, &mut CliSink::new(io)),
+        Commands::Pipeline(args) => pipeline_cli(&args.command, deps),
         // Routed by run_with before dispatch: they have no envelope.
         Commands::Schema(_) | Commands::Mcp(_) | Commands::Tui(_) => Err(Outcome::fail(
             exit::INTERNAL,
@@ -408,6 +417,50 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         )),
     };
     result.unwrap_or_else(|failure| failure)
+}
+
+/// `surgeon pipeline`: the CLI side of `pipeline::front`; the `--allow-*` options exist
+/// here only, never over MCP.
+fn pipeline_cli(command: &crate::cli::PipelineCommand, deps: &AppDeps) -> CoreResult {
+    use crate::cli::PipelineCommand as C;
+    use crate::pipeline::front;
+    use crate::pipeline::run::RunOptions;
+    match command {
+        C::Plan(a) => {
+            let options = RunOptions {
+                allow_disable_safety: a.allow_disable_safety,
+                allow_test_reuse: false,
+            };
+            front::core_plan(
+                &a.config,
+                &a.job_dir,
+                &options,
+                !a.no_calibration,
+                true,
+                deps,
+            )
+        }
+        C::Run(a) => {
+            let options = RunOptions {
+                allow_disable_safety: a.allow_disable_safety,
+                allow_test_reuse: a.allow_test_reuse,
+            };
+            match a.detach {
+                true => front::core_detach(a.config.as_deref(), &a.job_dir, &options),
+                false => front::core_run(
+                    a.config.as_deref(),
+                    &a.job_dir,
+                    options,
+                    a.watch_stdin,
+                    deps,
+                ),
+            }
+        }
+        C::Status(a) => front::core_status(&a.job_dir),
+        C::Cancel(a) => front::core_cancel(&a.job_dir),
+        C::Report(a) => front::core_report(&a.job_dir),
+        C::Promote(a) => front::core_promote(&a.job_dir, deps),
+    }
 }
 
 // ---------------------------------------------------------------- output

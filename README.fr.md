@@ -689,14 +689,15 @@ surgeon schema [OPTIONS]
 
 | Option | Défaut | Rôle |
 | --- | --- | --- |
-| `--kind` | `patch` | `patch` (schéma de `patch.json`), `tools` (les définitions d'outils exactement comme `tools/list` les renvoie), `surgery` (schéma de l'en-tête `.surgery`), `arch` (schéma d'une spécification d'architecture, `--arch-spec`). |
+| `--kind` | `patch` | `patch` (schéma de `patch.json`), `tools` (les définitions d'outils exactement comme `tools/list` les renvoie), `surgery` (schéma de l'en-tête `.surgery`), `arch` (schéma d'une spécification d'architecture, `--arch-spec`), `pipeline` (schéma de `pipeline.json`). |
 
 ```bash
-# les quatre schémas, en JSON brut
+# les cinq schémas, en JSON brut
 surgeon schema --kind patch
 surgeon schema --kind tools
 surgeon schema --kind surgery
 surgeon schema --kind arch
+surgeon schema --kind pipeline
 ```
 
 <a id="cmd-autotune"></a>
@@ -1386,6 +1387,131 @@ surgeon arch detect --model tiny-q8.gguf
 [ARCH]     qwen2 (general.architecture) · project_out exact · mlp_gate 2, mlp_up 2, mlp_out 2
 ```
 
+<a id="cmd-pipeline"></a>
+#### `surgeon pipeline`
+
+Commande parente du pipeline de décision ([docs/PIPELINE.md](docs/PIPELINE.md)) ; elle n'a pas d'option propre. Une configuration (`pipeline.json`, `surgeon schema --kind pipeline`) nomme le modèle, un gabarit de patch et ses valeurs candidates d'`alpha`, et les piliers (`safety`, `unblocking`, `gsm8k`, `kl`, `logits`), chacun avec un jeu Dev, un jeu Test et une porte (`non_inferiority`, `superiority`, `max_drift` ; tout seuil vient de la configuration). Le travailleur applique chaque candidat à une copie de travail (le modèle d'origine n'est jamais écrit, son SHA-256 avant et après est dans le rapport), mesure les piliers sur les jeux Dev dans l'ordre du tableau et arrête un candidat à sa première porte non GO, choisit sur le Dev seulement, puis consulte les jeux Test une seule fois, pour le candidat retenu. Les verdicts sont `GO`, `NO_GO` ou `INCONCLUSIVE` (échantillon trop petit pour la marge : jamais GO, avec la taille qu'il faudrait). Un pilier de sécurité est obligatoire.
+
+<a id="cmd-pipeline-plan"></a>
+#### `surgeon pipeline plan`
+
+Disque, durée et puissance, avant toute exécution ; écrit dans `<job>/plan.json`.
+
+```text
+surgeon pipeline plan [OPTIONS] --config <CONFIG> --job-dir <JOB_DIR>
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--config` | requis | `pipeline.json`. |
+| `--job-dir` | requis | Dossier du job. |
+| `--allow-disable-safety` | désactivé | Accepte une configuration sans pilier `safety` (noté dans le rapport ; ligne de commande seulement). |
+| `--no-calibration` | désactivé | Saute la mesure du débit de décodage (pas d'estimation de durée). |
+
+`data` : `pillars[]` (`n_dev`, `n_test`, `min_n_for_go` : la plus petite taille à laquelle une porte de non-infériorité peut être GO, `dev_underpowered`, `test_underpowered`), `disk` (copie de travail, dumps de logits, sauvegardes), `units_total`, `calibration`, `estimated_secs` (estimation haute), `warnings`.
+
+<a id="cmd-pipeline-run"></a>
+#### `surgeon pipeline run`
+
+Le travailleur : exécute le job, ou le reprend depuis ses points de reprise (un job repris écrit le même `results.json`, octet pour octet).
+
+```text
+surgeon pipeline run [OPTIONS] --job-dir <JOB_DIR>
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--config` | celle du job | `pipeline.json` ; absent, le job reprend avec la configuration à laquelle il est lié (une autre est refusée). |
+| `--job-dir` | requis | Dossier du job. |
+| `--allow-disable-safety` | désactivé | Accepte une configuration sans pilier `safety` (noté ; ligne de commande seulement). |
+| `--allow-test-reuse` | désactivé | Consulte un jeu Test déjà inscrit au registre ; le rapport est marqué `test_contaminated` et ne peut pas être GO (ligne de commande seulement). |
+| `--detach` | désactivé | Lance le travailleur en arrière-plan (sortie dans `<job>/worker.log`) et rend la main. |
+| `--watch-stdin` | désactivé | S'arrête quand stdin se ferme ; posé par le serveur MCP pour les travailleurs qu'il lance. |
+
+`data` est `results.json` : `verdict`, `verdict_reason`, `model` (empreintes, `unchanged`), `candidates[]` (portes Dev jusqu'à la première non GO, `stopped_at`), `selected`, `test` (agrégats seulement : les réponses restent dans `<job>/private/`), `test_contaminated`, `safety_disabled`, `budget_exceeded`. Portes : intervalle de Newcombe apparié (celui de `bench refusal`) au niveau de confiance de la porte pour les piliers binaires, avec le p exact de McNemar ; bootstrap percentile sur les prompts avec la graine de la configuration pour les dérives. `<job>/report.json` ajoute le manifeste de reproductibilité (empreintes du modèle, des jeux, des vecteurs, de la configuration ; graine ; version de surgeon) et les durées.
+
+<a id="cmd-pipeline-status"></a>
+#### `surgeon pipeline status`
+
+Étape, avancement, temps restant et portes Dev déjà tranchées, lus dans `<job>/state.json`.
+
+```text
+surgeon pipeline status [OPTIONS] --job-dir <JOB_DIR>
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--job-dir` | requis | Dossier du job. |
+
+<a id="cmd-pipeline-cancel"></a>
+#### `surgeon pipeline cancel`
+
+Demande au travailleur de s'arrêter à sa prochaine vérification ; il supprime sa copie de travail et ne laisse que des points de reprise complets (`run` reprend le job).
+
+```text
+surgeon pipeline cancel [OPTIONS] --job-dir <JOB_DIR>
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--job-dir` | requis | Dossier du job. |
+
+<a id="cmd-pipeline-report"></a>
+#### `surgeon pipeline report`
+
+`<job>/report.json` d'un job terminé.
+
+```text
+surgeon pipeline report [OPTIONS] --job-dir <JOB_DIR>
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--job-dir` | requis | Dossier du job. |
+
+<a id="cmd-pipeline-promote"></a>
+#### `surgeon pipeline promote`
+
+Après un GO seulement : écrit le patch retenu dans `<job>/promoted/patch.json`, validé par un dry-run sur le modèle d'origine. Il n'est jamais appliqué : `surgeon apply` reste une décision séparée.
+
+```text
+surgeon pipeline promote [OPTIONS] --job-dir <JOB_DIR>
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--job-dir` | requis | Dossier du job. |
+
+Une exécution réelle sur le mini modèle avec la configuration de [docs/PIPELINE.md](docs/PIPELINE.md) (ses jeux sont générés par `tests/p19_pipeline.rs` ; poids aléatoires : les portes passent parce que les marges sont larges, pas parce que le patch est bon) :
+
+```bash
+# estimations, décision, état, rapport, promotion
+surgeon pipeline plan --config pipeline.json --job-dir job --no-calibration
+surgeon pipeline run --config pipeline.json --job-dir job
+surgeon pipeline status --job-dir job
+surgeon pipeline report --job-dir job
+surgeon pipeline promote --job-dir job
+```
+
+```text
+[PLAN]     job cfd2f5d8019efe20 · 2 candidat(s) · 4 pilier(s) · disque 0 Mio · durée estimée non calibrée
+[PIPELINE] GO · le candidat retenu passe toutes les portes sur le Test
+[STATUT]   done · end  · 1760/1760 unités · reste 0 s
+[PIPELINE] GO · le candidat retenu passe toutes les portes sur le Test
+[PIPELINE] patch promu : job\promoted\patch.json (non appliqué ; surgeon apply le fera sur décision)
+```
+
+Un second job sur les mêmes jeux Test est refusé, quel que soit son candidat :
+
+```bash
+# mêmes jeux Test, un autre dossier de job
+surgeon pipeline run --config pipeline.json --job-dir job2
+```
+
+```text
+erreur : Test Set déjà consulté (registre des accès) : seconde consultation refusée ; --allow-test-reuse (ligne de commande) la permet et marque le rapport comme contaminé
+```
+
 <a id="patch-format"></a>
 ### 3.3 `patch.json` et les axes `rows` / `cols`
 
@@ -1789,7 +1915,7 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 <a id="tools"></a>
 ### 4.2 Outils
 
-`surgeon mcp` sert neuf outils (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
+`surgeon mcp` sert dix outils (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
 
 | Outil | Rôle |
 | --- | --- |
@@ -1802,6 +1928,7 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 | `surgeon_autotune` | Coefficients par couche par régression ridge. |
 | `surgeon_diff` | Différence de deux checkpoints écrite dans un nouveau `.surgery`. |
 | `surgeon_lora` | `mode` `merge` (adaptateur fusionné en place) ou `extract` (adaptateur écrit). |
+| `surgeon_pipeline` | Décision sur un patch : `action` `plan`, `start` (travailleur en arrière-plan, renvoie un `job_id` tout de suite), `status`, `cancel`, `report`, `promote_patch` ([docs/PIPELINE.md](docs/PIPELINE.md)). |
 
 Une vraie session sur le faux modèle : le client envoie `initialize`, `notifications/initialized`, puis un `tools/call`. Le serveur écrit une ligne sur stderr, puis répond sur stdout (la réponse à `initialize` est omise, et les lignes de réponse sont coupées) :
 
@@ -1822,11 +1949,12 @@ Le premier appel (`surgeon_check` sur `qwen2-mini`) réussit ; le second demande
 ### 4.3 Garde-fous
 
 - `--allow-dir` (répétable, sinon `SURGEON_MCP_ALLOW_DIRS`, sinon le dossier courant) : chaque chemin est résolu par le système (liens symboliques, `..`) et doit tomber sous un dossier autorisé ; les chemins relatifs le sont par rapport au premier.
-- `--read-only` : refuse tout outil qui écrit (`surgeon_apply`, `surgeon_extract`, exports GGUF, `surgeon_bench` en mode `dump`, `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora`).
+- `--read-only` : refuse tout outil qui écrit (`surgeon_apply`, `surgeon_extract`, exports GGUF, `surgeon_bench` en mode `dump`, `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora`, `surgeon_pipeline` `start`, `cancel` et `promote_patch`).
 - Sauvegarde imposée : une sauvegarde vérifiée par SHA-256 précède toute écriture, et une sauvegarde échouée bloque l'écriture. `backup: false` dans un patch n'est respecté qu'avec `--allow-no-backup`.
 - Annulation : `notifications/cancelled` arrête l'appel en cours, annule un patch partiel et tue le processus llama.cpp en cours ; une extraction ou un dump annulé ne laisse aucun fichier.
 - Progression : avec un `progressToken`, une `notifications/progress` est envoyée par tenseur, prompt ou bloc.
 - Un panic pendant un outil devient une erreur JSON-RPC et le serveur continue de tourner.
+- `surgeon_pipeline` : un travailleur à la fois, arrêté avec le serveur ; aucun argument libre et aucune option `--allow-*` (la porte de sécurité ne peut pas être désactivée, un jeu Test ne peut pas être réutilisé) ; chaque fichier nommé par la configuration passe le bac à sable, et les réponses Test d'un job (`<job>/private/`) sont refusées à tous les outils.
 
 Détails et versions du protocole acceptées : [docs/MCP.md](docs/MCP.md) (rédigé en français).
 

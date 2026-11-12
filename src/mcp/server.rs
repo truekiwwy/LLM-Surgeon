@@ -111,9 +111,12 @@ where
         // Detached on purpose: after a write failure it may stay blocked on stdin.
         std::thread::spawn(move || read_loop(reader, tx, cancel, interrupted));
     }
+    // Declared before the session: dropped after it, it stops the pipeline worker.
+    let pipeline = super::tools_pipeline::PipelineJobs::default();
     let mut session = Session {
         writer: &writer,
         deps,
+        pipeline: &pipeline,
         cfg,
         cancel: &cancel,
         err,
@@ -243,6 +246,7 @@ fn note_cancellation(message: &Value, cancel: &Mutex<CancelState>, interrupted: 
 struct Session<'a, W: Write> {
     writer: &'a ProtocolWriter<W>,
     deps: &'a AppDeps,
+    pipeline: &'a super::tools_pipeline::PipelineJobs,
     cfg: &'a McpConfig,
     cancel: &'a Mutex<CancelState>,
     err: &'a mut dyn Write,
@@ -339,6 +343,7 @@ impl<W: Write> Session<'_, W> {
             deps: self.deps,
             cfg: self.cfg,
             sink: &mut sink,
+            pipeline: self.pipeline,
         };
         // A panic unwinds through BackupSet::drop (rollback) and never kills the server.
         let outcome = catch_unwind(AssertUnwindSafe(|| tools::call(name, arguments, &mut ctx)));

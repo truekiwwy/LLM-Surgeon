@@ -38,7 +38,7 @@ use crate::eval::{
 pub const SEED: u32 = 42;
 const EXCERPT_CHARS: usize = 200;
 const SMALL_SAMPLE: usize = 100;
-const Z_95: f64 = 1.959_963_984_540_054;
+pub const Z_95: f64 = 1.959_963_984_540_054;
 const REL_TOLERANCE: f64 = 1e-9;
 
 fn unit_re() -> Option<&'static Regex> {
@@ -177,15 +177,20 @@ pub fn answers_match(extracted: &str, gold: &str) -> bool {
 
 /// Wilson score interval at 95 % for `correct` successes out of `n` (n >= 1).
 pub fn wilson(correct: usize, n: usize) -> (f64, f64) {
+    wilson_z(correct, n, Z_95)
+}
+
+/// Wilson score interval with the normal quantile `z` (1.96 for a two-sided 95 %).
+pub fn wilson_z(correct: usize, n: usize, z: f64) -> (f64, f64) {
     if n == 0 {
         return (0.0, 1.0);
     }
     let (k, n) = (correct as f64, n as f64);
     let p = k / n;
-    let z2 = Z_95 * Z_95;
+    let z2 = z * z;
     let denom = 1.0 + z2 / n;
     let center = (p + z2 / (2.0 * n)) / denom;
-    let half = Z_95 * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt() / denom;
+    let half = z * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt() / denom;
     // At p = 0 (p = 1) the lower (upper) bound is exactly 0 (1); rounding would miss it.
     let low = if correct == 0 {
         0.0
@@ -218,6 +223,7 @@ pub fn score(items: &[ItemResult]) -> EvalScore {
         loops: items.iter().filter(|i| i.loop_detected).count(),
         no_answer: count("no_answer"),
         timeouts: count("timeout"),
+        truncated: items.iter().filter(|i| i.truncated).count(),
     }
 }
 
@@ -242,6 +248,7 @@ pub fn judge(item: &Item, output: &str, loop_detected: bool) -> ItemResult {
         correct,
         reason: reason.to_owned(),
         loop_detected,
+        truncated: false,
         output_excerpt: truncate_chars(output, EXCERPT_CHARS).to_owned(),
         sample: None,
     }
@@ -293,7 +300,10 @@ pub fn run_suite(
     for (j, outcome) in outcomes.into_iter().enumerate() {
         let item = &items[j / samples];
         let mut result = match outcome {
-            Ok(out) => judge(item, &out.text, looped[j]),
+            Ok(out) => ItemResult {
+                truncated: out.truncated,
+                ..judge(item, &out.text, looped[j])
+            },
             Err(EvalError::Timeout { .. }) => ItemResult {
                 id: item.id.clone(),
                 gold: normalize(&item.gold),
@@ -302,6 +312,7 @@ pub fn run_suite(
                 correct: false,
                 reason: "timeout".into(),
                 loop_detected: false,
+                truncated: false,
                 output_excerpt: String::new(),
                 sample: None,
             },
@@ -474,6 +485,12 @@ pub fn run(
             (main.ci95_high - main.ci95_low) / 2.0 * 100.0
         ));
     }
+    if main.truncated > 0 {
+        warnings.push(format!(
+            "{} génération(s) sur {} coupée(s) par max_new_tokens = {} avant la fin de la réponse",
+            main.truncated, main.n, req.max_new_tokens
+        ));
+    }
     if let Some(min) = req.min_accuracy {
         if main.accuracy < min {
             threshold_warnings.push(format!(
@@ -598,7 +615,7 @@ mod tests {
         fn generate(
             &mut self,
             _prompt: &str,
-            _max_new_tokens: u32,
+            max_new_tokens: u32,
             on_chunk: &mut dyn FnMut(&str) -> ControlFlow<()>,
         ) -> crate::eval::Result<GenerationOutcome> {
             assert!(self.configured, "configure() is called before generate()");
@@ -606,7 +623,13 @@ mod tests {
             self.next += 1;
             let text = reply?;
             let mut sent = String::new();
-            for chunk in text.split_inclusive(' ') {
+            let mut truncated = false;
+            // One word is one token: the budget cuts a longer reply.
+            for (i, chunk) in text.split_inclusive(' ').enumerate() {
+                if i as u32 == max_new_tokens {
+                    truncated = true;
+                    break;
+                }
                 sent.push_str(chunk);
                 if on_chunk(chunk).is_break() {
                     break;
@@ -615,6 +638,7 @@ mod tests {
             Ok(GenerationOutcome {
                 text: sent,
                 stopped_early: false,
+                truncated,
                 duration_ms: 0,
             })
         }
@@ -699,6 +723,25 @@ mod tests {
             assert_eq!(progress.last(), Some(&(5, 5)));
         }
         run
+    }
+
+    #[test]
+    fn generations_cut_by_the_token_budget_are_counted() {
+        let (_dir, mut req) = fixture();
+        req.max_new_tokens = 4;
+        let run = evaluate(&req, vec![after_replies()]).unwrap();
+        let r = &run.report;
+        // The first three replies have more than 4 words, "I cannot tell." fits, the
+        // last one times out.
+        let cut: Vec<bool> = r.items.iter().map(|i| i.truncated).collect();
+        assert_eq!(cut, [true, true, true, false, false]);
+        assert_eq!(r.score.truncated, 3);
+        assert!(run.warnings.iter().any(|w| w.contains("max_new_tokens")));
+
+        req.max_new_tokens = 64;
+        let run = evaluate(&req, vec![after_replies()]).unwrap();
+        assert_eq!(run.report.score.truncated, 0);
+        assert!(!run.warnings.iter().any(|w| w.contains("max_new_tokens")));
     }
 
     #[test]

@@ -122,6 +122,10 @@ impl GenJob {
 pub struct GenerationOutcome {
     pub text: String,
     pub stopped_early: bool,
+    /// The token budget ran out before an end of sequence.
+    // shortcut: only the native backend reports it (false with llama.cpp); read the
+    // stop reason of llama-server when a llama.cpp run needs the counter.
+    pub truncated: bool,
     pub duration_ms: u128,
 }
 
@@ -347,6 +351,7 @@ fn stream_child(
     Ok(GenerationOutcome {
         text,
         stopped_early,
+        truncated: false,
         duration_ms: start.elapsed().as_millis(),
     })
 }

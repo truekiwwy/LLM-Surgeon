@@ -17,7 +17,7 @@ surgeon mcp --allow-dir /modeles --allow-dir /directions --read-only
 | Option | Effet |
 | --- | --- |
 | `--allow-dir <dossier>` | Dossier autorisé, répétable. Défaut : `$SURGEON_MCP_ALLOW_DIRS` (séparateur du système : `;` sous Windows, `:` ailleurs), sinon le dossier courant. |
-| `--read-only` | Refuse `surgeon_apply`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en mode `dump`, `surgeon_autotune` avec `out`, `surgeon_diff` et `surgeon_lora` (les deux modes) (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out` reste permis. |
+| `--read-only` | Refuse `surgeon_apply`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en mode `dump`, `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora` (les deux modes) et les actions `start`, `cancel`, `promote_patch` de `surgeon_pipeline` (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out` reste permis. |
 | `--allow-no-backup` | Respecte `backup: false` dans un patch. Sans cette option, la sauvegarde est imposée. |
 
 `$LLAMA_CPP_DIR`, défini par l'opérateur, sert de dossier llama.cpp par défaut pour
@@ -54,6 +54,7 @@ Claude Code, en plugin : le dossier [`plugin/`](../plugin) déclare le même ser
 | `surgeon_autotune` | Coefficients α par couche ajustés par ridge, patch.json en sortie | non destructif, idempotent ; écrit `out` seulement s'il est fourni |
 | `surgeon_diff` | Différence de deux checkpoints, approximée à rang `r`, écrite dans un `.surgery` neuf | écrit un fichier, non destructif, idempotent |
 | `surgeon_lora` | `mode` `merge` (fusionne un adaptateur LoRA en place) ou `extract` (écrit un adaptateur) | destructif |
+| `surgeon_pipeline` | Décision atomique sur un patch : `action` `plan`, `start`, `status`, `cancel`, `report`, `promote_patch` ([PIPELINE.md](PIPELINE.md)) | non destructif (copie de travail, modèle d'origine jamais écrit) |
 
 Les schémas exacts : `surgeon schema --kind tools`. Le format du patch :
 `surgeon schema` (JSON Schema draft-07, sans `$ref`).
@@ -493,6 +494,30 @@ Serveur lancé avec `--read-only` :
   compagnon ensemble ; un `out` ou un compagnon existant exige `overwrite: true` ;
   annulation ou erreur, aucun fichier n'est laissé. `--read-only` refuse `surgeon_extract`.
 - **Pas de tableau de bord** : `surgeon tui` est interactif et n'est pas exposé en MCP.
+
+## Décision sur un patch (`surgeon_pipeline`)
+
+Arguments plats : `action`, `job_dir`, `config` (pour `plan` et `start` ; absent pour
+`start`, le job existant reprend). Le flux d'un agent :
+
+1. `plan` : disque, durée estimée, puissance (`dev_underpowered` annonce un INCONCLUSIVE
+   garanti).
+2. `start` : lance `surgeon pipeline run --watch-stdin` en sous-processus et renvoie
+   `job_id` tout de suite ; un seul job à la fois par serveur (`error.kind = "busy"`).
+3. `status` jusqu'à `report_available` : étape, `units_done` / `units_total`,
+   `eta_secs`, portes Dev déjà tranchées.
+4. `report` : verdict `GO`, `NO_GO` ou `INCONCLUSIVE`, agrégats seulement pour le Test.
+5. `promote_patch` après un GO : écrit `promoted/patch.json` ; l'appliquer est une décision
+   séparée (`surgeon_apply`, sauvegarde imposée).
+
+Garde-fous propres : la configuration doit contenir un pilier `safety` et aucun
+`--allow-*` de la ligne de commande n'existe ici ; chaque fichier qu'elle nomme (modèle,
+vecteurs, jeux Dev et Test, gabarits, registre) passe le bac à sable ; un jeu Test déjà
+consulté est refusé (`test_set_already_used`) ; tout chemin sous un dossier `private/` de
+job (marqueur `.surgeon-private`) est refusé par le bac à sable, pour tous les outils ; le
+travailleur s'annule quand le serveur se ferme (stdin), et est tué après 15 s sinon. Une
+progression par `progressToken` n'est pas émise : `start` rend la main tout de suite et
+l'avancement se lit par `status`.
 
 ## Protocole
 
