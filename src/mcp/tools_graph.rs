@@ -35,11 +35,13 @@ pub struct GraphToolArgs {
     pub model: PathBuf,
     #[serde(default)]
     #[schemars(
-        description = "Dossier des sorties (graph.json, graph.dot, graph.mmd, matrices.csv, edges.csv). Absent : synthèse bornée seulement, aucun fichier écrit."
+        description = "Dossier des sorties (graph.json, graph.dot, graph.mmd, matrices.csv, edges.csv, index.html). Absent : synthèse bornée seulement, aucun fichier écrit."
     )]
     pub out_dir: Option<PathBuf>,
     #[serde(default)]
-    #[schemars(description = "Formats écrits avec out_dir : json, dot, mmd, csv.")]
+    #[schemars(
+        description = "Formats écrits avec out_dir : json, dot, mmd, csv, html (vue 3D autonome index.html, sans réseau)."
+    )]
     pub format: Option<Vec<OutputFormat>>,
     #[serde(default)]
     #[schemars(description = "Couches retenues : 0, 1-3, 0,2,4 ou all.")]
@@ -129,13 +131,23 @@ pub struct GraphToolArgs {
         description = "Plafond wall-clock en secondes ; la tâche est annulée (kind cancelled) au-delà."
     )]
     pub max_seconds: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Référence comparée au modèle, dans un dossier autorisé : modèle (analysé avec les mêmes paramètres) ou graph.json déjà exporté. Ajoute baseline_diff (deltas de rang effectif, de norme et d'alignement)."
+    )]
+    pub baseline: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "Empreinte rapide (taille, date, 3 fenêtres de 1 Mio par fichier) au lieu du SHA-256 complet ; model.hash_mode vaut alors fast."
+    )]
+    pub fast_hash: bool,
 }
 
 pub(super) fn definitions() -> Vec<Value> {
     vec![tool(
         TOOL_GRAPH,
         "Graphe de poids",
-        "Transforme les matrices du flux résiduel en graphe orienté : écritures (embed, o_proj, down_proj) vers lectures postérieures (q/k/v, gate/up, lm_head), avec alignement de sous-espaces, couplage énergétique, angle principal, erank énergétique borné, rang stable certifié, kurtosis et canaux outliers. Sans out_dir : synthèse bornée seulement, aucun fichier. Avec out_dir : graph.json (schéma surgeon schema --kind graph), graph.dot, graph.mmd, matrices.csv, edges.csv. Le graphe complet n'est jamais renvoyé en ligne.",
+        "Transforme les matrices du flux résiduel en graphe orienté : écritures (embed, o_proj, down_proj) vers lectures postérieures (q/k/v, gate/up, lm_head), avec alignement de sous-espaces, couplage énergétique, angle principal, erank énergétique borné, rang stable certifié, kurtosis et canaux outliers. Sans out_dir : synthèse bornée seulement, aucun fichier. Avec out_dir : graph.json (schéma surgeon schema --kind graph), graph.dot, graph.mmd, matrices.csv, edges.csv, index.html (vue 3D autonome). baseline compare à une référence (modèle ou graph.json). Le graphe complet n'est jamais renvoyé en ligne.",
         schema_value::<GraphToolArgs>(),
         json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
     )]
@@ -197,6 +209,8 @@ fn graph(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         estimate: args.estimate,
         jobs: args.jobs.unwrap_or(0) as usize,
         overwrite: args.overwrite,
+        baseline: optional_path(ctx, "baseline", &args.baseline)?,
+        fast_hash: args.fast_hash,
     };
     crate::graph::core_graph_with(&core, ctx.deps, ctx.sink, args.max_seconds)
 }

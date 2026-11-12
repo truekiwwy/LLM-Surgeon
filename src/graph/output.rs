@@ -1,4 +1,5 @@
-//! `graph.json`, DOT, Mermaid and CSV for `surgeon graph`, plus safe output writes.
+//! `graph.json`, DOT, Mermaid, CSV and the 3D HTML view for `surgeon graph`, plus safe
+//! output writes.
 //!
 //! The report is the schema source (`surgeon schema --kind graph`). It contains no
 //! wall-clock timestamp: a run is reproducible from the model digest, the parameters and
@@ -6,6 +7,7 @@
 //! temporary file renamed into place; `--overwrite` is required to replace an existing
 //! target.
 
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,6 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::diff::{BaselineDiff, EdgeDiff, NodeDiff};
 use super::error::{GraphError, Result};
 use super::metrics::NodeMetrics;
 use super::model::SkippedTensor;
@@ -31,7 +34,12 @@ pub struct ToolInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelReport {
     pub path: String,
+    /// Full SHA-256, or `fast-...` with `--fast-hash` (see `hash_mode`).
     pub sha256: String,
+    /// `sha256` (complete digest of every file) or `fast` (`--fast-hash`: sizes, dates and
+    /// three sampled windows per file). Absent from reports older than this field: `sha256`.
+    #[serde(default = "full_hash_mode")]
+    pub hash_mode: String,
     pub format: String,
     pub architecture: String,
     pub arch_source: String,
@@ -130,6 +138,13 @@ pub struct GraphReport {
     pub global: GlobalReport,
     pub nodes: Vec<NodeReport>,
     pub edges: Vec<EdgeReport>,
+    /// With `--baseline` only: deltas of the model against the reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_diff: Option<BaselineDiff>,
+}
+
+fn full_hash_mode() -> String {
+    "sha256".into()
 }
 
 /// JSON Schema (draft-07) of `graph.json` (`surgeon schema --kind graph`).
@@ -308,6 +323,10 @@ fn dot_escape(text: &str) -> String {
 /// Graphviz DOT with one cluster per layer, a legend, log node sizes, octagon outlier
 /// nodes and RGBA edges coloured by the selected scale and palette.
 pub fn render_dot(report: &GraphReport) -> String {
+    let (changed_nodes, changed_edges) = changed(report.baseline_diff.as_ref());
+    let dot_node = |report: &GraphReport, node: &NodeReport| {
+        dot_node(report, node, changed_nodes.get(node.id.as_str()).copied())
+    };
     let mut weights: Vec<f64> = report.edges.iter().map(|e| e.weight).collect();
     weights.sort_by(f64::total_cmp);
     let mut out = String::new();
@@ -363,6 +382,13 @@ pub fn render_dot(report: &GraphReport) -> String {
             ));
             continue;
         }
+        if let Some(diff) = changed_edges.get(&(edge.source.as_str(), edge.target.as_str())) {
+            out.push_str(&format!(
+                "  {source} -> {target} [color=\"{CHANGED}\", penwidth=3.40, style=bold, label=\"{:.3} (Δ {:+.3})\"];\n",
+                edge.weight, diff.alignment_delta
+            ));
+            continue;
+        }
         let color = edge_color(report, edge.weight, &weights);
         let width = 0.6 + 2.8 * weight_strength(report, edge.weight, &weights);
         out.push_str(&format!(
@@ -377,6 +403,12 @@ pub fn render_dot(report: &GraphReport) -> String {
     out.push_str("    legend_reader [label=\"reader (basis)\", shape=box, style=\"filled,dashed\", fillcolor=\"#f5f5f5\", color=\"#666666\"];\n");
     out.push_str("    legend_octagon [label=\"outlier / kurtosis\", shape=octagon, fillcolor=\"#f5f5f5\", color=\"#d62728\"];\n");
     out.push_str("    legend_writer -> legend_reader [label=\"alignment\", color=\"#999999\"];\n");
+    if let Some(diff) = &report.baseline_diff {
+        out.push_str(&format!(
+            "    legend_changed [label=\"changed vs baseline (>= {:.1}%)\", shape=box, penwidth=3.4, fillcolor=\"#f5f5f5\", color=\"{CHANGED}\"];\n",
+            diff.threshold * 100.0
+        ));
+    }
     out.push_str("  }\n");
     out.push_str("}\n");
     out
@@ -393,7 +425,31 @@ fn dot_id(id: &str) -> String {
     format!("\"{clean}\"")
 }
 
-fn dot_node(report: &GraphReport, node: &NodeReport) -> String {
+/// Colour of what changed against `--baseline`, in every renderer.
+const CHANGED: &str = "#e6550d";
+
+type ChangedEdges<'a> = BTreeMap<(&'a str, &'a str), &'a EdgeDiff>;
+
+/// Changed nodes and edges of the baseline diff, by id (empty without `--baseline`).
+fn changed(diff: Option<&BaselineDiff>) -> (BTreeMap<&str, &NodeDiff>, ChangedEdges<'_>) {
+    let Some(diff) = diff else {
+        return Default::default();
+    };
+    (
+        diff.nodes
+            .iter()
+            .filter(|n| n.changed)
+            .map(|n| (n.id.as_str(), n))
+            .collect(),
+        diff.edges
+            .iter()
+            .filter(|e| e.changed)
+            .map(|e| ((e.source.as_str(), e.target.as_str()), e))
+            .collect(),
+    )
+}
+
+fn dot_node(report: &GraphReport, node: &NodeReport, diff: Option<&NodeDiff>) -> String {
     let size = node_size(&node.metrics);
     let shape = match node
         .metrics
@@ -409,7 +465,7 @@ fn dot_node(report: &GraphReport, node: &NodeReport) -> String {
         NodeKind::Writer => "filled",
         NodeKind::Reader => "filled,dashed",
     };
-    let label = format!(
+    let mut label = format!(
         "{}\n{}\nerank {:.1}-{:.1}\nkurt {:.1}",
         node.id,
         node.tensor.replace('"', "'"),
@@ -417,15 +473,26 @@ fn dot_node(report: &GraphReport, node: &NodeReport) -> String {
         node.metrics.erank_energy_upper,
         node.metrics.kurtosis
     );
+    if let Some(diff) = diff {
+        label.push_str(&format!(
+            "\nΔ norm {:+.2}% · Δ erank {:+.2}",
+            diff.relative_change * 100.0,
+            diff.effective_rank_delta
+        ));
+    }
+    let outlier = node
+        .metrics
+        .is_outlier(report.parameters.kurtosis_threshold);
+    let (border, pen) = match (diff, outlier) {
+        (Some(_), _) => (CHANGED, 3.4),
+        (None, true) => ("#d62728", 1.2),
+        (None, false) => ("#555555", 1.2),
+    };
     format!(
-        "    {} [label=\"{}\", shape={shape}, style=\"{style}\", fillcolor=\"{}\", color=\"{}\", width={size:.2}, height={size:.2}];\n",
+        "    {} [label=\"{}\", shape={shape}, style=\"{style}\", fillcolor=\"{}\", color=\"{border}\", penwidth={pen:.1}, width={size:.2}, height={size:.2}];\n",
         dot_id(&node.id),
         dot_escape(&label),
         rgba(role_color(node.role), 70),
-        match node.metrics.is_outlier(report.parameters.kurtosis_threshold) {
-            true => "#d62728",
-            false => "#555555",
-        }
     )
 }
 
@@ -495,6 +562,12 @@ pub fn render_mermaid(report: &GraphReport) -> String {
         "  classDef reader fill:#f2f2f2,stroke:#666666,color:#111111,stroke-dasharray:4 3\n",
     );
     out.push_str("  classDef outlier fill:#fde0dd,stroke:#d62728,stroke-width:3px,color:#111111\n");
+    let (changed_nodes, changed_edges) = changed(report.baseline_diff.as_ref());
+    if !changed_nodes.is_empty() {
+        out.push_str(&format!(
+            "  classDef changed stroke:{CHANGED},stroke-width:4px\n"
+        ));
+    }
     let mut classes: Vec<String> = Vec::new();
     for node in &report.nodes {
         let class = match node
@@ -512,8 +585,15 @@ pub fn render_mermaid(report: &GraphReport) -> String {
     for line in classes {
         out.push_str(&line);
     }
+    for id in changed_nodes.keys() {
+        out.push_str(&format!("  class {} changed\n", mermaid_id(id)));
+    }
     for (index, edge) in report.edges.iter().enumerate() {
-        if edge.structural {
+        if changed_edges.contains_key(&(edge.source.as_str(), edge.target.as_str())) {
+            out.push_str(&format!(
+                "  linkStyle {index} stroke:{CHANGED},stroke-width:4px\n"
+            ));
+        } else if edge.structural {
             out.push_str(&format!(
                 "  linkStyle {index} stroke:#888888,stroke-width:1px,stroke-dasharray:4 3\n"
             ));
@@ -546,6 +626,21 @@ fn mermaid_node(report: &GraphReport, node: &NodeReport) -> String {
         mermaid_id(&node.id),
         mermaid_escape(&label)
     )
+}
+
+// ------------------------------------------------------------------ HTML
+
+const VIEW_TEMPLATE: &str = include_str!("view.html");
+const VIEW_DATA: &str = "/*GRAPH_DATA*/null";
+
+/// Self-contained interactive 3D view: the template of `view.html` (vanilla JS, Canvas 2D,
+/// no network access) with the complete report inlined as JSON.
+pub fn render_html(report: &GraphReport) -> String {
+    let data = serde_json::to_string(report)
+        .unwrap_or_else(|_| "null".into())
+        // Inside <script>, "</script>" or "<!--" would end or derail the data block.
+        .replace('<', "\\u003c");
+    VIEW_TEMPLATE.replacen(VIEW_DATA, &data, 1)
 }
 
 // ------------------------------------------------------------------ CSV
@@ -705,6 +800,7 @@ pub fn summary(
         "model": {
             "path": &report.model.path,
             "sha256": &report.model.sha256,
+            "hash_mode": &report.model.hash_mode,
             "format": &report.model.format,
             "architecture": &report.model.architecture,
             "hidden": report.model.hidden,
@@ -720,6 +816,21 @@ pub fn summary(
             "nodes": report.nodes.len() > node_rows.len(),
             "edges": report.edges.len() > edge_rows.len(),
         },
+        "baseline_diff": report.baseline_diff.as_ref().map(|diff| json!({
+            "baseline": diff.baseline,
+            "source": diff.source,
+            "baseline_sha256": diff.baseline_sha256,
+            "baseline_hash_mode": diff.baseline_hash_mode,
+            "threshold": diff.threshold,
+            "nodes_compared": diff.nodes_compared,
+            "nodes_changed": diff.nodes_changed,
+            "edges_compared": diff.edges_compared,
+            "edges_changed": diff.edges_changed,
+            "only_in_model": diff.only_in_model.len(),
+            "only_in_baseline": diff.only_in_baseline.len(),
+            "warnings": diff.warnings,
+            "top_changed_layers": diff.top_changed_layers,
+        })),
         "note": "graph.json is the complete report; this envelope is a bounded summary",
     })
 }
@@ -747,6 +858,26 @@ pub fn human_summary(report: &GraphReport, outputs: &[PathBuf]) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+    if let Some(diff) = &report.baseline_diff {
+        text.push_str(&format!(
+            "baseline: {} · {}/{} matrices and {}/{} edges changed\n",
+            diff.baseline,
+            diff.nodes_changed,
+            diff.nodes_compared,
+            diff.edges_changed,
+            diff.edges_compared
+        ));
+        for layer in diff.top_changed_layers.iter().take(3) {
+            text.push_str(&format!(
+                "  {}: {:.3}% ({})\n",
+                layer
+                    .layer
+                    .map_or_else(|| "embed/head".to_owned(), |l| format!("layer {l}")),
+                layer.max_relative_change * 100.0,
+                layer.top_node
+            ));
+        }
     }
     if outputs.is_empty() {
         text.push_str("outputs: none (no --out-dir)\n");
@@ -939,6 +1070,7 @@ mod tests {
             model: ModelReport {
                 path: "m".into(),
                 sha256: "a".repeat(64),
+                hash_mode: "sha256".into(),
                 format: "safetensors".into(),
                 architecture: "qwen2".into(),
                 arch_source: "config_model_type".into(),
@@ -1028,6 +1160,7 @@ mod tests {
                 weight: 0.8,
                 structural: false,
             }],
+            baseline_diff: None,
         }
     }
 
@@ -1056,6 +1189,22 @@ mod tests {
         assert_eq!(summary["top_edges"].as_array().unwrap().len(), 1);
         assert_eq!(summary["truncated"]["nodes"], true);
         assert_eq!(summary["truncated"]["edges"], false);
+    }
+
+    #[test]
+    fn html_data_cannot_close_its_script_block() {
+        let mut report = report();
+        report.nodes[0].tensor = "x</script><!--<script>".into();
+        let html = render_html(&report);
+        let template = VIEW_TEMPLATE.matches("</script>").count();
+        assert_eq!(html.matches("</script>").count(), template);
+        assert!(!html.contains("x</script>"));
+        assert!(!html.contains(VIEW_DATA));
+        let open = "type=\"application/json\">";
+        let from = html.find(open).unwrap() + open.len();
+        let to = from + html[from..].find("</script>").unwrap();
+        let back: GraphReport = serde_json::from_str(&html[from..to]).unwrap();
+        assert_eq!(back, report);
     }
 
     #[test]

@@ -7142,7 +7142,8 @@
             "json",
             "dot",
             "mmd",
-            "csv"
+            "csv",
+            "html"
           ],
           "required": false,
           "short": null,
@@ -7578,6 +7579,44 @@
           "short": null,
           "value_names": [
             "OVERWRITE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "baseline",
+          "long": "baseline",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "BASELINE"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "fast_hash",
+          "long": "fast-hash",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FAST_HASH"
           ]
         },
         {

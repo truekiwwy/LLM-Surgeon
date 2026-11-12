@@ -16,13 +16,14 @@
 //! captured. `--full-spectrum-max-dim` enables the exact L1 effective rank on small matrices.
 
 pub mod cache;
+pub mod diff;
 pub mod error;
 pub mod metrics;
 pub mod model;
 pub mod output;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -162,6 +163,7 @@ pub enum OutputFormat {
     Dot,
     Mmd,
     Csv,
+    Html,
 }
 
 impl OutputFormat {
@@ -171,6 +173,7 @@ impl OutputFormat {
             Self::Dot => "dot",
             Self::Mmd => "mmd",
             Self::Csv => "csv",
+            Self::Html => "html",
         }
     }
 }
@@ -251,7 +254,7 @@ pub struct GraphArgs {
     /// Dossier des sorties ; sans lui, seule une synthèse bornée est renvoyée.
     #[arg(long)]
     pub out_dir: Option<PathBuf>,
-    /// Formats écrits (json, dot, mmd, csv), séparés par des virgules.
+    /// Formats écrits (json, dot, mmd, csv, html), séparés par des virgules.
     #[arg(long, value_enum, value_delimiter = ',', default_value = "json")]
     pub format: Vec<OutputFormat>,
     /// Couches retenues (`0`, `1-3`, `0,2,4` ou `all`).
@@ -317,6 +320,12 @@ pub struct GraphArgs {
     /// Remplace les sorties existantes.
     #[arg(long)]
     pub overwrite: bool,
+    /// Référence comparée au modèle : dossier ou fichier de modèle, ou graph.json déjà exporté.
+    #[arg(long)]
+    pub baseline: Option<PathBuf>,
+    /// Empreinte rapide (taille, date, 3 fenêtres de 1 Mio par fichier) au lieu du SHA-256 complet.
+    #[arg(long = "fast-hash")]
+    pub fast_hash: bool,
 }
 
 impl GraphArgs {
@@ -356,6 +365,11 @@ impl GraphArgs {
                 "--no-cache et --cache-dir sont incompatibles".into(),
             ));
         }
+        if self.estimate && self.baseline.is_some() {
+            return Err(GraphError::Usage(
+                "--estimate ne couvre pas --baseline".into(),
+            ));
+        }
         if self.format.is_empty() {
             return Err(GraphError::Usage("--format est vide".into()));
         }
@@ -378,7 +392,15 @@ impl GraphArgs {
             ],
             false => self.matrices.iter().map(|m| m.role()).collect(),
         };
+        // "--format json,dot --format json" would write graph.json twice.
+        let mut formats = Vec::new();
+        for format in &self.format {
+            if !formats.contains(format) {
+                formats.push(*format);
+            }
+        }
         Ok(Settings {
+            formats,
             layers,
             roles,
             vector: self.vector.clone(),
@@ -392,6 +414,8 @@ impl GraphArgs {
 }
 
 struct Settings {
+    /// `--format` without duplicates, in the order given.
+    formats: Vec<OutputFormat>,
     layers: LayerSelection,
     roles: Vec<GraphRole>,
     vector: Option<PathBuf>,
@@ -466,16 +490,67 @@ pub fn core_graph_with(
     let cancel = Arc::new(AtomicBool::new(false));
     let watchdog = Watchdog::start(max_seconds, Arc::clone(&cancel));
     let settings = args.check()?;
-    let model = ModelData::open(&args.model)?;
+    if args.estimate {
+        let model = open_model(&args.model, args, deps, sink, &cancel)?;
+        return estimate(args, &settings, &model);
+    }
+    let mut report = build_report(&args.model, args, &settings, deps, sink, &cancel)?;
+    if let Some(path) = &args.baseline {
+        let baseline = match diff::is_report_file(path) {
+            true => diff::read_report(path)?,
+            false => build_report(path, args, &settings, deps, sink, &cancel)?,
+        };
+        report.baseline_diff = Some(diff::compare(&baseline, &report, path));
+    }
+    drop(watchdog);
     check_cancel(deps, &cancel)?;
+
+    let outputs = match &args.out_dir {
+        Some(dir) => {
+            let files = render_files(&report, &settings.formats);
+            let paths = output::write_outputs(dir, &files, args.overwrite)?;
+            sink.event(ProgressEvent::GraphWrite { files: paths.len() });
+            paths
+        }
+        None => Vec::new(),
+    };
+    sink.event(ProgressEvent::GraphDone {
+        nodes: report.global.nodes,
+        edges: report.global.edges,
+        seconds: started.elapsed().as_secs_f64(),
+    });
+    let data = output::summary(&report, &outputs, 200, 20);
+    Ok(Outcome::ok(data, output::human_summary(&report, &outputs)))
+}
+
+fn open_model(
+    path: &Path,
+    args: &GraphArgs,
+    deps: &AppDeps,
+    sink: &mut dyn ProgressSink,
+    cancel: &AtomicBool,
+) -> Result<ModelData> {
+    let model = ModelData::open(path, args.fast_hash)?;
+    check_cancel(deps, cancel)?;
     for warning in &model.warnings {
         sink.event(ProgressEvent::Warn(warning.clone()));
     }
-    if args.estimate {
-        return estimate(args, &settings, &model);
-    }
+    Ok(model)
+}
+
+/// The complete report of one model with the command's parameters: the target, or the
+/// `--baseline` model.
+fn build_report(
+    model_path: &Path,
+    args: &GraphArgs,
+    settings: &Settings,
+    deps: &AppDeps,
+    sink: &mut dyn ProgressSink,
+    cancel: &AtomicBool,
+) -> Result<GraphReport> {
+    let model = open_model(model_path, args, deps, sink, cancel)?;
     if model.tensors.is_empty() {
-        return Err(GraphError::Model("aucune matrice du flux résiduel".into()).into());
+        return Err(GraphError::Model("aucune matrice du flux résiduel".into()));
     }
 
     let vector = match &settings.vector {
@@ -492,9 +567,9 @@ pub fn core_graph_with(
         })
         .collect();
     if nodes.is_empty() {
-        return Err(
-            GraphError::Usage("aucune matrice ne survit à --layers/--matrices".into()).into(),
-        );
+        return Err(GraphError::Usage(
+            "aucune matrice ne survit à --layers/--matrices".into(),
+        ));
     }
     if let Some(max) = args.max_nodes {
         if nodes.len() > max {
@@ -525,7 +600,7 @@ pub fn core_graph_with(
     };
 
     sink.event(ProgressEvent::GraphStart {
-        model: args.model.clone(),
+        model: model_path.to_path_buf(),
         matrices: nodes.len(),
         rank: args.rank,
     });
@@ -540,7 +615,7 @@ pub fn core_graph_with(
         full_spectrum_max_dim: args.full_spectrum_max_dim,
         kurtosis_threshold: args.kurtosis_threshold,
         vector: vector.as_deref(),
-        cancel: &cancel,
+        cancel,
         external: Some(&deps.interrupted),
     };
     let pool = match args.jobs {
@@ -555,7 +630,7 @@ pub fn core_graph_with(
     let mut computed: Vec<(NodeReport, Basis, Vec<f32>)> = Vec::with_capacity(nodes.len());
     let mut skipped_full_spectrum = 0usize;
     for (index, tensor) in nodes.iter().enumerate() {
-        check_cancel(deps, &cancel)?;
+        check_cancel(deps, cancel)?;
         sink.event(ProgressEvent::GraphNode {
             id: node_id(tensor.role, tensor.layer, tensor.expert),
             done: index,
@@ -604,8 +679,7 @@ pub fn core_graph_with(
         };
         computed.push((report, analysis.basis, analysis.energy_weights));
     }
-    drop(watchdog);
-    check_cancel(deps, &cancel)?;
+    check_cancel(deps, cancel)?;
 
     let edges = build_edges(
         &computed,
@@ -681,6 +755,11 @@ pub fn core_graph_with(
         model: ModelReport {
             path: model.path.display().to_string(),
             sha256: model.sha256.clone(),
+            hash_mode: match args.fast_hash {
+                true => "fast",
+                false => "sha256",
+            }
+            .into(),
             format: model.format.as_str().into(),
             architecture: model.arch_id.clone(),
             arch_source: model.arch_source.clone(),
@@ -706,7 +785,11 @@ pub fn core_graph_with(
             color_scale: settings.color_scale.as_str().into(),
             palette: settings.palette.as_str().into(),
             max_nodes: args.max_nodes,
-            formats: args.format.iter().map(|f| f.as_str().to_owned()).collect(),
+            formats: settings
+                .formats
+                .iter()
+                .map(|f| f.as_str().to_owned())
+                .collect(),
         },
         global: GlobalReport {
             nodes: computed.len(),
@@ -725,24 +808,9 @@ pub fn core_graph_with(
         },
         nodes: computed.iter().map(|(node, _, _)| node.clone()).collect(),
         edges,
+        baseline_diff: None,
     };
-
-    let outputs = match &args.out_dir {
-        Some(dir) => {
-            let files = render_files(&report, &args.format);
-            let paths = output::write_outputs(dir, &files, args.overwrite)?;
-            sink.event(ProgressEvent::GraphWrite { files: paths.len() });
-            paths
-        }
-        None => Vec::new(),
-    };
-    sink.event(ProgressEvent::GraphDone {
-        nodes: report.global.nodes,
-        edges: report.global.edges,
-        seconds: started.elapsed().as_secs_f64(),
-    });
-    let data = output::summary(&report, &outputs, 200, 20);
-    Ok(Outcome::ok(data, output::human_summary(&report, &outputs)))
+    Ok(report)
 }
 
 fn check_cancel(deps: &AppDeps, cancel: &AtomicBool) -> Result<()> {
@@ -792,6 +860,10 @@ fn render_files(report: &GraphReport, formats: &[OutputFormat]) -> Vec<OutputFil
             OutputFormat::Mmd => files.push(OutputFile {
                 name: "graph.mmd",
                 contents: output::render_mermaid(report),
+            }),
+            OutputFormat::Html => files.push(OutputFile {
+                name: "index.html",
+                contents: output::render_html(report),
             }),
             OutputFormat::Csv => {
                 files.push(OutputFile {
@@ -1166,6 +1238,8 @@ mod tests {
             estimate: false,
             jobs: 0,
             overwrite: false,
+            baseline: None,
+            fast_hash: false,
         };
         assert!(args.check().is_ok());
         args.rank = 0;

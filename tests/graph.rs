@@ -848,3 +848,325 @@ fn mcp_read_only_refuses_out_dir_and_cache_dir_before_writing() {
     assert_eq!(env["data"]["global"]["nodes"], 30);
     assert_eq!(env["data"]["outputs"], json!([]));
 }
+
+// ------------------------------------------------------------------ fast hash, baseline, html
+
+/// Multiplies the F32 tensor `name` of `<model>/model.safetensors` in place.
+fn scale_tensor(model: &Path, name: &str, factor: f32) {
+    let path = model.join("model.safetensors");
+    let mut bytes = std::fs::read(&path).unwrap();
+    let header_len = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    let header: Value = serde_json::from_slice(&bytes[8..8 + header_len]).unwrap();
+    let info = &header[name];
+    assert_eq!(info["dtype"], "F32", "{name}");
+    let offset = |i: usize| 8 + header_len + info["data_offsets"][i].as_u64().unwrap() as usize;
+    let (start, end) = (offset(0), offset(1));
+    for chunk in bytes[start..end].chunks_exact_mut(4) {
+        let value = f32::from_le_bytes(chunk.try_into().unwrap()) * factor;
+        chunk.copy_from_slice(&value.to_le_bytes());
+    }
+    std::fs::write(&path, bytes).unwrap();
+}
+
+/// Two identical fake models, `a/qwen2-mini` (reference) and `b/qwen2-mini`.
+fn twin_models(dir: &Path) -> (PathBuf, PathBuf) {
+    (model(&dir.join("a")), model(&dir.join("b")))
+}
+
+fn diff_node<'a>(diff: &'a Value, id: &str) -> &'a Value {
+    diff["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id)
+        .unwrap()
+}
+
+#[test]
+fn fast_hash_is_marked_in_the_report_and_changes_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let model_path = model(dir.path());
+    let (fast, full) = (dir.path().join("fast"), dir.path().join("full"));
+    let mut args = graph_args(s(&model_path), s(&fast));
+    args.extend(["--format", "json", "--fast-hash"]);
+    let (code, env) = run_json(&deps(), &args);
+    assert_eq!(code, 0, "{env}");
+    assert_eq!(env["data"]["model"]["hash_mode"], "fast");
+    let report = read_json(&fast.join("graph.json"));
+    assert_eq!(report["model"]["hash_mode"], "fast");
+    let digest = report["model"]["sha256"].as_str().unwrap();
+    assert!(
+        digest.starts_with("fast-") && digest.len() == 5 + 64,
+        "{digest}"
+    );
+
+    let first = file_hashes(&fast);
+    args.push("--overwrite");
+    assert_eq!(run_json(&deps(), &args).0, 0);
+    assert_eq!(file_hashes(&fast), first, "deterministic");
+
+    let mut args = graph_args(s(&model_path), s(&full));
+    args.extend(["--format", "json"]);
+    assert_eq!(run_json(&deps(), &args).0, 0);
+    let full_report = read_json(&full.join("graph.json"));
+    assert_eq!(full_report["model"]["hash_mode"], "sha256");
+    let digest = full_report["model"]["sha256"].as_str().unwrap();
+    assert!(digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(full_report["nodes"], report["nodes"]);
+    assert_eq!(full_report["edges"], report["edges"]);
+}
+
+#[test]
+fn baseline_diff_is_zero_on_twins_and_finds_the_scaled_matrix() {
+    let dir = tempfile::tempdir().unwrap();
+    let (reference, candidate) = twin_models(dir.path());
+    let out = dir.path().join("out");
+    let mut args = graph_args(s(&candidate), s(&out));
+    args.extend(["--baseline", s(&reference)]);
+    let (code, env) = run_json(&deps(), &args);
+    assert_eq!(code, 0, "{env}");
+    assert_eq!(env["data"]["baseline_diff"]["nodes_changed"], 0);
+
+    let diff = read_json(&out.join("graph.json"))["baseline_diff"].clone();
+    assert_eq!(diff["source"], "model");
+    assert_eq!(diff["baseline_hash_mode"], "sha256");
+    assert_eq!(diff["nodes_compared"], 30);
+    assert_eq!(diff["edges_compared"], 45);
+    assert_eq!(diff["nodes_changed"], 0);
+    assert_eq!(diff["edges_changed"], 0);
+    assert_eq!(diff["top_changed_layers"], json!([]));
+    assert_eq!(diff["only_in_model"], json!([]));
+    assert_eq!(diff["only_in_baseline"], json!([]));
+    assert_eq!(diff["warnings"], json!([]));
+    for node in diff["nodes"].as_array().unwrap() {
+        for key in ["effective_rank_delta", "norm_delta", "relative_change"] {
+            assert_eq!(node[key], 0.0, "{node}");
+        }
+    }
+    for edge in diff["edges"].as_array().unwrap() {
+        assert_eq!(edge["alignment_delta"], 0.0, "{edge}");
+        assert_eq!(edge["coupling_delta"], 0.0, "{edge}");
+    }
+    let dot = std::fs::read_to_string(out.join("graph.dot")).unwrap();
+    assert!(!dot.contains("Δ norm"), "nothing to highlight");
+    assert!(
+        dot.contains("legend_changed"),
+        "the legend says what would be highlighted"
+    );
+
+    // Doubling one matrix doubles its Frobenius norm exactly and keeps its spectrum shape.
+    scale_tensor(&candidate, "model.layers.2.mlp.down_proj.weight", 2.0);
+    args.push("--overwrite");
+    let (code, env) = run_json(&deps(), &args);
+    assert_eq!(code, 0, "{env}");
+    let report = read_json(&out.join("graph.json"));
+    let diff = &report["baseline_diff"];
+    let changed: Vec<&str> = diff["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["changed"] == true)
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(changed, ["L2.mlp_out"]);
+    let node = diff_node(diff, "L2.mlp_out");
+    assert_eq!(node["relative_change"], 1.0);
+    let after = report["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "L2.mlp_out")
+        .unwrap()["metrics"]["frobenius_norm"]
+        .as_f64()
+        .unwrap();
+    assert_eq!(node["norm_delta"].as_f64().unwrap(), after / 2.0);
+    assert!(node["effective_rank_delta"].as_f64().unwrap().abs() < 1e-9);
+    for other in diff["nodes"].as_array().unwrap() {
+        if other["id"] != "L2.mlp_out" {
+            assert_eq!(other["relative_change"], 0.0, "{other}");
+        }
+    }
+    let top = &diff["top_changed_layers"][0];
+    assert_eq!(top["layer"], 2);
+    assert_eq!(top["top_node"], "L2.mlp_out");
+    assert_eq!(top["max_relative_change"], 1.0);
+    assert_eq!(
+        env["data"]["baseline_diff"]["top_changed_layers"][0]["layer"],
+        2
+    );
+
+    let dot = std::fs::read_to_string(out.join("graph.dot")).unwrap();
+    assert!(dot.contains("Δ norm +100.00%"), "{dot}");
+    assert!(dot.contains("legend_changed"));
+    let mmd = std::fs::read_to_string(out.join("graph.mmd")).unwrap();
+    assert!(mmd.contains("classDef changed"));
+    assert!(mmd.contains("class L2_mlp_out changed"));
+
+    // The same diff from a graph.json of the reference: no SVD of the reference again.
+    let reference_out = dir.path().join("reference");
+    let mut args = graph_args(s(&reference), s(&reference_out));
+    args.extend(["--format", "json"]);
+    assert_eq!(run_json(&deps(), &args).0, 0);
+    let from_json = dir.path().join("from-json");
+    let reference_json = reference_out.join("graph.json");
+    let mut args = graph_args(s(&candidate), s(&from_json));
+    args.extend(["--format", "json", "--baseline", s(&reference_json)]);
+    let (code, env) = run_json(&deps(), &args);
+    assert_eq!(code, 0, "{env}");
+    let again = read_json(&from_json.join("graph.json"))["baseline_diff"].clone();
+    assert_eq!(again["source"], "graph_json");
+    assert_eq!(again["nodes"], diff["nodes"]);
+    assert_eq!(again["edges"], diff["edges"]);
+    assert_eq!(again["top_changed_layers"], diff["top_changed_layers"]);
+
+    // Read back from its graph.json, the reference against itself is exactly zero: the
+    // floats round-trip bit for bit.
+    let identity = dir.path().join("identity");
+    let mut args = graph_args(s(&reference), s(&identity));
+    args.extend(["--format", "json", "--baseline", s(&reference_json)]);
+    assert_eq!(run_json(&deps(), &args).0, 0);
+    let zero = read_json(&identity.join("graph.json"))["baseline_diff"].clone();
+    for node in zero["nodes"].as_array().unwrap() {
+        for key in ["effective_rank_delta", "norm_delta", "relative_change"] {
+            assert_eq!(node[key], 0.0, "{node}");
+        }
+    }
+    for edge in zero["edges"].as_array().unwrap() {
+        assert_eq!(edge["alignment_delta"], 0.0, "{edge}");
+    }
+}
+
+#[test]
+fn baseline_misuse_exits_2_and_parameter_mismatches_are_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let (reference, candidate) = twin_models(dir.path());
+    let not_a_report = dir.path().join("bad.json");
+    std::fs::write(&not_a_report, "{\"schema_version\": 1}").unwrap();
+    for extra in [
+        vec!["--baseline", s(&not_a_report)],
+        vec!["--baseline", s(&reference), "--estimate"],
+    ] {
+        let mut args = vec!["graph", "--model", s(&candidate)];
+        args.extend(extra);
+        let (code, env) = run_json(&deps(), &args);
+        assert_eq!(code, 2, "{env}");
+    }
+
+    let reference_out = dir.path().join("reference");
+    let args = [
+        "graph",
+        "--model",
+        s(&reference),
+        "--out-dir",
+        s(&reference_out),
+        "--rank",
+        "6",
+        "--oversample",
+        "4",
+        "--power-iters",
+        "2",
+    ];
+    assert_eq!(run_json(&deps(), &args).0, 0);
+    let out = dir.path().join("out");
+    let reference_json = reference_out.join("graph.json");
+    let mut args = graph_args(s(&candidate), s(&out));
+    args.extend(["--format", "json", "--baseline", s(&reference_json)]);
+    let (code, env) = run_json(&deps(), &args);
+    assert_eq!(code, 0, "{env}");
+    let warnings = env["data"]["baseline_diff"]["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("rank")),
+        "{warnings:?}"
+    );
+}
+
+/// The JSON inlined in `index.html`.
+fn html_data(html: &str) -> Value {
+    let open = "<script id=\"graph-data\" type=\"application/json\">";
+    let start = html.find(open).unwrap() + open.len();
+    let end = start + html[start..].find("</script>").unwrap();
+    serde_json::from_str(&html[start..end]).unwrap()
+}
+
+#[test]
+fn html_view_is_self_contained_and_carries_the_graph_and_its_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let (reference, candidate) = twin_models(dir.path());
+    scale_tensor(&candidate, "model.layers.1.self_attn.o_proj.weight", 0.5);
+    for (name, baseline) in [("plain", None), ("diff", Some(&reference))] {
+        let out = dir.path().join(name);
+        let mut args = graph_args(s(&candidate), s(&out));
+        args.extend(["--format", "json,html"]);
+        if let Some(baseline) = baseline {
+            args.extend(["--baseline", s(baseline)]);
+        }
+        let (code, env) = run_json(&deps(), &args);
+        assert_eq!(code, 0, "{env}");
+        // json, dot, mmd, two csv and html: the repeated json is written once.
+        assert_eq!(env["data"]["outputs"].as_array().unwrap().len(), 6);
+        let html = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(html.starts_with("<!DOCTYPE html>"));
+        assert!(html.trim_end().ends_with("</html>"));
+        for forbidden in ["http://", "https://", "<link", "src=", "@import"] {
+            assert!(!html.contains(forbidden), "{name}: {forbidden}");
+        }
+        assert!(!html.contains("/*GRAPH_DATA*/"), "placeholder replaced");
+        let data = html_data(&html);
+        assert_eq!(data, read_json(&out.join("graph.json")), "{name}");
+        for control in [
+            "view-abs",
+            "view-diff",
+            "color-by",
+            "layer-min",
+            "layer-max",
+            "coupling",
+            "search",
+            "reset",
+            "panel",
+        ] {
+            assert!(html.contains(&format!("id=\"{control}\"")), "{control}");
+        }
+        match baseline {
+            None => assert!(data.get("baseline_diff").is_none()),
+            Some(_) => {
+                let diff = &data["baseline_diff"];
+                assert_eq!(diff["nodes_changed"], 1);
+                assert_eq!(diff_node(diff, "L1.attn_out")["relative_change"], -0.5);
+                assert_eq!(diff["top_changed_layers"][0]["top_node"], "L1.attn_out");
+            }
+        }
+    }
+}
+
+#[test]
+fn mcp_accepts_baseline_and_fast_hash_inside_the_sandbox_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let (reference, candidate) = twin_models(dir.path());
+    let config = McpConfig::new(&[dir.path().to_path_buf()], false, false).unwrap();
+    let (is_error, env) = one_call(
+        &config,
+        "surgeon_graph",
+        json!({"model": s(&candidate), "baseline": s(&reference), "fast_hash": true,
+            "rank": 8, "oversample": 4, "power_iters": 2}),
+    );
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["model"]["hash_mode"], "fast");
+    assert_eq!(env["data"]["baseline_diff"]["baseline_hash_mode"], "fast");
+    assert_eq!(env["data"]["baseline_diff"]["nodes_changed"], 0);
+    assert!(
+        env["data"]["baseline_diff"].get("nodes").is_none(),
+        "bounded summary"
+    );
+
+    let outside = tempfile::tempdir().unwrap();
+    let elsewhere = model(outside.path());
+    let (is_error, env) = one_call(
+        &config,
+        "surgeon_graph",
+        json!({"model": s(&candidate), "baseline": s(&elsewhere)}),
+    );
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "path_not_allowed", "{env}");
+}

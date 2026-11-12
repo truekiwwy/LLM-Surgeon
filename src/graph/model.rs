@@ -10,7 +10,7 @@
 //! GGUF file) with SHA-256: the cache key and `graph.json` both carry that digest.
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use half::{bf16, f16};
@@ -25,6 +25,8 @@ use crate::surgery::rsvd::RowSource;
 use super::error::{GraphError, Result};
 
 const HASH_BUFFER: usize = 1 << 20;
+/// Bytes read at the start, middle and end of each file by `--fast-hash`.
+const FAST_HASH_WINDOW: u64 = 1 << 20;
 
 /// `canonicalize` returns verbatim `\\?\C:\...` paths on Windows; the report and the MCP
 /// envelope are nicer, and external tools safer, with the plain short form.
@@ -217,20 +219,21 @@ enum RawRole {
 }
 
 impl ModelData {
-    pub fn open(path: &Path) -> Result<Self> {
+    /// `fast_hash`: the digest of [`hash_files_fast`] instead of the full SHA-256.
+    pub fn open(path: &Path, fast_hash: bool) -> Result<Self> {
         let canonical =
             plain_path(std::fs::canonicalize(path).map_err(|e| GraphError::io(path, &e))?);
         if canonical.is_dir() {
-            Self::open_safe(&canonical)
+            Self::open_safe(&canonical, fast_hash)
         } else if gguf::is_gguf(&canonical) {
-            Self::open_gguf(&canonical)
+            Self::open_gguf(&canonical, fast_hash)
         } else {
             let extension = canonical
                 .extension()
                 .map(|e| e.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
             match extension.as_str() {
-                "safetensors" | "json" => Self::open_safe(&canonical),
+                "safetensors" | "json" => Self::open_safe(&canonical, fast_hash),
                 _ => Err(GraphError::Model(format!(
                     "{} : format non reconnu (attendu .safetensors, dossier shardé ou .gguf)",
                     canonical.display()
@@ -239,7 +242,7 @@ impl ModelData {
         }
     }
 
-    fn open_safe(path: &Path) -> Result<Self> {
+    fn open_safe(path: &Path, fast_hash: bool) -> Result<Self> {
         let size = crate::hardware::compute_model_size(path)
             .map_err(|e| GraphError::Model(e.to_string()))?;
         let resolution = arch::resolve(path, None, None)?;
@@ -252,7 +255,7 @@ impl ModelData {
             }
             shards.push(model);
         }
-        let sha256 = hash_files(&size.shard_files)?;
+        let sha256 = digest(&size.shard_files, fast_hash)?;
         let store = Store::Safe(shards);
         Self::assemble(
             path.to_path_buf(),
@@ -264,7 +267,7 @@ impl ModelData {
         )
     }
 
-    fn open_gguf(path: &Path) -> Result<Self> {
+    fn open_gguf(path: &Path, fast_hash: bool) -> Result<Self> {
         let file = File::open(path).map_err(|e| GraphError::io(path, &e))?;
         let map = crate::kernel::map_read(&file).map_err(|e| GraphError::io(path, &e))?;
         let parsed = gguf::parse(&map)?;
@@ -274,7 +277,7 @@ impl ModelData {
             .iter()
             .map(|entry| raw_gguf(entry, &resolution.spec))
             .collect::<Vec<_>>();
-        let sha256 = hash_files(std::slice::from_ref(&path.to_path_buf()))?;
+        let sha256 = digest(std::slice::from_ref(&path.to_path_buf()), fast_hash)?;
         let store = Store::Gguf { map };
         Self::assemble(
             path.to_path_buf(),
@@ -1014,6 +1017,50 @@ impl RowSource for NodeSource<'_> {
     }
 }
 
+fn digest(paths: &[PathBuf], fast_hash: bool) -> Result<String> {
+    match fast_hash {
+        true => hash_files_fast(paths),
+        false => hash_files(paths),
+    }
+}
+
+/// Fast model digest, `fast-` + 64 hex digits: SHA-256 of each file name, exact size,
+/// modification time and three windows of [`FAST_HASH_WINDOW`] bytes (start, which holds the
+/// SafeTensors header, middle, end). A resize, a rewrite that moves the modification time or
+/// a change inside a window changes it; a same-size edit elsewhere that keeps the
+/// modification time does not. The prefix keeps it apart from a full SHA-256, in reports and
+/// cache keys.
+pub fn hash_files_fast(paths: &[PathBuf]) -> Result<String> {
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; FAST_HASH_WINDOW as usize];
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        hasher.update(name.as_bytes());
+        let mut file = File::open(path).map_err(|e| GraphError::io(path, &e))?;
+        let meta = file.metadata().map_err(|e| GraphError::io(path, &e))?;
+        let size = meta.len();
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos());
+        hasher.update(size.to_le_bytes());
+        hasher.update(modified.to_le_bytes());
+        let last = size.saturating_sub(FAST_HASH_WINDOW);
+        for start in [0, last / 2, last] {
+            let len = FAST_HASH_WINDOW.min(size - start) as usize;
+            file.seek(SeekFrom::Start(start))
+                .and_then(|_| file.read_exact(&mut buffer[..len]))
+                .map_err(|e| GraphError::io(path, &e))?;
+            hasher.update(&buffer[..len]);
+        }
+    }
+    Ok(format!("fast-{}", hex(&hasher.finalize())))
+}
+
 /// SHA-256 of the complete model: each file name and content, in path order.
 pub fn hash_files(paths: &[PathBuf]) -> Result<String> {
     let mut hasher = Sha256::new();
@@ -1126,4 +1173,60 @@ pub fn micro_bench_seconds() -> f64 {
     // Keep the result observable without relying on optimisation behaviour.
     std::hint::black_box(acc);
     started.elapsed().as_secs_f64()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fast_hash_is_deterministic_and_sees_size_window_bytes_and_rewrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.safetensors");
+        let window = FAST_HASH_WINDOW as usize;
+        let size = 5 * window;
+        let bytes: Vec<u8> = (0..size).map(|i| (i * 31 % 251) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let files = [path.clone()];
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        // Writes `content` and puts the modification time back to `when`.
+        let write_at = |content: &[u8], when: std::time::SystemTime| {
+            std::fs::write(&path, content).unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+            hash_files_fast(&files).unwrap()
+        };
+
+        let first = hash_files_fast(&files).unwrap();
+        assert!(
+            first.starts_with("fast-") && first.len() == 5 + 64,
+            "{first}"
+        );
+        assert_eq!(hash_files_fast(&files).unwrap(), first, "deterministic");
+        assert_ne!(
+            first[5..],
+            hash_files(&files).unwrap(),
+            "not the full SHA-256"
+        );
+
+        let flip = |offset: usize| {
+            let mut copy = bytes.clone();
+            copy[offset] ^= 1;
+            copy
+        };
+        // Same size and modification time: a byte of a window is seen...
+        for offset in [0, size / 2, size - 1] {
+            assert_ne!(write_at(&flip(offset), mtime), first, "offset {offset}");
+        }
+        // ...a byte between two windows is not: the documented limit.
+        assert_eq!(write_at(&flip(window + 10), mtime), first);
+        assert_ne!(write_at(&bytes[..size - 1], mtime), first, "size");
+        let later = mtime + std::time::Duration::from_secs(1);
+        assert_ne!(write_at(&bytes, later), first, "rewrite");
+        assert_eq!(write_at(&bytes, mtime), first, "same bytes, same time");
+    }
 }

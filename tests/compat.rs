@@ -30,6 +30,9 @@
 //! - the decision pipeline: the subcommand `pipeline` (plan, run, status, cancel, report,
 //!   promote), the value `pipeline` of `schema --kind`, the tenth tool `surgeon_pipeline`.
 //!   Only the tool schema hash moved; no existing option, property or output changed.
+//! - the 3D view and the diff of the weight graph: `graph --baseline` and `--fast-hash`,
+//!   the value `html` of `graph --format`, the same two properties and value in
+//!   `surgeon_graph`. Only the tool schema hash moved.
 //!
 //! No entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
