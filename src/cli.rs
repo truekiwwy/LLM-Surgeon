@@ -86,6 +86,8 @@ pub enum Commands {
     Arch(ArchArgs),
     /// Decide on a patch: candidates on the Dev sets, gates, one Test Set consultation.
     Pipeline(PipelineArgs),
+    /// Weight graph: residual-stream write/read alignment with certified spectral bounds.
+    Graph(crate::graph::GraphArgs),
 }
 
 /// `surgeon pipeline`: the atomic decision on a patch (`src/pipeline`, docs/PIPELINE.md).
@@ -803,6 +805,8 @@ pub enum SchemaKind {
     Arch,
     /// JSON Schema (draft-07) of pipeline.json.
     Pipeline,
+    /// JSON Schema (draft-07) of graph.json.
+    Graph,
 }
 
 #[derive(Debug, Clone, Args)]

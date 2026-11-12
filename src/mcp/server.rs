@@ -455,6 +455,9 @@ impl<W: Write> ProgressSink for McpProgress<'_, W> {
             ProgressEvent::AutotuneForward { done, total } => {
                 (done, total, format!("forward {done}/{total}"))
             }
+            ProgressEvent::GraphNode { id, done, total } => {
+                (done, total, format!("{id} ({done}/{total})"))
+            }
             // llama-perplexity announces its total late, or never: `total` is then omitted.
             ProgressEvent::BenchPplChunk { done, total } => {
                 let mut params = json!({ "progressToken": token, "progress": done, "message": format!("chunk {done}") });

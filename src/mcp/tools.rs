@@ -421,6 +421,7 @@ pub fn tool_definitions() -> Value {
     if let Some(list) = tools.as_array_mut() {
         list.extend(super::tools_p13::definitions());
         list.push(super::tools_pipeline::definition());
+        list.extend(super::tools_graph::definitions());
     }
     sorted(tools)
 }
@@ -487,6 +488,7 @@ pub fn render_schema(kind: SchemaKind) -> String {
         SchemaKind::Surgery => crate::surgery::schema::header_schema(),
         SchemaKind::Arch => crate::arch::schema(),
         SchemaKind::Pipeline => crate::pipeline::config::schema(),
+        SchemaKind::Graph => crate::graph::schema(),
     };
     let mut text = serde_json::to_string_pretty(&value).unwrap_or_default();
     text.push('\n');
@@ -497,6 +499,7 @@ pub(crate) fn is_known(name: &str) -> bool {
     TOOLS.contains(&name)
         || super::tools_p13::NAMES.contains(&name)
         || name == super::tools_pipeline::TOOL_PIPELINE
+        || super::tools_graph::NAMES.contains(&name)
 }
 
 pub(crate) struct ToolContext<'a> {
@@ -524,6 +527,7 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
             super::tools_pipeline::command_name(&arguments),
             super::tools_pipeline::call(arguments, ctx),
         ),
+        super::tools_graph::TOOL_GRAPH => super::tools_graph::call(arguments, ctx),
         _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);

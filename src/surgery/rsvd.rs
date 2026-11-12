@@ -71,6 +71,11 @@ pub struct Rsvd {
     pub rel_error: f64,
     /// `sum(s^2) / ||A||_F^2`.
     pub energy: f64,
+    /// `||A||_F`, from the first streaming pass.
+    pub frob_norm: f64,
+    /// `||Q^T A||_F^2 / ||A||_F^2`: energy captured by the randomized range,
+    /// `1 - residual_energy`. This is the certificate used by `surgeon graph`.
+    pub range_energy: f64,
 }
 
 /// A matrix that can be streamed by rows (e.g. `tuned - base` computed on the fly).
@@ -116,6 +121,8 @@ pub fn rsvd(a: &dyn RowSource, p: &RsvdParams, cancel: &AtomicBool) -> Result<Rs
             v: vec![0.0; r * n],
             rel_error: 0.0,
             energy: 0.0,
+            frob_norm: 0.0,
+            range_energy: 0.0,
         });
     }
     orthonormalize(&mut q, m, k)?;
@@ -127,6 +134,9 @@ pub fn rsvd(a: &dyn RowSource, p: &RsvdParams, cancel: &AtomicBool) -> Result<Rs
     }
     // z = B^T (n x k); G = B B^T = z^T z, summed over j in index order.
     let z = src.transpose_mul(&q, k)?;
+    // ||Q^T A||_F^2 = ||A^T Q||_F^2 = ||z||_F^2, the energy of A captured by the
+    // randomized range. The sum is in index order, so it is thread-count independent.
+    let range2: f64 = z.iter().map(|x| x * x).sum();
     let mut gram = vec![0.0; k * k];
     for zrow in z.chunks_exact(k) {
         for i in 0..k {
@@ -209,6 +219,8 @@ pub fn rsvd(a: &dyn RowSource, p: &RsvdParams, cancel: &AtomicBool) -> Result<Rs
         v,
         rel_error: (residual2 / frob2).sqrt(),
         energy: (captured2 / frob2).min(1.0),
+        frob_norm: frob2.sqrt(),
+        range_energy: (range2 / frob2).clamp(0.0, 1.0),
     })
 }
 

@@ -8,6 +8,7 @@ pub mod cli;
 pub mod engine;
 pub mod eval;
 pub mod extract;
+pub mod graph;
 pub mod hardware;
 pub mod linalg;
 pub mod mcp;

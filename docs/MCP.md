@@ -17,7 +17,7 @@ surgeon mcp --allow-dir /modeles --allow-dir /directions --read-only
 | Option | Effet |
 | --- | --- |
 | `--allow-dir <dossier>` | Dossier autorisé, répétable. Défaut : `$SURGEON_MCP_ALLOW_DIRS` (séparateur du système : `;` sous Windows, `:` ailleurs), sinon le dossier courant. |
-| `--read-only` | Refuse `surgeon_apply`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en mode `dump`, `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora` (les deux modes) et les actions `start`, `cancel`, `promote_patch` de `surgeon_pipeline` (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out` reste permis. |
+| `--read-only` | Refuse `surgeon_apply`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en mode `dump`, `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora` (les deux modes), `surgeon_graph` avec `out_dir` ou `cache_dir` et les actions `start`, `cancel`, `promote_patch` de `surgeon_pipeline` (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out` et `surgeon_graph` sans sortie restent permis. |
 | `--allow-no-backup` | Respecte `backup: false` dans un patch. Sans cette option, la sauvegarde est imposée. |
 
 `$LLAMA_CPP_DIR`, défini par l'opérateur, sert de dossier llama.cpp par défaut pour
@@ -55,6 +55,7 @@ Claude Code, en plugin : le dossier [`plugin/`](../plugin) déclare le même ser
 | `surgeon_diff` | Différence de deux checkpoints, approximée à rang `r`, écrite dans un `.surgery` neuf | écrit un fichier, non destructif, idempotent |
 | `surgeon_lora` | `mode` `merge` (fusionne un adaptateur LoRA en place) ou `extract` (écrit un adaptateur) | destructif |
 | `surgeon_pipeline` | Décision atomique sur un patch : `action` `plan`, `start`, `status`, `cancel`, `report`, `promote_patch` ([PIPELINE.md](PIPELINE.md)) | non destructif (copie de travail, modèle d'origine jamais écrit) |
+| `surgeon_graph` | Graphe orienté des écritures/lectures du flux résiduel, avec bornes spectrales certifiées ; synthèse bornée sans `out_dir`, fichiers avec | écrit seulement avec `out_dir` ou `cache_dir`, non destructif, idempotent |
 
 Les schémas exacts : `surgeon schema --kind tools`. Le format du patch :
 `surgeon schema` (JSON Schema draft-07, sans `$ref`).
@@ -442,6 +443,43 @@ Succès de `extract` (le dossier de `out` doit déjà exister ; un `out` existan
 {"command":"lora extract","data":{"lora":{"config":"<MODELS_DIR>/ex2/adapter_config.json","dtype":"f32","mean_rel_error":4.325878840151349e-8,"out":"<MODELS_DIR>/ex2/adapter_model.safetensors","per_tensor":[{"energy":0.9999999737902472,"name":"model.layers.0.mlp.down_proj.weight","rel_error":4.455349812212725e-8},{"energy":0.9999999835510746,"name":"model.layers.0.mlp.up_proj.weight","rel_error":3.924179396550512e-8}],"rank":4,"tensors":6,"warnings":[]},"warnings":[]},"error":null,"exit_code":0,"ok":true,"warnings":[]}
 ```
 
+## Graphe de poids (`surgeon_graph`)
+
+Équivalent de `surgeon graph` : un nœud par matrice du flux résiduel, une arête de chaque
+écriture vers les lectures strictement postérieures, avec alignement de sous-espaces,
+couplage, angle principal, bornes certifiées de `sigma1`, de `D_spec` et du rang effectif
+énergétique, kurtosis et canaux outliers. Aucun passage avant. Le détail des formules et
+du schéma est dans [docs/GRAPH.md](GRAPH.md).
+
+| Champ | Défaut | Rôle |
+| --- | --- | --- |
+| `model` | requis | `.safetensors`, dossier shardé ou `.gguf`, dans un dossier autorisé |
+| `out_dir` | absent | Écrit `graph.json`, `graph.dot`, `graph.mmd`, `matrices.csv`, `edges.csv` ; absent : synthèse bornée seulement, aucun fichier |
+| `format` | `["json"]` | `json`, `dot`, `mmd`, `csv` |
+| `layers`, `matrices` | tout | Filtres de couches (`0`, `1-3`, `0,2,4`, `all`) et de matrices (`q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head`) |
+| `rank`, `oversample`, `power_iters`, `seed` | 32, 10, 3, 0 | SVD randomisé ; même graine, mêmes nombres |
+| `full_spectrum_max_dim` | 2048 | Spectre exact pour `min(m,n)` jusqu'à cette valeur (0 désactive ; plafonds 1024 et `m*n <= 4_000_000`) |
+| `edges` | `adjacent` | `adjacent`, `all` ou `topk:N` |
+| `min_alignment`, `edge_weight` | 0, `alignment` | Filtre d'alignement brut et poids (`alignment` ou `coupling`) |
+| `vector` | absent | Vecteur JSON ou `.bin` f32 pour `e_write`/`e_read` |
+| `kurtosis_threshold`, `color_scale`, `palette` | 10, `quantile`, `diverging` | Seuil d'outlier et rendu DOT/Mermaid |
+| `max_nodes`, `cache_dir`, `no_cache`, `resume`, `estimate`, `jobs`, `overwrite` | | Mêmes sémantiques qu'en CLI |
+| `max_seconds` | absent | Plafond wall-clock ; au-delà, `error.kind = "cancelled"` et aucun fichier |
+
+Sans `out_dir`, `data` est une synthèse bornée : `model`, `parameters`, `global`, au plus
+200 entrées de `nodes`, au plus 20 `top_edges`, `outputs` et `truncated`. Le graphe complet
+n'est jamais renvoyé en ligne ; il faut `out_dir` et lire `graph.json` (schéma :
+`surgeon schema --kind graph`). Avec `--read-only`, un appel sans `out_dir` ni `cache_dir`
+reste autorisé (lecture seule) ; fournir l'un des deux donne `error.kind = "read_only"`
+avant toute écriture. Tous les chemins (`model`, `out_dir`, `cache_dir`, `vector`) passent
+par le bac à sable `--allow-dir`.
+
+Exemple d'appel sans écriture :
+
+```json
+{"name": "surgeon_graph", "arguments": {"model": "qwen2-mini", "rank": 8, "edges": "topk:2"}}
+```
+
 ## Garde-fous communs aux deux outils
 
 - Tous les chemins (`base`, `tuned`, `out`, `model`, `lora`, `adapter_config`, `backup_dir`,
@@ -475,7 +513,8 @@ Serveur lancé avec `--read-only` :
 - **Chemins confinés** : chaque chemin (modèle, prompts, `vector_file`, `backup_dir`,
   `export_gguf`, `llama_cpp_dir`, `base_dir`, `out` de l'extraction, pour `surgeon_bench`
   `before`, `after`, `text`, `dataset`, `prompts`, `baseline_model`, `out`, et pour
-  `surgeon_autotune` `vector`, `eval_dataset`, `out`)
+  `surgeon_autotune` `vector`, `eval_dataset`, `out`) ; pour `surgeon_graph`, `model`,
+  `out_dir`, `cache_dir` et `vector`.
   est résolu par le système (liens symboliques, `..`) et doit tomber sous un dossier
   autorisé, sinon `error.kind = "path_not_allowed"`, sans révéler la cible.
 - **Sauvegarde imposée** avant toute écriture, vérifiée par SHA-256 ; une sauvegarde ratée

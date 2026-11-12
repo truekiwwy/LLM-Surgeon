@@ -19,6 +19,8 @@
 //!   `arch_spec` of `surgeon_inspect`. The `inspect` output hash moved by its additive
 //!   `data.arch` object, the tool schema hash by the new properties; every extraction file
 //!   (the Qwen2 forward, refactored) is byte for byte what it was.
+//! - the weight graph: the subcommand `graph`, `schema --kind graph` and the tool
+//!   `surgeon_graph`, all additive (no existing command, option or output changed).
 //! - sampling, batching and the llama-server backend: twelve generation options of `bench
 //!   eval` and `bench refusal` (`--temperature` to `--ctx-size`), `bench refusal
 //!   --backend`, the values `llama-completion` and `llama-server` of `--backend` (the old
@@ -67,7 +69,7 @@ use weight_surgeon::cli::Cli;
 /// Subcommands added after the references, each one purely additive, with the reason.
 /// Empty since the references were rewritten for the steering extensions (`o_proj` and
 /// `embed_tokens` patch targets, `bench refusal`, `bench eval --backend`): they now
-/// include `plugins`, the former entry.
+/// include `plugins`, the former entry, and `graph` (`surgeon graph`, `schema --kind graph`).
 const ADDITIVE_SUBCOMMANDS: [&str; 0] = [];
 
 fn fixture(name: &str) -> PathBuf {
@@ -199,7 +201,7 @@ fn mcp_tools_surface() -> Value {
 #[test]
 fn mcp_tools_surface_is_unchanged() {
     let current = mcp_tools_surface();
-    assert_eq!(current.as_array().unwrap().len(), 10, "ten MCP tools");
+    assert_eq!(current.as_array().unwrap().len(), 11, "eleven MCP tools");
     let reference = read_fixture("mcp_tools_surface.json");
     assert!(
         current == reference,

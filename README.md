@@ -689,7 +689,7 @@ surgeon schema [OPTIONS]
 
 | Option | Default | Role |
 | --- | --- | --- |
-| `--kind` | `patch` | `patch` (schema of `patch.json`), `tools` (the tool definitions exactly as `tools/list` returns them), `surgery` (schema of the `.surgery` header), `arch` (schema of an architecture spec, `--arch-spec`), `pipeline` (schema of `pipeline.json`). |
+| `--kind` | `patch` | `patch` (schema of `patch.json`), `tools` (the tool definitions exactly as `tools/list` returns them), `surgery` (schema of the `.surgery` header), `arch` (schema of an architecture spec, `--arch-spec`), `pipeline` (schema of `pipeline.json`), `graph` (schema of `graph.json`). |
 
 ```bash
 # the five schemas, as raw JSON
@@ -698,6 +698,7 @@ surgeon schema --kind tools
 surgeon schema --kind surgery
 surgeon schema --kind arch
 surgeon schema --kind pipeline
+surgeon schema --kind graph
 ```
 
 <a id="cmd-autotune"></a>
@@ -1512,6 +1513,65 @@ surgeon pipeline run --config pipeline.json --job-dir job2
 erreur : Test Set déjà consulté (registre des accès) : seconde consultation refusée ; --allow-test-reuse (ligne de commande) la permet et marque le rapport comme contaminé
 ```
 
+<a id="cmd-graph"></a>
+#### `surgeon graph`
+
+Turns the matrices of the residual stream into a causal weighted graph: writers (`embed_tokens`, `o_proj`, `down_proj`) point to readers that execute strictly later (`q/k/v`, `gate/up`, `lm_head`). Each node gets a randomized-SVD subspace, certified bounds for `sigma1`, the stable rank and the energy-entropy effective rank, streaming kurtosis and channel outliers. No forward pass, no activation. Two runs with the same arguments and seed give byte-identical files, whatever `--jobs` says. Full formulas, schema and limits: [docs/GRAPH.md](docs/GRAPH.md).
+
+```text
+surgeon graph [OPTIONS] --model <MODEL>
+```
+
+| Option | Default | Role |
+| --- | --- | --- |
+| `--model` | required | `.safetensors` file, sharded folder or `.gguf`. |
+| `--out-dir` | none | Output folder; without it only a bounded summary is returned and nothing is written. |
+| `--format` | `json` | `json`, `dot`, `mmd`, `csv`, comma-separated. |
+| `--layers` | `all` | `all`, a range `1-3`, or a list `0,2,4`. |
+| `--matrices` | every graph role | `q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head`; repeatable or comma-separated. |
+| `--rank` | 32 | Target rank of the randomized SVD (at least 1). |
+| `--oversample` | 10 | Extra random columns of the subspace. |
+| `--power-iters` | 3 | Power iterations of the randomized SVD (0 to 64). |
+| `--seed` | 0 | SVD seed; same seed, same bytes. |
+| `--full-spectrum-max-dim` | 2048 | Largest `min(m,n)` for the exact spectrum (0 disables it; capped at 1024 and `m*n <= 4_000_000`). |
+| `--edges` | `adjacent` | `adjacent`, `all` or `topk:N` (adjacent edges plus the `N` strongest long-range edges of each writer). |
+| `--min-alignment` | 0 | Smallest raw alignment kept; 0 keeps everything. |
+| `--edge-weight` | `alignment` | `alignment` or `coupling`. |
+| `--vector` | none | Residual vector (JSON `[f32]` or raw f32 `.bin`) for `e_write`/`e_read`. |
+| `--kurtosis-threshold` | 10 | Per-channel kurtosis above which a channel is an outlier (finite, > 0). |
+| `--color-scale` | `quantile` | Edge colour scale: `quantile`, `log` or `linear`. |
+| `--palette` | `diverging` | `diverging` or `cb-safe`. |
+| `--max-nodes` | none | Largest matrices only, up to this many. |
+| `--cache-dir` | none | JSONL cache folder (cache off by default). |
+| `--no-cache` | off | Neither read nor write the cache; incompatible with `--cache-dir`. |
+| `--resume` | off | Reuse a partial cache; requires `--cache-dir`. |
+| `--estimate` | off | Estimate passes, bytes and time without running the SVDs or writing. |
+| `--jobs` | 0 | Local Rayon threads (0: the global pool). |
+| `--overwrite` | off | Replace existing outputs. |
+
+`data` is a bounded summary: `model`, `parameters`, `global`, at most 200 `nodes`, at most 20 `top_edges`, `outputs` and `truncated`; the complete graph is only in `graph.json`. Exit codes: 2 invalid input or existing output without `--overwrite`, 7 computation failure, 1 cancellation.
+
+```bash
+# write the four formats on the fake mini-model, exact spectra up to 64
+surgeon graph --model qwen2-mini --out-dir graph-demo --format json,dot,mmd,csv \
+  --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64
+```
+
+```text
+[GRAPH]    qwen2-mini · 30 matrices · rang 8
+[EDGES]    30 nœuds · 45 arêtes
+[GRAPH]    5 fichiers écrits
+[GRAPH]    30 nœuds · 45 arêtes · 0.0 s
+surgeon graph · 30 matrices · 45 edges
+[...]
+outputs:
+  graph-demo\graph.json
+  graph-demo\graph.dot
+  graph-demo\graph.mmd
+  graph-demo\matrices.csv
+  graph-demo\edges.csv
+```
+
 <a id="patch-format"></a>
 ### 3.3 `patch.json` and the `rows` / `cols` axes
 
@@ -1915,7 +1975,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 <a id="tools"></a>
 ### 4.2 Tools
 
-`surgeon mcp` serves ten tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
+`surgeon mcp` serves eleven tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
 
 | Tool | Role |
 | --- | --- |
@@ -1929,6 +1989,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 | `surgeon_diff` | Difference of two checkpoints written to a new `.surgery`. |
 | `surgeon_lora` | `mode` `merge` (adapter folded in place) or `extract` (adapter written). |
 | `surgeon_pipeline` | Decision on a patch: `action` `plan`, `start` (background worker, returns a `job_id` at once), `status`, `cancel`, `report`, `promote_patch` ([docs/PIPELINE.md](docs/PIPELINE.md)). |
+| `surgeon_graph` | Residual-stream write/read graph with certified spectral bounds; bounded summary, or files with `out_dir`. |
 
 A real session on the fake model: the client sends `initialize`, `notifications/initialized`, then a `tools/call`. The server writes one line on stderr, then answers on stdout (the `initialize` answer is left out, and the answer line is cut):
 
@@ -1949,7 +2010,7 @@ The first call (`surgeon_check` on `qwen2-mini`) succeeds; the second asks for `
 ### 4.3 Guardrails
 
 - `--allow-dir` (repeatable, else `SURGEON_MCP_ALLOW_DIRS`, else the current folder): every path is resolved by the system (symbolic links, `..`) and must fall under an allowed folder; relative paths are relative to the first one.
-- `--read-only`: refuses every tool that writes (`surgeon_apply`, `surgeon_extract`, GGUF exports, `surgeon_bench` in `dump` mode, `surgeon_autotune` with `out`, `surgeon_diff`, `surgeon_lora`, `surgeon_pipeline` `start`, `cancel` and `promote_patch`).
+- `--read-only`: refuses every tool that writes (`surgeon_apply`, `surgeon_extract`, GGUF exports, `surgeon_bench` in `dump` mode, `surgeon_autotune` with `out`, `surgeon_diff`, `surgeon_lora`, `surgeon_graph` with `out_dir` or `cache_dir`, `surgeon_pipeline` `start`, `cancel` and `promote_patch`).
 - Backup imposed: a verified SHA-256 backup precedes any write, and a failed backup blocks the write. `backup: false` in a patch is honored only with `--allow-no-backup`.
 - Cancellation: `notifications/cancelled` stops the running call, rolls back a partial patch and kills the running llama.cpp process; a cancelled extraction or dump leaves no file.
 - Progress: with a `progressToken`, a `notifications/progress` is sent per tensor, prompt or chunk.

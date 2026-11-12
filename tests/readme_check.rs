@@ -232,9 +232,11 @@ fn nested_bench_commands_and_mcp_tool_count_are_checked() {
     let count = tools.as_array().unwrap().len();
     let words = [
         "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven",
     ];
     let mots = [
         "zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf", "dix",
+        "onze",
     ];
     let (en, fr) = (read("README.md"), read("README.fr.md"));
     assert!(
