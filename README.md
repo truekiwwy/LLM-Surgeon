@@ -1135,7 +1135,7 @@ Without these options, `bench eval` and `bench refusal` print and write what the
 
 **GPU.** Whether `llama-server` uses a GPU depends on how llama.cpp was built (CUDA, Vulkan, HIP, Metal) and on `--gpu-layers`; surgeon itself stays on the CPU (its candle backend has no GPU feature, on purpose). To check the offload, run the server once by hand with the same model and `-ngl`: its log prints a line such as `load_tensors: offloaded 25/25 layers to GPU`, and `GET /props` reports its settings; when a run fails, surgeon puts the tail of the server's stderr in the error. GPU runs are not reproducible bit for bit, even at temperature 0 (the order of the kernels' reductions varies): compare rates with their intervals, not answers byte for byte.
 
-The `llama-server` backend is tested against `examples/fake_llama_server.rs` (health, slots, API key, streaming, timeouts, a server that dies, a taken port, the kill), not against a real llama.cpp, which this repository's tests do not install.
+The `llama-server` backend is tested against `examples/fake_llama_server.rs` (health, slots, API key, streaming, timeouts, a server that dies, a taken port, the kill), not against a real llama.cpp, which this repository's tests do not install. One real run, on Vulkan, is documented in [the validation report](docs/validation/qwen2.5-0.5b-validation.md).
 
 ```bash
 # three sampled answers per prompt, decoded four at a time in two parallel batches
@@ -2090,8 +2090,11 @@ llama.cpp is optional and never bundled. It is used only by `eval` and `bench pp
 | `eval --export-gguf` | `convert_hf_to_gguf.py` (or the legacy `convert-hf-to-gguf.py`) and its Python requirements, then `llama-quantize` (or `quantize`) |
 | `bench ppl` | `llama-perplexity` (or the older `perplexity`) |
 | `bench eval` | `llama-completion`, else `llama-cli` |
+| `bench eval --backend llama-server` | `llama-server` |
 
 Search order: the folder given by `--llama-cpp-dir`, then the folder of the `LLAMA_CPP_DIR` environment variable (in both, the sub-folders `build/bin`, `build/bin/Release` and `build` are tried too), then the folders of `PATH`.
+
+A SafeTensors folder given to a llama.cpp backend is converted to a temporary GGUF. With a `--llama-cpp-dir` that holds `convert_hf_to_gguf.py` that script does it (any supported architecture, Python required). Otherwise, for a Qwen2 model, `surgeon` converts it itself in pure Rust (f16 matrices, f32 norms and biases, the vocabulary of `tokenizer.json`): no Python, so the prebuilt binaries-only releases work.
 
 ```bash
 # bash: pass the folder once per command, or export it for the session
@@ -2105,6 +2108,15 @@ $env:LLAMA_CPP_DIR = "$env:USERPROFILE\llama.cpp"
 ```
 
 Through MCP the operator sets `LLAMA_CPP_DIR` for the server; the agent does not choose it.
+
+**GPU on Windows (Vulkan, AMD or any Vulkan 1.2 card).** Download the `llama-<build>-bin-win-vulkan-x64.zip` asset of a [llama.cpp release](https://github.com/ggml-org/llama.cpp/releases) into `%USERPROFILE%\tools\llama-vulkan`, outside any repository, point `LLAMA_CPP_DIR` at it for the session (`$env:LLAMA_CPP_DIR = "$env:USERPROFILE\tools\llama-vulkan"`) or pass `--llama-cpp-dir`, check that the card is listed and run the bench:
+
+```powershell
+& "$env:LLAMA_CPP_DIR\llama-server.exe" --list-devices
+surgeon bench eval --model C:\models\Qwen2.5-0.5B-Instruct --dataset gsm_dev.jsonl --backend llama-server --gpu-layers 99
+```
+
+`--gpu-layers 99` offloads every layer. Measured on a Radeon RX 7600 XT (16 GB), Qwen2.5-0.5B-Instruct, 30 GSM8K questions of 256 tokens: 17 min 02 s on the CPU, 39 s on the GPU, the same 26/30 ([details](docs/validation/qwen2.5-0.5b-validation.md)). `surgeon pipeline` has no backend option: it stays on the native CPU generator.
 
 <a id="architecture"></a>
 ### 4.7 Architecture and plugins

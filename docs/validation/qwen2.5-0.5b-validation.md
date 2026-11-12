@@ -391,3 +391,57 @@ modèle (item-2, item-24). Le score rejoint la relecture manuelle (26/30).
 existants de l'extracteur passent sans modification. `cargo test` : 870 réussis, 0 échec,
 9 ignorés ; `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` et
 `deps_purity` au vert, aucune dépendance ajoutée.
+
+## 11. Addendum du 2026-11-12 : GPU Vulkan (Radeon RX 7600 XT)
+
+Branche `feat/gpu-vulkan-backend`. Même Dev GSM (`gsm_dev.jsonl`, n = 30, SHA-256
+`509ce6af...`), même gabarit ChatML (`gsm_chatml.tmpl`, SHA-256 `938d4b71...`), 256 tokens,
+glouton (`--temperature 0 --seed 42`), extraction ÉCART-1 fusionnée.
+
+**Machine et runtime.** Intel Core i5-12400F, AMD Radeon RX 7600 XT (16 Go, RDNA 3, pilote
+AMD propriétaire 26.10.1), Windows 11. `llama-server` b12329 (`ggml-org/llama.cpp`, release
+`win-vulkan-x64`) décompressé dans `C:\Users\<utilisateur>\tools\llama-vulkan`, hors dépôt, désigné par
+`LLAMA_CPP_DIR`.
+`llama-server --list-devices` : `Vulkan0: AMD Radeon RX 7600 XT (16368 MiB)`.
+
+**Chaîne.** Le dossier SafeTensors est converti par `surgeon` lui-même (Rust pur, f16, environ
+une seconde) en GGUF temporaire, à côté du modèle, supprimé à la fin ; `llama-server -ngl 99`
+est démarré puis arrêté par le bench. La machine n'a pas de Python : le script
+`convert_hf_to_gguf.py` n'a pas servi. Pendant un run, 80 à 88 % de calcul GPU (compteurs
+Windows `GPU Engine`), jamais de repli CPU.
+
+```bash
+surgeon bench eval --model C:/models/Qwen2.5-0.5B-Instruct \
+  --dataset .jobs/qwen-test/data/gsm_dev.jsonl --backend llama-server --gpu-layers 99 \
+  --limit 30 --max-new-tokens 256 --prompt-template @.jobs/qwen-test/data/gsm_chatml.tmpl \
+  --temperature 0 --seed 42 --json
+```
+
+| Mesure | CPU i5-12400F (natif, bf16) | GPU RX 7600 XT (Vulkan, `--batch-size 1`) | GPU (`--batch-size 6`) |
+| --- | --- | --- | --- |
+| Durée de la commande | 1022 s (17 min 02 s) | 38,9 s (34,9 à 38,5 s de génération sur 4 runs) | 16,9 s |
+| Gain | 1x | 26x | 60x |
+| Exactitude | 26/30 = 0,867 (23/30 avant ÉCART-1) | 26/30 = 0,867 [0,703 ; 0,947] | 26/30 |
+| Boucles détectées | 0 | 0 | 0 |
+| Réponses coupées par le budget | 3 (item-9, 11, 18) | 3 (item-9, 11, 18) | 3 |
+| Échecs | item-2, 9, 11, 24 | item-2, 9, 11, 24 | item-2, 9, 11, 24 |
+
+Le chiffre CPU de 26/30 est le rejugement hors ligne de la section 10 (la mesure de 1022 s
+date d'avant ÉCART-1 et donnait 23/30). Les trois extractions qui diffèrent du rapport CPU
+(item-3, item-10, item-29) sont exactement celles que ÉCART-1 corrige.
+
+**Écarts de précision.** Les poids passent de bf16 (CPU) à f16 (GGUF) et les noyaux Vulkan
+somment dans un autre ordre. Sur 30 items, 29 extraits de 200 caractères sont identiques à
+ceux du CPU ; item-16 diverge dès la 13e lettre (« total length of the fence » contre « how
+many meters of fence ») et aboutit à la même réponse, 38. Quatre runs `--batch-size 1` sont
+identiques entre eux ; `--batch-size 6` (deux runs) donne les mêmes sorties et extractions
+que `--batch-size 1` (pas une garantie : l'ordre des réductions dépend du lot).
+
+**Intégrité.** SHA-256 de tous les fichiers de `C:\models\Qwen2.5-0.5B-Instruct` identiques
+avant et après les runs.
+
+**Changements de code.** Conversion SafeTensors vers GGUF pour Qwen2 en Rust pur
+(`src/eval/safetensors_gguf.rs`, utilisée quand le dossier llama.cpp ne contient pas
+`convert_hf_to_gguf.py`) ;
+`truncated` renseigné pour `llama-server` (`stop_type: "limit"`), alors qu'il valait toujours
+`false`. `surgeon pipeline` reste sur le backend natif : ses piliers n'ont pas d'option de backend.

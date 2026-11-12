@@ -188,7 +188,7 @@ fn completions_stream_and_carry_the_sampling() {
         .unwrap();
     assert_eq!(out.text, "Adding the numbers step by step.\n#### 42");
     assert_eq!(chunks.len(), 7, "one event per word: {chunks:?}");
-    assert!(!out.stopped_early);
+    assert!(!out.stopped_early && !out.truncated);
     // Greedy: the seed of the decoding, temperature 0.
     assert!(g.configure(&Decoding::greedy(1234, None)));
     whole(&mut g, "x").unwrap();
@@ -222,6 +222,10 @@ fn completions_stream_and_carry_the_sampling() {
         .generate("Problem: 1", 3, &mut |_| ControlFlow::Continue(()))
         .unwrap();
     assert_eq!(short.text, "Adding the numbers ");
+    assert!(
+        short.truncated,
+        "the budget ran out before the end of the answer"
+    );
 }
 
 #[test]

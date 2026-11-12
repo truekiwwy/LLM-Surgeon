@@ -250,6 +250,11 @@ fn complete(stream: &mut TcpStream, state: &State, body: &[u8]) -> std::io::Resu
     let words = request["n_predict"].as_u64().unwrap_or(u64::MAX) as usize;
     let answer = answer(prompt);
     let pieces: Vec<&str> = answer.split_inclusive(' ').take(words).collect();
+    let stop_type = if pieces.concat().len() < answer.len() {
+        "limit"
+    } else {
+        "eos"
+    };
     if request["stream"].as_bool() != Some(true) {
         let reply = json!({"content": pieces.concat(), "stop": true});
         return respond(stream, "200 OK", &reply.to_string());
@@ -266,7 +271,7 @@ fn complete(stream: &mut TcpStream, state: &State, body: &[u8]) -> std::io::Resu
         let event = json!({"content": piece, "stop": false});
         chunk(stream, &format!("data: {event}\n\n"))?;
     }
-    let last = json!({"content": "", "stop": true, "tokens_predicted": pieces.len()});
+    let last = json!({"content": "", "stop": true, "stop_type": stop_type, "tokens_predicted": pieces.len()});
     chunk(stream, &format!("data: {last}\n\n"))?;
     write!(stream, "0\r\n\r\n")?;
     stream.flush()

@@ -9,6 +9,7 @@ use super::command::{last_lines, CommandRunner};
 use super::error::{EvalError, Result};
 use super::generator::find_binary;
 use super::runner::{EvalReport, EvalVerdict};
+use super::safetensors_gguf::{convert_qwen2, is_qwen2_dir, WeightType};
 
 /// Types accepted by `llama-quantize`. Anything else is refused before any command runs.
 pub const ALLOWED_QUANTS: [&str; 17] = [
@@ -284,8 +285,10 @@ pub fn model_dir(model: &Path) -> PathBuf {
 
 /// `.gguf` as is; otherwise one unquantized f16 conversion to
 /// `<model dir>/.weight-surgeon-<tag>-<pid>.gguf`, next to the model because an f16 copy
-/// can be tens of GB, often too big for the temporary directory. Without `llama_cpp_dir`
-/// the conversion is refused with [`LLAMA_DIR_REQUIRED`].
+/// can be tens of GB, often too big for the temporary directory. With a llama.cpp checkout
+/// holding `convert_hf_to_gguf.py` that script converts; otherwise a Qwen2 model goes through
+/// the pure Rust converter (a binaries-only build such as the Vulkan release, no python), and
+/// any other model is refused with [`LLAMA_DIR_REQUIRED`].
 pub fn ensure_gguf(
     model: &Path,
     llama_cpp_dir: Option<&Path>,
@@ -298,13 +301,18 @@ pub fn ensure_gguf(
             temporary: false,
         });
     }
-    let llama_cpp_dir =
-        llama_cpp_dir.ok_or_else(|| EvalError::InvalidConfig(LLAMA_DIR_REQUIRED.into()))?;
     let model_dir = model_dir(model);
     let file = GgufModel {
         path: model_dir.join(format!(".weight-surgeon-{tag}-{}.gguf", std::process::id())),
         temporary: true,
     };
+    let has_script = llama_cpp_dir.is_some_and(|d| CONVERTERS.iter().any(|c| d.join(c).is_file()));
+    if !has_script && is_qwen2_dir(&model_dir) {
+        convert_qwen2(&model_dir, &file.path, WeightType::F16)?;
+        return Ok(file);
+    }
+    let llama_cpp_dir =
+        llama_cpp_dir.ok_or_else(|| EvalError::InvalidConfig(LLAMA_DIR_REQUIRED.into()))?;
     let cfg = GgufExportConfig {
         llama_cpp_dir: llama_cpp_dir.to_path_buf(),
         model_dir,

@@ -12,7 +12,8 @@
 //!           generator -> command (drain_tail, last_lines, spawn_error), error
 //!           prompts -> error
 //!           runner -> generator (TextGenerator), loop_detector, prompts, error
-//!           gguf -> command (CommandRunner), generator (find_binary), runner (EvalReport)
+//!           gguf -> command (CommandRunner), generator (find_binary), runner (EvalReport),
+//!                   safetensors_gguf (pure Rust Qwen2 conversion, no python)
 //! run_eval -> LoopDetector::reset -> TextGenerator::generate -> on_chunk
 //!          -> LoopDetector::push -> step -> check_marker | check_period | feed_word | feed_line
 //!          -> ControlFlow::Break on Loop -> check_expectations -> verdict
@@ -47,6 +48,7 @@ mod http;
 mod loop_detector;
 mod prompts;
 mod runner;
+mod safetensors_gguf;
 pub mod sampling;
 pub mod server;
 
@@ -64,6 +66,7 @@ pub use gguf::{
 pub use loop_detector::{LoopDetector, LoopDetectorConfig, LoopReason, LoopVerdict};
 pub use prompts::{load_prompts, EvalPrompt};
 pub use runner::{run_eval, EvalConfig, EvalReport, EvalVerdict, PromptResult, PromptStatus};
+pub use safetensors_gguf::{convert_qwen2, WeightType};
 
 /// Longest prefix of at most `max_chars` characters; never splits a multi-byte character.
 pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> &str {

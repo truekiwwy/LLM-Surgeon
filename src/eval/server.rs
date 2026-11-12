@@ -413,14 +413,15 @@ fn request_body(p: &SamplingParams, seed: u32, job: &GenJob, max_new_tokens: u32
 }
 
 /// One streamed completion: every `content` to `on_content` (`false` stops and drops the
-/// connection). Returns the text and whether it was stopped.
+/// connection). Returns the text, whether it was stopped, and whether the server ended it on
+/// the token budget (`stop_type: "limit"`).
 fn complete(
     port: u16,
     api_key: &str,
     body: &str,
     timeout: Duration,
     on_content: &mut dyn FnMut(&str) -> bool,
-) -> std::result::Result<(String, bool), HttpError> {
+) -> std::result::Result<(String, bool, bool), HttpError> {
     let started = Instant::now();
     let (_, events) = http::request(
         port,
@@ -432,6 +433,7 @@ fn complete(
     )?;
     let mut text = String::new();
     let mut stopped = false;
+    let mut limit = false;
     events.events(&mut |data| {
         if started.elapsed() > timeout {
             return Err(HttpError::Timeout);
@@ -449,9 +451,10 @@ fn complete(
                 return Ok(false);
             }
         }
+        limit |= event.get("stop_type").and_then(Value::as_str) == Some("limit");
         Ok(!event.get("stop").and_then(Value::as_bool).unwrap_or(false))
     })?;
-    Ok((text, stopped))
+    Ok((text, stopped, limit))
 }
 
 enum Event {
@@ -481,14 +484,15 @@ impl TextGenerator for LlamaServerGenerator {
     ) -> Result<GenerationOutcome> {
         let started = Instant::now();
         let body = self.request_body(job, max_new_tokens);
-        let (text, stopped) = complete(self.port, &self.api_key, &body, self.timeout, &mut |c| {
-            on_chunk(c).is_continue()
-        })
-        .map_err(|e| self.failed(e))?;
+        let (text, stopped, limit) =
+            complete(self.port, &self.api_key, &body, self.timeout, &mut |c| {
+                on_chunk(c).is_continue()
+            })
+            .map_err(|e| self.failed(e))?;
         Ok(GenerationOutcome {
             text,
             stopped_early: stopped,
-            truncated: false,
+            truncated: limit,
             duration_ms: started.elapsed().as_millis(),
         })
     }
@@ -541,10 +545,10 @@ impl TextGenerator for LlamaServerGenerator {
                         let _ = tx.send(Event::Chunk(j, c.to_owned()));
                         !stops[j].load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst)
                     })
-                    .map(|(text, stopped)| GenerationOutcome {
+                    .map(|(text, stopped, limit)| GenerationOutcome {
                         text,
                         stopped_early: stopped,
-                        truncated: false,
+                        truncated: limit,
                         duration_ms: started.elapsed().as_millis(),
                     });
                     let result = result.map_err(|e| match e {

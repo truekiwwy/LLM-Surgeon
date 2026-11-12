@@ -123,8 +123,7 @@ pub struct GenerationOutcome {
     pub text: String,
     pub stopped_early: bool,
     /// The token budget ran out before an end of sequence.
-    // shortcut: only the native backend reports it (false with llama.cpp); read the
-    // stop reason of llama-server when a llama.cpp run needs the counter.
+    // shortcut: native and llama-server report it (stop_type "limit"); llama-cli never does.
     pub truncated: bool,
     pub duration_ms: u128,
 }
