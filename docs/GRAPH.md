@@ -301,8 +301,13 @@ JSON dans un bloc `<script type="application/json">`, où chaque `<` est échapp
 
 - Navigation : glisser pour l'orbite, Maj+glisser ou clic droit pour déplacer, molette
   pour le zoom, `R` ou le bouton pour revenir à la vue initiale, Échap pour désélectionner.
-- Disposition : l'axe vertical suit l'ordre causal (`seq`, `embed` en bas, `lm_head`
-  en haut) ; dans une couche, chaque rôle a son angle sur un anneau.
+- Disposition (sélecteur du panneau de gauche, bascule en direct avec animation) :
+  `Colonne par couches` (défaut) place l'axe vertical selon l'ordre causal (`seq`, `embed`
+  en bas, `lm_head` en haut), chaque rôle ayant son angle sur un anneau ; `Constellation 3D
+  (forces)` lance une simulation de forces déterministe (répulsion entre tous les nœuds,
+  attraction le long des arêtes proportionnelle au couplage, départ sur une sphère de
+  Fibonacci, sans aléatoire) : le même rapport donne toujours la même constellation. Les
+  filtres, la recherche, la vue Diff et l'inspection fonctionnent dans les deux dispositions.
 - Clic sur un nœud : dimensions, dtype, bornes certifiées de `sigma1`, du rang stable et
   du rang effectif, énergies, `e_write`/`e_read`, kurtosis, canaux outliers, arêtes les
   plus fortes et, s'il existe, son diff.

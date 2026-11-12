@@ -76,6 +76,11 @@
     <button type="button" id="view-abs" aria-pressed="true">Absolue</button>
     <button type="button" id="view-diff" aria-pressed="false">Diff (Δ)</button>
   </div>
+  <label for="layout">Disposition</label>
+  <select id="layout">
+    <option value="layers">Colonne par couches</option>
+    <option value="forces">Constellation 3D (forces)</option>
+  </select>
   <label for="color-by">Couleur des nœuds (vue absolue)</label>
   <select id="color-by">
     <option value="role">Type de module</option>
@@ -138,9 +143,11 @@
     const ring = n.role === "embed" || n.role === "lm_head" ? 0 : 3.2 + 0.45 * ((n.expert || 0) % 8);
     const angle = (ROLE_ANGLE[n.role] || 0) + 0.39 * (n.expert || 0) + 0.18 * (n.layer || 0);
     const m = n.metrics;
+    const column = [ring * Math.cos(angle), (n.seq - maxSeq / 2) * 0.9, ring * Math.sin(angle)];
     return {
       src: n, id: n.id,
-      x: ring * Math.cos(angle), y: (n.seq - maxSeq / 2) * 0.9, z: ring * Math.sin(angle),
+      // x/y/z is the position drawn now; target is where the active layout wants it.
+      home: { layers: column, forces: null }, target: column, x: column[0], y: column[1], z: column[2],
       size: Math.min(2.4, Math.max(0.45, 0.45 + 0.35 * Math.log10(1 + Math.max(0, m.frobenius_norm)))),
       erank: (m.erank_energy_lower + m.erank_energy_upper) / 2,
       diff: nodeDiff.get(n.id) || null,
@@ -169,6 +176,52 @@
   const maxRel = maxOf(nodes.map((n) => (n.diff ? Math.abs(n.diff.relative_change) : 0)));
   const maxEdgeDelta = maxOf(edges.map((e) => (e.diff ? Math.abs(e.diff.alignment_delta) : 0)));
 
+  // ---------------------------------------------------------------- constellation layout
+  // Fruchterman-Reingold in 3D: every pair repels, every edge pulls with a strength given by its
+  // spectral coupling. No random source and a fixed iteration count, so one report always gives
+  // the same constellation.
+  function computeForces() {
+    const N = nodes.length, K = 1.8, R = K * Math.cbrt(N);
+    const index = new Map(nodes.map((n, i) => [n, i]));
+    const links = edges.map((e) => [index.get(e.a), index.get(e.b),
+      e.src.structural ? 0.5 : 0.2 + 0.8 * (maxCoupling ? e.src.coupling / maxCoupling : 0)]);
+    const pos = new Float64Array(3 * N), disp = new Float64Array(3 * N);
+    // Fibonacci sphere start: distinct points, no bias toward the layer column.
+    for (let i = 0; i < N; i++) {
+      const y = N > 1 ? 1 - (2 * i) / (N - 1) : 0, r = Math.sqrt(1 - y * y), a = i * 2.399963;
+      pos.set([R * r * Math.cos(a), R * y, R * r * Math.sin(a)], 3 * i);
+    }
+    // shortcut: exact O(N^2) repulsion with a shrinking iteration budget, switch to Barnes-Hut
+    // if reports with several thousand matrices become common.
+    const iters = Math.min(300, Math.max(40, Math.floor(2e7 / (N * N))));
+    for (let it = 0; it < iters; it++) {
+      disp.fill(0);
+      for (let i = 0; i < N; i++) {
+        for (let j = i + 1; j < N; j++) {
+          const dx = pos[3 * i] - pos[3 * j], dy = pos[3 * i + 1] - pos[3 * j + 1], dz = pos[3 * i + 2] - pos[3 * j + 2];
+          const f = (K * K) / (dx * dx + dy * dy + dz * dz + 1e-6);
+          disp[3 * i] += dx * f; disp[3 * i + 1] += dy * f; disp[3 * i + 2] += dz * f;
+          disp[3 * j] -= dx * f; disp[3 * j + 1] -= dy * f; disp[3 * j + 2] -= dz * f;
+        }
+      }
+      for (const [i, j, s] of links) {
+        const dx = pos[3 * i] - pos[3 * j], dy = pos[3 * i + 1] - pos[3 * j + 1], dz = pos[3 * i + 2] - pos[3 * j + 2];
+        const f = (s * Math.hypot(dx, dy, dz)) / K;
+        disp[3 * i] -= dx * f; disp[3 * i + 1] -= dy * f; disp[3 * i + 2] -= dz * f;
+        disp[3 * j] += dx * f; disp[3 * j + 1] += dy * f; disp[3 * j + 2] += dz * f;
+      }
+      const temp = 0.1 * R * (1 - it / iters) + 0.01;
+      for (let i = 0; i < N; i++) {
+        // Weak pull to the centre keeps disconnected parts in view.
+        const gx = disp[3 * i] - 0.05 * pos[3 * i], gy = disp[3 * i + 1] - 0.05 * pos[3 * i + 1], gz = disp[3 * i + 2] - 0.05 * pos[3 * i + 2];
+        const len = Math.hypot(gx, gy, gz) || 1, step = Math.min(len, temp) / len;
+        pos[3 * i] += gx * step; pos[3 * i + 1] += gy * step; pos[3 * i + 2] += gz * step;
+      }
+    }
+    const mean = [0, 1, 2].map((k) => { let s = 0; for (let i = 0; i < N; i++) s += pos[3 * i + k]; return s / N; });
+    nodes.forEach((n, i) => { n.home.forces = [0, 1, 2].map((k) => pos[3 * i + k] - mean[k]); });
+  }
+
   // ---------------------------------------------------------------- colours
   const SEQ = [[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]];
   const rgb = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
@@ -188,15 +241,39 @@
 
   // ---------------------------------------------------------------- state
   const state = {
-    view: "abs", colorBy: "role", onlyChanged: false,
+    view: "abs", layout: "layers", colorBy: "role", onlyChanged: false,
     layerMin: 0, layerMax: Math.max(0, layers - 1), minCoupling: 0,
     query: "", selected: null, hover: null,
   };
   const cam = { yaw: 0.6, pitch: 0.35, dist: 10, tx: 0, ty: 0, tz: 0 };
   function resetCamera() {
-    const radius = Math.max(4, ...nodes.map((n) => Math.hypot(n.x, n.y, n.z)));
+    const radius = Math.max(4, ...nodes.map((n) => Math.hypot(...n.target)));
     Object.assign(cam, { yaw: 0.6, pitch: 0.35, dist: radius * 2.4, tx: 0, ty: 0, tz: 0 });
     redraw();
+  }
+
+  // Eases every node toward the target of the active layout; false once all have arrived.
+  let animating = false, lastFrame = 0;
+  function stepAnimation(now) {
+    const dt = lastFrame ? Math.min(0.05, (now - lastFrame) / 1000) : 0.016;
+    const k = 1 - Math.exp(-dt * 7);
+    lastFrame = now;
+    let moving = false;
+    for (const n of nodes) {
+      const t = n.target, dx = t[0] - n.x, dy = t[1] - n.y, dz = t[2] - n.z;
+      if (Math.hypot(dx, dy, dz) < 1e-3) { [n.x, n.y, n.z] = t; continue; }
+      n.x += dx * k; n.y += dy * k; n.z += dz * k;
+      moving = true;
+    }
+    return moving;
+  }
+  function setLayout(layout) {
+    if (layout === "forces" && nodes.length && !nodes[0].home.forces) computeForces();
+    state.layout = layout;
+    for (const n of nodes) n.target = n.home[layout];
+    animating = true; lastFrame = 0;
+    resetCamera();
+    sync();
   }
 
   function isChanged(n) { return !!(n.diff && n.diff.changed); }
@@ -265,8 +342,12 @@
     pending = true;
     requestAnimationFrame(draw);
   }
-  function draw() {
+  function draw(now) {
     pending = false;
+    if (animating) {
+      animating = stepAnimation(now);
+      if (animating) redraw();
+    }
     ctx.clearRect(0, 0, W, H);
     const pos = new Map();
     for (const n of nodes) {
@@ -416,6 +497,7 @@
   function sync() {
     $("view-abs").setAttribute("aria-pressed", String(state.view === "abs"));
     $("view-diff").setAttribute("aria-pressed", String(state.view === "diff"));
+    $("layout").value = state.layout;
     $("color-by").disabled = state.view === "diff";
     $("only-changed").disabled = state.view !== "diff";
     $("layer-text").textContent = `${state.layerMin} à ${state.layerMax}`;
@@ -429,7 +511,7 @@
   function focusNode(n) {
     if (!n) return;
     state.selected = n;
-    Object.assign(cam, { tx: n.x, ty: n.y, tz: n.z });
+    Object.assign(cam, { tx: n.target[0], ty: n.target[1], tz: n.target[2] });
     cam.dist = Math.min(cam.dist, 14);
     sync();
   }
@@ -446,7 +528,8 @@
   }
   $("view-abs").onclick = () => { state.view = "abs"; sync(); };
   $("view-diff").onclick = () => { if (diff) { state.view = "diff"; sync(); } };
-  $("color-by").onchange = (e) => { state.colorBy = e.target.value; sync(); };
+  $("layout").onchange = (e) => setLayout(e.target.value);
+  $("color-by").onchange =(e) => { state.colorBy = e.target.value; sync(); };
   $("only-changed").onchange = (e) => { state.onlyChanged = e.target.checked; sync(); };
   for (const id of ["layer-min", "layer-max"]) {
     const input = $(id);

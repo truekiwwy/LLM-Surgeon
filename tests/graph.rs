@@ -1115,7 +1115,18 @@ fn html_view_is_self_contained_and_carries_the_graph_and_its_diff() {
         assert!(!html.contains("/*GRAPH_DATA*/"), "placeholder replaced");
         let data = html_data(&html);
         assert_eq!(data, read_json(&out.join("graph.json")), "{name}");
+        // The force layout must stay reproducible and offline.
+        for forbidden in ["Math.random", "fetch(", "XMLHttpRequest", "WebSocket"] {
+            assert!(!html.contains(forbidden), "{name}: {forbidden}");
+        }
+        for layout in ["layers", "forces"] {
+            assert!(
+                html.contains(&format!("<option value=\"{layout}\"")),
+                "{layout}"
+            );
+        }
         for control in [
+            "layout",
             "view-abs",
             "view-diff",
             "color-by",
