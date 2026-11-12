@@ -189,8 +189,8 @@ stable et reproductible.
 
 ## 7. Sorties
 
-`--format` accepte une liste séparée par des virgules parmi `json`, `dot`, `mmd`, `csv`
-(défaut `json`). Sans `--out-dir`, rien n'est écrit : l'enveloppe ne contient qu'une
+`--format` accepte une liste séparée par des virgules parmi `json`, `dot`, `mmd`, `csv`,
+`html` (défaut `json` ; un format répété n'est écrit qu'une fois). Sans `--out-dir`, rien n'est écrit : l'enveloppe ne contient qu'une
 synthèse bornée (200 nœuds, 20 arêtes les plus fortes). Avec `--out-dir`, les fichiers
 sont créés dans ce dossier :
 
@@ -201,6 +201,7 @@ sont créés dans ce dossier :
 | `graph.mmd` | Mermaid `flowchart LR` : nœuds hexagonaux, `classDef`, un `linkStyle` par arête |
 | `matrices.csv` | une ligne par nœud, toutes les métriques |
 | `edges.csv` | une ligne par arête, tous les champs d'alignement |
+| `index.html` | vue 3D interactive autonome (section 7.3) |
 
 Les écritures sont sûres : le dossier cible est créé, chaque fichier est écrit dans un
 temporaire exclusif puis renommé ; un lien symbolique ou un fichier existant est refusé
@@ -212,7 +213,8 @@ Le schéma est généré depuis `GraphReport` (`src/graph/output.rs`) et imprim�
 `surgeon schema --kind graph`. Champs de premier niveau :
 
 - `schema_version` (1), `tool` (`name`, `version`) ;
-- `model` : `path`, `sha256` (SHA-256 du modèle complet), `format`, `architecture`,
+- `model` : `path`, `sha256` (SHA-256 du modèle complet, ou `fast-...` avec
+  `--fast-hash`), `hash_mode` (`sha256` ou `fast`), `format`, `architecture`,
   `arch_source`, `hidden`, `layers`, `tied_lm_head`, `tensor_count` (nombre de nœuds
   retenus), `total_weight_bytes` (somme des tenseurs uniques du graphe), `skipped`,
   `warnings` ;
@@ -226,7 +228,8 @@ Le schéma est généré depuis `GraphReport` (`src/graph/output.rs`) et imprim�
   `dtype`, `weight_bytes`, `rows`, `cols`, `seq`, `metrics` ;
 - `edges[]` : `source`, `target`, `writer_role`, `reader_role`, `source_seq`,
   `target_seq`, `layer_gap`, `rank_used`, `alignment`, `chance`, `alignment_norm`,
-  `coupling`, `cos_theta`, `weight`, `structural`.
+  `coupling`, `cos_theta`, `weight`, `structural` ;
+- `baseline_diff` (avec `--baseline` seulement, section 7.4).
 
 `metrics` contient `rows`, `cols`, `rank`, `frobenius_norm`, `energy`,
 `residual_energy`, `range_energy`, `rel_error`, `sigma1`, `sigma1_lower`,
@@ -289,6 +292,73 @@ flowchart LR
   linkStyle 1 stroke:#f8bfa4,stroke-width:2.87px
 ```
 
+### 7.3 Vue 3D (`--format html`)
+
+`index.html` est un fichier unique : le gabarit `src/graph/view.html` (HTML, CSS et
+JavaScript sans bibliothèque, rendu 3D projeté sur un canvas 2D) et le rapport complet en
+JSON dans un bloc `<script type="application/json">`, où chaque `<` est échappé en
+`\u003c`. Il ne référence aucune ressource externe et s'ouvre hors ligne.
+
+- Navigation : glisser pour l'orbite, Maj+glisser ou clic droit pour déplacer, molette
+  pour le zoom, `R` ou le bouton pour revenir à la vue initiale, Échap pour désélectionner.
+- Disposition : l'axe vertical suit l'ordre causal (`seq`, `embed` en bas, `lm_head`
+  en haut) ; dans une couche, chaque rôle a son angle sur un anneau.
+- Clic sur un nœud : dimensions, dtype, bornes certifiées de `sigma1`, du rang stable et
+  du rang effectif, énergies, `e_write`/`e_read`, kurtosis, canaux outliers, arêtes les
+  plus fortes et, s'il existe, son diff.
+- Couleurs : type de module, couplage maximal des arêtes ou rang effectif ; contour rouge
+  pour un outlier (même règle que les octogones DOT).
+- Filtres : plage de couches (`embed` compte comme la couche 0, `lm_head` comme la
+  dernière), couplage minimal des arêtes, recherche par id ou nom de tenseur.
+- Vue Diff (avec `--baseline`) : nœuds colorés par le changement relatif de norme
+  (bleu baisse, rouge hausse), arêtes par le delta d'alignement, contour orange au-delà du
+  seuil, option pour masquer ce qui n'a pas changé, liste cliquable des couches les plus
+  modifiées. La vue s'ouvre en mode Diff quand au moins un nœud a changé.
+
+### 7.4 `--baseline` : diff avant/après
+
+`--baseline` accepte un modèle (dossier, `.safetensors` ou `.gguf`), analysé dans la même
+exécution avec les mêmes paramètres et le même cache, ou un `graph.json` déjà écrit (tout
+`.json` qui n'est pas un `*.index.json`), qui évite de refaire les SVD de la référence.
+Les nœuds sont appariés par `id`, les arêtes non structurelles par `(source, target)`.
+Chaque delta vaut `modèle - référence` :
+
+| Champ | Définition |
+| --- | --- |
+| `effective_rank_delta` | delta du milieu de l'intervalle `[erank_energy_lower, erank_energy_upper]` |
+| `norm_delta` | delta de la norme de Frobenius |
+| `relative_change` | `norm_delta / ‖W_ref‖_F` ; ±1 si la référence est nulle |
+| `sigma1_delta` | delta de `sigma1` quand les deux rapports l'ont |
+| `alignment_delta`, `coupling_delta` | deltas de l'alignement et du couplage d'une arête |
+| `relative_change` (arête) | `alignment_delta / alignment_ref` |
+
+Un nœud est `changed` quand `|relative_change|` ou `|effective_rank_delta| / max(erank_ref, 1)`
+atteint `threshold` (1e-3) ; une arête, quand son `|relative_change|` l'atteint.
+`top_changed_layers` classe au plus 10 couches par plus grand `|relative_change|` d'un nœud
+modifié (`layer` vaut `null` pour l'embedding et la tête). `only_in_model` et
+`only_in_baseline` listent les nœuds sans partenaire ; `warnings` liste les paramètres qui
+diffèrent entre les deux rapports (`rank`, `seed`, etc.), dont l'effet se mélange alors à
+celui du patch. Deux modèles identiques analysés avec les mêmes paramètres donnent des
+deltas exactement nuls.
+
+DOT et Mermaid entourent en orange (`#e6550d`) les nœuds et arêtes modifiés, et le label
+DOT d'un nœud modifié porte `Δ norm` et `Δ erank`.
+
+Limite : les deltas viennent des rapports, pas des poids. Une modification qui garde la
+norme de Frobenius et le spectre (une rotation, par exemple) n'apparaît pas.
+
+### 7.5 `--fast-hash`
+
+Par défaut, `model.sha256` est le SHA-256 de tous les fichiers du modèle, lus en entier.
+`--fast-hash` le remplace par `fast-` suivi du SHA-256 de, pour chaque fichier : son nom,
+sa taille exacte, sa date de modification et trois fenêtres de 1 Mio (début, qui contient
+l'en-tête SafeTensors, milieu, fin). `model.hash_mode` vaut alors `fast`. Un
+redimensionnement, une réécriture qui change la date ou une modification dans une fenêtre
+changent l'empreinte ; une modification de même taille hors des fenêtres, avec une date
+remise à l'identique, ne la change pas. Le préfixe empêche toute confusion avec un SHA-256
+dans le rapport et dans les clés de cache, et une copie du modèle a une autre date, donc
+une autre empreinte.
+
 ## 8. Cache, reprise, estimation, annulation
 
 Le cache est un fichier JSONL dans `--cache-dir`. La clé contient le SHA-256 complet du
@@ -310,7 +380,7 @@ Le résultat ne dépend pas de `N` : les réductions sont ordonnées et chaque n
 indépendant. Ctrl-C, le drapeau d'interruption du serveur MCP et l'échéance
 `max_seconds` positionnent un drapeau vérifié avant chaque nœud et à l'intérieur du SVD ;
 l'annulation renvoie le code 1 (`error.kind = "cancelled"`) et ne laisse aucun fichier.
-Le hachage du modèle, lui, n'est pas interruptible.
+Le hachage du modèle, lui, n'est pas interruptible (`--fast-hash` le rend quasi instantané).
 
 ## 9. Codes de sortie
 

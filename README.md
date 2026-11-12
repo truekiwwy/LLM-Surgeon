@@ -1526,7 +1526,7 @@ surgeon graph [OPTIONS] --model <MODEL>
 | --- | --- | --- |
 | `--model` | required | `.safetensors` file, sharded folder or `.gguf`. |
 | `--out-dir` | none | Output folder; without it only a bounded summary is returned and nothing is written. |
-| `--format` | `json` | `json`, `dot`, `mmd`, `csv`, comma-separated. |
+| `--format` | `json` | `json`, `dot`, `mmd`, `csv`, `html`, comma-separated. `html` writes `index.html`, a self-contained 3D view (orbit, zoom, filters, node inspector, absolute or diff view) that needs no network. |
 | `--layers` | `all` | `all`, a range `1-3`, or a list `0,2,4`. |
 | `--matrices` | every graph role | `q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head`; repeatable or comma-separated. |
 | `--rank` | 32 | Target rank of the randomized SVD (at least 1). |
@@ -1548,13 +1548,18 @@ surgeon graph [OPTIONS] --model <MODEL>
 | `--estimate` | off | Estimate passes, bytes and time without running the SVDs or writing. |
 | `--jobs` | 0 | Local Rayon threads (0: the global pool). |
 | `--overwrite` | off | Replace existing outputs. |
+| `--baseline` | none | Reference to compare with: a model (analysed with the same parameters) or a `graph.json` written earlier. Adds `baseline_diff` (effective-rank, norm and alignment deltas, `top_changed_layers`) and highlights what changed in every format. Incompatible with `--estimate`. |
+| `--fast-hash` | off | Fast model digest (`fast-...`: size, modification time and three 1 MiB windows per file) instead of the full SHA-256; `model.hash_mode` says `fast`. |
 
-`data` is a bounded summary: `model`, `parameters`, `global`, at most 200 `nodes`, at most 20 `top_edges`, `outputs` and `truncated`; the complete graph is only in `graph.json`. Exit codes: 2 invalid input or existing output without `--overwrite`, 7 computation failure, 1 cancellation.
+`data` is a bounded summary: `model`, `parameters`, `global`, at most 200 `nodes`, at most 20 `top_edges`, `outputs`, `truncated` and, with `--baseline`, the counts and `top_changed_layers` of `baseline_diff`; the complete graph is only in `graph.json`. Exit codes: 2 invalid input or existing output without `--overwrite`, 7 computation failure, 1 cancellation.
 
 ```bash
 # write the four formats on the fake mini-model, exact spectra up to 64
 surgeon graph --model qwen2-mini --out-dir graph-demo --format json,dot,mmd,csv \
   --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64
+# compare a patched copy with that report, 3D diff view in graph-diff/index.html
+surgeon graph --model qwen2-mini-patched --baseline graph-demo/graph.json --out-dir graph-diff \
+  --format json,html --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64 --fast-hash
 ```
 
 ```text

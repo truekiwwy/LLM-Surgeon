@@ -454,8 +454,8 @@ du schéma est dans [docs/GRAPH.md](GRAPH.md).
 | Champ | Défaut | Rôle |
 | --- | --- | --- |
 | `model` | requis | `.safetensors`, dossier shardé ou `.gguf`, dans un dossier autorisé |
-| `out_dir` | absent | Écrit `graph.json`, `graph.dot`, `graph.mmd`, `matrices.csv`, `edges.csv` ; absent : synthèse bornée seulement, aucun fichier |
-| `format` | `["json"]` | `json`, `dot`, `mmd`, `csv` |
+| `out_dir` | absent | Écrit `graph.json`, `graph.dot`, `graph.mmd`, `matrices.csv`, `edges.csv`, `index.html` ; absent : synthèse bornée seulement, aucun fichier |
+| `format` | `["json"]` | `json`, `dot`, `mmd`, `csv`, `html` (vue 3D autonome `index.html`) |
 | `layers`, `matrices` | tout | Filtres de couches (`0`, `1-3`, `0,2,4`, `all`) et de matrices (`q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head`) |
 | `rank`, `oversample`, `power_iters`, `seed` | 32, 10, 3, 0 | SVD randomisé ; même graine, mêmes nombres |
 | `full_spectrum_max_dim` | 2048 | Spectre exact pour `min(m,n)` jusqu'à cette valeur (0 désactive ; plafonds 1024 et `m*n <= 4_000_000`) |
@@ -465,14 +465,16 @@ du schéma est dans [docs/GRAPH.md](GRAPH.md).
 | `kurtosis_threshold`, `color_scale`, `palette` | 10, `quantile`, `diverging` | Seuil d'outlier et rendu DOT/Mermaid |
 | `max_nodes`, `cache_dir`, `no_cache`, `resume`, `estimate`, `jobs`, `overwrite` | | Mêmes sémantiques qu'en CLI |
 | `max_seconds` | absent | Plafond wall-clock ; au-delà, `error.kind = "cancelled"` et aucun fichier |
+| `baseline` | absent | Référence : modèle (mêmes paramètres) ou `graph.json` déjà écrit ; ajoute `baseline_diff` (synthèse : compteurs, `top_changed_layers`, `warnings`) |
+| `fast_hash` | `false` | Empreinte rapide `fast-...` au lieu du SHA-256 complet ; `model.hash_mode = "fast"` |
 
 Sans `out_dir`, `data` est une synthèse bornée : `model`, `parameters`, `global`, au plus
 200 entrées de `nodes`, au plus 20 `top_edges`, `outputs` et `truncated`. Le graphe complet
 n'est jamais renvoyé en ligne ; il faut `out_dir` et lire `graph.json` (schéma :
 `surgeon schema --kind graph`). Avec `--read-only`, un appel sans `out_dir` ni `cache_dir`
 reste autorisé (lecture seule) ; fournir l'un des deux donne `error.kind = "read_only"`
-avant toute écriture. Tous les chemins (`model`, `out_dir`, `cache_dir`, `vector`) passent
-par le bac à sable `--allow-dir`.
+avant toute écriture. Tous les chemins (`model`, `out_dir`, `cache_dir`, `vector`,
+`baseline`) passent par le bac à sable `--allow-dir`.
 
 Exemple d'appel sans écriture :
 
@@ -514,7 +516,7 @@ Serveur lancé avec `--read-only` :
   `export_gguf`, `llama_cpp_dir`, `base_dir`, `out` de l'extraction, pour `surgeon_bench`
   `before`, `after`, `text`, `dataset`, `prompts`, `baseline_model`, `out`, et pour
   `surgeon_autotune` `vector`, `eval_dataset`, `out`) ; pour `surgeon_graph`, `model`,
-  `out_dir`, `cache_dir` et `vector`.
+  `out_dir`, `cache_dir`, `vector` et `baseline`.
   est résolu par le système (liens symboliques, `..`) et doit tomber sous un dossier
   autorisé, sinon `error.kind = "path_not_allowed"`, sans révéler la cible.
 - **Sauvegarde imposée** avant toute écriture, vérifiée par SHA-256 ; une sauvegarde ratée

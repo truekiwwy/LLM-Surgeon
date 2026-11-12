@@ -1526,7 +1526,7 @@ surgeon graph [OPTIONS] --model <MODEL>
 | --- | --- | --- |
 | `--model` | obligatoire | Fichier `.safetensors`, dossier shardé ou `.gguf`. |
 | `--out-dir` | aucun | Dossier des sorties ; sans lui, seule une synthèse bornée est renvoyée et rien n'est écrit. |
-| `--format` | `json` | `json`, `dot`, `mmd`, `csv`, séparés par des virgules. |
+| `--format` | `json` | `json`, `dot`, `mmd`, `csv`, `html`, séparés par des virgules. `html` écrit `index.html`, une vue 3D autonome (orbite, zoom, filtres, inspecteur de nœud, vue absolue ou diff) qui n'a besoin d'aucun réseau. |
 | `--layers` | `all` | `all`, une plage `1-3`, ou une liste `0,2,4`. |
 | `--matrices` | tous les rôles du graphe | `q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head` ; répétable ou séparé par des virgules. |
 | `--rank` | 32 | Rang cible du SVD randomisé (au moins 1). |
@@ -1548,13 +1548,18 @@ surgeon graph [OPTIONS] --model <MODEL>
 | `--estimate` | désactivé | Estime passes, octets et durée sans exécuter les SVD ni écrire. |
 | `--jobs` | 0 | Fils Rayon locaux (0 : pool global). |
 | `--overwrite` | désactivé | Remplace les sorties existantes. |
+| `--baseline` | aucun | Référence à comparer : un modèle (analysé avec les mêmes paramètres) ou un `graph.json` déjà écrit. Ajoute `baseline_diff` (deltas de rang effectif, de norme et d'alignement, `top_changed_layers`) et met en évidence ce qui a changé dans tous les formats. Incompatible avec `--estimate`. |
+| `--fast-hash` | désactivé | Empreinte rapide du modèle (`fast-...` : taille, date de modification et trois fenêtres de 1 Mio par fichier) au lieu du SHA-256 complet ; `model.hash_mode` vaut `fast`. |
 
-`data` est une synthèse bornée : `model`, `parameters`, `global`, au plus 200 `nodes`, au plus 20 `top_edges`, `outputs` et `truncated` ; le graphe complet n'existe que dans `graph.json`. Codes de sortie : 2 entrée invalide ou sortie existante sans `--overwrite`, 7 échec de calcul, 1 annulation.
+`data` est une synthèse bornée : `model`, `parameters`, `global`, au plus 200 `nodes`, au plus 20 `top_edges`, `outputs`, `truncated` et, avec `--baseline`, les compteurs et `top_changed_layers` de `baseline_diff` ; le graphe complet n'existe que dans `graph.json`. Codes de sortie : 2 entrée invalide ou sortie existante sans `--overwrite`, 7 échec de calcul, 1 annulation.
 
 ```bash
 # écrit les quatre formats sur le mini-modèle factice, spectres exacts jusqu'à 64
 surgeon graph --model qwen2-mini --out-dir graph-demo --format json,dot,mmd,csv \
   --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64
+# compare une copie patchée à ce rapport, vue 3D du diff dans graph-diff/index.html
+surgeon graph --model qwen2-mini-patched --baseline graph-demo/graph.json --out-dir graph-diff \
+  --format json,html --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64 --fast-hash
 ```
 
 ```text
