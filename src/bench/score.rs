@@ -778,6 +778,36 @@ mod tests {
         assert_eq!(run.report.verdict, Verdict::Ok, "equal is not below");
     }
 
+    /// The pipeline's `loops_before` / `loops_after` count the items whose reason is
+    /// "loop": a finished answer that reuses a stock phrase is scored, a sentence repeated
+    /// back to back is a loop, and `score.loops` agrees with that count.
+    #[test]
+    fn stock_phrases_are_scored_and_only_a_real_loop_counts_as_a_loop() {
+        let (_dir, mut req) = fixture();
+        req.max_new_tokens = 512;
+        let stock = "First, the total number of red apples is 2. Next, the total number of \
+                     green apples is 3. So the total number of apples is 2 + 3 = 5. Check: the \
+                     total number of apples minus the total number of red apples is 3.\n#### 5";
+        let sentence_loop: &'static str = "I will add the two numbers and check the result again. "
+            .repeat(8)
+            .leak();
+        let replies = vec![
+            Ok(stock),
+            Ok("So the answer is \\boxed{0.5}"),
+            Ok(sentence_loop),
+            Ok("I cannot tell."),
+            Ok("#### 1"),
+        ];
+        let r = evaluate(&req, vec![replies]).unwrap().report;
+        let reasons: Vec<&str> = r.items.iter().map(|i| i.reason.as_str()).collect();
+        assert_eq!(
+            reasons,
+            ["correct", "correct", "loop", "no_answer", "correct"]
+        );
+        assert!(r.items[2].loop_detected && !r.items[2].truncated);
+        assert_eq!(r.score.loops, 1);
+    }
+
     #[test]
     fn paired_comparison_and_determinism() {
         let (dir, mut req) = fixture();

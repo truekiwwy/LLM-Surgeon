@@ -1,11 +1,15 @@
 //! Streaming detector of degenerate generation loops.
 //!
 //! Every character is examined exactly once, with bounded state: O(1) work per character
-//! for periodicity (one run counter per candidate period), O(window) memory for the
-//! n-gram and marker windows. No regex, so no backtracking. Chunk boundaries are
-//! irrelevant because all state is carried across `push` calls.
+//! for periodicity (one run counter per candidate period, in characters and in words),
+//! O(window) memory for the marker window. No regex, no allocation per character or word.
+//! Chunk boundaries are irrelevant because all state is carried across `push` calls.
+//!
+//! Repetition only counts when it is contiguous at the end of the stream: a step-by-step
+//! answer reuses stock phrases ("the total number of") far apart, a loop repeats the same
+//! block back to back. Calibration: outputs/reports/loop-calibration.md.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use serde::Serialize;
 
@@ -13,10 +17,22 @@ use super::truncate_chars;
 
 const MIN_PERIOD: usize = 3;
 const MAX_PERIOD: usize = 40;
-/// A motif must appear this many times in a row (the motif plus 5 copies).
-const MIN_PERIOD_REPEATS: usize = 6;
-/// Caps the word buffer when the stream contains no whitespace.
-const MAX_WORD_CHARS: usize = 64;
+/// A motif must appear this many times in a row. Healthy GSM8K solutions top out at 4
+/// (the zeros of "10000"), 2^8 written out as "2 * 2 * ... * 2" has 8, the shortest real
+/// loop of the calibration set has 10.
+const MIN_PERIOD_REPEATS: usize = 9;
+/// A motif without letters or digits ("!", "|---") must repeat over this many characters:
+/// rules and table separators are layout, a screen of "!!!!" is a loop.
+const MIN_SYMBOL_RUN: usize = 160;
+/// Longest block of words checked for back-to-back repetition (a long sentence or two).
+const MAX_WORD_PERIOD: usize = 64;
+/// A block of words must appear this many times in a row...
+const MIN_WORD_COPIES: usize = 3;
+/// ...and the copies after the first must span this many words, so a short block such as
+/// "2 *" in "2 * 2 * 2 * 2" needs many more copies than a repeated sentence.
+const MIN_REPEATED_WORDS: usize = 24;
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0100_0000_01b3;
 const MAX_EVIDENCE_CHARS: usize = 200;
 
 /// Every `max_*` threshold is exclusive: a loop is reported when the count goes above it.
@@ -24,12 +40,9 @@ const MAX_EVIDENCE_CHARS: usize = 200;
 pub struct LoopDetectorConfig {
     /// Marker occurrences allowed inside the sliding window.
     pub max_marker_hits: usize,
-    /// Case-insensitive, matched on word boundaries.
+    /// Case-insensitive, matched on word boundaries and followed by punctuation or a line
+    /// break, so that "wait time" or "actually ran" do not count.
     pub markers: Vec<String>,
-    /// Words per n-gram; 0 disables the n-gram check.
-    pub ngram_size: usize,
-    /// Occurrences of one n-gram allowed inside the sliding window.
-    pub max_ngram_repeats: usize,
     /// Identical consecutive non-empty lines allowed (blank lines are ignored).
     pub max_identical_lines: usize,
     pub window_chars: usize,
@@ -45,8 +58,6 @@ impl Default for LoopDetectorConfig {
             markers: ["Wait", "Hmm", "Actually", "Let me re-check", "But wait"]
                 .map(String::from)
                 .to_vec(),
-            ngram_size: 4,
-            max_ngram_repeats: 4,
             max_identical_lines: 3,
             window_chars: 4000,
             min_chars_before_check: 80,
@@ -70,6 +81,7 @@ pub enum LoopVerdict {
 #[serde(rename_all = "snake_case")]
 pub enum LoopReason {
     MarkerRepetition,
+    /// A block of words repeated back to back at the end of the stream.
     NgramRepetition,
     IdenticalLines,
     CharPeriodicity,
@@ -88,11 +100,13 @@ pub struct LoopDetector {
     marker_hits: VecDeque<usize>,
     /// `period_runs[p]`: consecutive characters equal to the one `p` positions earlier.
     period_runs: [usize; MAX_PERIOD + 1],
-    word: String,
-    word_start: usize,
-    last_words: VecDeque<(String, usize)>,
-    ngrams: VecDeque<(String, usize)>,
-    ngram_counts: HashMap<String, usize>,
+    /// FNV-1a hash of the word being read (lowercased, punctuation kept); None between words.
+    word: Option<u64>,
+    /// Ring of the last word hashes, indexed by `words_seen % MAX_WORD_PERIOD`.
+    words: [u64; MAX_WORD_PERIOD],
+    words_seen: usize,
+    /// `word_runs[p]`: consecutive words equal to the one `p` words earlier.
+    word_runs: [usize; MAX_WORD_PERIOD + 1],
     line: String,
     last_line: String,
     line_streak: usize,
@@ -119,11 +133,10 @@ impl LoopDetector {
             chars_seen: 0,
             marker_hits: VecDeque::new(),
             period_runs: [0; MAX_PERIOD + 1],
-            word: String::new(),
-            word_start: 0,
-            last_words: VecDeque::new(),
-            ngrams: VecDeque::new(),
-            ngram_counts: HashMap::new(),
+            word: None,
+            words: [0; MAX_WORD_PERIOD],
+            words_seen: 0,
+            word_runs: [0; MAX_WORD_PERIOD + 1],
             line: String::new(),
             last_line: String::new(),
             line_streak: 0,
@@ -154,12 +167,17 @@ impl LoopDetector {
     fn step(&mut self, c: char) -> Option<(LoopReason, String)> {
         let lc = c.to_lowercase().next().unwrap_or(c);
         let marker = self.check_marker(lc);
-        let period = self.check_period(lc);
-        self.chars_seen += 1;
-        self.recent.push_back(lc);
-        if self.recent.len() > self.recent_cap {
-            self.recent.pop_front();
+        // Periodicity sees every run of whitespace as one space: "1, 1,  1, 1," loops too.
+        let pc = if lc.is_whitespace() { ' ' } else { lc };
+        let mut period = None;
+        if !(pc == ' ' && self.recent.back() == Some(&' ')) {
+            period = self.check_period(pc);
+            self.recent.push_back(pc);
+            if self.recent.len() > self.recent_cap {
+                self.recent.pop_front();
+            }
         }
+        self.chars_seen += 1;
         let ngram = self.feed_word(lc);
         let line = self.feed_line(c);
 
@@ -169,7 +187,8 @@ impl LoopDetector {
         if self.chars_seen < self.cfg.min_chars_before_check {
             return None;
         }
-        ngram.or(line).or(period)
+        // A repeated line also completes a repeated word block: the line is the clearer evidence.
+        line.or(ngram).or(period)
     }
 
     /// Called before `lc` is appended: `lc` is the character right after a candidate marker.
@@ -184,8 +203,9 @@ impl LoopDetector {
                 (_, 0) => self.chars_seen == m.len(),
                 _ => !self.recent[start - 1].is_alphanumeric(),
             };
-            let boundary_after =
-                m.last().is_some_and(|l| !l.is_alphanumeric()) || !lc.is_alphanumeric();
+            // A hesitation is punctuated ("Wait,", "Wait..."); "wait time" is a noun.
+            let boundary_after = m.last().is_some_and(|l| !l.is_alphanumeric())
+                || !(lc.is_alphanumeric() || lc == ' ' || lc == '\t');
             boundary_before && boundary_after && self.recent.range(start..).eq(m.iter())
         })?;
         let name = found.0.clone();
@@ -214,77 +234,57 @@ impl LoopDetector {
         for p in MIN_PERIOD..=MAX_PERIOD {
             let repeats = len >= p && self.recent[len - p] == lc;
             self.period_runs[p] = if repeats { self.period_runs[p] + 1 } else { 0 };
-            if found.is_none() && self.period_runs[p] >= (MIN_PERIOD_REPEATS - 1) * p {
-                let motif: String = self
-                    .recent
-                    .range(len - p + 1..)
-                    .copied()
-                    .chain([lc])
-                    .collect();
-                // Separators such as "|---" or runs of spaces are layout, not a loop.
-                if motif.chars().any(char::is_alphanumeric) {
-                    found = Some((
-                        LoopReason::CharPeriodicity,
-                        format!("motif « {motif} » répété {MIN_PERIOD_REPEATS} fois de suite"),
-                    ));
-                }
+            let run = self.period_runs[p];
+            if found.is_some() || run < (MIN_PERIOD_REPEATS - 1) * p {
+                continue;
+            }
+            let motif: String = self
+                .recent
+                .range(len - p + 1..)
+                .copied()
+                .chain([lc])
+                .collect();
+            // Separators such as "|---" are layout up to a point. Runs of spaces never get
+            // here: `step` collapses them.
+            if motif.chars().any(char::is_alphanumeric) || run >= MIN_SYMBOL_RUN {
+                found = Some((
+                    LoopReason::CharPeriodicity,
+                    format!("motif « {motif} » répété {} fois de suite", run / p + 1),
+                ));
             }
         }
         found
     }
 
+    /// Same run counters as `check_period`, over word hashes instead of characters.
     fn feed_word(&mut self, lc: char) -> Option<(LoopReason, String)> {
         if !lc.is_whitespace() {
-            if self.word.is_empty() {
-                self.word_start = self.chars_seen - 1;
-            }
-            if self.word.chars().count() < MAX_WORD_CHARS {
-                self.word.push(lc);
-            }
+            let h = self.word.unwrap_or(FNV_OFFSET) ^ u64::from(u32::from(lc));
+            self.word = Some(h.wrapping_mul(FNV_PRIME));
             return None;
         }
-        let raw = std::mem::take(&mut self.word);
-        let word = raw.trim_matches(|c: char| !c.is_alphanumeric());
-        let n = self.cfg.ngram_size;
-        if word.is_empty() || n == 0 {
-            return None;
-        }
-        self.last_words
-            .push_back((word.to_owned(), self.word_start));
-        if self.last_words.len() > n {
-            self.last_words.pop_front();
-        }
-        if self.last_words.len() < n {
-            return None;
-        }
-
-        let start = self.last_words.front().map_or(0, |w| w.1);
-        let key = self
-            .last_words
-            .iter()
-            .map(|w| w.0.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        *self.ngram_counts.entry(key.clone()).or_insert(0) += 1;
-        self.ngrams.push_back((key.clone(), start));
-
-        let oldest = self.chars_seen.saturating_sub(self.cfg.window_chars);
-        while let Some((old, _)) = self.ngrams.front().filter(|(_, s)| *s < oldest).cloned() {
-            self.ngrams.pop_front();
-            if let Some(c) = self.ngram_counts.get_mut(&old) {
-                *c -= 1;
-                if *c == 0 {
-                    self.ngram_counts.remove(&old);
-                }
+        let h = self.word.take()?;
+        let mut found = None;
+        for p in 1..=MAX_WORD_PERIOD {
+            let repeats =
+                self.words_seen >= p && self.words[(self.words_seen - p) % MAX_WORD_PERIOD] == h;
+            self.word_runs[p] = if repeats { self.word_runs[p] + 1 } else { 0 };
+            let run = self.word_runs[p];
+            if found.is_none() && run >= MIN_REPEATED_WORDS && run >= (MIN_WORD_COPIES - 1) * p {
+                let tail: String = self.recent.iter().collect();
+                found = Some((
+                    LoopReason::NgramRepetition,
+                    format!(
+                        "bloc de {p} mots répété {} fois de suite (fin : « {} »)",
+                        run / p + 1,
+                        tail.trim()
+                    ),
+                ));
             }
         }
-        let live = self.ngram_counts.get(&key).copied().unwrap_or(0);
-        (live > self.cfg.max_ngram_repeats).then(|| {
-            (
-                LoopReason::NgramRepetition,
-                format!("« {key} » répété {live} fois dans la fenêtre"),
-            )
-        })
+        self.words[self.words_seen % MAX_WORD_PERIOD] = h;
+        self.words_seen += 1;
+        found
     }
 
     fn feed_line(&mut self, c: char) -> Option<(LoopReason, String)> {
@@ -412,7 +412,10 @@ mod tests {
     }
 
     #[test]
-    fn repeated_ngram_with_varying_tail() {
+    fn a_template_with_changing_numbers_is_not_a_word_block_loop() {
+        // Same shape as "Day 1: 2 pages. Day 2: 4 pages." in a real solution: only an
+        // exact back-to-back block counts, so a hesitation loop whose numbers change is
+        // left to the token budget.
         let mut d = LoopDetector::new(LoopDetectorConfig::default());
         let text: String = (0..6)
             .map(|i| {
@@ -423,15 +426,14 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(reason_of(&mut d, &text), Some(LoopReason::NgramRepetition));
+        assert_eq!(d.push(&text), LoopVerdict::Ok);
     }
 
-    /// Known false positive (docs/validation/qwen2.5-0.5b-validation.md, ÉCART-3): a
-    /// finished, correct step-by-step answer that reuses one stock phrase five times is
-    /// cut as an n-gram loop. Left red on purpose: no threshold is retuned on the data
-    /// that revealed it.
+    /// Former false positive (docs/validation/qwen2.5-0.5b-validation.md, ÉCART-3): a
+    /// finished, correct step-by-step answer that reuses one stock phrase five times was
+    /// cut by the windowed n-gram count. Fixed by the back-to-back word-block rule,
+    /// calibrated on independent data (outputs/reports/loop-calibration.md).
     #[test]
-    #[ignore = "known false positive of the n-gram rule on structured reasoning"]
     fn a_step_by_step_answer_reusing_a_stock_phrase_is_not_a_loop() {
         let answer = "To solve the problem, we need to follow these steps:
 
@@ -473,7 +475,7 @@ mod tests {
         assert_eq!(d.push(&"|---".repeat(30)), LoopVerdict::Ok);
         assert_eq!(d.push(&" ".repeat(200)), LoopVerdict::Ok);
         assert_eq!(
-            reason_of(&mut d, &"xyz.".repeat(6)),
+            reason_of(&mut d, &"xyz.".repeat(MIN_PERIOD_REPEATS)),
             Some(LoopReason::CharPeriodicity)
         );
     }
@@ -490,8 +492,9 @@ mod tests {
 
     #[test]
     fn sliding_window_forgets_old_markers() {
-        let filler = |n: usize| -> String { (0..n).map(|i| format!("mot{i} ")).collect() };
-        let text: String = (0..5).map(|_| format!("Wait. {}", filler(50))).collect();
+        // Different words in each paragraph, so that only the markers repeat.
+        let filler = |k: usize| -> String { (0..50).map(|i| format!("mot{k}x{i} ")).collect() };
+        let text: String = (0..5).map(|k| format!("Wait. {}", filler(k))).collect();
 
         let small = LoopDetectorConfig {
             window_chars: 200,
@@ -502,5 +505,119 @@ mod tests {
             reason(&LoopDetector::new(LoopDetectorConfig::default()).push(&text)),
             Some(LoopReason::MarkerRepetition)
         );
+    }
+
+    /// Structured but healthy solutions: every one repeats words, lines or shapes, never
+    /// one block back to back.
+    #[test]
+    fn multi_step_math_with_repetitive_structure_is_not_a_loop() {
+        let steps: String = (1..=6)
+            .map(|i| {
+                format!(
+                    "**Step {i}: Calculate the total number of apples in box {i}.**\n\n\
+                     The total number of apples in box {i} is {i} x 12 = {} apples.\n\n",
+                    i * 12
+                )
+            })
+            .collect();
+        let doubling: String = (1..=8)
+            .map(|d| format!("Day {d}: {} pages\n", 1 << d))
+            .collect();
+        let list: String = ["apples", "pears", "plums", "figs", "limes", "kiwis"]
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                format!(
+                    "{}. The cost of the {f} is {} * 2 = {} dollars.\n",
+                    i + 1,
+                    i + 3,
+                    2 * (i + 3)
+                )
+            })
+            .collect();
+        let solutions = [
+            format!("{steps}Adding the boxes: 12 + 24 + 36 + 48 + 60 + 72 = 252.\n\n#### 252"),
+            format!("Let's list the pages read each day.\n\n{doubling}\n#### 256"),
+            "The number of grains doubles on every square of the board, starting from one \
+             grain. On the ninth square there are 2^8 grains, so 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 \
+             = 256 grains.\n\n#### 256"
+                .into(),
+            format!("Here is the cost of each fruit:\n\n{list}\nTotal = 6 + 8 + 10 + 12 + 14 + 16 = 66\nTotal = 66 dollars\n\n#### 66"),
+            "| Item | Price | Count | Cost |\n|------|-------|-------|------|\n| pen | 2 | 3 | 6 |\n\
+             | cup | 5 | 2 | 10 |\n| hat | 7 | 1 | 7 |\n|------|-------|-------|------|\n\n\
+             ---\n\nTotal: 6 + 10 + 7 = 23\n\n#### 23"
+                .into(),
+            "x = 3\ny = 3\nz = 3\n\nSo x = y = z = 3 and x + y + z = 3 + 3 + 3 = 9.\n\n#### 9".into(),
+            "1. **First dose wait time:** 20 minutes.\n2. **Second dose wait time:** half of \
+             the first wait time, 10 minutes.\n3. **Total wait time:** the first wait time \
+             plus the second wait time, 20 + 10 = 30 minutes.\n\n#### 30"
+                .into(),
+        ];
+        let mut d = LoopDetector::new(LoopDetectorConfig::default());
+        for text in &solutions {
+            d.reset();
+            assert_eq!(d.push(text), LoopVerdict::Ok, "{text}");
+        }
+    }
+
+    /// Degenerate loops of 1-2, 4-8 and 12-20 tokens after a healthy start: each is
+    /// caught, by the expected rule, within a few copies of the motif.
+    #[test]
+    fn short_medium_and_long_loops_are_cut_early() {
+        // Longer than `min_chars_before_check`, so the count starts with the loop.
+        let prefix = "First, one notebook costs 12 / 4 = 3 dollars, and Mary buys 4 of them for her class.\n\n";
+        let cases = [
+            (" the", LoopReason::CharPeriodicity, 13),
+            ("!", LoopReason::CharPeriodicity, 164),
+            ("<br>", LoopReason::CharPeriodicity, 13),
+            ("The answer is 3. ", LoopReason::NgramRepetition, 7),
+            ("Total = 3 + 3 = 6\n", LoopReason::IdenticalLines, 4),
+            (
+                "So the total cost of the notebooks is 3 dollars per notebook times 4 notebooks. ",
+                LoopReason::NgramRepetition,
+                3,
+            ),
+            (
+                "Therefore, 3 x 4 = 12 and 12 / 4 = 3, so each notebook costs 3 dollars, which is the answer we need. ",
+                LoopReason::NgramRepetition,
+                3,
+            ),
+        ];
+        let mut d = LoopDetector::new(LoopDetectorConfig::default());
+        for (motif, expected, max_copies) in cases {
+            d.reset();
+            let text = format!("{prefix}{}", motif.repeat(300));
+            let v = d.push(&text);
+            let LoopVerdict::Loop {
+                reason, at_char, ..
+            } = v
+            else {
+                panic!("missed loop on {motif:?}")
+            };
+            assert_eq!(reason, expected, "{motif:?}");
+            let copies = (at_char - prefix.chars().count()).div_ceil(motif.chars().count());
+            assert!(copies <= max_copies, "{motif:?} cut after {copies} copies");
+        }
+    }
+
+    #[test]
+    fn a_word_block_loop_is_found_whatever_the_chunking() {
+        let text = format!(
+            "We start from 5 apples. {}",
+            "Then Mary gives two apples to John and John gives them back to Mary. ".repeat(4)
+        );
+        let chars: Vec<char> = text.chars().collect();
+        let mut d = LoopDetector::new(LoopDetectorConfig::default());
+        let whole = d.push(&text);
+        assert_eq!(reason(&whole), Some(LoopReason::NgramRepetition));
+        for size in [1, 2, 5] {
+            d.reset();
+            let v = chars
+                .chunks(size)
+                .map(|piece| d.push(&piece.iter().collect::<String>()))
+                .last()
+                .unwrap();
+            assert_eq!(v, whole, "chunk size {size}");
+        }
     }
 }
