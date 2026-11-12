@@ -1,7 +1,8 @@
 //! Final answer of a model output. Rules in priority order, the first one that finds a
 //! non-empty candidate wins:
 //!
-//! 1. `hashes`: `#### X`, last non-empty occurrence (rest of its line);
+//! 1. `hashes`: `#### X` (exactly four `#`), last marker whose rest of line holds a number;
+//!    a digit-free marker (`#### N` echoed from the prompt) is skipped, see [`hashes`];
 //! 2. `boxed`: `\boxed{X}`, last balanced occurrence (nested and escaped braces handled
 //!    by a small parser);
 //! 3. `bold`: last `**X**` segment holding at least one ASCII digit;
@@ -16,6 +17,8 @@ use std::sync::OnceLock;
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::Serialize;
+
+use super::score::{normalize, parse_number};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -64,12 +67,23 @@ fn phrase_re() -> Option<&'static Regex> {
 
 /// Thousands groups first (`1,234.5`), else a plain or decimal-comma number with an
 /// optional exponent (`1,8e1`).
+const NUMBER: &str = r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?";
+
 pub(crate) fn number_re() -> Option<&'static Regex> {
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
-    cached(
-        &RE,
-        r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?",
-    )
+    cached(&RE, NUMBER)
+}
+
+/// A number, or a plain fraction `a/b` kept whole.
+fn number_or_fraction_re() -> Option<&'static Regex> {
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(&format!("(?:{NUMBER})(?:/(?:{NUMBER}))?")).ok())
+        .as_ref()
+}
+
+fn hash_run_re() -> Option<&'static Regex> {
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
+    cached(&RE, "#+")
 }
 
 /// Content of the brace group opening at `open` (index of `{`), escaped braces skipped.
@@ -102,11 +116,31 @@ pub fn last_boxed(text: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Rule `hashes`. A marker is a run of exactly four `#` anywhere in a line (`#####` opens a
+/// Markdown heading, not an answer); its candidate is the rest of that line. Markers are
+/// read from the last one back and the first candidate holding a number wins:
+///
+/// - a candidate the scorer reads whole as one number (`18`, `1,234`, `\frac{1}{2}`,
+///   `160 minutes`, `60%`) is returned as written;
+/// - otherwise its last number or `a/b` fraction, sign and thousands groups kept
+///   (`#### Final Line: 3000` -> `3000`, `#### Total = -1,250.50 euros` -> `-1,250.50`);
+/// - a candidate without digits (`#### N` or `#### <number>` echoed from the prompt,
+///   `####` alone) is skipped, so an earlier marker, then the next rules, get their turn.
 fn hashes(text: &str) -> Option<String> {
-    text.rmatch_indices("####").find_map(|(at, m)| {
-        let rest = text[at + m.len()..].lines().next().unwrap_or("");
-        let answer = rest.trim().trim_start_matches('#').trim();
-        (!answer.is_empty()).then(|| answer.to_owned())
+    let ends: Vec<usize> = hash_run_re()?
+        .find_iter(text)
+        .filter(|m| m.len() == 4)
+        .map(|m| m.end())
+        .collect();
+    ends.into_iter().rev().find_map(|end| {
+        let candidate = text[end..].lines().next().unwrap_or("").trim();
+        if parse_number(&normalize(candidate)).is_some() {
+            return Some(candidate.to_owned());
+        }
+        number_or_fraction_re()?
+            .find_iter(candidate)
+            .last()
+            .map(|m| m.as_str().to_owned())
     })
 }
 
@@ -166,6 +200,10 @@ fn strip_end_markers(output: &str) -> &str {
     text
 }
 
+/// Final answer of `output`, end-of-generation markers removed first: the first rule, in
+/// the priority order of the module docs (`hashes`, `boxed`, `bold`, `phrase`,
+/// `last_number`), that finds a candidate. A rule that finds nothing usable (only
+/// digit-free `####` markers, a `**heading**` without digit) hands over to the next one.
 pub fn extract(output: &str) -> Option<Extracted> {
     let output = strip_end_markers(output);
     let rules: [(Rule, Finder); 5] = [
@@ -269,5 +307,65 @@ mod tests {
         is("the answer is 3, **4**, \\boxed{5}", "5", Rule::Boxed);
         is("the answer is 3 but **4**", "4", Rule::Bold);
         is("The answer is 8. Checking: 2 * 4 = 8, 9", "8", Rule::Phrase);
+    }
+
+    #[test]
+    fn digit_free_hash_markers_are_skipped() {
+        // Prompt echoed after the real answer: an earlier marker answers.
+        is("200 - 138 = 62.\n\n#### 62\n\n#### N", "62", Rule::Hashes);
+        is(
+            "#### 42\n#### <number>\n#### [answer]\n####",
+            "42",
+            Rule::Hashes,
+        );
+        is("#### 42\n#### N\"", "42", Rule::Hashes);
+        // Only an echo: the next rules answer.
+        is("End with #### N.\nSo \\boxed{42}", "42", Rule::Boxed);
+        is("Write \"#### N\".\nShe keeps 42", "42", Rule::LastNumber);
+        assert_eq!(got("#### N"), None);
+        assert_eq!(got("####"), None);
+        is("12 apples\n####", "12", Rule::LastNumber);
+    }
+
+    #[test]
+    fn text_around_the_number_of_a_hash_marker() {
+        is(
+            "#### Final Line: 3000\n\nSo, the final numeric answer is 3000 grams.",
+            "3000",
+            Rule::Hashes,
+        );
+        is("#### Answer: $45", "45", Rule::Hashes);
+        is("#### Answer: $1,250.50", "1,250.50", Rule::Hashes);
+        is("#### Total = -1,250.50 euros", "-1,250.50", Rule::Hashes);
+        is("#### 3000\"", "3000", Rule::Hashes);
+        is("#### 5 + 3 = 8", "8", Rule::Hashes);
+        is("#### Answer: 3/4 cup", "3/4", Rule::Hashes);
+        is(
+            "In the form \"#### N\", this is written as 150.",
+            "150",
+            Rule::Hashes,
+        );
+        // A candidate the scorer reads whole stays as written.
+        is("#### 18 hours.", "18 hours.", Rule::Hashes);
+        is("#### -7", "-7", Rule::Hashes);
+        is("#### +7", "+7", Rule::Hashes);
+        is("#### 1,234", "1,234", Rule::Hashes);
+        is("#### \\frac{1}{2}", "\\frac{1}{2}", Rule::Hashes);
+    }
+
+    #[test]
+    fn last_numeric_hash_marker_wins_and_headings_are_not_markers() {
+        is("#### 12\nRechecking.\n#### 15", "15", Rule::Hashes);
+        is("#### 62 then #### N", "62", Rule::Hashes);
+        is("#### 5 #### 6", "6", Rule::Hashes);
+        is("##### Step 2: 5 + 3 = 8\n\\boxed{9}", "9", Rule::Boxed);
+        is("#### 7\n##### Check: 3 + 4", "7", Rule::Hashes);
+        is("###### 4\n#### 7", "7", Rule::Hashes);
+        // Standard GSM8K reference layout.
+        is(
+            "Natalia sold 48/2 = <<48/2=24>>24 clips in May.\n#### 72",
+            "72",
+            Rule::Hashes,
+        );
     }
 }
