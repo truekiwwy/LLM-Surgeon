@@ -178,6 +178,8 @@ le défaut. La règle de cette validation l'interdit. Ce qui est livré :
 
 La décision de revoir la règle revient au mainteneur, avec un jeu de calibration indépendant.
 
+Corrigé depuis, sur un jeu de calibration indépendant : voir la section 9.
+
 ### 4.5 Coût : plan contre réalité
 
 | Run | Durée estimée | Durée réelle | Écart | Unités prévues / comptées |
@@ -278,3 +280,61 @@ Checklist avant de se fier à un verdict du pipeline sur un autre modèle :
 - [ ] `truncated_*` et `loops_*` du pilier GSM proches de 0, sinon relire des sorties brutes ;
 - [ ] gabarit de chat comparé au gabarit officiel du modèle (message système) ;
 - [ ] `model.unchanged` à true dans le rapport.
+
+## 9. Addendum du 2026-11-12 : recalibration du détecteur de boucles (ÉCART-3)
+
+Branche `fix/loop-detector`. Rapport complet, hors dépôt : `outputs/reports/loop-calibration.md`.
+
+**Protocole.** Aucun réglage sur les données de cette validation. Calibration sur 50 problèmes
+du split `train` officiel de GSM8K (un tous les 149), sans doublon avec les jeux de
+`.jobs/qwen-test/data/` (SHA-256 des questions normalisées, 0 collision sur 55 empreintes,
+aucun énoncé affiché), et sur 29 boucles : 20 synthétiques (1-2, 4-8 et 12-20 tokens,
+ponctuation, balises) et 9 sorties réelles d'une copie du modèle détruite par un `subtract`
+sur `down_proj` des couches 10 à 12, les écrivains les plus couplés du graphe. Le Dev GSM n'a
+été exécuté qu'une fois, après gel des paramètres et tests au vert.
+
+**Nouvelle règle** (`src/eval/loop_detector.rs`) :
+
+- blocs de mots : un bloc de 1 à 64 mots doit se répéter d'affilée en fin de flux, au moins
+  3 fois et sur au moins 24 mots après la première copie ; l'ancien compte d'un 4-gramme dans
+  une fenêtre de 4000 caractères disparaît (`ngram_size` et `max_ngram_repeats` retirés, raison
+  JSON `ngram_repetition` gardée) ;
+- périodicité de caractères : blancs réduits à un espace, 9 copies au lieu de 6 ; un motif
+  sans lettre ni chiffre compte au-delà de 160 caractères ;
+- marqueurs : « Wait » et les autres doivent être suivis d'une ponctuation ou d'un saut de
+  ligne (« wait time » ne compte plus) ;
+- coût : O(104) comparaisons d'entiers par caractère, aucune allocation par mot.
+
+**Calibration.**
+
+| Jeu | Avant | Après |
+| --- | --- | --- |
+| 50 solutions saines | 11 faux positifs (10 n-grammes, 1 « wait time ») | 0 |
+| 29 boucles | 23 détectées | 25 détectées (20/20 synthétiques) |
+
+Les 4 boucles manquées sont des rafales du modèle détruit : deux dans les 80 premiers
+caractères (contrôles muets par conception), un nombre à 13 chiffres mal étiqueté par
+l'oracle, une rafale de 7 copies sous le seuil de 9.
+
+**Dev GSM, modèle d'origine, passe unique** (mêmes réglages que le pilier `gsm`) :
+
+| Mesure | Avant | Après |
+| --- | --- | --- |
+| Boucles détectées | 7 | 0 |
+| Exactitude mesurée | 18/30 = 0,600 | 23/30 = 0,767 [0,591 ; 0,882] |
+| Réponses coupées par le budget de 256 tokens | 1 | 3 |
+| Durée de `bench eval` | non mesurée isolément | 1022 s |
+
+Les 7 échecs restants : 3 faux négatifs d'extraction (ÉCART-1, toujours ouvert), 2 réponses
+coupées par le budget, 2 erreurs du modèle. Sur le contenu, 26/30, comme la relecture
+manuelle de la section 4.4.
+
+**Tests.** `a_step_by_step_answer_reusing_a_stock_phrase_is_not_a_loop` réactivé sans
+changer son assertion. Ajoutés : structures mathématiques répétitives (étapes, doublements,
+`2^8` écrit en entier, listes, tableau, « wait time »), boucles courtes, moyennes et longues
+avec délai d'arrêt borné, découpage du flux, et cohérence de la raison `loop` avec
+`score.loops` relu par `loops_before` / `loops_after`. `repeated_ngram_with_varying_tail`
+devient `a_template_with_changing_numbers_is_not_a_word_block_loop` : une phrase répétée avec
+des nombres qui changent a la forme d'un raisonnement sain et n'est plus coupée.
+
+SHA-256 des fichiers du modèle d'origine inchangés.
