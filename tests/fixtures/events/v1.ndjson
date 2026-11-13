@@ -1,0 +1,13 @@
+{"v":1,"seq":0,"t_ms":0,"event":"job_started","command":"apply"}
+{"v":1,"seq":1,"t_ms":10,"event":"progress","done":3,"total":8,"unit":"tensor"}
+{"v":1,"seq":2,"t_ms":20,"event":"progress","done":2,"unit":"chunk"}
+{"v":1,"seq":3,"t_ms":30,"event":"node_state","node_id":"model.layers.1.mlp.down_proj.weight","state":"running"}
+{"v":1,"seq":4,"t_ms":40,"event":"metric","node_id":"ref","name":"max_delta","value":0.125}
+{"v":1,"seq":5,"t_ms":50,"event":"metric","name":"edges","value":42.0}
+{"v":1,"seq":6,"t_ms":60,"event":"log","level":"info","message":"écriture validée en 0.2 s"}
+{"v":1,"seq":7,"t_ms":70,"event":"artifact","kind":"backup","path":"m/model.safetensors.bak-1700000000"}
+{"v":1,"seq":8,"t_ms":80,"event":"artifact","kind":"vector","path":"artifacts/v.safetensors","sha256":"abababababababababababababababababababababababababababababababab"}
+{"v":1,"seq":9,"t_ms":90,"event":"warning","message":"rollback : modèle restauré"}
+{"v":1,"seq":10,"t_ms":100,"event":"finished","exit_code":0}
+{"v":1,"seq":11,"t_ms":110,"event":"failed","kind":"invalid_patch","message":"operations[0] : alpha manquant","exit_code":2}
+{"v":1,"seq":12,"t_ms":120,"event":"cancelled"}

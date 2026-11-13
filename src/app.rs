@@ -224,6 +224,8 @@ struct Io<'a> {
     ui: Ui,
     err_ui: Ui,
     err_is_tty: bool,
+    /// `--events`: every progress event the CLI sink sees is also written there.
+    events: Option<crate::events::EventWriter>,
 }
 
 impl<'a> Io<'a> {
@@ -235,6 +237,7 @@ impl<'a> Io<'a> {
             ui: mode(cfg.out),
             err_ui: mode(cfg.err),
             err_is_tty: cfg.err_is_tty && !json,
+            events: None,
         }
     }
 
@@ -319,9 +322,25 @@ pub fn run_with(mut cli: Cli, deps: &AppDeps, out: &mut dyn Write, err: &mut dyn
         let failure = Outcome::fail(exit::INVALID_INPUT, message).with_kind("invalid_input");
         return emit(&mut io, cli.json, Some(command_name(&cli.command)), failure);
     }
+    if let Some(target) = &cli.events {
+        match crate::events::EventWriter::open(target) {
+            Ok(mut writer) => {
+                writer.emit(crate::events::SurgeonEvent::JobStarted {
+                    command: command_name(&cli.command).into(),
+                });
+                io.events = Some(writer);
+            }
+            Err(e) => {
+                let message = format!("--events {} : {e}", target.display());
+                let failure =
+                    Outcome::fail(exit::INVALID_INPUT, message).with_kind("invalid_input");
+                return emit(&mut io, cli.json, Some(command_name(&cli.command)), failure);
+            }
+        }
+    }
     CATCHING.store(true, Ordering::SeqCst);
     // A panic unwinds through BackupSet::drop, which rolls back an uncommitted patch.
-    let outcome = catch_unwind(AssertUnwindSafe(|| dispatch(&cli.command, deps, &mut io)))
+    let mut outcome = catch_unwind(AssertUnwindSafe(|| dispatch(&cli.command, deps, &mut io)))
         .unwrap_or_else(|payload| {
             Outcome::fail(
                 exit::INTERNAL,
@@ -330,6 +349,15 @@ pub fn run_with(mut cli: Cli, deps: &AppDeps, out: &mut dyn Write, err: &mut dyn
             .with_kind("internal")
         });
     CATCHING.store(false, Ordering::SeqCst);
+    if let Some(mut writer) = io.events.take() {
+        let interrupted = deps.interrupted.load(Ordering::SeqCst);
+        writer.emit(crate::events::terminal(&outcome, interrupted));
+        if let Some(e) = writer.take_error() {
+            outcome
+                .warnings
+                .push(format!("--events : flux incomplet ({e})"));
+        }
+    }
     emit(&mut io, cli.json, Some(command_name(&cli.command)), outcome)
 }
 
@@ -1606,6 +1634,9 @@ impl Drop for CliSink<'_, '_> {
 
 impl ProgressSink for CliSink<'_, '_> {
     fn event(&mut self, event: ProgressEvent) {
+        if let Some(writer) = self.io.events.as_mut() {
+            writer.event(event.clone());
+        }
         let ui = self.io.ui;
         if let ProgressEvent::Shift {
             op_id,

@@ -52,6 +52,9 @@
 //!   refusal`, `pipeline plan` and `pipeline run`. Only the tool schema hash moved; no
 //!   existing option, property or output changed. `backend detect` (no reference command)
 //!   reports `mistralrs` and no longer `hipfire.supported_os`.
+//! - the studio event stream (docs/STUDIO.md): the global option `--events <FICHIER|->` and
+//!   the value `events` of `schema --kind`. Checked by removing both from the new surface,
+//!   which gives back the previous one exactly; no tool schema, no output hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

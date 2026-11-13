@@ -353,8 +353,9 @@ fn command_paths(command: &clap::Command, prefix: &str, out: &mut Vec<(String, V
         let path = format!("{prefix}{}", sub.get_name());
         let options: Vec<String> = sub
             .get_arguments()
+            .filter(|a| !a.is_global_set())
             .filter_map(|a| a.get_long())
-            .filter(|l| !["help", "version", "json", "verbose"].contains(l))
+            .filter(|l| !["help", "version"].contains(l))
             .map(|l| format!("--{l}"))
             .collect();
         out.push((path.clone(), options));
@@ -498,7 +499,7 @@ fn every_command_and_option_is_documented_and_real() {
 #[test]
 fn quoted_options_exist_somewhere_in_the_cli() {
     let mut known: BTreeSet<String> = real_commands().into_iter().flat_map(|(_, o)| o).collect();
-    known.extend(["--json", "--verbose", "--help", "--version"].map(String::from));
+    known.extend(["--json", "--verbose", "--events", "--help", "--version"].map(String::from));
     // Options of other tools quoted on purpose: Claude Code, cargo, llama-perplexity,
     // llama-server (its whitelisted flags).
     let foreign = [

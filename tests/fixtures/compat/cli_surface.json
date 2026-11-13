@@ -42,6 +42,24 @@
       ]
     },
     {
+      "action": "Set",
+      "aliases": null,
+      "default_values": [],
+      "env": null,
+      "global": true,
+      "hidden": false,
+      "id": "events",
+      "long": "events",
+      "num_args": "1",
+      "positional": false,
+      "possible_values": [],
+      "required": false,
+      "short": null,
+      "value_names": [
+        "FICHIER|-"
+      ]
+    },
+    {
       "action": "Help",
       "aliases": null,
       "default_values": [],
@@ -155,6 +173,24 @@
           "short": "v",
           "value_names": [
             "VERBOSE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
           ]
         },
         {
@@ -314,6 +350,24 @@
           "short": "v",
           "value_names": [
             "VERBOSE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
           ]
         },
         {
@@ -761,6 +815,24 @@
           ]
         },
         {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
+          ]
+        },
+        {
           "action": "Help",
           "aliases": null,
           "default_values": [],
@@ -955,6 +1027,24 @@
           "short": "v",
           "value_names": [
             "VERBOSE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
           ]
         },
         {
@@ -1388,6 +1478,24 @@
           ]
         },
         {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
+          ]
+        },
+        {
           "action": "Help",
           "aliases": null,
           "default_values": [],
@@ -1668,6 +1776,24 @@
           ]
         },
         {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
+          ]
+        },
+        {
           "action": "Help",
           "aliases": null,
           "default_values": [],
@@ -1711,7 +1837,8 @@
             "surgery",
             "arch",
             "pipeline",
-            "graph"
+            "graph",
+            "events"
           ],
           "required": false,
           "short": null,
@@ -1757,6 +1884,24 @@
           "short": "v",
           "value_names": [
             "VERBOSE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
           ]
         },
         {
@@ -1883,6 +2028,24 @@
           ]
         },
         {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
+          ]
+        },
+        {
           "action": "Help",
           "aliases": null,
           "default_values": [],
@@ -1945,6 +2108,24 @@
           "short": "v",
           "value_names": [
             "VERBOSE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
           ]
         },
         {
@@ -2159,6 +2340,24 @@
               "short": "v",
               "value_names": [
                 "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
               ]
             },
             {
@@ -2484,6 +2683,24 @@
               "short": "v",
               "value_names": [
                 "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
               ]
             },
             {
@@ -3112,6 +3329,24 @@
               ]
             },
             {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
+              ]
+            },
+            {
               "action": "Help",
               "aliases": null,
               "default_values": [],
@@ -3335,6 +3570,24 @@
               "short": "v",
               "value_names": [
                 "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
               ]
             },
             {
@@ -4139,6 +4392,24 @@
               ]
             },
             {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
+              ]
+            },
+            {
               "action": "Help",
               "aliases": null,
               "default_values": [],
@@ -4315,6 +4586,24 @@
               "short": "v",
               "value_names": [
                 "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
               ]
             },
             {
@@ -4605,6 +4894,24 @@
               "short": "v",
               "value_names": [
                 "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
               ]
             },
             {
@@ -5145,6 +5452,24 @@
           ]
         },
         {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
+          ]
+        },
+        {
           "action": "Help",
           "aliases": null,
           "default_values": [],
@@ -5506,6 +5831,24 @@
           ]
         },
         {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
+          ]
+        },
+        {
           "action": "Help",
           "aliases": null,
           "default_values": [],
@@ -5568,6 +5911,24 @@
           "short": "v",
           "value_names": [
             "VERBOSE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
           ]
         },
         {
@@ -5782,6 +6143,24 @@
               "short": "v",
               "value_names": [
                 "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
               ]
             },
             {
@@ -6006,6 +6385,24 @@
               ]
             },
             {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
+              ]
+            },
+            {
               "action": "Help",
               "aliases": null,
               "default_values": [],
@@ -6106,6 +6503,24 @@
           ]
         },
         {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
+          ]
+        },
+        {
           "action": "Help",
           "aliases": null,
           "default_values": [],
@@ -6167,6 +6582,24 @@
               "short": "v",
               "value_names": [
                 "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
               ]
             },
             {
@@ -6262,6 +6695,24 @@
           ]
         },
         {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
+          ]
+        },
+        {
           "action": "Help",
           "aliases": null,
           "default_values": [],
@@ -6323,6 +6774,24 @@
               "short": "v",
               "value_names": [
                 "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
               ]
             },
             {
@@ -6427,6 +6896,24 @@
               ]
             },
             {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
+              ]
+            },
+            {
               "action": "Help",
               "aliases": null,
               "default_values": [],
@@ -6524,6 +7011,24 @@
           "short": "v",
           "value_names": [
             "VERBOSE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
           ]
         },
         {
@@ -6815,6 +7320,24 @@
               "short": "v",
               "value_names": [
                 "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
               ]
             },
             {
@@ -7150,6 +7673,24 @@
               ]
             },
             {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
+              ]
+            },
+            {
               "action": "Help",
               "aliases": null,
               "default_values": [],
@@ -7230,6 +7771,24 @@
               "short": "v",
               "value_names": [
                 "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
               ]
             },
             {
@@ -7316,6 +7875,24 @@
               ]
             },
             {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
+              ]
+            },
+            {
               "action": "Help",
               "aliases": null,
               "default_values": [],
@@ -7399,6 +7976,24 @@
               ]
             },
             {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
+              ]
+            },
+            {
               "action": "Help",
               "aliases": null,
               "default_values": [],
@@ -7479,6 +8074,24 @@
               "short": "v",
               "value_names": [
                 "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
               ]
             },
             {
@@ -8144,6 +8757,24 @@
           ]
         },
         {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
+          ]
+        },
+        {
           "action": "Help",
           "aliases": null,
           "default_values": [],
@@ -8206,6 +8837,24 @@
           "short": "v",
           "value_names": [
             "VERBOSE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
           ]
         },
         {
@@ -8293,6 +8942,24 @@
               ]
             },
             {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
+              ]
+            },
+            {
               "action": "Help",
               "aliases": null,
               "default_values": [],
@@ -8355,6 +9022,24 @@
               "short": "v",
               "value_names": [
                 "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
               ]
             },
             {

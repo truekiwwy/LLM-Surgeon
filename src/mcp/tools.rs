@@ -490,6 +490,7 @@ pub fn render_schema(kind: SchemaKind) -> String {
         SchemaKind::Arch => crate::arch::schema(),
         SchemaKind::Pipeline => crate::pipeline::config::schema(),
         SchemaKind::Graph => crate::graph::schema(),
+        SchemaKind::Events => crate::events::schema(),
     };
     let mut text = serde_json::to_string_pretty(&value).unwrap_or_default();
     text.push('\n');

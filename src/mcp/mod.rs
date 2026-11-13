@@ -60,9 +60,34 @@ pub use tools::{
     BenchToolArgs, CheckToolArgs, EvalToolArgs, ExtractToolArgs, InspectToolArgs, MethodId,
     TOOL_APPLY, TOOL_AUTOTUNE, TOOL_BENCH, TOOL_CHECK, TOOL_EVAL, TOOL_EXTRACT, TOOL_INSPECT,
 };
+pub use tools_pipeline::PipelineJobs;
 
-use crate::app::{exit, AppDeps};
+use crate::app::{exit, AppDeps, ProgressSink};
 use crate::cli::{McpArgs, SchemaKind};
+
+/// One `tools/call` in process, exactly as `surgeon mcp` runs it: the argument schema of
+/// [`tool_definitions`], the sandbox of `cfg`, the same cores; the progress goes to `sink`.
+/// The result is the `tools/call` result (`structuredContent` holds the JSON envelope).
+/// For embedders such as surgeon-gui; `pipeline` keeps the detached pipeline worker alive.
+pub fn call_tool(
+    name: &str,
+    arguments: serde_json::Value,
+    deps: &AppDeps,
+    cfg: &McpConfig,
+    sink: &mut dyn ProgressSink,
+    pipeline: &PipelineJobs,
+) -> Result<serde_json::Value, String> {
+    if !tools::is_known(name) {
+        return Err(format!("outil inconnu : {name}"));
+    }
+    let mut ctx = tools::ToolContext {
+        deps,
+        cfg,
+        sink,
+        pipeline,
+    };
+    Ok(tools::call(name, arguments, &mut ctx))
+}
 
 /// `surgeon schema`: raw JSON even under `--json` or `CLICOLOR_FORCE`, since nothing here
 /// goes through `ui`. A closed pipe is ignored.

@@ -52,6 +52,10 @@ pub struct Cli {
     /// -v, -vv, -vvv
     #[arg(short, long, global = true, action = ArgAction::Count)]
     pub verbose: u8,
+    /// Write the progress as versioned NDJSON events to FILE, or to stderr with `-`
+    /// (`surgeon schema --kind events`, docs/STUDIO.md). Outputs are unchanged.
+    #[arg(long, global = true, value_name = "FICHIER|-")]
+    pub events: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -918,6 +922,8 @@ pub enum SchemaKind {
     Pipeline,
     /// JSON Schema (draft-07) of graph.json.
     Graph,
+    /// JSON Schema (draft-07) of one `--events` NDJSON line.
+    Events,
 }
 
 #[derive(Debug, Clone, Args)]
