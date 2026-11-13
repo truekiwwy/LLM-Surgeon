@@ -111,7 +111,8 @@ pub fn viewport(ui: &mut Ui, app: &mut SurgeonApp, preview: bool) {
         LayoutMode::Column => 0.0,
         LayoutMode::Constellation => 1.0,
     };
-    let time = if app.motion { T.motion * 4.0 } else { 0.0 };
+    // The morph explains where each node goes, within the 120 ms every transition keeps.
+    let time = if app.motion { T.motion } else { 0.0 };
     let t_ = ui
         .ctx()
         .animate_value_with_time(egui::Id::new("layout-blend"), target, time);

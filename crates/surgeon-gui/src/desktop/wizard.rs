@@ -863,7 +863,8 @@ fn run_engine(
 fn progress_bar(p: &crate::task::Progress) -> ProgressBar {
     match p.fraction() {
         Some(f) => ProgressBar::new(f).show_percentage(),
-        None => ProgressBar::new(0.0).animate(true),
+        // Size unknown: an empty bar, not a looping shimmer (no animation without a reason).
+        None => ProgressBar::new(0.0),
     }
 }
 
