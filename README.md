@@ -17,7 +17,7 @@ Terminal messages are in French. Every output in this file is a real run, copied
 ## Table of contents
 
 1. [Concept and use cases](#concept)
-2. [Quick start](#quick-start)
+2. [Quick start](#quick-start) (includes the [desktop app](#desktop))
 3. [Advanced guide and reference](#reference)
 4. [Agents and MCP](#mcp)
 5. [FAQ, safety and troubleshooting](#faq)
@@ -417,6 +417,30 @@ What it means: this patch changed the model a lot on these prompts (KL 0.41 agai
 
 > **For beginners**
 > If you only wanted to learn the tool, path A is enough. Path B shows that the same commands scale to a real model without changes.
+
+<a id="desktop"></a>
+### 2.4 Desktop app (Windows)
+
+`surgeon-gui.exe` is a double-click application on top of the same engine: a home screen, a
+first-run wizard that checks your machine (GPU, Vulkan, RAM, disk) and installs llama.cpp for
+you, the card studio and the 3D weight graph. Nothing is downloaded without your explicit
+consent next to the URL, size and SHA-256, and nothing is sent anywhere.
+
+- **Install**: the per-user installer (no administrator rights) or the portable ZIP from the
+  release page, with `SHA256SUMS`. Both include the `surgeon` command line. Unsigned builds
+  trigger a Windows SmartScreen warning: see [docs/DESKTOP.md](docs/DESKTOP.md).
+- **First run**: language, machine diagnostic, llama.cpp (Vulkan GPU or CPU, recorded as your
+  trusted toolchain), workspace folder, optional sample model (Qwen2.5-0.5B-Instruct), tour.
+  Replay it from the home screen; the **Diagnostics** page repairs or reinstalls each part.
+- **Check it works**: run the self-test below (exit code 0 or 1).
+
+```powershell
+surgeon-gui --self-test
+surgeon-gui graph.json
+```
+
+Installation, troubleshooting and uninstall: [docs/DESKTOP.md](docs/DESKTOP.md). Why each
+crate is there: [docs/GUI_DEPENDENCIES.md](docs/GUI_DEPENDENCIES.md).
 
 <a id="reference"></a>
 ## 3. Advanced guide and reference

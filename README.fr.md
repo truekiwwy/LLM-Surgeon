@@ -17,7 +17,7 @@ Les messages du terminal sont en français. Toutes les sorties de ce fichier son
 ## Table des matières
 
 1. [Concept et cas d'usage](#concept)
-2. [Démarrage rapide](#quick-start)
+2. [Démarrage rapide](#quick-start) (dont l'[application de bureau](#desktop))
 3. [Guide avancé et référence technique](#reference)
 4. [Agents et MCP](#mcp)
 5. [FAQ, sécurité et dépannage](#faq)
@@ -417,6 +417,33 @@ Ce que ça veut dire : ce patch a beaucoup changé le modèle sur ces prompts (K
 
 > **Pour les débutants**
 > Si vous vouliez seulement apprendre l'outil, le chemin A suffit. Le chemin B montre que les mêmes commandes passent à l'échelle d'un vrai modèle sans changement.
+
+<a id="desktop"></a>
+### 2.4 Application de bureau (Windows)
+
+`surgeon-gui.exe` est une application à lancer d'un double-clic, au-dessus du même moteur :
+un écran d'accueil, un assistant de premier lancement qui diagnostique votre machine (GPU,
+Vulkan, RAM, disque) et installe llama.cpp pour vous, le studio de cartes et le graphe 3D des
+poids. Rien n'est téléchargé sans votre accord explicite, affiché à côté de l'URL, de la
+taille et du SHA-256, et rien n'est envoyé nulle part.
+
+- **Installation** : l'installateur par utilisateur (sans droits administrateur) ou le ZIP
+  portable de la page de release, avec `SHA256SUMS`. Les deux contiennent la ligne de commande
+  `surgeon`. Un exécutable non signé déclenche l'avertissement Windows SmartScreen : voir
+  [docs/DESKTOP.md](docs/DESKTOP.md).
+- **Premier lancement** : langue, diagnostic de la machine, llama.cpp (GPU Vulkan ou CPU,
+  enregistré comme votre toolchain de confiance), dossier de travail, modèle d'exemple
+  facultatif (Qwen2.5-0.5B-Instruct), visite guidée. Rejouable depuis l'accueil ; la page
+  **Diagnostics** répare ou réinstalle chaque composant.
+- **Vérifier que ça marche** : lancez l'auto-test ci-dessous (code de sortie 0 ou 1).
+
+```powershell
+surgeon-gui --self-test
+surgeon-gui graph.json
+```
+
+Installation, dépannage et désinstallation : [docs/DESKTOP.md](docs/DESKTOP.md). Pourquoi
+chaque crate est là : [docs/GUI_DEPENDENCIES.md](docs/GUI_DEPENDENCIES.md).
 
 <a id="reference"></a>
 ## 3. Guide avancé et référence technique
