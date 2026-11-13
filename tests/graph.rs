@@ -853,7 +853,7 @@ fn mcp_read_only_refuses_out_dir_and_cache_dir_before_writing() {
     assert_eq!(env["data"]["outputs"], json!([]));
 }
 
-// ------------------------------------------------------------------ fast hash, baseline, html
+// ------------------------------------------------------------------ fast hash, baseline, ndjson
 
 /// Multiplies the F32 tensor `name` of `<model>/model.safetensors` in place.
 fn scale_tensor(model: &Path, name: &str, factor: f32) {
@@ -1086,69 +1086,36 @@ fn baseline_misuse_exits_2_and_parameter_mismatches_are_reported() {
     );
 }
 
-/// The JSON inlined in `index.html`.
-fn html_data(html: &str) -> Value {
-    let open = "<script id=\"graph-data\" type=\"application/json\">";
-    let start = html.find(open).unwrap() + open.len();
-    let end = start + html[start..].find("</script>").unwrap();
-    serde_json::from_str(&html[start..end]).unwrap()
-}
-
 #[test]
-fn html_view_is_self_contained_and_carries_the_graph_and_its_diff() {
+fn ndjson_output_is_a_stream_snapshot_of_the_graph_and_its_diff() {
     let dir = tempfile::tempdir().unwrap();
     let (reference, candidate) = twin_models(dir.path());
     scale_tensor(&candidate, "model.layers.1.self_attn.o_proj.weight", 0.5);
     for (name, baseline) in [("plain", None), ("diff", Some(&reference))] {
         let out = dir.path().join(name);
         let mut args = graph_args(s(&candidate), s(&out));
-        args.extend(["--format", "json,html"]);
+        args.extend(["--format", "json,ndjson"]);
         if let Some(baseline) = baseline {
             args.extend(["--baseline", s(baseline)]);
         }
         let (code, env) = run_json(&deps(), &args);
         assert_eq!(code, 0, "{env}");
-        // json, dot, mmd, two csv and html: the repeated json is written once.
+        // json, dot, mmd, two csv and ndjson: the repeated json is written once.
         assert_eq!(env["data"]["outputs"].as_array().unwrap().len(), 6);
-        let html = std::fs::read_to_string(out.join("index.html")).unwrap();
-        assert!(html.starts_with("<!DOCTYPE html>"));
-        assert!(html.trim_end().ends_with("</html>"));
-        for forbidden in ["http://", "https://", "<link", "src=", "@import"] {
-            assert!(!html.contains(forbidden), "{name}: {forbidden}");
-        }
-        assert!(!html.contains("/*GRAPH_DATA*/"), "placeholder replaced");
-        let data = html_data(&html);
+        let ndjson = std::fs::read_to_string(out.join("graph.ndjson")).unwrap();
+        assert_eq!(ndjson.lines().count(), 1, "{name}");
+        assert!(ndjson.ends_with('\n'));
+        assert!(
+            matches!(
+                serde_json::from_str::<GraphPatch>(&ndjson),
+                Ok(GraphPatch::Snapshot { .. })
+            ),
+            "{name}: a stream starts with a snapshot"
+        );
+        // The written text, not a re-serialization (which widens the f32 singular values).
+        let line: Value = serde_json::from_str(&ndjson).unwrap();
+        let data = line["report"].clone();
         assert_eq!(data, read_json(&out.join("graph.json")), "{name}");
-        // Positions come from Rust: the view stays offline and draws only.
-        for forbidden in [
-            "Math.random",
-            "fetch(",
-            "XMLHttpRequest",
-            "WebSocket",
-            "computeForces",
-        ] {
-            assert!(!html.contains(forbidden), "{name}: {forbidden}");
-        }
-        for layout in ["layers", "forces"] {
-            assert!(
-                html.contains(&format!("<option value=\"{layout}\"")),
-                "{layout}"
-            );
-        }
-        for control in [
-            "layout",
-            "view-abs",
-            "view-diff",
-            "color-by",
-            "layer-min",
-            "layer-max",
-            "coupling",
-            "search",
-            "reset",
-            "panel",
-        ] {
-            assert!(html.contains(&format!("id=\"{control}\"")), "{control}");
-        }
         match baseline {
             None => assert!(data.get("baseline_diff").is_none()),
             Some(_) => {
@@ -1344,29 +1311,4 @@ fn graph_patches_replay_a_surgery_exactly() {
     let untouched = stale.clone();
     assert!(history[1].apply(&mut stale).is_err());
     assert_eq!(stale, untouched);
-}
-
-#[test]
-fn html_view_has_no_physics_and_no_network() {
-    let view = include_str!("../src/graph/view.html");
-    for forbidden in [
-        "computeForces",
-        "Float64Array",
-        "for (let j",
-        "Math.random",
-        "fetch(",
-        "XMLHttpRequest",
-        "WebSocket",
-        "EventSource",
-        "sendBeacon",
-        "import(",
-        "new Worker",
-        "http://",
-        "https://",
-    ] {
-        assert!(!view.contains(forbidden), "{forbidden}");
-    }
-    for field in ["pos_column", "pos_constellation"] {
-        assert!(view.contains(field), "{field}");
-    }
 }

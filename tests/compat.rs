@@ -40,8 +40,11 @@
 //! - the 3D view and the diff of the weight graph: `graph --baseline` and `--fast-hash`,
 //!   the value `html` of `graph --format`, the same two properties and value in
 //!   `surgeon_graph`. Only the tool schema hash moved.
+//! - the native viewer: the value `html` of `graph --format` and of `surgeon_graph` became
+//!   `ndjson` (`graph.ndjson`, a `GraphPatch` snapshot for `crates/surgeon-gui`); the HTML view
+//!   is gone. One deliberate removal; only the tool schema hash moved.
 //!
-//! No entry changed or disappeared, and the only output hashes that moved are the two
+//! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
 //! it was.
 //!

@@ -190,7 +190,7 @@ stable et reproductible.
 ## 7. Sorties
 
 `--format` accepte une liste séparée par des virgules parmi `json`, `dot`, `mmd`, `csv`,
-`html` (défaut `json` ; un format répété n'est écrit qu'une fois). Sans `--out-dir`, rien n'est écrit : l'enveloppe ne contient qu'une
+`ndjson` (défaut `json` ; un format répété n'est écrit qu'une fois). Sans `--out-dir`, rien n'est écrit : l'enveloppe ne contient qu'une
 synthèse bornée (200 nœuds, 20 arêtes les plus fortes). Avec `--out-dir`, les fichiers
 sont créés dans ce dossier :
 
@@ -201,7 +201,7 @@ sont créés dans ce dossier :
 | `graph.mmd` | Mermaid `flowchart LR` : nœuds hexagonaux, `classDef`, un `linkStyle` par arête |
 | `matrices.csv` | une ligne par nœud, toutes les métriques |
 | `edges.csv` | une ligne par arête, tous les champs d'alignement |
-| `index.html` | vue 3D interactive autonome (section 7.3) |
+| `graph.ndjson` | première ligne d'un flux `GraphPatch` (`snapshot` du rapport complet), ouverte et suivie par `surgeon-gui` (sections 7.3 et 7.7) |
 
 Les écritures sont sûres : le dossier cible est créé, chaque fichier est écrit dans un
 temporaire exclusif puis renommé ; un lien symbolique ou un fichier existant est refusé
@@ -293,32 +293,46 @@ flowchart LR
   linkStyle 1 stroke:#f8bfa4,stroke-width:2.87px
 ```
 
-### 7.3 Vue 3D (`--format html`)
+### 7.3 Visualiseur natif (`crates/surgeon-gui`)
 
-`index.html` est un fichier unique : le gabarit `src/graph/view.html` (HTML, CSS et
-JavaScript sans bibliothèque, rendu 3D projeté sur un canvas 2D) et le rapport complet en
-JSON dans un bloc `<script type="application/json">`, où chaque `<` est échappé en
-`\u003c`. Il ne référence aucune ressource externe et s'ouvre hors ligne.
+`surgeon-gui` est une application native en Rust (egui, rendu OpenGL), sans HTML ni
+navigateur. C'est un crate autonome avec son propre `Cargo.lock`, comme `surgeon-tui` :
+sa pile graphique n'entre pas dans le `Cargo.lock` racine que vérifie `tests/deps_purity.rs`.
 
-- Navigation : glisser pour l'orbite, Maj+glisser ou clic droit pour déplacer, molette
-  pour le zoom, `R` ou le bouton pour revenir à la vue initiale, Échap pour désélectionner.
-- Disposition (sélecteur du panneau de gauche, bascule en direct avec animation) :
-  `Colonne par couches` (défaut) ou `Constellation 3D (forces)`. Les deux jeux de
-  coordonnées sont calculés en Rust (section 7.6) et lus dans `pos_column` et
-  `pos_constellation` ; la vue ne fait aucune simulation, elle met seulement les positions
-  à l'échelle et interpole d'une disposition à l'autre. Les filtres, la recherche, la vue
-  Diff et l'inspection fonctionnent dans les deux dispositions.
-- Clic sur un nœud : dimensions, dtype, bornes certifiées de `sigma1`, du rang stable et
-  du rang effectif, énergies, `e_write`/`e_read`, kurtosis, canaux outliers, arêtes les
-  plus fortes et, s'il existe, son diff.
-- Couleurs : type de module, couplage maximal des arêtes ou rang effectif ; contour rouge
-  pour un outlier (même règle que les octogones DOT).
-- Filtres : plage de couches (`embed` compte comme la couche 0, `lm_head` comme la
-  dernière), couplage minimal des arêtes, recherche par id ou nom de tenseur.
-- Vue Diff (avec `--baseline`) : nœuds colorés par le changement relatif de norme
-  (bleu baisse, rouge hausse), arêtes par le delta d'alignement, contour orange au-delà du
-  seuil, option pour masquer ce qui n'a pas changé, liste cliquable des couches les plus
-  modifiées. La vue s'ouvre en mode Diff quand au moins un nœud a changé.
+```bash
+cargo run --release --manifest-path crates/surgeon-gui/Cargo.toml -- graph-out/graph.json
+cargo run --release --manifest-path crates/surgeon-gui/Cargo.toml -- graph-out/graph.ndjson
+mon-orchestrateur | surgeon-gui -      # flux NDJSON sur l'entrée standard
+```
+
+- Entrée : un `graph.json` (un état), un `.ndjson` (flux `GraphPatch`, section 7.7, suivi
+  en direct : les lignes ajoutées au fichier apparaissent) ou `-` (NDJSON sur l'entrée
+  standard). Une ligne invalide est signalée sans arrêter le flux.
+- Navigation : clic gauche glissé pour l'orbite, clic droit glissé pour déplacer, molette
+  pour le zoom, `R` pour revenir à la vue initiale ; survol d'un nœud : carte compacte
+  (forme, dtype, `sigma1`, rang effectif) ; clic : sélection, clic dans le vide :
+  désélection.
+- Disposition (barre du haut) : `Colonne` ou `Constellation`. Les positions sont lues dans
+  `pos_column` et `pos_constellation` (section 7.6) ; la vue ne calcule rien, elle
+  interpole d'une disposition à l'autre.
+- Panneau gauche : filtre texte (id ou tenseur), filtres de rôle `attn`, `mlp`, `embed`
+  (le graphe n'a pas de nœud de normalisation), liste des nœuds par couche.
+- Inspecteur droit : forme, dtype, octets, `sigma1` et rang stable avec leurs bornes
+  certifiées, intervalle du rang effectif, énergie captée, kurtosis, `σ1/σmin` quand le
+  spectre est complet (sinon `σ1/σr` sur les valeurs singulières gardées), avertissements
+  du nœud, et tableau `Baseline vs Actuel (Δ)` (`--baseline`) ou `État précédent vs
+  Actuel` (patch d'un flux).
+- `Diff (Δ)` : nœuds verts quand le rang effectif augmente, rouges quand il baisse, en
+  clair quand seule la norme a changé, éteints sinon ; intensité selon `|relative_change|`
+  (pleine à 10 %). Arêtes modifiées vertes ou rouges selon le signe du delta d'alignement.
+- Timeline (flux seulement) : pas à pas et curseur sur l'historique des patches ; en
+  position finale, la vue suit les nouveaux patches. Les nœuds touchés par le patch affiché
+  sont cerclés de magenta (la couleur des couches signalées par un agent dans `surgeon-tui`).
+- `Backend…` : fenêtre de réglage du backend d'inférence (`llama-server`, `hipfire`,
+  `native`, `llama_cpp_dir`, `gpu_layers`, `batch_size`), préremplie par
+  `detect_hardware_and_backends` et enregistrée dans le `config.toml` utilisateur que lit
+  la CLI (docs/BACKENDS.md). Elle s'ouvre seule au premier démarrage, quand ce fichier
+  n'existe pas encore. `hipfire` reste désactivé hors Linux, avec la raison affichée.
 
 ### 7.4 `--baseline` : diff avant/après
 
@@ -422,7 +436,8 @@ l'état du graphe en NDJSON, un objet JSON par ligne (`GraphPatch::to_ndjson`) :
   arête inconnus est refusé sans rien modifier : le récepteur doit redemander un
   `snapshot`. Rejouer les patches dans l'ordre reconstruit chaque état exactement.
 
-Le flux est une API de bibliothèque : `surgeon graph` n'écrit pas encore de NDJSON.
+`surgeon graph --format ndjson` écrit `graph.ndjson`, la ligne `snapshot` du rapport ; un
+orchestrateur y ajoute ses lignes `update` et `surgeon-gui` les affiche au fil de l'eau.
 
 ## 8. Cache, reprise, estimation, annulation
 

@@ -165,7 +165,7 @@ pub enum OutputFormat {
     Dot,
     Mmd,
     Csv,
-    Html,
+    Ndjson,
 }
 
 impl OutputFormat {
@@ -175,7 +175,7 @@ impl OutputFormat {
             Self::Dot => "dot",
             Self::Mmd => "mmd",
             Self::Csv => "csv",
-            Self::Html => "html",
+            Self::Ndjson => "ndjson",
         }
     }
 }
@@ -256,7 +256,7 @@ pub struct GraphArgs {
     /// Dossier des sorties ; sans lui, seule une synthèse bornée est renvoyée.
     #[arg(long)]
     pub out_dir: Option<PathBuf>,
-    /// Formats écrits (json, dot, mmd, csv, html), séparés par des virgules.
+    /// Formats écrits (json, dot, mmd, csv, ndjson), séparés par des virgules.
     #[arg(long, value_enum, value_delimiter = ',', default_value = "json")]
     pub format: Vec<OutputFormat>,
     /// Couches retenues (`0`, `1-3`, `0,2,4` ou `all`).
@@ -868,9 +868,12 @@ fn render_files(report: &GraphReport, formats: &[OutputFormat]) -> Vec<OutputFil
                 name: "graph.mmd",
                 contents: output::render_mermaid(report),
             }),
-            OutputFormat::Html => files.push(OutputFile {
-                name: "index.html",
-                contents: output::render_html(report),
+            // The first line of a stream: surgeon-gui opens it and follows what is appended.
+            OutputFormat::Ndjson => files.push(OutputFile {
+                name: "graph.ndjson",
+                contents: stream::GraphPatch::snapshot(report)
+                    .to_ndjson()
+                    .unwrap_or_default(),
             }),
             OutputFormat::Csv => {
                 files.push(OutputFile {

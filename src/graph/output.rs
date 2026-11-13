@@ -1,4 +1,4 @@
-//! `graph.json`, DOT, Mermaid, CSV and the 3D HTML view for `surgeon graph`, plus safe
+//! `graph.json`, DOT, Mermaid and CSV for `surgeon graph`, plus safe
 //! output writes.
 //!
 //! The report is the schema source (`surgeon schema --kind graph`). It contains no
@@ -636,21 +636,6 @@ fn mermaid_node(report: &GraphReport, node: &NodeReport) -> String {
     )
 }
 
-// ------------------------------------------------------------------ HTML
-
-const VIEW_TEMPLATE: &str = include_str!("view.html");
-const VIEW_DATA: &str = "/*GRAPH_DATA*/null";
-
-/// Self-contained interactive 3D view: the template of `view.html` (vanilla JS, Canvas 2D,
-/// no network access) with the complete report inlined as JSON.
-pub fn render_html(report: &GraphReport) -> String {
-    let data = serde_json::to_string(report)
-        .unwrap_or_else(|_| "null".into())
-        // Inside <script>, "</script>" or "<!--" would end or derail the data block.
-        .replace('<', "\\u003c");
-    VIEW_TEMPLATE.replacen(VIEW_DATA, &data, 1)
-}
-
 // ------------------------------------------------------------------ CSV
 
 pub fn render_matrices_csv(report: &GraphReport) -> String {
@@ -1201,22 +1186,6 @@ mod tests {
         assert_eq!(summary["top_edges"].as_array().unwrap().len(), 1);
         assert_eq!(summary["truncated"]["nodes"], true);
         assert_eq!(summary["truncated"]["edges"], false);
-    }
-
-    #[test]
-    fn html_data_cannot_close_its_script_block() {
-        let mut report = report();
-        report.nodes[0].tensor = "x</script><!--<script>".into();
-        let html = render_html(&report);
-        let template = VIEW_TEMPLATE.matches("</script>").count();
-        assert_eq!(html.matches("</script>").count(), template);
-        assert!(!html.contains("x</script>"));
-        assert!(!html.contains(VIEW_DATA));
-        let open = "type=\"application/json\">";
-        let from = html.find(open).unwrap() + open.len();
-        let to = from + html[from..].find("</script>").unwrap();
-        let back: GraphReport = serde_json::from_str(&html[from..to]).unwrap();
-        assert_eq!(back, report);
     }
 
     #[test]

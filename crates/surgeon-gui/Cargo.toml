@@ -1,0 +1,28 @@
+[package]
+name = "surgeon-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Native viewer of the weight-surgeon graph: 3D layouts, baseline diff, live GraphPatch streams and backend setup"
+repository = "https://github.com/truekiwwy/LLM-Surgeon"
+readme = "README.md"
+keywords = ["llm", "safetensors", "egui", "visualization", "graph"]
+categories = ["visualization", "gui"]
+
+[[bin]]
+name = "surgeon-gui"
+path = "src/main.rs"
+
+# A crate of its own with its own Cargo.lock, like crates/surgeon-tui: the GUI stack (winit,
+# wayland, glutin) never enters the root lockfile that tests/deps_purity.rs checks.
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+# glow (OpenGL) rather than wgpu: no Metal / Vulkan SDK crates, painting is 2D anyway.
+eframe = { version = "0.36.2", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+serde_json = "1.0.154"
+weight-surgeon = { path = "../.." }

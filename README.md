@@ -1572,7 +1572,7 @@ surgeon graph [OPTIONS] --model <MODEL>
 | --- | --- | --- |
 | `--model` | required | `.safetensors` file, sharded folder or `.gguf`. |
 | `--out-dir` | none | Output folder; without it only a bounded summary is returned and nothing is written. |
-| `--format` | `json` | `json`, `dot`, `mmd`, `csv`, `html`, comma-separated. `html` writes `index.html`, a self-contained 3D view (orbit, zoom, filters, node inspector, absolute or diff view) that needs no network. |
+| `--format` | `json` | `json`, `dot`, `mmd`, `csv`, `ndjson`, comma-separated. `ndjson` writes `graph.ndjson`, the first line (`snapshot`) of a `GraphPatch` stream that the native viewer `crates/surgeon-gui` opens and follows live (layer column or 3D constellation, filters, inspector, diff view, patch timeline; docs/GRAPH.md section 7.3). |
 | `--layers` | `all` | `all`, a range `1-3`, or a list `0,2,4`. |
 | `--matrices` | every graph role | `q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head`; repeatable or comma-separated. |
 | `--rank` | 32 | Target rank of the randomized SVD (at least 1). |
@@ -1603,9 +1603,9 @@ surgeon graph [OPTIONS] --model <MODEL>
 # write the four formats on the fake mini-model, exact spectra up to 64
 surgeon graph --model qwen2-mini --out-dir graph-demo --format json,dot,mmd,csv \
   --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64
-# compare a patched copy with that report, 3D diff view in graph-diff/index.html
+# compare a patched copy with that report; open graph-diff/graph.ndjson in surgeon-gui for the 3D diff view
 surgeon graph --model qwen2-mini-patched --baseline graph-demo/graph.json --out-dir graph-diff \
-  --format json,html --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64 --fast-hash
+  --format json,ndjson --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64 --fast-hash
 ```
 
 ```text

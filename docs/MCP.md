@@ -455,8 +455,8 @@ du schéma est dans [docs/GRAPH.md](GRAPH.md).
 | Champ | Défaut | Rôle |
 | --- | --- | --- |
 | `model` | requis | `.safetensors`, dossier shardé ou `.gguf`, dans un dossier autorisé |
-| `out_dir` | absent | Écrit `graph.json`, `graph.dot`, `graph.mmd`, `matrices.csv`, `edges.csv`, `index.html` ; absent : synthèse bornée seulement, aucun fichier |
-| `format` | `["json"]` | `json`, `dot`, `mmd`, `csv`, `html` (vue 3D autonome `index.html`) |
+| `out_dir` | absent | Écrit `graph.json`, `graph.dot`, `graph.mmd`, `matrices.csv`, `edges.csv`, `graph.ndjson` ; absent : synthèse bornée seulement, aucun fichier |
+| `format` | `["json"]` | `json`, `dot`, `mmd`, `csv`, `ndjson` (`graph.ndjson`, flux `GraphPatch` ouvert par `surgeon-gui`) |
 | `layers`, `matrices` | tout | Filtres de couches (`0`, `1-3`, `0,2,4`, `all`) et de matrices (`q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head`) |
 | `rank`, `oversample`, `power_iters`, `seed` | 32, 10, 3, 0 | SVD randomisé ; même graine, mêmes nombres |
 | `full_spectrum_max_dim` | 2048 | Spectre exact pour `min(m,n)` jusqu'à cette valeur (0 désactive ; plafonds 1024 et `m*n <= 4_000_000`) |

@@ -11,6 +11,7 @@ Ces termes ont le même sens dans tout le dépôt (aide du CLI, serveur MCP, doc
 | --- | --- | --- |
 | **Surgery Engine** | La bibliothèque Rust `weight_surgeon` (paquet `weight-surgeon`) : moteur mmap, noyaux, formats, extraction, patch, LoRA, diff de faible rang, mesure, évaluation. | `src/lib.rs` et les modules ci-dessous |
 | **CLI front-end** | Le binaire `surgeon` : analyse des arguments, rendu terminal, tableau de bord. | `src/main.rs`, `src/cli.rs`, `src/app.rs`, `src/ui.rs`, `src/tui/` |
+| **Native viewer** | Le binaire `surgeon-gui` (crate autonome, egui) : graphe des poids en 3D, diff, flux `GraphPatch`, réglage du backend. Il ne fait que lire `weight_surgeon` ; son `Cargo.lock` est séparé. | `crates/surgeon-gui/`, [docs/GRAPH.md](GRAPH.md) section 7.3 |
 | **Agent extension (MCP)** | Le serveur `surgeon mcp` : neuf outils typés en JSON-RPC sur stdio, dossiers autorisés, sauvegarde imposée. | `src/mcp/`, [docs/MCP.md](MCP.md) |
 | **Extension point** | Un trait Rust public, versionné, qu'un tiers implémente et enregistre. Un seul aujourd'hui : `ExtractionMethod`. | `src/plugin/` |
 | **Plugin** | Soit une implémentation d'un extension point compilée avec la bibliothèque, soit l'empaquetage `plugin/` pour Claude Code. Rien d'autre. | [docs/PLUGINS.md](PLUGINS.md) |
