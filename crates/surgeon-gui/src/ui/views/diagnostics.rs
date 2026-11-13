@@ -60,7 +60,8 @@ fn system(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     let rows = app.desktop.system.as_ref().map_or(2, |s| {
         4 + s.gpus.len().max(1) + s.notes.len() - usize::from(s.disk_free_mib.is_none())
     });
-    let height = T.size.header + 2.0 * T.space.m + rows as f32 * T.size.row;
+    // A kv row is one row plus the item gap.
+    let height = T.size.header + 2.0 * T.space.m + rows as f32 * (T.size.row + T.space.xs);
     let parts = layout::stack(
         regions.center,
         &[Part::Fixed(layout::snap8(height)), Part::Flex(1.0)],
@@ -85,6 +86,8 @@ fn system(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 }
             },
             |ui, app| {
+                // Keys and values stay readable together on a wide window.
+                ui.set_max_width(T.size.center_min);
                 let Some(s) = &app.desktop.system else {
                     c::empty(ui, t("diag.no_probe"), t("diag.no_probe.hint"));
                     return;
