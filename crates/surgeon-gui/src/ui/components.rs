@@ -184,11 +184,23 @@ pub fn separator(ui: &mut Ui) {
     ui.add_space(T.space.s);
 }
 
+/// A line of tabular secondary text behind an icon of the set, in the icon column.
+pub fn icon_line(ui: &mut Ui, icon: Icon, text: impl Into<String>) -> Response {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = T.space.s;
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(T.size.icon, T.size.row), Sense::hover());
+        icons::paint(ui.painter(), rect, icon, T.color.text_disabled);
+        mono_secondary(ui, text)
+    })
+    .inner
+}
+
 /// A state: a drawn dot and its word, never the color alone.
 pub fn status(ui: &mut Ui, state: State, text: impl Into<String>) -> Response {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = T.space.s;
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(T.size.dot, T.size.row), Sense::hover());
+        // The dot sits in the same 16 column as the icons, so states and tool lines align.
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(T.size.icon, T.size.row), Sense::hover());
         icons::dot(ui.painter(), rect.center(), state);
         ui.add(Label::new(rich(text, font_body(), T.color.text)).truncate())
     })
@@ -206,7 +218,7 @@ pub fn empty(ui: &mut Ui, title: &str, hint: &str) {
 pub fn message(ui: &mut Ui, text: &str, error: bool) {
     let state = if error { State::Error } else { State::Ok };
     ui.horizontal_top(|ui| {
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(T.size.dot, T.size.row), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(T.size.icon, T.size.row), Sense::hover());
         icons::dot(ui.painter(), rect.center(), state);
         ui.add(Label::new(rich(text, font_body(), T.color.text)).wrap());
     });

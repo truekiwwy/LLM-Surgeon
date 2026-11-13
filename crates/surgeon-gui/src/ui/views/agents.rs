@@ -7,7 +7,7 @@ use eframe::egui::{self, Id, Order, Pos2, ScrollArea, Ui};
 
 use super::super::components::{self as c, ButtonKind, Segment};
 use super::super::i18n::{t, tf};
-use super::super::icons::State;
+use super::super::icons::{Icon, State};
 use super::super::layout::{self, Part, Regions};
 use super::super::theme::TOKENS as T;
 use super::explorer;
@@ -162,11 +162,8 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
                     ui.add_space(T.space.s);
                 }
                 Block::ToolUse { name, input, .. } => {
-                    c::mono_secondary(
-                        ui,
-                        tf("chat.tool_call", &[("name", name), ("input", &input)]),
-                    )
-                    .on_hover_text(input.to_string());
+                    let line = tf("chat.tool_call", &[("name", name), ("input", &input)]);
+                    c::icon_line(ui, Icon::StepForward, line).on_hover_text(input.to_string());
                 }
                 Block::ToolResult {
                     content, is_error, ..
@@ -174,7 +171,7 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
                     let first = result_line(content);
                     match is_error {
                         true => c::status(ui, State::Error, first),
-                        false => c::mono_secondary(ui, first),
+                        false => c::icon_line(ui, Icon::StepBack, first),
                     };
                 }
                 Block::Opaque { .. } => {}
