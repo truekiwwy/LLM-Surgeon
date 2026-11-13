@@ -1,27 +1,26 @@
 //! `plan`: what a run will cost and whether its gates can conclude, before anything is
 //! written to a model or generated at length. Disk: the working copy, the logits dumps and,
 //! for `restore-from-backup`, the backups. Time: work units (tokens generated or evaluated,
-//! an upper estimate since generation may stop early) over a measured decoding rate. Power:
-//! the smallest Dev and Test sizes at which a non-inferiority gate can be GO at all.
+//! an upper estimate since generation may stop early) over the decoding rate measured on the
+//! engine that does them: the job's backend (llama-server on the GPU) for the binary pillars,
+//! the native CPU engine for the drift pillars and for a native job. Power: the smallest Dev
+//! and Test sizes at which a non-inferiority gate can be GO at all.
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use std::time::Instant;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::config::{Gate, PillarKind, PipelineConfig, WorkingCopy};
+use super::config::{Gate, PillarConfig, PillarKind, PipelineConfig, WorkingCopy};
 use super::job::{dir_size, sha256_file, Result};
 use super::measure;
 use super::stats::{lowest_pairs, minimum_pairs};
 use super::PipelineError;
 use crate::app::AppDeps;
-use crate::bench::native::NativeGenerator;
-use crate::eval::TextGenerator;
-use crate::extract::{load_prompt_texts, load_tokenizer, tokenize, DTypeChoice};
+use crate::backend::BackendConfig;
+use crate::extract::{load_prompt_texts, load_tokenizer, tokenize};
 
 /// Tokens decoded by the calibration.
 const CALIBRATION_TOKENS: u32 = 8;
@@ -79,41 +78,71 @@ pub struct Plan {
     /// Le moteur des piliers binaires : native-cpu, llama-server (Vulkan, ngl=99, batch=1).
     #[serde(default)]
     pub backend: String,
-    /// null si la calibration n'a pas été faite.
+    /// Moteur natif (CPU) : piliers kl et logits, et tous les piliers d'un job native. null
+    /// sans calibration ou si rien ne tourne en natif.
     pub calibration: Option<Calibration>,
-    /// Estimation haute de la durée, en secondes ; null sans calibration.
+    /// Backend du job (llama-server sur le GPU) pour les piliers binaires : chargement
+    /// (conversion GGUF et démarrage du serveur compris) et débit. null pour un job native.
+    #[serde(default)]
+    pub backend_calibration: Option<Calibration>,
+    /// Estimation haute de la durée, en secondes, chaque moteur à son débit ; null sans
+    /// calibration.
     pub estimated_secs: Option<u64>,
     pub max_wall_time_secs: u64,
     pub warnings: Vec<String>,
 }
 
-/// Units of the whole run if no candidate stops early: every candidate on every Dev set,
-/// the base model once per set, then the Test sets (base and selected candidate).
+/// Units of one pillar if no candidate stops early: every candidate and the base model on
+/// the Dev set, then the Test set (base and selected candidate).
+fn pillar_units(p: &PillarConfig, candidates: u64) -> Result<u64> {
+    let per = |dataset: &Path| -> Result<u64> {
+        let n = measure::count_items(p.kind, dataset, p.limit)? as u64;
+        let per_item = match p.kind {
+            PillarKind::Kl | PillarKind::Logits => p
+                .max_tokens
+                .map_or(crate::bench::DEFAULT_DUMP_MAX_TOKENS as u64, u64::from),
+            PillarKind::Gsm8k => p
+                .max_new_tokens
+                .map_or(u64::from(crate::bench::DEFAULT_MAX_NEW_TOKENS), u64::from),
+            _ => p.max_new_tokens.map_or(
+                u64::from(crate::bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
+                u64::from,
+            ),
+        };
+        Ok(n * per_item)
+    };
+    // Per candidate one measurement (a dump for a drift); the base model once.
+    Ok(per(&p.dataset_dev)? * (candidates + 1) + 2 * per(&p.dataset_test)?)
+}
+
+/// Units of the whole run if no candidate stops early.
 pub fn units_total(config: &PipelineConfig) -> Result<u64> {
     let candidates = config.candidates.values().len() as u64;
-    let mut total = 0u64;
-    for p in &config.pillars {
-        let per = |dataset: &Path| -> Result<u64> {
-            let n = measure::count_items(p.kind, dataset, p.limit)? as u64;
-            let per_item = match p.kind {
-                PillarKind::Kl | PillarKind::Logits => p
-                    .max_tokens
-                    .map_or(crate::bench::DEFAULT_DUMP_MAX_TOKENS as u64, u64::from),
-                PillarKind::Gsm8k => p
-                    .max_new_tokens
-                    .map_or(u64::from(crate::bench::DEFAULT_MAX_NEW_TOKENS), u64::from),
-                _ => p.max_new_tokens.map_or(
-                    u64::from(crate::bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
-                    u64::from,
-                ),
-            };
-            Ok(n * per_item)
-        };
-        // Per candidate one measurement (a dump for a drift); the base model once.
-        total += per(&p.dataset_dev)? * (candidates + 1);
-        total += 2 * per(&p.dataset_test)?;
+    config
+        .pillars
+        .iter()
+        .map(|p| pillar_units(p, candidates))
+        .sum()
+}
+
+/// What one engine has to do: work units and model loads.
+#[derive(Default)]
+struct Work {
+    units: u64,
+    loads: u64,
+}
+
+impl Work {
+    /// Seconds at the calibrated rate; zero without work, unknown without a calibration.
+    fn secs(&self, calibration: Option<&Calibration>) -> Option<f64> {
+        match (self.loads, calibration) {
+            (0, _) => Some(0.0),
+            (_, Some(c)) => {
+                Some(self.units as f64 / c.tokens_per_second + self.loads as f64 * c.load_secs)
+            }
+            (_, None) => None,
+        }
     }
-    Ok(total)
 }
 
 fn vocab_size(model: &Path) -> u64 {
@@ -142,16 +171,18 @@ fn dump_bytes(
     Ok(positions * vocab * 4)
 }
 
-/// Loads the model and decodes a few tokens: the rate the estimate rests on.
-fn calibrate(config: &PipelineConfig, deps: &AppDeps) -> Result<Calibration> {
+/// Loads the model on `backend` (native CPU without one) and decodes a few tokens: the rate
+/// the estimate rests on. On llama-server the load includes the GGUF conversion and the
+/// server start, which every measurement of the run pays too.
+fn calibrate(
+    config: &PipelineConfig,
+    backend: Option<&BackendConfig>,
+    deps: &AppDeps,
+) -> Result<Calibration> {
     let started = Instant::now();
-    let mut generator = NativeGenerator::load(
-        &config.model,
-        DTypeChoice::Auto,
-        deps.probe.as_ref(),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .map_err(measure::bench_error)?;
+    let mut generator =
+        measure::generator(&config.model, backend, &measure::options(backend), deps)
+            .map_err(measure::bench_error)?;
     let load_secs = started.elapsed().as_secs_f64();
     let started = Instant::now();
     let mut tokens = 0u32;
@@ -180,7 +211,9 @@ pub fn plan(
     let candidates = config.candidates.values().len();
     // Base dumps by (set, max_tokens): pillars on the same set share them.
     let mut base_dumps = BTreeMap::new();
-    let mut model_loads = 0u64;
+    let backend = config.backend.as_ref();
+    // The drift pillars always read native logits; the binary ones generate on the backend.
+    let (mut native, mut on_backend) = (Work::default(), Work::default());
     let vocab = vocab_size(&config.model);
     for p in &config.pillars {
         let n_dev = measure::count_items(p.kind, &p.dataset_dev, p.limit)?;
@@ -231,6 +264,11 @@ pub fn plan(
             ));
         }
         previous_rank = previous_rank.max(p.kind.cost_rank());
+        let work = match p.kind.is_binary() && backend.is_some() {
+            true => &mut on_backend,
+            false => &mut native,
+        };
+        work.units += pillar_units(p, candidates as u64)?;
         if !p.kind.is_binary() {
             let tokens = p
                 .max_tokens
@@ -241,9 +279,9 @@ pub fn plan(
                 let bytes = dump_bytes(&tokenizer, dataset, tokens, vocab)?;
                 base_dumps.insert((sha, tokens), bytes);
             }
-            model_loads += 2 * (candidates as u64 + 1);
+            work.loads += 2 * (candidates as u64 + 1);
         } else {
-            model_loads += candidates as u64 + 1 + 2;
+            work.loads += candidates as u64 + 1 + 2;
         }
         pillars.push(PillarPlan {
             id: p.id.clone(),
@@ -273,22 +311,24 @@ pub fn plan(
         backups_bytes,
         total_bytes: model_bytes + dumps_bytes + backups_bytes,
     };
-    let units_total = units_total(config)?;
-    // The calibration decodes on the native CPU engine: its rate says nothing about a GPU.
-    let native = config.backend.is_none();
-    if calibrate_rate && !native {
-        warnings.push(
-            "durée non estimée : la calibration mesure le moteur natif (CPU), pas le backend du job"
-                .into(),
-        );
-    }
-    let calibration = match calibrate_rate && native {
-        true => Some(calibrate(config, deps)?),
-        false => None,
+    // Each engine that has work is measured: a CPU rate says nothing about a GPU.
+    let measure_on =
+        |work: &Work, engine: Option<&BackendConfig>| match calibrate_rate && work.loads > 0 {
+            true => calibrate(config, engine, deps).map(Some),
+            false => Ok(None),
+        };
+    let calibration = measure_on(&native, None)?;
+    let backend_calibration = match backend {
+        Some(b) => measure_on(&on_backend, Some(b))?,
+        None => None,
     };
-    let estimated_secs = calibration.as_ref().map(|c| {
-        (units_total as f64 / c.tokens_per_second + model_loads as f64 * c.load_secs).ceil() as u64
-    });
+    let estimated_secs = match (
+        native.secs(calibration.as_ref()),
+        on_backend.secs(backend_calibration.as_ref()),
+    ) {
+        (Some(cpu), Some(gpu)) if calibrate_rate => Some((cpu + gpu).ceil() as u64),
+        _ => None,
+    };
     if let Some(secs) = estimated_secs {
         if secs > config.budgets.max_wall_time_secs {
             warnings.push(format!(
@@ -303,10 +343,11 @@ pub fn plan(
         candidates,
         pillars,
         disk,
-        units_total,
-        model_loads,
+        units_total: native.units + on_backend.units,
+        model_loads: native.loads + on_backend.loads,
         backend: crate::backend::describe_config(&config.backend.clone().unwrap_or_default()),
         calibration,
+        backend_calibration,
         estimated_secs,
         max_wall_time_secs: config.budgets.max_wall_time_secs,
         warnings,

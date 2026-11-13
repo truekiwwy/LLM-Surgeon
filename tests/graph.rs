@@ -1346,6 +1346,62 @@ fn graph_patches_replay_a_surgery_exactly() {
     assert_eq!(stale, untouched);
 }
 
+fn read_patches(path: &Path) -> Vec<GraphPatch> {
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(text.ends_with('\n'), "{text}");
+    text.lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn graph_ndjson_streams_the_reference_then_the_update_to_the_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let (before_model, after_model) = twin_models(dir.path());
+    scale_tensor(&after_model, "model.layers.1.self_attn.o_proj.weight", 0.5);
+    // The reference was exported earlier as graph.json with other formats than this run.
+    let before = graph_report(&before_model, &dir.path().join("before"));
+    let baseline = dir.path().join("before").join("graph.json");
+    let out = dir.path().join("stream");
+    let mut args = graph_args(s(&after_model), s(&out));
+    args.extend(["--format", "ndjson", "--baseline", s(&baseline)]);
+    let (code, env) = run_json(&deps(), &args);
+    assert_eq!(code, 0, "{env}");
+    let mut after: GraphReport =
+        serde_json::from_slice(&std::fs::read(out.join("graph.json")).unwrap()).unwrap();
+    assert!(after.baseline_diff.is_some());
+    after.baseline_diff = None;
+
+    let patches = read_patches(&out.join("graph.ndjson"));
+    assert_eq!(patches.len(), 2);
+    let GraphPatch::Snapshot { report } = &patches[0] else {
+        panic!("a stream starts with a snapshot");
+    };
+    assert_eq!(
+        (&report.model, &report.nodes),
+        (&before.model, &before.nodes)
+    );
+    let GraphPatch::Update { nodes, .. } = &patches[1] else {
+        panic!("the model is an update of the reference, not a second snapshot");
+    };
+    let changed: Vec<&str> = nodes.iter().map(|u| u.node.id.as_str()).collect();
+    assert_eq!(changed, ["L1.attn_out"]);
+    let mut state = (**report).clone();
+    patches[1].apply(&mut state).unwrap();
+    assert_eq!(state, after, "replaying the stream gives graph.json");
+
+    // Without --baseline: the model alone, one snapshot line.
+    let alone = dir.path().join("alone");
+    let mut args = graph_args(s(&after_model), s(&alone));
+    args.extend(["--format", "ndjson"]);
+    let (code, env) = run_json(&deps(), &args);
+    assert_eq!(code, 0, "{env}");
+    let patches = read_patches(&alone.join("graph.ndjson"));
+    assert!(
+        matches!(&patches[..], [GraphPatch::Snapshot { report }] if report.nodes == after.nodes)
+    );
+}
+
 #[test]
 fn html_view_has_no_physics_and_no_network() {
     let view = include_str!("../src/graph/view.html");

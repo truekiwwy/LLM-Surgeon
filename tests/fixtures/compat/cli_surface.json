@@ -7407,7 +7407,8 @@
             "dot",
             "mmd",
             "csv",
-            "html"
+            "html",
+            "ndjson"
           ],
           "required": false,
           "short": null,

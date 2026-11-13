@@ -166,6 +166,9 @@ pub enum OutputFormat {
     Mmd,
     Csv,
     Html,
+    // `graph.ndjson`, see stream::history. A plain comment: a doc comment would split the
+    // enum of the MCP schema into a oneOf.
+    Ndjson,
 }
 
 impl OutputFormat {
@@ -176,6 +179,7 @@ impl OutputFormat {
             Self::Mmd => "mmd",
             Self::Csv => "csv",
             Self::Html => "html",
+            Self::Ndjson => "ndjson",
         }
     }
 }
@@ -256,7 +260,7 @@ pub struct GraphArgs {
     /// Dossier des sorties ; sans lui, seule une synthèse bornée est renvoyée.
     #[arg(long)]
     pub out_dir: Option<PathBuf>,
-    /// Formats écrits (json, dot, mmd, csv, html), séparés par des virgules.
+    /// Formats écrits (json, dot, mmd, csv, html, ndjson), séparés par des virgules.
     #[arg(long, value_enum, value_delimiter = ',', default_value = "json")]
     pub format: Vec<OutputFormat>,
     /// Couches retenues (`0`, `1-3`, `0,2,4` ou `all`).
@@ -497,19 +501,23 @@ pub fn core_graph_with(
         return estimate(args, &settings, &model);
     }
     let mut report = build_report(&args.model, args, &settings, deps, sink, &cancel)?;
-    if let Some(path) = &args.baseline {
-        let baseline = match diff::is_report_file(path) {
-            true => diff::read_report(path)?,
-            false => build_report(path, args, &settings, deps, sink, &cancel)?,
-        };
-        report.baseline_diff = Some(diff::compare(&baseline, &report, path));
-    }
+    let baseline = match &args.baseline {
+        Some(path) => {
+            let baseline = match diff::is_report_file(path) {
+                true => diff::read_report(path)?,
+                false => build_report(path, args, &settings, deps, sink, &cancel)?,
+            };
+            report.baseline_diff = Some(diff::compare(&baseline, &report, path));
+            Some(baseline)
+        }
+        None => None,
+    };
     drop(watchdog);
     check_cancel(deps, &cancel)?;
 
     let outputs = match &args.out_dir {
         Some(dir) => {
-            let files = render_files(&report, &settings.formats);
+            let files = render_files(&report, baseline.as_ref(), &settings.formats);
             let paths = output::write_outputs(dir, &files, args.overwrite)?;
             sink.event(ProgressEvent::GraphWrite { files: paths.len() });
             paths
@@ -852,10 +860,18 @@ fn median(sorted: &[f64]) -> f64 {
     }
 }
 
-fn render_files(report: &GraphReport, formats: &[OutputFormat]) -> Vec<OutputFile> {
+fn render_files(
+    report: &GraphReport,
+    baseline: Option<&GraphReport>,
+    formats: &[OutputFormat],
+) -> Vec<OutputFile> {
     let mut files = Vec::new();
     for format in formats {
         match format {
+            OutputFormat::Ndjson => files.push(OutputFile {
+                name: "graph.ndjson",
+                contents: stream::history(report, baseline).unwrap_or_default(),
+            }),
             OutputFormat::Json => files.push(OutputFile {
                 name: "graph.json",
                 contents: output::render_json(report).unwrap_or_default(),

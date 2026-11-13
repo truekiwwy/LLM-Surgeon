@@ -10,11 +10,19 @@
 //! {"cmd":"clear_preview"}
 //! {"cmd":"set_filter","role":"gate"}          // role omitted or null = no filter
 //! {"cmd":"snapshot"}                          // -> {"ok":true,"snapshot":{...}}
+//! {"cmd":"graph_patch","patch":{"type":"snapshot","report":{...}}}  // -> {"ok":true,"patches":1}
+//! {"cmd":"graph_patch","patch":{"type":"update",...}}               // -> {"ok":true,"patches":2}
+//! {"cmd":"graph_stream"}                      // -> {"ok":true,"patches":[...]}
 //! ```
 //!
 //! Every command gets exactly one reply line: `{"ok":true,...}` or
 //! `{"ok":false,"error":"..."}`. Unknown commands and malformed payloads are
 //! errors, never crashes; a closed connection is tolerated.
+//!
+//! `graph_patch` and `graph_stream` relay the `GraphPatch` lines of
+//! `surgeon graph --format ndjson` (docs/GRAPH.md) from a producer (an
+//! orchestrator) to consumers (a GUI): `graph_stream` returns the last snapshot
+//! and the updates since, to apply in order.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -28,7 +36,8 @@ use tokio::sync::{mpsc, oneshot};
 /// Reply sent back to the agent, for the app to fill the snapshot with.
 pub struct IpcRequest {
     pub command: IpcCommand,
-    /// Present for `snapshot`: send the JSON document of the snapshot through it.
+    /// Present when [`IpcCommand::needs_reply`]: the snapshot document for `snapshot`,
+    /// the whole reply line for the graph commands.
     pub reply: Option<oneshot::Sender<Value>>,
 }
 
@@ -36,12 +45,26 @@ pub struct IpcRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub enum IpcCommand {
     Ping,
-    HighlightLayer { layer: u64 },
-    SelectTensor { name: String },
-    PreviewPatch { tensor: String, alpha: f64 },
+    HighlightLayer {
+        layer: u64,
+    },
+    SelectTensor {
+        name: String,
+    },
+    PreviewPatch {
+        tensor: String,
+        alpha: f64,
+    },
     ClearPreview,
-    SetFilter { role: Option<String> },
+    SetFilter {
+        role: Option<String>,
+    },
     Snapshot,
+    /// One `GraphPatch` line, checked for its `type` only (the TUI does not read graphs).
+    GraphPatch {
+        patch: Value,
+    },
+    GraphStream,
 }
 
 impl IpcCommand {
@@ -54,7 +77,17 @@ impl IpcCommand {
             IpcCommand::ClearPreview => "clear_preview",
             IpcCommand::SetFilter { .. } => "set_filter",
             IpcCommand::Snapshot => "snapshot",
+            IpcCommand::GraphPatch { .. } => "graph_patch",
+            IpcCommand::GraphStream => "graph_stream",
         }
+    }
+
+    /// The app answers these itself (the bridge acks the others).
+    pub fn needs_reply(&self) -> bool {
+        matches!(
+            self,
+            IpcCommand::Snapshot | IpcCommand::GraphPatch { .. } | IpcCommand::GraphStream
+        )
     }
 
     /// Parses one JSON document; a typed error string is returned to the agent.
@@ -74,6 +107,14 @@ impl IpcCommand {
             CommandWire::ClearPreview => Ok(IpcCommand::ClearPreview),
             CommandWire::SetFilter { role } => Ok(IpcCommand::SetFilter { role }),
             CommandWire::Snapshot => Ok(IpcCommand::Snapshot),
+            CommandWire::GraphPatch { patch } => match patch["type"].as_str() {
+                Some("snapshot") if patch["report"].is_object() => {
+                    Ok(IpcCommand::GraphPatch { patch })
+                }
+                Some("update") => Ok(IpcCommand::GraphPatch { patch }),
+                _ => Err("graph_patch : patch de type snapshot (avec report) ou update".into()),
+            },
+            CommandWire::GraphStream => Ok(IpcCommand::GraphStream),
         }
     }
 
@@ -96,6 +137,36 @@ enum CommandWire {
     ClearPreview,
     SetFilter { role: Option<String> },
     Snapshot,
+    GraphPatch { patch: Value },
+    GraphStream,
+}
+
+/// The graph stream relayed from `graph_patch` to `graph_stream`: the last snapshot and the
+/// updates received since.
+// shortcut: updates pile up until the next snapshot; bound them if a producer streams for hours.
+#[derive(Debug, Default)]
+pub struct GraphRelay {
+    patches: Vec<Value>,
+}
+
+impl GraphRelay {
+    /// Takes one patch and returns the reply line. An update before any snapshot is refused:
+    /// a consumer could not apply it.
+    pub fn push(&mut self, patch: Value) -> Value {
+        match patch["type"].as_str() {
+            Some("snapshot") => self.patches = vec![patch],
+            Some("update") if !self.patches.is_empty() => self.patches.push(patch),
+            _ => {
+                return json!({"ok": false, "error": "graph_patch : update sans snapshot préalable"})
+            }
+        }
+        json!({"ok": true, "patches": self.patches.len()})
+    }
+
+    /// The reply to `graph_stream`.
+    pub fn stream(&self) -> Value {
+        json!({"ok": true, "patches": self.patches})
+    }
 }
 
 /// What the TUI answers to `snapshot`, describing the current selection.
@@ -274,7 +345,8 @@ async fn process_line(line: &str, tx: &mpsc::UnboundedSender<IpcRequest>) -> Val
     };
     match IpcCommand::from_value(&value) {
         Ok(command) => {
-            if command.name() == "snapshot" {
+            if command.needs_reply() {
+                let snapshot = matches!(command, IpcCommand::Snapshot);
                 let (sent, received) = oneshot::channel();
                 if tx
                     .send(IpcRequest {
@@ -286,8 +358,9 @@ async fn process_line(line: &str, tx: &mpsc::UnboundedSender<IpcRequest>) -> Val
                     return json!({"ok": false, "error": "interface hors ligne"});
                 }
                 match tokio::time::timeout(std::time::Duration::from_secs(5), received).await {
-                    Ok(Ok(snapshot)) => json!({"ok": true, "snapshot": snapshot}),
-                    _ => json!({"ok": false, "error": "capture expirée"}),
+                    Ok(Ok(answer)) if snapshot => json!({"ok": true, "snapshot": answer}),
+                    Ok(Ok(reply)) => reply,
+                    _ => json!({"ok": false, "error": "réponse de l'interface expirée"}),
                 }
             } else {
                 if tx

@@ -9,7 +9,7 @@ graphique s'en sert au premier démarrage. Code : `src/backend/`.
 | Backend | Matériel | Ce que c'est | État |
 | --- | --- | --- | --- |
 | `native` | CPU | Générateur en Rust pur de `surgeon` (Qwen2, Llama/Mistral, Qwen3 en SafeTensors). Aucun programme externe. | Repli, défaut historique de `bench refusal` et du pipeline. |
-| `llama-server` | GPU (Vulkan, CUDA, Metal...) ou CPU | Un serveur `llama.cpp` local pour toute l'exécution. Un dossier SafeTensors Qwen2 est converti par `surgeon` lui-même en GGUF (Rust pur, sans Python). | Backend GPU principal. |
+| `llama-server` | GPU (Vulkan, CUDA, Metal...) ou CPU | Un serveur `llama.cpp` local pour toute l'exécution. Un dossier SafeTensors Qwen2, Llama, Mistral, Gemma, Gemma 2 ou Phi-3 est converti par `surgeon` lui-même en GGUF (Rust pur, sans Python). | Backend GPU principal. |
 | `hipfire` | GPU AMD, HIP/ROCm, Linux | Moteur externe [`warpfront/hipfire`](https://github.com/warpfront/hipfire). | Reconnu et vérifié, pilote non branché (section 6). |
 
 Les trois partagent l'interface `TextGenerator` (`src/eval/generator.rs`) : un bench ne sait pas
@@ -112,11 +112,26 @@ l'utilisateur a modifiée). Ensuite aucune option de backend n'est nécessaire.
 
 - **GPU.** Il suffit d'un `llama-server` compilé pour le GPU (release `win-vulkan-x64` de
   `ggml-org/llama.cpp`) et de `gpu_layers = 99`. `surgeon` ne compile rien.
-- **Conversion.** Un dossier SafeTensors Qwen2 est converti par `surgeon` (matrices en f16 par défaut,
+- **Conversion.** Un dossier SafeTensors est converti par `surgeon` (matrices en f16 par défaut,
   `gguf_dtype = "f32"` pour une conversion sans perte depuis bf16, normes et biais en f32,
   vocabulaire de `tokenizer.json`). Si le dossier llama.cpp contient `convert_hf_to_gguf.py`, c'est
-  lui qui convertit (autres architectures, Python requis). Un tokenizer qui n'est pas un BPE
-  byte-level est refusé avec son type.
+  lui qui convertit (autres architectures, Python requis). Familles gérées, d'après
+  `model_type` :
+
+  | `model_type` | `general.architecture` | Particularités reproduites de `convert_hf_to_gguf.py` |
+  | --- | --- | --- |
+  | `qwen2` | `qwen2` | biais Q/K/V, vocabulaire byte-level `qwen2` |
+  | `llama` (Llama 2, 3, 3.1, 3.2), `mistral` | `llama` | lignes Q/K regroupées par paire rotative ; `rope_freqs.weight` calculé pour `rope_scaling` `llama3` ; `rope.dimension_count` |
+  | `gemma` | `gemma` | normes écrites `1 + w` ; `lm_head` ignoré (lié) ; `key_length` / `value_length` ; `add_space_prefix = false` |
+  | `gemma2` | `gemma2` | comme `gemma`, plus les normes post-attention et post-FFN, les softcaps et `sliding_window` |
+  | `phi3` | `phi3` | `qkv_proj` et `gate_up_proj` gardés fusionnés ; `rope_factors_long` / `rope_factors_short` et `rope.scaling.attn_factor` pour LongRoPE ; dimension rotative partielle |
+
+  Vocabulaire : un BPE byte-level (Qwen2, Llama 3) devient `gpt2`, un BPE SentencePiece avec
+  `byte_fallback` (Llama 2, Mistral, Gemma, Phi-3) devient `llama` avec des scores tirés de l'ordre
+  des fusions, les pièces `<0xNN>` en type BYTE et le jeton inconnu en UNKNOWN. Sont refusés avec
+  leur raison, pour ne pas produire un GGUF qui tourne faux : un autre `model_type`, un tokenizer
+  qui n'est pas BPE, un BPE byte-level hors Qwen2 dont le pré-découpage n'est pas celui de Llama 3
+  (Mistral Nemo, par exemple), un `rope_scaling` Llama ou Phi-3 autre que `llama3` / `longrope`.
 - **Fichier temporaire.** Le GGUF est écrit dans `std::env::temp_dir()` sous le nom
   `weight-surgeon-<étiquette>-<pid>-<nanosecondes>.gguf`, jamais à côté du modèle. Une garde (`Drop`)
   le supprime avec le générateur, après une erreur, et sur une interruption par Ctrl-C (le
@@ -155,8 +170,11 @@ options de backend. Un job `native` ne porte aucun bloc `backend` (les jobs d'av
 à la même configuration).
 
 Seuls les piliers binaires (`safety`, `unblocking`, `gsm8k`) génèrent ; `kl` et `logits` lisent
-toujours des logits natifs. `plan` ne calibre pas la durée pour un autre backend que `native`
-(le débit mesuré est celui du CPU) et le dit. Le rapport donne le moteur réel :
+toujours des logits natifs. `plan` calibre chaque moteur sur son propre travail : le moteur natif
+pour les piliers `kl` et `logits` (`calibration`), le backend du job pour les piliers binaires
+(`backend_calibration`, dont le temps de chargement compte la conversion GGUF et le démarrage du
+serveur, payés à chaque mesure). `estimated_secs` additionne les deux, chacun à son débit. Un
+moteur sans travail n'est pas lancé ; `--no-calibration` ne lance rien. Le rapport donne le moteur réel :
 `results.backend`, `manifest.backend` et `plan.backend`, par exemple
 `llama-server (Vulkan, ngl=99, batch=1)`, `native-cpu`. Les rapports de `bench eval` et
 `bench refusal` ajoutent `generation.backend_detail` quand ils portent un bloc `generation`.

@@ -3,7 +3,7 @@
 //! command, snapshot answered by the app side of the channel.
 
 use serde_json::{json, Value};
-use surgeon_tui::ipc::{IpcCommand, IpcRequest, IpcTarget};
+use surgeon_tui::ipc::{GraphRelay, IpcCommand, IpcRequest, IpcTarget};
 
 /// A unique endpoint for this test run. The timestamp alone is not enough on
 /// Windows (clock resolution ~15 ms can collide across parallel tests), so a
@@ -196,8 +196,80 @@ async fn multiple_commands_on_one_connection() {
     assert_eq!(pings, 3);
 }
 
+/// A producer pushes graph patches, a consumer reads them back; the app side answers each
+/// graph command with the whole reply line, as `App::on_ipc` does with its `GraphRelay`.
+#[tokio::test]
+async fn graph_patches_are_relayed_from_a_producer_to_a_consumer() {
+    let target = test_target();
+    let mut rx = spawn_server(target.clone()).await;
+    connect(&target, &mut rx).await;
+    let app = tokio::spawn(async move {
+        let mut relay = GraphRelay::default();
+        for _ in 0..4 {
+            let request = rx.recv().await.expect("channel");
+            let answer = match request.command {
+                IpcCommand::GraphPatch { patch } => relay.push(patch),
+                IpcCommand::GraphStream => relay.stream(),
+                other => panic!("{other:?}"),
+            };
+            let _ = request
+                .reply
+                .expect("graph commands wait for the app")
+                .send(answer);
+        }
+    });
+
+    let snapshot = json!({"type": "snapshot", "report": {"nodes": []}});
+    let update = json!({"type": "update", "moves": [{"id": "L0.q"}]});
+    let replies = surgeon_tui::ipc::send_commands(
+        &target,
+        &[
+            json!({"cmd": "graph_patch", "patch": update}),
+            json!({"cmd": "graph_patch", "patch": snapshot}),
+            json!({"cmd": "graph_patch", "patch": update}),
+            json!({"cmd": "graph_stream"}),
+        ],
+    )
+    .await
+    .expect("exchange");
+    app.await.expect("app side");
+    assert_eq!(
+        replies[0]["ok"],
+        json!(false),
+        "an update needs a snapshot first"
+    );
+    assert_eq!(replies[1], json!({"ok": true, "patches": 1}));
+    assert_eq!(replies[2], json!({"ok": true, "patches": 2}));
+    assert_eq!(
+        replies[3],
+        json!({"ok": true, "patches": [snapshot, update]})
+    );
+}
+
+#[test]
+fn a_new_graph_snapshot_restarts_the_relayed_stream() {
+    let mut relay = GraphRelay::default();
+    relay.push(json!({"type": "snapshot", "report": {"n": 1}}));
+    relay.push(json!({"type": "update"}));
+    let reply = relay.push(json!({"type": "snapshot", "report": {"n": 2}}));
+    assert_eq!(reply, json!({"ok": true, "patches": 1}));
+    assert_eq!(relay.stream()["patches"][0]["report"]["n"], json!(2));
+}
+
 #[test]
 fn the_protocol_parses_typical_agent_payloads() {
+    // A graph patch is checked for its type only; a snapshot must carry its report.
+    for bad in [
+        json!({"cmd": "graph_patch"}),
+        json!({"cmd": "graph_patch", "patch": {"type": "snapshot"}}),
+        json!({"cmd": "graph_patch", "patch": {"type": "other"}}),
+    ] {
+        assert!(IpcCommand::from_value(&bad).is_err(), "{bad}");
+    }
+    let update =
+        IpcCommand::from_value(&json!({"cmd": "graph_patch", "patch": {"type": "update"}}));
+    assert!(update.is_ok_and(|c| c.needs_reply()));
+    assert!(!IpcCommand::Ping.needs_reply());
     let parsed =
         IpcCommand::from_value(&json!({"cmd": "highlight_layer", "layer": 3})).expect("highlight");
     assert_eq!(parsed, IpcCommand::HighlightLayer { layer: 3 });

@@ -190,7 +190,7 @@ stable et reproductible.
 ## 7. Sorties
 
 `--format` accepte une liste séparée par des virgules parmi `json`, `dot`, `mmd`, `csv`,
-`html` (défaut `json` ; un format répété n'est écrit qu'une fois). Sans `--out-dir`, rien n'est écrit : l'enveloppe ne contient qu'une
+`html`, `ndjson` (défaut `json` ; un format répété n'est écrit qu'une fois). Sans `--out-dir`, rien n'est écrit : l'enveloppe ne contient qu'une
 synthèse bornée (200 nœuds, 20 arêtes les plus fortes). Avec `--out-dir`, les fichiers
 sont créés dans ce dossier :
 
@@ -202,6 +202,7 @@ sont créés dans ce dossier :
 | `matrices.csv` | une ligne par nœud, toutes les métriques |
 | `edges.csv` | une ligne par arête, tous les champs d'alignement |
 | `index.html` | vue 3D interactive autonome (section 7.3) |
+| `graph.ndjson` | flux `GraphPatch` : snapshot, puis l'update vers le modèle avec `--baseline` (section 7.7) |
 
 Les écritures sont sûres : le dossier cible est créé, chaque fichier est écrit dans un
 temporaire exclusif puis renommé ; un lien symbolique ou un fichier existant est refusé
@@ -422,7 +423,35 @@ l'état du graphe en NDJSON, un objet JSON par ligne (`GraphPatch::to_ndjson`) :
   arête inconnus est refusé sans rien modifier : le récepteur doit redemander un
   `snapshot`. Rejouer les patches dans l'ordre reconstruit chaque état exactement.
 
-Le flux est une API de bibliothèque : `surgeon graph` n'écrit pas encore de NDJSON.
+**En ligne de commande.** `surgeon graph --format ndjson --out-dir <dossier>` écrit
+`graph.ndjson` (`stream::history`) :
+
+- sans `--baseline`, une ligne : le `snapshot` du modèle ;
+- avec `--baseline`, deux lignes : le `snapshot` de la référence, puis l'`update` vers le
+  modèle. Aucun des deux états ne porte `baseline_diff` : les `diff` par nœud de l'update
+  sont cette comparaison. La référence prend les `formats` de l'exécution (ils décrivent
+  l'export, pas l'analyse), donc un `graph.json` exporté avec d'autres formats donne quand
+  même un `update` et non un second `snapshot`.
+
+Rejouer `graph.ndjson` donne `graph.json` de la même exécution, `baseline_diff` en moins.
+
+```bash
+surgeon graph --model patched --baseline before/graph.json --format json,ndjson --out-dir after
+```
+
+**Pont IPC (`surgeon-tui`, futur `surgeon-gui`).** Deux commandes relaient ces lignes d'un
+producteur (un orchestrateur) à des consommateurs, sans HTML ni lien à la bibliothèque :
+
+```text
+{"cmd":"graph_patch","patch":{"type":"snapshot","report":{...}}}  -> {"ok":true,"patches":1}
+{"cmd":"graph_patch","patch":{"type":"update",...}}               -> {"ok":true,"patches":2}
+{"cmd":"graph_stream"}                                            -> {"ok":true,"patches":[...]}
+```
+
+Un `snapshot` remet le relais à zéro ; un `update` reçu avant tout `snapshot` est refusé
+(`ok: false`). `graph_stream` rend le dernier `snapshot` et les `update` reçus depuis, à
+appliquer dans l'ordre. Le TUI ne vérifie que le `type` de chaque patch : la validation
+complète est celle de `GraphPatch::apply` côté consommateur.
 
 ## 8. Cache, reprise, estimation, annulation
 

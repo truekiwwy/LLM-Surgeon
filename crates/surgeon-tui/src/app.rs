@@ -24,7 +24,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 use crate::context::{agent_argv, launch_agent, ContextInfo};
-use crate::ipc::{IpcCommand, IpcRequest, IpcTarget, Snapshot};
+use crate::ipc::{GraphRelay, IpcCommand, IpcRequest, IpcTarget, Snapshot};
 use crate::model::metrics::{self, Stats};
 use crate::model::roles::{Exactness, Role};
 use crate::model::{ModelIndex, TensorEntry};
@@ -88,6 +88,8 @@ pub struct App {
     pub log: VecDeque<String>,
     pub highlight: Option<(u32, Instant)>,
     pub preview: Option<PatchPreview>,
+    /// `graph_patch` lines kept for `graph_stream`.
+    pub graph: GraphRelay,
     pub agent_command: String,
     pub ipc_display: String,
     pub quit: bool,
@@ -108,6 +110,7 @@ impl App {
             log: VecDeque::new(),
             highlight: None,
             preview: None,
+            graph: GraphRelay::default(),
             agent_command,
             ipc_display,
             quit: false,
@@ -381,6 +384,21 @@ impl App {
             IpcCommand::Snapshot => {
                 if let Some(sender) = reply {
                     let _ = sender.send(self.snapshot().to_value());
+                }
+            }
+            IpcCommand::GraphPatch { patch } => {
+                let answer = self.graph.push(patch);
+                match answer["patches"].as_u64() {
+                    Some(n) => self.log(format!("agent : graphe, {n} patch(s) depuis le snapshot")),
+                    None => self.log("agent : update de graphe sans snapshot, ignoré"),
+                }
+                if let Some(sender) = reply {
+                    let _ = sender.send(answer);
+                }
+            }
+            IpcCommand::GraphStream => {
+                if let Some(sender) = reply {
+                    let _ = sender.send(self.graph.stream());
                 }
             }
         }

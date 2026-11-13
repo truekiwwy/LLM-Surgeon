@@ -40,6 +40,9 @@
 //! - the 3D view and the diff of the weight graph: `graph --baseline` and `--fast-hash`,
 //!   the value `html` of `graph --format`, the same two properties and value in
 //!   `surgeon_graph`. Only the tool schema hash moved.
+//! - the NDJSON graph stream: the value `ndjson` of `graph --format` and of the `format` of
+//!   `surgeon_graph`. Only the tool schema hash moved. `pipeline plan` gained the output field
+//!   `backend_calibration`, which no reference command prints.
 //!
 //! No entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

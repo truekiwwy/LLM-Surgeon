@@ -83,7 +83,7 @@ fn native(model: &Path, deps: &AppDeps) -> bench::Result<Box<dyn TextGenerator>>
 /// The generator of the job's backend: native without one, else llama-server on the GPU.
 /// The same factory as bench eval and bench refusal (conversion to a temporary GGUF,
 /// server started here and killed with the generator).
-fn generator(
+pub(super) fn generator(
     model: &Path,
     backend: Option<&BackendConfig>,
     generation: &GenOptions,
@@ -107,7 +107,7 @@ fn generator(
 }
 
 /// How the job's backend generates: its batching, layers and GGUF type (greedy, one sample).
-fn options(backend: Option<&BackendConfig>) -> GenOptions {
+pub(super) fn options(backend: Option<&BackendConfig>) -> GenOptions {
     let Some(cfg) = backend else {
         return GenOptions::default();
     };

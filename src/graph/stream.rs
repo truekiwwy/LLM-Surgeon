@@ -200,3 +200,21 @@ impl GraphPatch {
         Ok(line)
     }
 }
+
+/// `graph.ndjson` of a `graph` run: the snapshot of the model alone, or with `--baseline` the
+/// snapshot of the reference then the update to the model. Neither state carries
+/// `baseline_diff` (the per-node deltas of the update are that comparison), and the reference
+/// takes the run's `formats`, which describe the export rather than the analysis: a
+/// `graph.json` exported with other formats still gives an update, not a second snapshot.
+pub fn history(report: &GraphReport, baseline: Option<&GraphReport>) -> Result<String> {
+    let mut after = report.clone();
+    after.baseline_diff = None;
+    let Some(baseline) = baseline else {
+        return GraphPatch::snapshot(&after).to_ndjson();
+    };
+    let mut before = baseline.clone();
+    before.baseline_diff = None;
+    before.parameters.formats = after.parameters.formats.clone();
+    Ok(GraphPatch::snapshot(&before).to_ndjson()?
+        + &GraphPatch::between(&before, &after).to_ndjson()?)
+}

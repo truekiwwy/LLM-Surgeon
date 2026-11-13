@@ -916,7 +916,8 @@ fn the_binary_pillars_run_on_the_configured_backend_and_the_job_is_bound_to_it()
     json["model"]["merges"] = json!([]);
     std::fs::write(&tokenizer, json.to_string()).unwrap();
 
-    // The calibration measures the native CPU engine: no estimate for another backend.
+    // Each engine is calibrated on its own work: the drift pillar on the native CPU engine,
+    // the binary ones through the backend (conversion and server start in its load time).
     let mut plan_args = vec![
         "pipeline",
         "plan",
@@ -928,12 +929,17 @@ fn the_binary_pillars_run_on_the_configured_backend_and_the_job_is_bound_to_it()
     plan_args.extend(flags);
     let (code, plan) = ws.surgeon(&plan_args);
     assert_eq!(code, 0, "{plan}");
-    assert_eq!(plan["data"]["backend"], label);
-    assert_eq!(plan["data"]["estimated_secs"], Value::Null);
-    assert!(plan["warnings"][0]
-        .as_str()
-        .unwrap()
-        .contains("non estimée"));
+    let data = &plan["data"];
+    assert_eq!(data["backend"], label);
+    assert!(data["calibration"]["tokens_per_second"].as_f64().unwrap() > 0.0);
+    let gpu = &data["backend_calibration"];
+    assert!(gpu["tokens_per_second"].as_f64().unwrap() > 0.0, "{data}");
+    assert!(gpu["load_secs"].as_f64().unwrap() > 0.0, "{data}");
+    assert!(data["estimated_secs"].as_u64().is_some(), "{data}");
+    // The calibration's server is gone with its temporary GGUF.
+    assert!(tree(&ws.path("job"))
+        .iter()
+        .all(|p| p.extension().is_none_or(|e| e != "gguf")));
 
     let (code, run) = ws.run("job", &flags);
     assert_eq!(code, 0, "{run}");

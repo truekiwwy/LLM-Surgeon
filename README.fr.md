@@ -1443,14 +1443,14 @@ surgeon pipeline plan [OPTIONS] --config <CONFIG> --job-dir <JOB_DIR>
 | `--config` | requis | `pipeline.json`. |
 | `--job-dir` | requis | Dossier du job. |
 | `--allow-disable-safety` | désactivé | Accepte une configuration sans pilier `safety` (noté dans le rapport ; ligne de commande seulement). |
-| `--no-calibration` | désactivé | Saute la mesure du débit de décodage (pas d'estimation de durée). |
+| `--no-calibration` | désactivé | Saute les mesures du débit de décodage (pas d'estimation de durée). Sinon chaque moteur qui a du travail est mesuré : le CPU natif pour `kl` / `logits` (et tous les piliers d'un job `native`), le backend du job pour les piliers binaires. |
 | `--backend` | `pipeline.json`, puis la configuration utilisateur, sinon `native` | `native` (CPU), `llama-server` (GPU via llama.cpp) ou `hipfire`. Seuls les piliers binaires génèrent ; `kl` et `logits` lisent toujours des logits natifs. |
 | `--gpu-layers` | la configuration utilisateur | `-ngl` de `llama-server`. |
 | `--batch-size` | la configuration utilisateur | Slots et requêtes simultanées de `llama-server`. |
 | `--llama-cpp-dir` | `$LLAMA_CPP_DIR`, puis la configuration utilisateur | Dossier de llama.cpp. |
 | `--hipfire-bin` | configuration utilisateur, puis `PATH` | Binaire `hipfire`. |
 
-`data` : `pillars[]` (`n_dev`, `n_test`, `min_n_for_go` : la plus petite taille à laquelle une porte de non-infériorité peut être GO, `dev_underpowered`, `test_underpowered`), `disk` (copie de travail, dumps de logits, sauvegardes), `units_total`, `calibration`, `estimated_secs` (estimation haute), `warnings`.
+`data` : `pillars[]` (`n_dev`, `n_test`, `min_n_for_go` : la plus petite taille à laquelle une porte de non-infériorité peut être GO, `dev_underpowered`, `test_underpowered`), `disk` (copie de travail, dumps de logits, sauvegardes), `units_total`, `calibration` (moteur natif CPU), `backend_calibration` (backend du job, GPU via `llama-server` ; son temps de chargement compte la conversion GGUF et le démarrage du serveur), `estimated_secs` (estimation haute, chaque moteur à son débit), `warnings`.
 
 <a id="cmd-pipeline-run"></a>
 #### `surgeon pipeline run`
@@ -1572,7 +1572,7 @@ surgeon graph [OPTIONS] --model <MODEL>
 | --- | --- | --- |
 | `--model` | obligatoire | Fichier `.safetensors`, dossier shardé ou `.gguf`. |
 | `--out-dir` | aucun | Dossier des sorties ; sans lui, seule une synthèse bornée est renvoyée et rien n'est écrit. |
-| `--format` | `json` | `json`, `dot`, `mmd`, `csv`, `html`, séparés par des virgules. `html` écrit `index.html`, une vue 3D autonome (orbite, zoom, filtres, inspecteur de nœud, vue absolue ou diff) qui n'a besoin d'aucun réseau. |
+| `--format` | `json` | `json`, `dot`, `mmd`, `csv`, `html`, `ndjson`, séparés par des virgules. `html` écrit `index.html`, une vue 3D autonome (orbite, zoom, filtres, inspecteur de nœud, vue absolue ou diff) qui n'a besoin d'aucun réseau. `ndjson` écrit `graph.ndjson`, des lignes `GraphPatch` pour un orchestrateur ou une GUI : le snapshot, puis avec `--baseline` l'update de la référence vers le modèle (voir [docs/GRAPH.md](docs/GRAPH.md), section 7.7). |
 | `--layers` | `all` | `all`, une plage `1-3`, ou une liste `0,2,4`. |
 | `--matrices` | tous les rôles du graphe | `q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head` ; répétable ou séparé par des virgules. |
 | `--rank` | 32 | Rang cible du SVD randomisé (au moins 1). |
@@ -2141,7 +2141,7 @@ llama.cpp est facultatif et jamais fourni. Il n'est utilisé que par `eval` et `
 
 Ordre de recherche : le dossier donné par `--llama-cpp-dir`, puis le dossier de la variable d'environnement `LLAMA_CPP_DIR` (dans les deux, les sous-dossiers `build/bin`, `build/bin/Release` et `build` sont aussi essayés), puis les dossiers du `PATH`.
 
-Un dossier SafeTensors confié à un backend llama.cpp est converti en GGUF temporaire. Avec un `--llama-cpp-dir` qui contient `convert_hf_to_gguf.py`, c'est ce script qui s'en charge (toute architecture gérée, Python requis). Sinon, pour un modèle Qwen2, `surgeon` le convertit lui-même en Rust pur (matrices en f16, normes et biais en f32, vocabulaire de `tokenizer.json`) : pas de Python, donc les releases précompilées sans scripts fonctionnent.
+Un dossier SafeTensors confié à un backend llama.cpp est converti en GGUF temporaire. Avec un `--llama-cpp-dir` qui contient `convert_hf_to_gguf.py`, c'est ce script qui s'en charge (toute architecture gérée, Python requis). Sinon, pour un modèle Qwen2, Llama (2, 3, 3.1, 3.2), Mistral, Gemma, Gemma 2 ou Phi-3, `surgeon` le convertit lui-même en Rust pur (matrices en f16, normes et biais en f32, vocabulaire de `tokenizer.json`, disposition Q/K et tenseurs de rope attendus par llama.cpp) : pas de Python, donc les releases précompilées sans scripts fonctionnent. Ce qui est refusé, et pourquoi : [docs/BACKENDS.md](docs/BACKENDS.md).
 
 ```bash
 # bash : passer le dossier à chaque commande, ou l'exporter pour la session

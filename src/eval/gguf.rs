@@ -9,7 +9,7 @@ use super::command::{last_lines, CommandRunner};
 use super::error::{EvalError, Result};
 use super::generator::find_binary;
 use super::runner::{EvalReport, EvalVerdict};
-use super::safetensors_gguf::{convert_qwen2, is_qwen2_dir, WeightType};
+use super::safetensors_gguf::{convert_safetensors, is_convertible_dir, WeightType};
 
 /// Types accepted by `llama-quantize`. Anything else is refused before any command runs.
 pub const ALLOWED_QUANTS: [&str; 17] = [
@@ -299,9 +299,10 @@ pub fn model_dir(model: &Path) -> PathBuf {
 /// `.gguf` as is; otherwise one unquantized f16 conversion (see [`ensure_gguf_as`] for f32)
 /// to `<temp dir>/weight-surgeon-<tag>-<pid>-<nanos>.gguf`, deleted when the returned value
 /// drops. Point `TMPDIR` / `TEMP` at a big disk for a large model. With a llama.cpp checkout
-/// holding `convert_hf_to_gguf.py` that script converts; otherwise a Qwen2 model goes through
-/// the pure Rust converter (a binaries-only build such as the Vulkan release, no python), and
-/// any other model is refused with [`LLAMA_DIR_REQUIRED`].
+/// holding `convert_hf_to_gguf.py` that script converts; otherwise a Qwen2, Llama, Mistral,
+/// Gemma, Gemma 2 or Phi-3 model goes through the pure Rust converter (a binaries-only build
+/// such as the Vulkan release, no python), and any other model is refused with
+/// [`LLAMA_DIR_REQUIRED`].
 pub fn ensure_gguf(
     model: &Path,
     llama_cpp_dir: Option<&Path>,
@@ -328,8 +329,8 @@ pub fn ensure_gguf_as(
     let model_dir = model_dir(model);
     let file = GgufModel::temporary(tag);
     let has_script = llama_cpp_dir.is_some_and(|d| CONVERTERS.iter().any(|c| d.join(c).is_file()));
-    if !has_script && is_qwen2_dir(&model_dir) {
-        convert_qwen2(&model_dir, &file.path, dtype)?;
+    if !has_script && is_convertible_dir(&model_dir) {
+        convert_safetensors(&model_dir, &file.path, dtype)?;
         return Ok(file);
     }
     let llama_cpp_dir =
