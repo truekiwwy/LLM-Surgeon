@@ -106,10 +106,7 @@ pub fn mask_secrets(text: &str) -> String {
             None => line.to_owned(),
         })
         .collect::<Vec<_>>()
-        .join(
-            "
-",
-        )
+        .join("\n")
 }
 
 /// Byte index where the secret's value starts: after `key =`, `key:` or `bearer `. A key

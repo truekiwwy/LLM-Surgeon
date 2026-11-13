@@ -278,9 +278,9 @@ impl Desktop {
             Outcome::BackendChanged => Some(Event::BackendChanged),
             Outcome::Closed(finished) => {
                 self.wizard = None;
-                if finished {
-                    self.settings.wizard_done = true;
-                }
+                // Closing it early is a choice too: it stays one click away on the home
+                // screen and in Diagnostics, but it does not pop up again by itself.
+                self.settings.wizard_done = true;
                 let _ = self.settings.save(&self.env.settings);
                 finished.then_some(Event::BackendChanged)
             }
@@ -592,9 +592,70 @@ fn status_chip(ui: &mut egui::Ui, status: Status, l: Lang) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::SurgeonApp;
+    use crate::raster;
+
+    fn env(dir: &std::path::Path) -> Env {
+        Env {
+            components: dir.join("data").join("components"),
+            config: None,
+            settings: dir.join("data").join("settings.json"),
+        }
+    }
+
+    /// The strings the whole window paints on `screen`, through the real app.
+    fn texts(screen: Screen, lang: Lang, dir: &std::path::Path) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let settings = Settings {
+            language: Some(lang),
+            wizard_done: true,
+            ..Default::default()
+        };
+        let desktop = Desktop::detached(None, screen, settings, env(dir));
+        let mut app = SurgeonApp::with_shell(&ctx, None, desktop);
+        raster::render(&ctx, [1280, 800], 1.0, |ui| app.draw(ui)).texts
+    }
 
     #[test]
-    fn the_screens_are_distinct() {
-        assert_ne!(Screen::Home, Screen::Workbench);
+    fn launching_without_argument_shows_the_home_screen_not_a_usage_line() {
+        let dir = tempfile::tempdir().unwrap();
+        // The version is not part of the structure: a release bump must not break the golden.
+        let texts: Vec<String> = texts(Screen::Home, Lang::Fr, dir.path())
+            .iter()
+            .map(|t| t.replace(env!("CARGO_PKG_VERSION"), "{version}"))
+            .collect();
+        let golden = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/home.fr.golden.txt"
+        );
+        let actual = texts.join("\n") + "\n";
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::write(golden, &actual).unwrap();
+        }
+        // The fixture may be checked out with CRLF on Windows.
+        let expected = std::fs::read_to_string(golden)
+            .unwrap()
+            .replace("\r\n", "\n");
+        assert_eq!(
+            actual, expected,
+            "home structure changed; UPDATE_GOLDEN=1 to accept"
+        );
+        assert!(
+            !actual.contains("graph.json | graph.ndjson"),
+            "no usage message"
+        );
+    }
+
+    #[test]
+    fn the_language_switches_the_screens() {
+        let dir = tempfile::tempdir().unwrap();
+        let en = texts(Screen::Home, Lang::En, dir.path());
+        assert!(en.iter().any(|t| t == "Setup"), "{en:?}");
+        let diagnostics = texts(Screen::Diagnostics, Lang::En, dir.path());
+        assert!(
+            diagnostics.iter().any(|t| t == "Diagnostics export"),
+            "{diagnostics:?}"
+        );
+        assert!(diagnostics.iter().any(|t| t == "Repair"), "{diagnostics:?}");
     }
 }

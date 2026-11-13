@@ -2,7 +2,7 @@
 //! `SURGEON_GUI_DATA_DIR`, else `%LOCALAPPDATA%\weight-surgeon` (Windows) or
 //! `$XDG_DATA_HOME/weight-surgeon` (`~/.local/share` when unset).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const DATA_DIR_ENV: &str = "SURGEON_GUI_DATA_DIR";
 
@@ -17,8 +17,32 @@ pub fn home_dir() -> Option<PathBuf> {
     env("USERPROFILE").or_else(|| env("HOME"))
 }
 
+/// The portable ZIP carries a `portable.txt` next to the executable: everything then lives
+/// in `data/` beside it, and nothing is written to the user profile.
+fn portable_dir(exe_dir: &Path) -> Option<PathBuf> {
+    exe_dir
+        .join("portable.txt")
+        .is_file()
+        .then(|| exe_dir.join("data"))
+}
+
+/// Running from the portable ZIP (and no explicit data folder was given).
+pub fn is_portable() -> bool {
+    env(DATA_DIR_ENV).is_none()
+        && std::env::current_exe()
+            .ok()
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(portable_dir)
+            .is_some()
+}
+
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = env(DATA_DIR_ENV) {
+        return dir;
+    }
+    let exe = std::env::current_exe().ok();
+    if let Some(dir) = exe.as_deref().and_then(Path::parent).and_then(portable_dir) {
         return dir;
     }
     let base = match cfg!(windows) {
@@ -55,4 +79,17 @@ pub fn default_workspace() -> PathBuf {
         .map(|h| h.join("Documents"))
         .unwrap_or_else(data_dir);
     base.join("weight-surgeon")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_portable_marker_moves_the_data_next_to_the_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(portable_dir(dir.path()), None);
+        std::fs::write(dir.path().join("portable.txt"), "").unwrap();
+        assert_eq!(portable_dir(dir.path()), Some(dir.path().join("data")));
+    }
 }

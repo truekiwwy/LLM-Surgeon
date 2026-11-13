@@ -78,6 +78,8 @@ pub struct Wizard {
     pub offline: bool,
     /// Replace the installed build (Diagnostics > Reinstall) instead of keeping it.
     force: bool,
+    /// The user picked a build: the machine diagnostic, arriving later, no longer decides.
+    variant_touched: bool,
     plan_task: Option<Task<PlanResult>>,
     plan: Option<PlanResult>,
     engine_consent: bool,
@@ -118,6 +120,7 @@ impl Wizard {
             },
             offline: false,
             force: false,
+            variant_touched: false,
             plan_task: None,
             plan: None,
             engine_consent: false,
@@ -244,6 +247,9 @@ impl Wizard {
 
     pub fn show(&mut self, ctx: &egui::Context, cx: &mut Context<'_>) -> Outcome {
         let backend_changed = self.poll(cx);
+        if !self.variant_touched && self.plan.is_none() && self.engine_task.is_none() {
+            self.variant = default_variant(cx.system);
+        }
         let lang = cx.settings.lang();
         let mut outcome = Outcome::Open;
         egui::Modal::new(egui::Id::new("first-run-wizard")).show(ctx, |ui| {
@@ -422,6 +428,7 @@ impl Wizard {
                 l.pick("AMD HIP / ROCm (optionnel)", "AMD HIP / ROCm (optional)"),
             );
             if before != self.variant {
+                self.variant_touched = true;
                 self.plan = None;
                 self.engine_consent = false;
             }
@@ -782,6 +789,14 @@ impl Wizard {
             ))
             .color(theme::DIM),
         );
+    }
+}
+
+/// Vulkan when the machine has a GPU and the loader, else the CPU build.
+fn default_variant(system: Option<&SystemReport>) -> Variant {
+    match system.is_some_and(|s| s.vulkan == Some(true) && !s.gpus.is_empty()) {
+        true => Variant::Vulkan,
+        false => Variant::Cpu,
     }
 }
 

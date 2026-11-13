@@ -108,6 +108,14 @@ pub fn set_workspace(env: &Env, dir: &Path) -> Result<(), String> {
     if dir.as_os_str().is_empty() {
         return Err("chemin vide".into());
     }
+    // The uninstaller may wipe the data folder: a workspace must never live inside it.
+    if let Some(data) = env.components.parent().filter(|d| dir.starts_with(d)) {
+        return Err(format!(
+            "{} est dans le dossier de données de l'application ({}) : choisissez un autre dossier",
+            dir.display(),
+            data.display()
+        ));
+    }
     std::fs::create_dir_all(dir).map_err(|e| format!("{} : {e}", dir.display()))?;
     let probe = dir.join(".surgeon-write-test");
     std::fs::write(&probe, b"")
@@ -131,9 +139,9 @@ mod tests {
 
     fn env(dir: &Path) -> Env {
         Env {
-            components: dir.join("components"),
+            components: dir.join("data").join("components"),
             config: Some(dir.join("config.toml")),
-            settings: dir.join("settings.json"),
+            settings: dir.join("data").join("settings.json"),
         }
     }
 
@@ -209,5 +217,15 @@ mod tests {
         assert!(ws.is_dir());
         assert_eq!(Settings::load(&env.settings).unwrap().workspace, Some(ws));
         assert!(set_workspace(&env, Path::new("")).is_err());
+        let inside = env
+            .components
+            .parent()
+            .unwrap()
+            .join("components")
+            .join("ws");
+        assert!(
+            set_workspace(&env, &inside).is_err(),
+            "not inside the data folder"
+        );
     }
 }

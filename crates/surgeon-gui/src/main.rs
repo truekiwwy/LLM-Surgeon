@@ -18,6 +18,7 @@ use surgeon_gui::instance::{self, Role};
 use surgeon_gui::settings::{Lang, Settings};
 use surgeon_gui::source::Input;
 use surgeon_gui::{actions, diag, logging, paths, raster, selftest, source};
+use weight_surgeon::backend::config;
 
 /// Reuses the console of the shell that launched the GUI-subsystem binary, if any.
 #[cfg(all(windows, not(debug_assertions)))]
@@ -51,6 +52,13 @@ fn window_icon() -> Option<egui::IconData> {
 fn main() -> ExitCode {
     attach_parent_console();
     let cli = Cli::parse();
+    // Portable: the engine's trusted-toolchain record stays in data/ too, not in %APPDATA%.
+    if paths::is_portable() && std::env::var_os(config::CONFIG_PATH_ENV).is_none() {
+        std::env::set_var(
+            config::CONFIG_PATH_ENV,
+            paths::data_dir().join("config.toml"),
+        );
+    }
     logging::init(&paths::logs_dir());
     logging::info(&format!("surgeon-gui {} start", env!("CARGO_PKG_VERSION")));
 

@@ -56,6 +56,8 @@ pub fn safe_relative(name: &str) -> Option<PathBuf> {
             {
                 return None
             }
+            // `name:stream` would write an NTFS alternate data stream, not a file.
+            p if p.contains(':') => return None,
             p => out.push(p),
         }
     }
@@ -174,6 +176,7 @@ mod tests {
             "",
             "a\0b",
             ".",
+            "bin/llama-server.exe:evil",
         ] {
             assert!(safe_relative(bad).is_none(), "{bad:?} must be refused");
         }
