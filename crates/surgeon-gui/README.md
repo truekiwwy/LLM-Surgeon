@@ -4,7 +4,7 @@ Native viewer of the weight graph written by `surgeon graph`, and a surgery work
 pure Rust (egui, OpenGL through glow). No HTML, no browser, no network.
 
 ```bash
-# the studio, empty canvas
+# the home screen (and, on a fresh profile, the first-run wizard)
 cargo run --release
 # one state, opened on the 3D view
 cargo run --release -- ../../graph-out/graph.json
@@ -17,6 +17,23 @@ cargo run --release -- --workspace D:/surgery
 # projects, working copy, a real engine job, replay and ledger, without a window
 cargo run --release -- --self-test
 ```
+
+## Desktop app
+
+No argument opens the **home screen**: open a graph, a workspace or a folder (typed path or
+drag and drop), see the state of each dependency, replay the **first-run wizard** (machine
+diagnostic, llama.cpp install with verified hashes, workspace, optional sample model), open
+**Diagnostics** (repair, reinstall, redacted export) or check for a new version (manual, never
+silent). A second launch hands its arguments to the running window.
+
+```bash
+cargo run --release -- --self-test            # engine, OpenGL window, data folder; exit code 0 / 1
+cargo run --release -- --screenshot home.png  # renders the screen off-screen (CPU, no window)
+cargo run --release -- --reset-settings       # the wizard runs again at the next start
+```
+
+Packaging (per-user installer, portable ZIP, checksums, optional signing) and troubleshooting:
+[../../docs/DESKTOP.md](../../docs/DESKTOP.md). Crates and why: [../../docs/GUI_DEPENDENCIES.md](../../docs/GUI_DEPENDENCIES.md).
 
 ## Workspaces
 

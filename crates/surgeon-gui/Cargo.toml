@@ -28,11 +28,33 @@ eframe = { version = "0.36.2", default-features = false, features = [
 schemars = { version = "0.8", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# Installer and first-run wizard: every item is justified in docs/GUI_DEPENDENCIES.md.
+sha2 = "0.11.1"
+png = "0.18"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # Free disk space before a working copy, and whether a project lock's process is alive.
 sysinfo = { version = "0.40.1", default-features = false, features = ["disk", "system"] }
 weight-surgeon = { path = "../.." }
+
+# TLS: the Windows system stack (schannel: system trust store, no C build) there, rustls
+# elsewhere. `ureq` is the only HTTP client of the GUI; it never runs in the engine crate.
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Foundation"] }
+
+[target.'cfg(not(windows))'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[build-dependencies]
+embed-resource = "3"
 
 [dev-dependencies]
 tempfile = "3.27.0"
 # The mini Qwen2 of examples/make_fake_qwen2.rs (same version and features as the engine).
 tokenizers = { version = "0.23.2", default-features = false, features = ["unstable_wasm"] }
+
+# Distribution binary: LTO and strip (the engine crate keeps the cargo defaults).
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true

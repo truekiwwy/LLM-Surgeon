@@ -68,9 +68,11 @@ fn checks(root: &Path, out: &mut dyn Write) -> Result<(), String> {
         Arc::new(EngineExecutor::default()),
         Arc::new(|| {}),
     )?;
+    // The check reads the copy: it is submitted once the copy has ended, not alongside.
     m.submit(spec(COPY_TOOL, json!({"id": "c1"})))?;
+    let mut ended = m.wait(Duration::from_secs(120))?;
     m.submit(spec("surgeon_check", json!({"model": "copies/c1"})))?;
-    let ended = m.wait(Duration::from_secs(120))?;
+    ended.extend(m.wait(Duration::from_secs(120))?);
     for e in &ended {
         if e.verdict != Verdict::Ok {
             return Err(format!("{} : {:?} {}", e.spec.tool, e.verdict, e.envelope));

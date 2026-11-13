@@ -1,7 +1,9 @@
 //! State and layout of the window. Four workspaces share the top bar: `Studio` (the card
 //! canvas), `Graphe 3D` (layer list, 3D viewport, inspector), `Split` (canvas and 3D side
-//! by side) and `Projets` (projects, jobs and ledger, `studio::view`). The patch editor is a drawer on the right in all three; a running job and, for
-//! a stream, the patch timeline sit at the bottom.
+//! by side) and `Projets` (projects, jobs and ledger, `studio::view`). `Accueil`, `Assistant`
+//! and `Diagnostics` (`desktop`) come before them in the same bar. The patch editor is a
+//! drawer on the right; a running job and, for a stream, the patch timeline sit at the
+//! bottom.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -24,6 +26,8 @@ use crate::backend_dialog::BackendDialog;
 use crate::camera::Orbit;
 use crate::canvas::view::{self as canvas_view, Action, Canvas, Status};
 use crate::canvas::{self, CardKind};
+use crate::cli::Item;
+use crate::desktop::{Desktop, Event, Screen};
 use crate::editor::view::{self as editor_view, Request};
 use crate::editor::{self, Editor};
 use crate::runner::{self, Finished, Job, Task};
@@ -85,29 +89,38 @@ pub struct SurgeonApp {
     scratch: PathBuf,
     /// Projects, jobs and ledger.
     studio: Studio,
+    /// Home, Diagnostics, the first-run wizard and updates around the studio.
+    desktop: Desktop,
 }
 
 impl SurgeonApp {
+    /// The studio with its default shell: the home screen when there is no input.
     pub fn new(ctx: &egui::Context, input: Option<Input>, workspace: PathBuf) -> Self {
+        let screen = match input {
+            Some(_) => Screen::Workbench,
+            None => Screen::Home,
+        };
+        let desktop = Desktop::new(ctx, None, screen, false);
+        Self::with_shell(ctx, input, desktop, workspace)
+    }
+
+    /// `workspace` is the projects folder of the `Projets` space.
+    pub fn with_shell(
+        ctx: &egui::Context,
+        input: Option<Input>,
+        desktop: Desktop,
+        workspace: PathBuf,
+    ) -> Self {
         theme::apply(ctx);
         // A graph on the command line opens on the 3D view, nothing on the studio.
         let mode = match input {
             Some(_) => Mode::Graph,
             None => Mode::Studio,
         };
-        let (timeline, feed) = load(ctx, input);
         let dialog = BackendDialog::load();
-        // `llama-server --list-devices` can take seconds: probe off the UI thread.
-        let (tx, probe) = std::sync::mpsc::channel();
-        let user = dialog.saved().clone();
-        let wake = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(backend::detect::detect_hardware_and_backends(&user));
-            wake.request_repaint();
-        });
-        Self {
-            timeline,
-            feed,
+        let mut app = Self {
+            timeline: Timeline::default(),
+            feed: None,
             stream_error: None,
             layout: LayoutMode::Column,
             diff: false,
@@ -118,7 +131,7 @@ impl SurgeonApp {
             show_layers: true,
             show_inspector: true,
             dialog,
-            probe: Some(probe),
+            probe: None,
             hardware: None,
             mode,
             show_editor: false,
@@ -129,20 +142,102 @@ impl SurgeonApp {
             backups: Vec::new(),
             scratch: std::env::temp_dir().join(format!("surgeon-studio-{}", std::process::id())),
             studio: Studio::new(workspace),
+            desktop,
+        };
+        if let Some(input) = input {
+            app.set_input(ctx, input);
         }
+        app.spawn_probe(ctx);
+        app
     }
 
     /// An external graph, outside any project (ephemeral): replaces the one shown.
     fn open_graph(&mut self, ctx: &egui::Context, path: &std::path::Path) {
         match source::open(path) {
-            Ok(input) => {
-                (self.timeline, self.feed) = load(ctx, Some(input));
-                self.stream_error = None;
-                self.selected = None;
-                self.mode = Mode::Graph;
-            }
+            Ok(input) => self.set_input(ctx, input),
             Err(e) => self.studio.message = Some((e, true)),
         }
+    }
+
+    /// Shows `input` (a graph or a stream) on the 3D view.
+    fn set_input(&mut self, ctx: &egui::Context, input: Input) {
+        (self.timeline, self.feed) = match input {
+            Input::Report(report) => (Timeline::from_report(*report), None),
+            Input::Stream { reader, follow } => {
+                let wake = ctx.clone();
+                let rx = source::spawn_reader(reader, follow, move || wake.request_repaint());
+                (Timeline::default(), Some(rx))
+            }
+        };
+        self.stream_error = None;
+        self.selected = None;
+        self.mode = Mode::Graph;
+    }
+
+    /// `llama-server --list-devices` can take seconds: probe off the UI thread.
+    fn spawn_probe(&mut self, ctx: &egui::Context) {
+        let (tx, probe) = std::sync::mpsc::channel();
+        let user = self.dialog.saved().clone();
+        let wake = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(backend::detect::detect_hardware_and_backends(&user));
+            wake.request_repaint();
+        });
+        self.probe = Some(probe);
+    }
+
+    /// Opens what the command line carried besides the first graph.
+    pub fn open_items(&mut self, ctx: &egui::Context, items: Vec<Item>) {
+        if !items.is_empty() {
+            self.desktop_event(ctx, Event::Open(items));
+        }
+    }
+
+    /// What the shell asked for: open items, or the backend settings changed on disk.
+    fn desktop_event(&mut self, ctx: &egui::Context, event: Event) {
+        match event {
+            Event::BackendChanged => {
+                self.dialog = BackendDialog::load();
+                self.hardware = None;
+                self.spawn_probe(ctx);
+            }
+            Event::Open(items) => {
+                for item in items {
+                    if let Err(e) = self.open_item(ctx, item) {
+                        self.desktop.notify(e);
+                        self.desktop.screen = Screen::Home;
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_item(&mut self, ctx: &egui::Context, item: Item) -> Result<(), String> {
+        match item {
+            Item::Graph(path) => {
+                let input = source::open(&path)?;
+                self.set_input(ctx, input);
+                self.desktop.screen = Screen::Workbench;
+            }
+            Item::Studio(path) => {
+                self.canvas.ws = canvas::Workspace::load(&path)?;
+                self.canvas.file = path.display().to_string();
+                self.canvas.results.clear();
+                self.mode = Mode::Studio;
+                self.desktop.screen = Screen::Workbench;
+            }
+            Item::Folder(dir) => {
+                self.desktop.use_workspace(&dir)?;
+                self.studio = Studio::new(dir);
+            }
+            Item::Unknown(path) => {
+                return Err(format!(
+                    "{} : type de fichier non reconnu (graph.json, .ndjson, .surgeon-studio.json ou dossier)",
+                    path.display()
+                ))
+            }
+        }
+        Ok(())
     }
 
     fn busy(&self) -> bool {
@@ -452,6 +547,8 @@ impl SurgeonApp {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
+            self.desktop.nav(ui);
+            ui.separator();
             ui.selectable_value(&mut self.mode, Mode::Studio, "Studio (Canvas)");
             ui.selectable_value(&mut self.mode, Mode::Graph, "Graphe 3D");
             ui.selectable_value(&mut self.mode, Mode::Split, "Split (Canvas + 3D)");
@@ -681,8 +778,22 @@ impl SurgeonApp {
 
 impl eframe::App for SurgeonApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+    }
+}
+
+impl SurgeonApp {
+    /// One frame of the whole window; no `eframe::Frame` needed, so that off-screen rendering
+    /// (`--screenshot`, tests) can drive it.
+    pub fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
+        for event in self.desktop.ui(ui, self.dialog.saved()) {
+            self.desktop_event(&ctx, event);
+        }
+        if self.desktop.screen != Screen::Workbench {
+            return;
+        }
         if matches!(self.mode, Mode::Graph | Mode::Split)
             && !ctx.egui_wants_keyboard_input()
             && ctx.input(|i| i.key_pressed(Key::R))
@@ -746,22 +857,6 @@ impl eframe::App for SurgeonApp {
         }
 
         self.dialog.show(&ctx, self.hardware.as_ref());
-    }
-}
-
-/// The timeline of a graph input, and the patch feed of a stream.
-fn load(
-    ctx: &egui::Context,
-    input: Option<Input>,
-) -> (Timeline, Option<Receiver<Result<GraphPatch, String>>>) {
-    match input {
-        Some(Input::Report(report)) => (Timeline::from_report(*report), None),
-        Some(Input::Stream { reader, follow }) => {
-            let wake = ctx.clone();
-            let rx = source::spawn_reader(reader, follow, move || wake.request_repaint());
-            (Timeline::default(), Some(rx))
-        }
-        None => (Timeline::default(), None),
     }
 }
 

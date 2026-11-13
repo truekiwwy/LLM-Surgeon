@@ -1,0 +1,28 @@
+Accueil
+Atelier
+Diagnostics
+v{version}
+LLM Surgery Studio
+Inspecter, patcher et évaluer les poids de vos LLM locaux.
+Ouvrir
+Un graph.json, un flux .ndjson, un workspace .surgeon-studio.json ou un dossier. Vous pouvez aussi les glisser-déposer sur la fenêtre.
+chemin du fichier ou du dossier
+Ouvrir
+Nouveau workspace (Studio)
+Configuration
+[manquant ]
+llama.cpp
+[manquant ]
+Vulkan
+[manquant ]
+surgeon (CLI)
+[manquant ]
+workspace
+[manquant ]
+Qwen2.5-0.5B-Instruct
+Assistant de configuration
+Diagnostics
+Langue et mises à jour
+Français
+English
+Rechercher une mise à jour

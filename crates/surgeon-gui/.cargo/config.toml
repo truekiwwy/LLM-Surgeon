@@ -1,0 +1,7 @@
+# The MSVC C runtime is linked statically: no Visual C++ redistributable to install.
+# Applies when cargo runs from this folder (CI and packaging/build-windows.ps1 do).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
