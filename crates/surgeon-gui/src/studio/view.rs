@@ -14,7 +14,7 @@ use weight_surgeon::events::{LogLevel, NodeStatus, SurgeonEvent};
 use super::bus::{RunView, EVENTS_FILE, FRAME};
 use super::exec::EngineExecutor;
 use super::forms::{self, FieldKind, Form};
-use super::jobs::{Budgets, JobSpec, Manager, COPY_TOOL, OUT};
+use super::jobs::{Budgets, Ended, JobSpec, Manager, COPY_TOOL, OUT};
 use super::ledger;
 use super::project::{Manifest, Project, ProjectState};
 use crate::theme::{self, mono};
@@ -75,8 +75,9 @@ impl Studio {
         self.projects = Project::list(&self.workspace);
     }
 
-    /// Advances the jobs; keeps the window repainting at 60 Hz while one runs.
-    pub fn tick(&mut self, ctx: &egui::Context) {
+    /// Advances the jobs; keeps the window repainting at 60 Hz while one runs. Returns the
+    /// runs that just ended (the agent hub waits for its own).
+    pub fn tick(&mut self, ctx: &egui::Context) -> Vec<Ended> {
         if let Some(rx) = &self.creating {
             if let Ok(result) = rx.try_recv() {
                 self.creating = None;
@@ -90,19 +91,21 @@ impl Studio {
             }
         }
         let Some(m) = &mut self.manager else {
-            return;
+            return Vec::new();
         };
-        for ended in m.tick(Instant::now()) {
+        let all = m.tick(Instant::now());
+        for ended in &all {
             let line = format!("{} · {} : {:?}", ended.id, ended.spec.label, ended.verdict);
             let bad = ended.verdict != ledger::Verdict::Ok;
             self.message = Some((line, bad));
             if self.followed.as_deref() == Some(ended.id.as_str()) {
-                self.replayed = Some((ended.id.clone(), Ok(ended.view)));
+                self.replayed = Some((ended.id.clone(), Ok(ended.view.clone())));
             }
         }
         if m.busy() {
             ctx.request_repaint_after(FRAME);
         }
+        all
     }
 
     /// Node states of the runs in progress, for the 3D view.
@@ -296,6 +299,7 @@ impl Studio {
                     priority: 0,
                     budgets: Budgets::default(),
                     resumed_from: None,
+                    read_only: false,
                 };
                 if let Err(e) = m.submit(spec) {
                     self.message = Some((e, true));
@@ -374,6 +378,7 @@ impl Studio {
                         max_candidates: parse(&self.max_candidates).map(|n: u64| n as u32),
                     },
                     resumed_from: None,
+                    read_only: false,
                 })
             });
             match submitted {

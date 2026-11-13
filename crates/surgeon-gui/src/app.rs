@@ -22,6 +22,7 @@ use weight_surgeon::graph::output::{GraphReport, NodeReport};
 use weight_surgeon::graph::stream::GraphPatch;
 use weight_surgeon::graph::GraphRole;
 
+use crate::agent::view::Hub;
 use crate::backend_dialog::BackendDialog;
 use crate::camera::Orbit;
 use crate::canvas::view::{self as canvas_view, Action, Canvas, Status};
@@ -48,6 +49,7 @@ enum Mode {
     Graph,
     Split,
     Projects,
+    Agents,
 }
 
 /// The role filters of the layer list.
@@ -89,6 +91,8 @@ pub struct SurgeonApp {
     scratch: PathBuf,
     /// Projects, jobs and ledger.
     studio: Studio,
+    /// AI providers, the agent loop, approvals and the evidence log.
+    agents: Hub,
     /// Home, Diagnostics, the first-run wizard and updates around the studio.
     desktop: Desktop,
 }
@@ -142,6 +146,7 @@ impl SurgeonApp {
             backups: Vec::new(),
             scratch: std::env::temp_dir().join(format!("surgeon-studio-{}", std::process::id())),
             studio: Studio::new(workspace),
+            agents: Hub::system(ctx),
             desktop,
         };
         if let Some(input) = input {
@@ -149,6 +154,11 @@ impl SurgeonApp {
         }
         app.spawn_probe(ctx);
         app
+    }
+
+    /// Shows the Agents page (`--screenshot --screen agents`).
+    pub fn open_agents(&mut self) {
+        self.mode = Mode::Agents;
     }
 
     /// An external graph, outside any project (ephemeral): replaces the one shown.
@@ -486,7 +496,14 @@ impl SurgeonApp {
             self.hardware = Some(report);
             self.probe = None;
         }
-        self.studio.tick(ctx);
+        let ended = self.studio.tick(ctx);
+        self.agents.tick(&mut self.studio, &ended);
+        if let Some(target) = self.agents.take_focus() {
+            self.selected = Some(target);
+        }
+        if self.agents.busy() {
+            ctx.request_repaint_after(crate::studio::bus::FRAME);
+        }
         let finished = self.job.as_mut().map(Job::poll).unwrap_or_default();
         for done in finished {
             self.finish(done);
@@ -553,6 +570,7 @@ impl SurgeonApp {
             ui.selectable_value(&mut self.mode, Mode::Graph, "Graphe 3D");
             ui.selectable_value(&mut self.mode, Mode::Split, "Split (Canvas + 3D)");
             ui.selectable_value(&mut self.mode, Mode::Projects, "Projets");
+            ui.selectable_value(&mut self.mode, Mode::Agents, "Agents");
             ui.toggle_value(&mut self.show_editor, "Éditeur JSON");
             ui.separator();
             match self.timeline.current() {
@@ -572,18 +590,21 @@ impl SurgeonApp {
                     ui.label(RichText::new("aucun graphe").color(theme::DIM));
                 }
             }
-            ui.separator();
-            ui.selectable_value(&mut self.layout, LayoutMode::Column, "Colonne");
-            ui.selectable_value(&mut self.layout, LayoutMode::Constellation, "Constellation");
-            ui.separator();
-            let has_diff = self.timeline.current().is_some_and(|s| {
-                s.report.baseline_diff.is_some() || s.touched.values().any(Option::is_some)
-            });
-            let toggle = ui
-                .add_enabled(has_diff, egui::Button::selectable(self.diff, "Diff (Δ)"))
-                .on_disabled_hover_text("ni --baseline dans le rapport, ni patch d'analyse");
-            if toggle.clicked() {
-                self.diff = !self.diff;
+            // The 3D controls only where the 3D view is: the bar has no room for them elsewhere.
+            if matches!(self.mode, Mode::Graph | Mode::Split) {
+                ui.separator();
+                ui.selectable_value(&mut self.layout, LayoutMode::Column, "Colonne");
+                ui.selectable_value(&mut self.layout, LayoutMode::Constellation, "Constellation");
+                ui.separator();
+                let has_diff = self.timeline.current().is_some_and(|s| {
+                    s.report.baseline_diff.is_some() || s.touched.values().any(Option::is_some)
+                });
+                let toggle = ui
+                    .add_enabled(has_diff, egui::Button::selectable(self.diff, "Diff (Δ)"))
+                    .on_disabled_hover_text("ni --baseline dans le rapport, ni patch d'analyse");
+                if toggle.clicked() {
+                    self.diff = !self.diff;
+                }
             }
             if self.mode == Mode::Graph {
                 ui.separator();
@@ -846,6 +867,7 @@ impl SurgeonApp {
                     }
                 });
             }
+            Mode::Agents => self.agents.show(ui, &mut self.studio),
             Mode::Split => {
                 let half = ui.available_width() / 2.0;
                 Panel::left("canvas-split")

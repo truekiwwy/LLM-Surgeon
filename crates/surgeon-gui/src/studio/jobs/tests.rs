@@ -97,6 +97,7 @@ fn spec(tool: &str, label: &str, args: Value) -> JobSpec {
         priority: 0,
         budgets: Budgets::default(),
         resumed_from: None,
+        read_only: false,
     }
 }
 

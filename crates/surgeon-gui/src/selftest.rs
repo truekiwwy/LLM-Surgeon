@@ -141,6 +141,7 @@ pub fn run(workspace: Option<&Path>) -> bool {
     let mut checks = vec![
         check("moteur", engine()),
         check("studio", studio()),
+        check("agent", crate::agent::selftest::run()),
         check("données", writable(&crate::paths::data_dir())),
     ];
     if let Some(dir) = workspace {
@@ -189,6 +190,12 @@ mod tests {
     fn the_studio_check_runs_on_a_throwaway_workspace() {
         let line = studio().unwrap();
         assert!(line.contains("vérifications"), "{line}");
+    }
+
+    #[test]
+    fn the_agent_check_runs_a_scripted_dialogue_on_the_engine() {
+        let line = crate::agent::selftest::run().unwrap();
+        assert!(line.contains("origine intacte"), "{line}");
     }
 
     #[test]

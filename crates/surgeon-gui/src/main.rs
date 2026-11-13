@@ -174,7 +174,12 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
     let screen = match cli.screen.as_str() {
         "home" | "wizard" => Screen::Home,
         "diagnostics" => Screen::Diagnostics,
-        other => return Err(format!("--screen {other} : home, wizard ou diagnostics")),
+        "agents" => Screen::Workbench,
+        other => {
+            return Err(format!(
+                "--screen {other} : home, wizard, diagnostics ou agents"
+            ))
+        }
     };
     let mut settings = Settings::load(&paths::settings_path()).unwrap_or_default();
     settings.language.get_or_insert_with(Lang::system);
@@ -187,8 +192,14 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
         Some(Item::Graph(path)) => Some(source::open(&path)?),
         _ => None,
     };
-    let workspace = cli.workspace.clone().unwrap_or_else(paths::default_workspace);
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(paths::default_workspace);
     let mut app = SurgeonApp::with_shell(&ctx, input, desktop, workspace);
+    if cli.screen == "agents" {
+        app.open_agents();
+    }
     let frame = raster::render(&ctx, [1440, 900], 1.0, |ui| app.draw(ui));
     frame.image.save_png(png)
 }

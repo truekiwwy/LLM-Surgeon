@@ -40,7 +40,7 @@ weight-surgeon = { path = "../.." }
 # elsewhere. `ureq` is the only HTTP client of the GUI; it never runs in the engine crate.
 [target.'cfg(windows)'.dependencies]
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
-windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Foundation"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Foundation", "Win32_Security_Credentials"] }
 
 [target.'cfg(not(windows))'.dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls"] }

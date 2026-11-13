@@ -18,7 +18,7 @@ option `surgeon-gui --workspace <DOSSIER>`) :
 | `runs/<id>/` | `params.json` (outil, arguments, priorité, budgets), `status.json`, `events.ndjson`, `out/` |
 | `artifacts/` | Vecteurs, graphes, patchs et dumps que l'utilisateur garde |
 | `copies/<id>/` | Copies de travail, les seuls modèles que le studio écrit |
-| `chat/` | Réservé à l'agent (vide pour l'instant) |
+| `chat/` | Conversations, actions et journal des preuves de l'agent ([AGENTS.md](AGENTS.md)) |
 | `ledger.jsonl` | Journal d'expériences, en ajout seul |
 | `project.lock` | PID du studio qui a ouvert le projet |
 
@@ -225,6 +225,7 @@ formulaires, puis supprime tout.
 - Pas de télémétrie, aucune donnée ne sort de la machine ; aucun secret n'est écrit par ce
   socle (les arguments des jobs sont journalisés tels quels : ne pas y mettre de secret).
 - Les captures hors écran (`--screenshot`) n'existent pas : la fenêtre se vérifie à la main.
-- `chat/` est créé mais rien ne l'utilise encore.
+- Un job lancé par l'agent en mode « Demander » porte `"read_only": true` dans son
+  `params.json` : le moteur le reçoit comme `surgeon mcp --read-only`.
 - Un job `surgeon_pipeline start` lance un travailleur détaché : le run du studio se
   termine quand le travailleur est lancé, son avancement se suit par `action: status`.

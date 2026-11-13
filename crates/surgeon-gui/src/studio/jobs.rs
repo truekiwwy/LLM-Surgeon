@@ -50,6 +50,9 @@ pub struct JobSpec {
     pub budgets: Budgets,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_from: Option<String>,
+    /// The engine runs it as `surgeon mcp --read-only` (an agent in "Ask" mode).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -417,7 +420,9 @@ impl Manager {
             .map(|(i, _)| i)
     }
 
-    fn check(&self, spec: &JobSpec) -> Result<(), String> {
+    /// Why a job may not be submitted, if it may not: unknown tool, an in-place tool on
+    /// anything but a working copy, an output inside the source model, a pipeline budget.
+    pub fn check(&self, spec: &JobSpec) -> Result<(), String> {
         if spec.tool != COPY_TOOL
             && !weight_surgeon::mcp::tool_definitions()
                 .as_array()

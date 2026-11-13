@@ -37,8 +37,8 @@ Packaging (per-user installer, portable ZIP, checksums, optional signing) and tr
 
 ## Workspaces
 
-The top bar switches between `Studio (Canvas)`, `Graphe 3D`, `Split (Canvas + 3D)` and
-`Projets`, and opens the `Éditeur JSON` drawer on the right in any of them.
+The top bar switches between `Studio (Canvas)`, `Graphe 3D`, `Split (Canvas + 3D)`,
+`Projets` and `Agents`, and opens the `Éditeur JSON` drawer on the right in any of them.
 
 - `Graphe 3D`: layer list (left), 3D viewport (center), inspector (right). Left drag orbits,
   right drag pans, wheel zooms, `R` resets. `Colonne` / `Constellation`, `Diff (Δ)`, GPU
@@ -57,6 +57,12 @@ The top bar switches between `Studio (Canvas)`, `Graphe 3D`, `Split (Canvas + 3D
   opens a `graph.json` / `graph.ndjson` in the 3D view without a project. While a job runs,
   the 3D view rings the nodes it has reached. Model, guarantees and event protocol:
   [docs/STUDIO.md](../../docs/STUDIO.md).
+- `Agents`: connections (Anthropic, OpenAI, any OpenAI-compatible endpoint such as
+  OpenRouter, Ollama, LM Studio or `llama-server`; the Claude Code and Codex CLIs as signed
+  in by the user), API keys in the Windows Credential Manager, a consent before the first
+  request, and for the open project a conversation whose tool calls become jobs of the
+  project, approval cards computed by the code, budgets, pause and stop, and an evidence log
+  (Measured / Inferred / Unknown). Threat model and details: [docs/AGENTS.md](../../docs/AGENTS.md).
 - Bottom: the running job (step, elapsed time, `Annuler`), and for a stream the patch
   timeline; at the last state the view follows new patches.
 

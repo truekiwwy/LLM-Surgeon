@@ -31,13 +31,24 @@ were already there.
 
 `clap`, `serde`, `serde_json`, `eframe` / `egui` were already used by the viewer.
 
+## Added for the agent hub
+
+| Crate | Why it is needed | Cost |
+| --- | --- | --- |
+| `windows-sys` feature `Win32_Security_Credentials` (Windows only) | `CredWriteW`, `CredReadW`, `CredDeleteW`: API keys in the Windows Credential Manager (`src/agent/vault.rs`, the only other `unsafe` of the crate, annotated). | No new crate: a feature of a crate already used; no lockfile change. |
+
+The providers reuse `ureq` and its TLS stack (schannel on Windows: no C build), kept in this
+crate; the engine crate stays without network, TLS or keychain (`tests/deps_purity.rs`).
+
 ## What is *not* added, and why
 
 - **No file-dialog crate**: the home screen takes a path (typed or dropped on the window).
 - **No async runtime, no `reqwest`, no `tokio`**: downloads run on plain threads (`src/task.rs`).
-- **No keychain crate**: the app stores no secret. The sample model and the releases are
-  public; nothing asks for a token. If one is ever needed it must go through the OS keychain,
-  never `settings.json` or the logs (which mask secrets: `src/logging.rs`).
+- **No keychain crate**: the agent hub's API keys go to the Windows Credential Manager
+  through three calls of `windows-sys` (below), never to `settings.json`, `agents.json` or
+  the logs. Other systems keep the key for the session only, for now (docs/AGENTS.md).
+- **No LLM SDK, no SSE crate**: the Anthropic and OpenAI streams are read by a small SSE
+  reader over the same `ureq` (`src/agent/provider.rs`); there is no official Rust SDK.
 - **No telemetry, no crash reporter, no auto-updater.** The update check is a button.
 
 ## Network surface
@@ -47,6 +58,12 @@ Allowed domains (`src/net.rs`, `ALLOWED_HOSTS`): `api.github.com`, `github.com`,
 credentials in URLs. Nothing is requested before the user clicks a button next to the URL,
 size and hash; there is no background traffic. The studio itself (projects, jobs, ledger) makes
 no network access.
+
+The agent hub is the exception, and only after a consent per connection: it talks to the
+endpoint the user configured (Anthropic, OpenAI, or any URL for a compatible server), HTTPS
+only except to this machine (`localhost`, `127.0.0.1`, `::1`), no redirects, no credentials in
+URLs. The "local only" switch refuses every non-loopback endpoint before a socket is opened.
+The Claude Code and Codex CLIs, when used, make their own requests (docs/AGENTS.md).
 
 ## Reading the lockfile
 

@@ -28,7 +28,7 @@ pub struct Cli {
     /// Rend l'écran courant hors écran dans ce PNG, puis quitte.
     #[arg(long, value_name = "PNG")]
     pub screenshot: Option<PathBuf>,
-    /// Avec --screenshot : home (défaut), wizard, diagnostics.
+    /// Avec --screenshot : home (défaut), wizard, diagnostics, agents.
     #[arg(long, value_name = "SCREEN", default_value = "home")]
     pub screen: String,
     /// Efface les réglages du bureau (settings.json) : l'assistant se relance au prochain

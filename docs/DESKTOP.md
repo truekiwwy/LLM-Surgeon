@@ -77,6 +77,7 @@ surgeon-gui --version
 surgeon-gui --self-test                      # engine, OpenGL window, data folder; exit code 0 or 1
 surgeon-gui --screenshot home.png            # renders the current screen without a window or a GPU
 surgeon-gui --screenshot d.png --screen diagnostics
+surgeon-gui --screenshot a.png --screen agents   # the Agents page (docs/AGENTS.md)
 surgeon-gui --reset-settings                 # the wizard runs again at the next start
 surgeon-gui graph.json                       # still accepted: graph.json, graph.ndjson, - (stdin)
 surgeon-gui "C:\Modèles\mon espace"          # a folder becomes the workspace; so does a drop on the window

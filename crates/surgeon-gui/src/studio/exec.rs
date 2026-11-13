@@ -34,7 +34,7 @@ impl Executor for EngineExecutor {
             roots.push(dir);
         }
         // allow_no_backup false: the apply backups are imposed, as over MCP.
-        let cfg = match McpConfig::new(&roots, false, false) {
+        let cfg = match McpConfig::new(&roots, spec.read_only, false) {
             Ok(cfg) => cfg,
             Err(e) => return Outcome::failed(format!("dossiers autorisés : {e}")),
         };

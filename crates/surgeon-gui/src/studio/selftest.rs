@@ -37,11 +37,12 @@ fn spec(tool: &str, args: serde_json::Value) -> JobSpec {
         priority: 0,
         budgets: Budgets::default(),
         resumed_from: None,
+        read_only: false,
     }
 }
 
 /// One F32 tensor `[2, 2]` named like an MLP writer, in a model folder.
-fn write_model(dir: &Path) -> Result<(), String> {
+pub(crate) fn write_model(dir: &Path) -> Result<(), String> {
     let mut header =
         br#"{"model.layers.0.mlp.down_proj.weight":{"dtype":"F32","shape":[2,2],"data_offsets":[0,16]}}"#
             .to_vec();
