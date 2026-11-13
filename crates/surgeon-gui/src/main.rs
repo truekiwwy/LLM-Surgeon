@@ -129,6 +129,7 @@ fn main() -> ExitCode {
         true => Screen::Workbench,
         false => Screen::Home,
     };
+    let replay = cli.replay.clone();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("LLM Surgery Studio")
@@ -147,6 +148,10 @@ fn main() -> ExitCode {
             }
             let mut app = SurgeonApp::with_shell(&cc.egui_ctx, input, desktop, workspace);
             app.open_items(&cc.egui_ctx, rest);
+            if let Some(Err(e)) = replay.as_deref().map(|r| app.open_replay(r)) {
+                logging::warn(&e);
+                eprintln!("{e}");
+            }
             Ok(Box::new(app))
         }),
     );
@@ -174,7 +179,12 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
     let screen = match cli.screen.as_str() {
         "home" | "wizard" => Screen::Home,
         "diagnostics" => Screen::Diagnostics,
-        other => return Err(format!("--screen {other} : home, wizard ou diagnostics")),
+        "graph" => Screen::Workbench,
+        other => {
+            return Err(format!(
+                "--screen {other} : home, wizard, diagnostics ou graph"
+            ))
+        }
     };
     let mut settings = Settings::load(&paths::settings_path()).unwrap_or_default();
     settings.language.get_or_insert_with(Lang::system);
@@ -187,8 +197,14 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
         Some(Item::Graph(path)) => Some(source::open(&path)?),
         _ => None,
     };
-    let workspace = cli.workspace.clone().unwrap_or_else(paths::default_workspace);
+    let workspace = cli
+        .workspace
+        .clone()
+        .unwrap_or_else(paths::default_workspace);
     let mut app = SurgeonApp::with_shell(&ctx, input, desktop, workspace);
+    if let Some(replay) = &cli.replay {
+        app.open_replay(replay)?;
+    }
     let frame = raster::render(&ctx, [1440, 900], 1.0, |ui| app.draw(ui));
     frame.image.save_png(png)
 }

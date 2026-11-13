@@ -170,11 +170,16 @@ pub fn from_progress(event: &ProgressEvent) -> Vec<SurgeonEvent> {
             tensor,
             overall_done,
             overall_total,
+            max_abs_delta,
             ..
-        } => vec![
-            S::done(tensor),
-            S::progress(*overall_done, Some(*overall_total), "tensor"),
-        ],
+        } => [
+            Some(S::done(tensor)),
+            S::metric(Some(tensor), "max_abs_delta", f64::from(*max_abs_delta)),
+            Some(S::progress(*overall_done, Some(*overall_total), "tensor")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
         P::OpDone {
             op_id, max_delta, ..
         }

@@ -29,6 +29,8 @@ silent). A second launch hands its arguments to the running window.
 ```bash
 cargo run --release -- --self-test            # engine, OpenGL window, data folder; exit code 0 / 1
 cargo run --release -- --screenshot home.png  # renders the screen off-screen (CPU, no window)
+# the 3D view with a recorded run replayed over it, off-screen
+cargo run --release -- --screenshot run.png --screen graph --replay runs/<id>/events.ndjson graph.json
 cargo run --release -- --reset-settings       # the wizard runs again at the next start
 ```
 
@@ -54,8 +56,11 @@ The top bar switches between `Studio (Canvas)`, `Graphe 3D`, `Split (Canvas + 3D
   `durée max`, `candidats max` for a pipeline), the running and queued jobs with `Annuler`,
   the followed run (progress, node states, metrics, artifacts, log, replayed from its
   `events.ndjson` once finished), the history and the ledger exports. `Graphe éphémère`
-  opens a `graph.json` / `graph.ndjson` in the 3D view without a project. While a job runs,
-  the 3D view rings the nodes it has reached. Model, guarantees and event protocol:
+  opens a `graph.json` / `graph.ndjson` in the 3D view without a project. `Estimer` runs
+  the tool's own preview (estimate, dry run, plan) and a `durée max` refuses a run whose
+  estimate exceeds it. The followed run opens in `3D`, `Diff Δ` or `Inspecteur`: the
+  nodes it reached carry a glyph per state, live or replayed with a time cursor
+  ([docs/GUI_3D.md](../../docs/GUI_3D.md)). Model, guarantees and event protocol:
   [docs/STUDIO.md](../../docs/STUDIO.md).
 - Bottom: the running job (step, elapsed time, `Annuler`), and for a stream the patch
   timeline; at the last state the view follows new patches.

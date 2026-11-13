@@ -28,9 +28,12 @@ pub struct Cli {
     /// Rend l'écran courant hors écran dans ce PNG, puis quitte.
     #[arg(long, value_name = "PNG")]
     pub screenshot: Option<PathBuf>,
-    /// Avec --screenshot : home (défaut), wizard, diagnostics.
+    /// Avec --screenshot : home (défaut), wizard, diagnostics, graph (la vue 3D du graphe).
     #[arg(long, value_name = "SCREEN", default_value = "home")]
     pub screen: String,
+    /// Rejoue le events.ndjson d'un run sur la vue 3D du graphe ouvert (barre de lecture).
+    #[arg(long, value_name = "EVENTS")]
+    pub replay: Option<PathBuf>,
     /// Efface les réglages du bureau (settings.json) : l'assistant se relance au prochain
     /// démarrage. Les composants installés et le config.toml du moteur sont conservés.
     #[arg(long)]

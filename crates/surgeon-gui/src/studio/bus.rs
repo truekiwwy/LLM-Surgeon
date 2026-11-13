@@ -110,6 +110,8 @@ pub struct RunView {
     /// Latest `(done, total)` per unit.
     pub progress: BTreeMap<String, (u64, Option<u64>)>,
     pub nodes: BTreeMap<String, NodeStatus>,
+    /// The node of the latest `node_state` line.
+    pub last_node: Option<String>,
     /// Latest value per `(node, name)`.
     pub metrics: BTreeMap<(Option<String>, String), f64>,
     pub logs: VecDeque<(LogLevel, String)>,
@@ -121,6 +123,8 @@ pub struct RunView {
     /// Sequence numbers missing between two lines read (a file never has any).
     pub gaps: u64,
     last_seq: Option<u64>,
+    /// Duplicate or out-of-order lines ignored.
+    pub stale: u64,
     /// Progress lines the window skipped (live only).
     pub sampled: u64,
 }
@@ -128,7 +132,13 @@ pub struct RunView {
 impl RunView {
     pub fn apply(&mut self, line: &EventLine) {
         if let Some(prev) = self.last_seq {
-            self.gaps += line.seq.saturating_sub(prev + 1);
+            // A line already folded (duplicate) or older than the last one changes nothing:
+            // a node never goes back to the state an earlier line gave it.
+            if line.seq <= prev {
+                self.stale += 1;
+                return;
+            }
+            self.gaps += line.seq - prev - 1;
         }
         self.last_seq = Some(line.seq);
         self.lines += 1;
@@ -139,6 +149,7 @@ impl RunView {
             }
             SurgeonEvent::NodeState { node_id, state } => {
                 self.nodes.insert(node_id.clone(), *state);
+                self.last_node = Some(node_id.clone());
             }
             SurgeonEvent::Metric {
                 node_id,
@@ -172,23 +183,31 @@ impl RunView {
         self.logs.push_back((level, message));
     }
 
-    /// Rebuilds a run from its file. A torn last line (the process died mid-write) is
-    /// skipped; any other unreadable line is an error.
+    /// Rebuilds a run from its file.
     pub fn replay(file: &Path) -> Result<Self, String> {
-        let text =
-            std::fs::read_to_string(file).map_err(|e| format!("{} : {e}", file.display()))?;
         let mut view = Self::default();
-        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-        let torn_tail = !text.ends_with('\n');
-        for (i, line) in lines.iter().enumerate() {
-            match parse_line(line) {
-                Ok(parsed) => view.apply(&parsed),
-                Err(_) if torn_tail && i + 1 == lines.len() => {}
-                Err(e) => return Err(format!("{} ligne {} : {e}", file.display(), i + 1)),
-            }
+        for line in &read_lines(file)? {
+            view.apply(line);
         }
         Ok(view)
     }
+}
+
+/// Every line of an `events.ndjson`. A torn last line (the process died mid-write) is
+/// skipped; any other unreadable line is an error.
+pub fn read_lines(file: &Path) -> Result<Vec<EventLine>, String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{} : {e}", file.display()))?;
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let torn_tail = !text.ends_with('\n');
+    let mut out = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        match parse_line(line) {
+            Ok(parsed) => out.push(parsed),
+            Err(_) if torn_tail && i + 1 == lines.len() => {}
+            Err(e) => return Err(format!("{} ligne {} : {e}", file.display(), i + 1)),
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -178,3 +178,43 @@ fn handle(mut stream: TcpStream, port: u16, state: &Mutex<State>) {
     let _ = stream.flush();
     let _ = stream.shutdown(Shutdown::Both);
 }
+
+/// A synthetic graph of `nodes` matrices built from the fixture's first node: distinct ids
+/// and tensor names, positions on a deterministic helix, a chain of structural edges and
+/// three weighted edges per node.
+pub fn graph(nodes: usize) -> weight_surgeon::graph::output::GraphReport {
+    use weight_surgeon::graph::stream::GraphPatch;
+    let line = include_str!("../tests/fixtures/qwen2-mini.ndjson");
+    let GraphPatch::Snapshot { report } = serde_json::from_str(line.trim()).unwrap() else {
+        panic!("the fixture is a snapshot");
+    };
+    let mut report = *report;
+    let (node, edge) = (report.nodes[0].clone(), report.edges[0].clone());
+    report.nodes = (0..nodes)
+        .map(|i| {
+            let t = i as f32 / nodes.max(1) as f32;
+            let angle = t * 40.0;
+            let mut n = node.clone();
+            n.id = format!("L{i}.n");
+            n.tensor = format!("model.layers.{i}.mlp.down_proj.weight");
+            n.layer = Some(i / 7);
+            n.seq = i;
+            n.pos_column = [0.6 * angle.cos(), 1.6 * t - 0.8, 0.6 * angle.sin()];
+            n.pos_constellation = [0.8 * (3.0 * angle).sin(), 0.5 * angle.cos(), t - 0.5];
+            n
+        })
+        .collect();
+    report.edges = (0..nodes)
+        .flat_map(|i| (1..=4).map(move |d| (i, d)))
+        .filter(|(i, d)| i + d < nodes)
+        .map(|(i, d)| {
+            let mut e = edge.clone();
+            e.source = format!("L{i}.n");
+            e.target = format!("L{}.n", i + d);
+            e.structural = d == 1;
+            e.weight = ((i * 7 + d * 13) % 100) as f64 / 100.0;
+            e
+        })
+        .collect();
+    report
+}

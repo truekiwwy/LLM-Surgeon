@@ -102,12 +102,17 @@ impl StatusFile {
     }
 }
 
-/// Analysis tools that read a little and finish fast; everything else takes the heavy slot.
-pub fn is_heavy(tool: &str) -> bool {
-    !matches!(
-        tool,
+/// Analysis tools that read a little and finish fast, and previews (estimate, dry run) that
+/// write no model; everything else takes the heavy slot. A pipeline `plan` stays heavy: it
+/// may calibrate by running the model.
+pub fn is_heavy(spec: &JobSpec) -> bool {
+    let light_tool = matches!(
+        spec.tool.as_str(),
         "surgeon_check" | "surgeon_inspect" | "surgeon_backends"
-    )
+    );
+    let light_preview =
+        spec.tool != "surgeon_pipeline" && super::estimate::is_preview(&spec.tool, &spec.args);
+    !(light_tool || light_preview)
 }
 
 /// What a job returned: the engine's JSON envelope.
@@ -408,11 +413,11 @@ impl Manager {
     }
 
     fn next_startable(&self) -> Option<usize> {
-        let heavy_running = self.running.iter().any(|r| is_heavy(&r.spec.tool));
+        let heavy_running = self.running.iter().any(|r| is_heavy(&r.spec));
         self.queue
             .iter()
             .enumerate()
-            .filter(|(_, q)| !(heavy_running && is_heavy(&q.spec.tool)))
+            .filter(|(_, q)| !(heavy_running && is_heavy(&q.spec)))
             .min_by_key(|(_, q)| (-q.spec.priority, q.seq))
             .map(|(i, _)| i)
     }

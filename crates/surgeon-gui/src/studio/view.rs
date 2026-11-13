@@ -12,6 +12,7 @@ use eframe::egui::{self, ComboBox, ProgressBar, RichText, ScrollArea, TextEdit};
 use weight_surgeon::events::{LogLevel, NodeStatus, SurgeonEvent};
 
 use super::bus::{RunView, EVENTS_FILE, FRAME};
+use super::estimate::{self, Estimate};
 use super::exec::EngineExecutor;
 use super::forms::{self, FieldKind, Form};
 use super::jobs::{Budgets, JobSpec, Manager, COPY_TOOL, OUT};
@@ -23,6 +24,22 @@ use crate::theme::{self, mono};
 pub enum Action {
     /// Open a `graph.json` / `graph.ndjson` without a project (ephemeral).
     OpenGraph(PathBuf),
+    /// Show the run of `runs/<id>/` in the 3D view: live while it runs, else replayed from
+    /// its `events.ndjson`, over the graph it wrote if any.
+    OpenRun {
+        dir: PathBuf,
+        live: bool,
+        target: Target,
+    },
+}
+
+/// Where a run opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Graph,
+    Diff,
+    /// The node the run reached last, in the inspector.
+    Inspector,
 }
 
 pub struct Studio {
@@ -42,6 +59,10 @@ pub struct Studio {
     /// The run shown under the queue: a live one, or one replayed from its file.
     followed: Option<String>,
     replayed: Option<(String, Result<RunView, String>)>,
+    /// The preview run in progress and the key of the arguments it estimates.
+    estimating: Option<(String, String)>,
+    /// The last estimate and the key of its arguments: it holds only while they stay.
+    estimate: Option<(String, Estimate)>,
     graph_path: String,
     pub message: Option<(String, bool)>,
 }
@@ -64,6 +85,8 @@ impl Studio {
             max_candidates: String::new(),
             followed: None,
             replayed: None,
+            estimating: None,
+            estimate: None,
             graph_path: String::new(),
             message: None,
         };
@@ -96,6 +119,15 @@ impl Studio {
             let line = format!("{} · {} : {:?}", ended.id, ended.spec.label, ended.verdict);
             let bad = ended.verdict != ledger::Verdict::Ok;
             self.message = Some((line, bad));
+            if let Some((_, key)) = self
+                .estimating
+                .take_if(|(id, _)| *id == ended.id)
+                .filter(|_| !bad)
+            {
+                let e = estimate::read(&ended.envelope);
+                self.message = Some((format!("estimation : {}", e.summary()), false));
+                self.estimate = Some((key, e));
+            }
             if self.followed.as_deref() == Some(ended.id.as_str()) {
                 self.replayed = Some((ended.id.clone(), Ok(ended.view)));
             }
@@ -105,13 +137,14 @@ impl Studio {
         }
     }
 
-    /// Node states of the runs in progress, for the 3D view.
-    pub fn node_states(&self) -> BTreeMap<&str, NodeStatus> {
-        self.manager
+    /// The run the 3D view follows live: the followed one if it runs, else the first running.
+    pub fn live_view(&self) -> Option<&RunView> {
+        let running = &self.manager.as_ref()?.running;
+        running
             .iter()
-            .flat_map(|m| &m.running)
-            .flat_map(|r| r.view.nodes.iter().map(|(k, v)| (k.as_str(), *v)))
-            .collect()
+            .find(|r| self.followed.as_deref() == Some(r.id.as_str()))
+            .or(running.first())
+            .map(|r| &r.view)
     }
 
     fn open(&mut self, ctx: &egui::Context, dir: &Path) {
@@ -154,9 +187,11 @@ impl Studio {
             ScrollArea::vertical()
                 .id_salt("launch")
                 .show(&mut cols[1], |ui| self.project_column(ui));
-            ScrollArea::vertical()
+            let opened = ScrollArea::vertical()
                 .id_salt("runs")
-                .show(&mut cols[2], |ui| self.runs_column(ui));
+                .show(&mut cols[2], |ui| self.runs_column(ui))
+                .inner;
+            action = action.take().or(opened);
         });
         action
     }
@@ -361,8 +396,72 @@ impl Studio {
                 ui.add(TextEdit::singleline(&mut self.max_candidates).desired_width(40.0));
             }
         });
-        if ui.button("Mettre en file").clicked() {
-            let submitted = form.args(&self.values).and_then(|args| {
+        // The estimate holds for these exact arguments only.
+        let args = form.args(&self.values);
+        let key = args
+            .as_ref()
+            .map(|a| format!("{} {a}", form.tool))
+            .unwrap_or_default();
+        let preview = args
+            .as_ref()
+            .ok()
+            .filter(|a| !estimate::is_preview(&form.tool, a))
+            .and_then(|a| estimate::preview_args(&form.tool, a));
+        let current = self.estimate.as_ref().filter(|(k, _)| *k == key);
+        match (&preview, current, &self.estimating) {
+            (_, _, Some(_)) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(mono("estimation en cours…"));
+                });
+            }
+            (_, Some((_, e)), _) => {
+                ui.label(mono(format!("estimation : {}", e.summary())));
+                for w in &e.warnings {
+                    ui.label(mono(w).small().color(theme::WARN));
+                }
+            }
+            (Some(_), None, None) => {
+                ui.label(
+                    mono("pas d'estimation pour ces paramètres")
+                        .small()
+                        .color(theme::DIM),
+                );
+            }
+            (None, None, None) => {}
+        }
+        let max_wall: Option<u64> = self.max_wall.trim().parse().ok();
+        let mut queue = false;
+        ui.horizontal(|ui| {
+            let can_estimate = preview.is_some() && self.estimating.is_none();
+            if ui
+                .add_enabled(can_estimate, egui::Button::new("Estimer"))
+                .on_hover_text(
+                    "le mode aperçu de l'outil (estimate, dry_run, plan) : rien n'est écrit",
+                )
+                .on_disabled_hover_text("pas de mode aperçu pour cet outil, ou estimation en cours")
+                .clicked()
+            {
+                if let Some(preview) = preview.clone() {
+                    let submitted = m.submit(JobSpec {
+                        tool: form.tool.clone(),
+                        label: format!("estimation · {}", self.label),
+                        args: preview,
+                        priority: 10,
+                        budgets: Budgets::default(),
+                        resumed_from: None,
+                    });
+                    match submitted {
+                        Ok(id) => self.estimating = Some((id, key.clone())),
+                        Err(e) => self.message = Some((e, true)),
+                    }
+                }
+            }
+            queue = ui.button("Mettre en file").clicked();
+        });
+        if queue {
+            let submitted = args.and_then(|args| {
+                estimate::gate(preview.is_some(), max_wall, current.map(|(_, e)| e))?;
                 let parse = |s: &str| s.trim().parse().ok();
                 m.submit(JobSpec {
                     tool: form.tool.clone(),
@@ -370,7 +469,7 @@ impl Studio {
                     args,
                     priority: self.priority,
                     budgets: Budgets {
-                        max_wall_time_secs: parse(&self.max_wall),
+                        max_wall_time_secs: max_wall,
                         max_candidates: parse(&self.max_candidates).map(|n: u64| n as u32),
                     },
                     resumed_from: None,
@@ -386,10 +485,9 @@ impl Studio {
         }
     }
 
-    fn runs_column(&mut self, ui: &mut egui::Ui) {
-        let Some(m) = &mut self.manager else {
-            return;
-        };
+    fn runs_column(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        let m = self.manager.as_mut()?;
         ui.heading("Jobs");
         let mut cancel = None;
         for run in &m.running {
@@ -433,6 +531,31 @@ impl Studio {
         }
         if let Some(id) = &self.followed {
             ui.separator();
+            let live = m.running.iter().any(|r| &r.id == id);
+            ui.horizontal(|ui| {
+                ui.label(mono("ouvrir :").color(theme::DIM));
+                for (label, target, hint) in [
+                    (
+                        "3D",
+                        Target::Graph,
+                        "les nœuds atteints, avec rejeu temporel",
+                    ),
+                    (
+                        "Diff Δ",
+                        Target::Diff,
+                        "la vue 3D colorée par le Δ du graphe",
+                    ),
+                    ("Inspecteur", Target::Inspector, "le dernier nœud atteint"),
+                ] {
+                    if ui.button(label).on_hover_text(hint).clicked() {
+                        action = Some(Action::OpenRun {
+                            dir: m.project.runs_dir().join(id),
+                            live,
+                            target,
+                        });
+                    }
+                }
+            });
             match m.running.iter().find(|r| &r.id == id) {
                 Some(run) => run_view(ui, &run.view),
                 None => {
@@ -487,6 +610,7 @@ impl Studio {
                 }
             }
         });
+        action
     }
 }
 

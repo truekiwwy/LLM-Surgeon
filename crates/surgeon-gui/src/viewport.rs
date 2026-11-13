@@ -1,20 +1,39 @@
 //! The central 3D canvas: nodes at their Rust-computed positions (blended between the two
-//! layouts), coupling edges, orbit / pan / zoom, picking and a compact hover card.
+//! layouts), coupling edges, orbit / pan / zoom, picking and a compact hover card. A run
+//! (live or replayed) draws over the nodes it reached: a glyph per state, never the color
+//! alone, and for an apply the |ΔW| of each tensor on the report's color scale.
+//!
+//! Cost per frame stays flat on large graphs: the strongest edges only (the step sorts them
+//! once), fewer of them past [`LOD_NODES`] nodes, sub-pixel edges skipped, and the per-frame
+//! vectors kept in [`Buffers`] from one frame to the next.
 
 use std::collections::HashMap;
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, PointerButton, Pos2, Rect, Sense, Stroke,
+    self, Align2, Color32, CornerRadius, FontId, PointerButton, Pos2, Rect, Sense, Shape, Stroke,
     StrokeKind, Vec2,
 };
+use weight_surgeon::events::NodeStatus;
 use weight_surgeon::graph::diff::{EdgeDiff, NodeDiff};
 use weight_surgeon::graph::layout::Position;
 use weight_surgeon::graph::output::NodeReport;
 use weight_surgeon::graph::GraphRole;
 
-use crate::camera::{self, Orbit};
+use crate::camera::{self, Orbit, Projected};
 use crate::source::Step;
+use crate::studio::live::Layer;
 use crate::theme;
+
+/// Past this many nodes, the lighter edge budget.
+pub const LOD_NODES: usize = 400;
+
+/// Weighted edges drawn per frame (structural ones and those of the selection always are).
+pub fn edge_budget(nodes: usize) -> usize {
+    match nodes > LOD_NODES {
+        true => 1_200,
+        false => 4_000,
+    }
+}
 
 /// The tensor a role stands for, as checkpoints name it.
 pub fn role_label(role: GraphRole) -> &'static str {
@@ -37,6 +56,75 @@ pub fn node_title(node: &NodeReport) -> String {
     match node.layer {
         Some(layer) => format!("Layer {layer} · {}{expert}", role_label(node.role)),
         None => format!("{}{expert}", role_label(node.role)),
+    }
+}
+
+/// How a run state reads without color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Glyph {
+    /// Dotted ring.
+    Dots,
+    /// Square outline.
+    Square,
+    /// Ring and check mark.
+    Check,
+    /// Thick ring and cross.
+    Cross,
+}
+
+pub fn state_style(state: NodeStatus) -> (Glyph, Color32, &'static str) {
+    match state {
+        NodeStatus::Pending => (Glyph::Dots, theme::DIM, "en attente"),
+        NodeStatus::Running => (Glyph::Square, theme::SELECTION, "en cours"),
+        NodeStatus::Done => (Glyph::Check, theme::GOOD, "terminé"),
+        NodeStatus::Failed => (Glyph::Cross, theme::BAD, "échoué"),
+    }
+}
+
+pub const STATES: [NodeStatus; 4] = [
+    NodeStatus::Pending,
+    NodeStatus::Running,
+    NodeStatus::Done,
+    NodeStatus::Failed,
+];
+
+/// The glyph of `state` around a node of radius `r` at `c`.
+fn glyph(out: &mut Vec<Shape>, state: NodeStatus, c: Pos2, r: f32) {
+    let (glyph, color, _) = state_style(state);
+    let ring = r + 3.0;
+    match glyph {
+        Glyph::Dots => out.extend((0..6).map(|k| {
+            let a = k as f32 * std::f32::consts::TAU / 6.0;
+            Shape::circle_filled(c + ring * Vec2::angled(a), 1.2, color)
+        })),
+        Glyph::Square => out.push(Shape::rect_stroke(
+            Rect::from_center_size(c, Vec2::splat(2.0 * ring)),
+            CornerRadius::ZERO,
+            Stroke::new(1.5, color),
+            StrokeKind::Middle,
+        )),
+        Glyph::Check | Glyph::Cross => {
+            let width = if glyph == Glyph::Cross { 2.0 } else { 1.5 };
+            out.push(Shape::circle_stroke(c, ring, Stroke::new(width, color)));
+            // The mark sits on the ring, top right, where it does not hide the node.
+            let m = c + Vec2::new(ring, -ring) * 0.75;
+            let s = (0.6 * r).max(2.5);
+            let stroke = Stroke::new(1.5, color);
+            match glyph {
+                Glyph::Check => out.push(Shape::line(
+                    vec![
+                        m + Vec2::new(-s, 0.0),
+                        m + Vec2::new(-0.3 * s, 0.7 * s),
+                        m + Vec2::new(s, -0.8 * s),
+                    ],
+                    stroke,
+                )),
+                _ => out.extend([
+                    Shape::line_segment([m - Vec2::splat(s), m + Vec2::splat(s)], stroke),
+                    Shape::line_segment([m + Vec2::new(-s, s), m + Vec2::new(s, -s)], stroke),
+                ]),
+            }
+        }
     }
 }
 
@@ -70,6 +158,10 @@ fn lerp(a: Position, b: Position, t: f32) -> Position {
     ]
 }
 
+fn node_radius(p: &Projected) -> f32 {
+    (0.02 * p.scale).clamp(2.5, 9.0)
+}
+
 pub struct View<'a> {
     pub step: &'a Step,
     /// 0: `pos_column`, 1: `pos_constellation`.
@@ -80,12 +172,23 @@ pub struct View<'a> {
     pub selected: Option<usize>,
     /// Nodes the patch being edited will touch (empty: no preview).
     pub targets: &'a [bool],
+    /// The run drawn over the graph, filled for this step.
+    pub layer: Option<&'a Layer>,
+}
+
+/// What a frame allocates, kept between frames.
+#[derive(Default)]
+pub struct Buffers {
+    projected: Vec<Option<Projected>>,
+    order: Vec<usize>,
+    pickable: Vec<(usize, Pos2, f32)>,
+    shapes: Vec<Shape>,
 }
 
 /// What a click did: `Some(Some(i))` picked node `i`, `Some(None)` clicked empty space.
 pub type Click = Option<Option<usize>>;
 
-pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit) -> Click {
+pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffers) -> Click {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, CornerRadius::ZERO, theme::BG);
@@ -104,11 +207,14 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit) -> Click {
     }
 
     let report = &view.step.report;
-    let projected: Vec<_> = report
-        .nodes
-        .iter()
-        .map(|n| camera.project(lerp(n.pos_column, n.pos_constellation, view.blend), rect))
-        .collect();
+    buf.projected.clear();
+    buf.projected.extend(
+        report
+            .nodes
+            .iter()
+            .map(|n| camera.project(lerp(n.pos_column, n.pos_constellation, view.blend), rect)),
+    );
+    let projected = &buf.projected;
     let node_diffs: HashMap<&str, &NodeDiff> = match view.diff {
         // The baseline diff first; in a stream, the delta of the patch that made this state.
         true => report
@@ -131,19 +237,28 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit) -> Click {
         false => HashMap::new(),
     };
 
-    // Edges first, under the nodes.
+    // Edges first, under the nodes; the step lists them structural first, then strongest.
+    let shapes = &mut buf.shapes;
+    shapes.clear();
     let max_weight = report
         .edges
         .iter()
         .map(|e| e.weight.abs())
         .fold(f64::MIN_POSITIVE, f64::max);
-    for &(k, a, b) in &view.step.edges {
+    let budget = edge_budget(report.nodes.len());
+    for (rank, &(k, a, b)) in view.step.edges.iter().enumerate() {
+        let edge = &report.edges[k];
+        let touches_selection = view.selected.is_some_and(|s| s == a || s == b);
+        if rank >= budget && !edge.structural && !touches_selection {
+            continue;
+        }
         let (Some(pa), Some(pb)) = (projected[a], projected[b]) else {
             continue;
         };
-        let edge = &report.edges[k];
+        if pa.pos.distance_sq(pb.pos) < 0.25 {
+            continue;
+        }
         let shown = view.visible[a] || view.visible[b];
-        let touches_selection = view.selected.is_some_and(|s| s == a || s == b);
         let (color, width) = if touches_selection {
             (theme::SELECTION.gamma_multiply(0.85), 1.5)
         } else if let Some(diff) = edge_diffs.get(&(edge.source.as_str(), edge.target.as_str())) {
@@ -159,48 +274,73 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit) -> Click {
         } else {
             color.gamma_multiply(0.2)
         };
-        painter.line_segment([pa.pos, pb.pos], Stroke::new(width, color));
+        shapes.push(Shape::line_segment(
+            [pa.pos, pb.pos],
+            Stroke::new(width, color),
+        ));
     }
 
     // Nodes far to near, so the nearest stay on top.
-    let mut order: Vec<usize> = (0..report.nodes.len())
-        .filter(|&i| projected[i].is_some())
-        .collect();
-    order.sort_by(|&a, &b| {
+    buf.order.clear();
+    buf.order
+        .extend((0..report.nodes.len()).filter(|&i| projected[i].is_some()));
+    buf.order.sort_by(|&a, &b| {
         let depth = |i: usize| projected[i].map_or(0.0, |p| p.depth);
         depth(b).total_cmp(&depth(a))
     });
-    let mut targets = Vec::new();
-    for &i in &order {
+    let state_of = |i: usize| view.layer.and_then(|l| l.states.get(i).copied().flatten());
+    buf.pickable.clear();
+    for &i in &buf.order {
         let Some(p) = projected[i] else { continue };
         let node = &report.nodes[i];
-        let radius = (0.02 * p.scale).clamp(2.5, 9.0);
+        let radius = node_radius(&p);
         let fill = match view.diff {
             true => delta_color(node_diffs.get(node.id.as_str()).copied()),
             false => theme::role_color(node.role),
+        };
+        // A run in view: its values color the nodes they cover, unreached nodes step back.
+        let fill = match view.layer {
+            Some(layer) => match (layer.colors.get(i).copied().flatten(), state_of(i)) {
+                (Some(color), _) => color,
+                (None, Some(_)) => fill,
+                (None, None) => fill.gamma_multiply(0.35),
+            },
+            None => fill,
         };
         let fill = match view.visible[i] {
             true => fill,
             false => fill.gamma_multiply(0.12),
         };
-        painter.circle_filled(p.pos, radius, fill);
+        shapes.push(Shape::circle_filled(p.pos, radius, fill));
         if view.step.touched.contains_key(&node.id) {
-            painter.circle_stroke(p.pos, radius + 2.5, Stroke::new(1.5, theme::AGENT));
+            shapes.push(Shape::circle_stroke(
+                p.pos,
+                radius + 2.5,
+                Stroke::new(1.5, theme::AGENT),
+            ));
         }
         if view.targets.get(i).copied().unwrap_or(false) {
-            painter.circle_stroke(p.pos, radius + 2.0, Stroke::new(1.0, theme::SELECTION));
+            shapes.push(Shape::circle_stroke(
+                p.pos,
+                radius + 2.0,
+                Stroke::new(1.0, theme::SELECTION),
+            ));
+        }
+        if let Some(state) = state_of(i).filter(|_| view.visible[i]) {
+            glyph(shapes, state, p.pos, radius);
         }
         if view.visible[i] {
-            targets.push((i, p.pos, radius));
+            buf.pickable.push((i, p.pos, radius));
         }
     }
+    painter.extend(shapes.drain(..));
 
     let hovered = response
         .hover_pos()
-        .and_then(|pointer| camera::pick(&targets, pointer, 3.0));
+        .and_then(|pointer| camera::pick(&buf.pickable, pointer, 3.0));
     if let Some(i) = view.selected.filter(|&i| view.visible[i]) {
         if let Some(p) = projected[i] {
-            let radius = (0.02 * p.scale).clamp(2.5, 9.0);
+            let radius = node_radius(&p);
             painter.circle_stroke(p.pos, radius + 3.5, Stroke::new(2.0, theme::SELECTION));
             painter.text(
                 p.pos + Vec2::new(radius + 7.0, 0.0),
@@ -213,24 +353,36 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit) -> Click {
     }
     if let (Some(i), Some(pointer)) = (hovered, response.hover_pos()) {
         if let Some(p) = projected[i] {
-            painter.circle_stroke(
-                p.pos,
-                (0.02 * p.scale).clamp(2.5, 9.0) + 1.5,
-                Stroke::new(1.0, theme::TEXT),
-            );
+            painter.circle_stroke(p.pos, node_radius(&p) + 1.5, Stroke::new(1.0, theme::TEXT));
         }
-        hover_card(&painter, rect, pointer, &report.nodes[i]);
+        let run = view.layer.map(|l| run_line(l, i));
+        hover_card(&painter, rect, pointer, &report.nodes[i], run);
     }
 
+    let mut top = rect.left_top() + Vec2::new(10.0, 8.0);
+    let mut caption = |text: String, color: Color32| {
+        let r = painter.text(top, Align2::LEFT_TOP, text, FontId::monospace(11.0), color);
+        top.y += r.height() + 2.0;
+    };
     let targeted = view.targets.iter().filter(|t| **t).count();
     if targeted > 0 {
-        painter.text(
-            rect.left_top() + Vec2::new(10.0, 8.0),
-            Align2::LEFT_TOP,
+        caption(
             format!("dry-run visuel : {targeted} tenseur(s) ciblé(s)"),
-            FontId::monospace(11.0),
             theme::SELECTION,
         );
+    }
+    if let Some(layer) = view.layer {
+        caption(layer.kind.caption().into(), theme::TEXT);
+        if let (Some(metric), Some((lo, hi))) = (layer.kind.metric(), layer.range) {
+            caption(format!("{metric} : {lo:.3e} – {hi:.3e}"), theme::DIM);
+        }
+        if layer.unmatched > 0 {
+            caption(
+                format!("{} id(s) du run hors de ce graphe", layer.unmatched),
+                theme::DIM,
+            );
+        }
+        legend(&painter, rect, layer);
     }
     painter.text(
         rect.left_bottom() + Vec2::new(10.0, -8.0),
@@ -246,11 +398,58 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit) -> Click {
     }
 }
 
+/// `terminé · max_abs_delta 1.250e-2`, or `hors run`.
+pub fn run_line(layer: &Layer, i: usize) -> String {
+    let state = layer.states.get(i).copied().flatten();
+    let mut line = state.map_or("hors run".into(), |s| state_style(s).2.to_owned());
+    if let (Some(metric), Some(Some(v))) = (layer.kind.metric(), layer.values.get(i)) {
+        line.push_str(&format!(" · {metric} {v:.3e}"));
+    }
+    line
+}
+
+/// Glyph, label and count of each state, bottom right.
+fn legend(painter: &egui::Painter, rect: Rect, layer: &Layer) {
+    let font = FontId::monospace(11.0);
+    let row = 16.0;
+    let size = Vec2::new(150.0, row * STATES.len() as f32 + 8.0);
+    let card = Rect::from_min_size(rect.right_bottom() - size - Vec2::splat(10.0), size);
+    painter.rect_filled(card, CornerRadius::same(2), theme::PANEL);
+    painter.rect_stroke(
+        card,
+        CornerRadius::same(2),
+        Stroke::new(1.0, theme::BORDER),
+        StrokeKind::Inside,
+    );
+    let mut shapes = Vec::new();
+    for (k, state) in STATES.into_iter().enumerate() {
+        let y = card.top() + 4.0 + row * (k as f32 + 0.5);
+        let c = Pos2::new(card.left() + 14.0, y);
+        let (_, color, label) = state_style(state);
+        shapes.push(Shape::circle_filled(c, 3.0, theme::DIM));
+        glyph(&mut shapes, state, c, 3.0);
+        painter.text(
+            Pos2::new(card.left() + 30.0, y),
+            Align2::LEFT_CENTER,
+            format!("{label} {}", layer.count(state)),
+            font.clone(),
+            color,
+        );
+    }
+    painter.extend(shapes);
+}
+
 /// A few monospace lines next to the pointer, kept inside the canvas.
-fn hover_card(painter: &egui::Painter, rect: Rect, pointer: Pos2, node: &NodeReport) {
+fn hover_card(
+    painter: &egui::Painter,
+    rect: Rect,
+    pointer: Pos2,
+    node: &NodeReport,
+    run: Option<String>,
+) {
     let m = &node.metrics;
     let sigma = m.sigma1.map_or("-".into(), |s| format!("{s:.4}"));
-    let lines = [
+    let mut lines = vec![
         (node_title(node), theme::TEXT),
         (
             format!("{} × {}  {}", node.rows, node.cols, node.dtype),
@@ -264,6 +463,9 @@ fn hover_card(painter: &egui::Painter, rect: Rect, pointer: Pos2, node: &NodeRep
             theme::DIM,
         ),
     ];
+    if let Some(run) = run {
+        lines.push((format!("run : {run}"), theme::SELECTION));
+    }
     let font = FontId::monospace(11.0);
     let galleys: Vec<_> = lines
         .into_iter()
@@ -294,6 +496,11 @@ fn hover_card(painter: &egui::Painter, rect: Rect, pointer: Pos2, node: &NodeRep
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raster;
+    use crate::source::Timeline;
+    use crate::studio::bus::RunView;
+    use crate::testkit;
+    use weight_surgeon::events::{EventLine, SurgeonEvent};
 
     fn diff(rank: f64, relative: f64, changed: bool) -> NodeDiff {
         NodeDiff {
@@ -322,5 +529,226 @@ mod tests {
         let weak = delta_color(Some(&diff(-0.5, 0.001, true)));
         let strong = delta_color(Some(&diff(-0.5, 0.2, true)));
         assert!(strong.r() > weak.r());
+    }
+
+    #[test]
+    fn every_state_has_its_own_glyph_and_label() {
+        let styles: Vec<_> = STATES.into_iter().map(state_style).collect();
+        for (a, x) in styles.iter().enumerate() {
+            for y in &styles[a + 1..] {
+                assert_ne!(x.0, y.0, "glyph {} / {}", x.2, y.2);
+                assert_ne!(x.2, y.2);
+            }
+        }
+        // Each glyph draws something different in kind, not only in color.
+        let kinds = |state| {
+            let mut out = Vec::new();
+            glyph(&mut out, state, Pos2::ZERO, 5.0);
+            out.iter().map(std::mem::discriminant).collect::<Vec<_>>()
+        };
+        let all: Vec<_> = STATES.into_iter().map(kinds).collect();
+        for (a, x) in all.iter().enumerate() {
+            for y in &all[a + 1..] {
+                assert_ne!(x, y);
+            }
+        }
+    }
+
+    /// A run where every node of `step` has `state`, with a |ΔW| when it is done.
+    fn layer_for(step: &Step, state: NodeStatus) -> Layer {
+        let mut view = RunView::default();
+        let mut seq = 0;
+        let mut push = |event| {
+            view.apply(&EventLine {
+                v: 1,
+                seq,
+                t_ms: seq,
+                event,
+            });
+            seq += 1;
+        };
+        push(SurgeonEvent::JobStarted {
+            command: "surgeon_apply".into(),
+        });
+        for (i, node) in step.report.nodes.iter().enumerate() {
+            push(SurgeonEvent::NodeState {
+                node_id: node.tensor.clone(),
+                state,
+            });
+            if state == NodeStatus::Done {
+                push(SurgeonEvent::Metric {
+                    node_id: Some(node.id.clone()),
+                    name: "max_abs_delta".into(),
+                    value: i as f64,
+                });
+            }
+        }
+        let mut layer = Layer::default();
+        layer.fill(&view, step);
+        layer
+    }
+
+    /// One frame of the viewport alone at 960×640: its painted texts and line count.
+    fn frame(
+        step: &Step,
+        layer: Option<&Layer>,
+        selected: Option<usize>,
+    ) -> (raster::Frame, usize) {
+        let n = step.report.nodes.len();
+        let (visible, targets) = (vec![true; n], vec![false; n]);
+        let view = View {
+            step,
+            blend: 0.0,
+            diff: false,
+            visible: &visible,
+            selected,
+            targets: &targets,
+            layer,
+        };
+        let ctx = egui::Context::default();
+        let (mut camera, mut buf) = (Orbit::default(), Buffers::default());
+        let frame = raster::render(&ctx, [960, 640], 1.0, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                show(ui, &view, &mut camera, &mut buf);
+            });
+        });
+        // The edges drawn are the line segments under the first node.
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                show(ui, &view, &mut camera, &mut buf);
+            });
+        });
+        output.textures_delta.clear();
+        let lines = output
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.shape, Shape::LineSegment { .. }))
+            .count();
+        (frame, lines)
+    }
+
+    #[test]
+    fn an_empty_graph_renders_its_frame_and_help() {
+        let timeline = Timeline::from_report(testkit::graph(0));
+        let (frame, lines) = frame(timeline.current().unwrap(), None, None);
+        assert_eq!(lines, 0);
+        assert!(frame.texts.iter().any(|t| t.contains("orbite")));
+        assert!(frame.image.ink() > 0.0);
+    }
+
+    #[test]
+    fn five_hundred_nodes_render_within_the_edge_budget() {
+        let timeline = Timeline::from_report(testkit::graph(600));
+        let step = timeline.current().unwrap();
+        let structural = step.report.edges.iter().filter(|e| e.structural).count();
+        assert!(
+            step.edges.len() > edge_budget(600) + structural,
+            "the budget bites"
+        );
+        let layer = layer_for(step, NodeStatus::Done);
+        let (frame, lines) = frame(step, Some(&layer), Some(300));
+        // Weighted edges stop at the budget; structural ones and the selection's stay.
+        let selection = step
+            .edges
+            .iter()
+            .filter(|e| e.1 == 300 || e.2 == 300)
+            .count();
+        assert!(
+            lines <= edge_budget(600) + structural + selection,
+            "{lines}"
+        );
+        assert!(lines >= edge_budget(600), "{lines}");
+        assert!(frame.texts.iter().any(|t| t.starts_with("terminé 600")));
+        assert!(frame.texts.iter().any(|t| t.contains("max_abs_delta")));
+        assert!(frame.image.ink() > 0.1, "{}", frame.image.ink());
+    }
+
+    #[test]
+    fn a_failed_run_reads_in_the_legend_and_the_glyphs() {
+        let timeline = Timeline::from_report(testkit::graph(40));
+        let step = timeline.current().unwrap();
+        let layer = layer_for(step, NodeStatus::Failed);
+        let (frame, _) = frame(step, Some(&layer), None);
+        assert!(frame.texts.iter().any(|t| t == "échoué 40"));
+        assert!(frame.texts.iter().any(|t| t == "terminé 0"));
+        // The red of the failure glyphs is on screen.
+        let bad = frame
+            .image
+            .rgba
+            .chunks_exact(4)
+            .filter(|p| p[0] > 180 && p[1] < 90 && p[2] < 100)
+            .count();
+        assert!(bad > 200, "{bad}");
+    }
+
+    #[test]
+    fn layouts_and_picking_are_deterministic() {
+        let a = Timeline::from_report(testkit::graph(64));
+        let b = Timeline::from_report(testkit::graph(64));
+        let (sa, sb) = (a.current().unwrap(), b.current().unwrap());
+        assert_eq!(sa.edges, sb.edges, "same edge order");
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let camera = Orbit::default();
+        let project = |s: &Step| -> Vec<_> {
+            s.report
+                .nodes
+                .iter()
+                .map(|n| camera.project(n.pos_column, rect))
+                .collect()
+        };
+        assert_eq!(project(sa), project(sb));
+        // The node under its own center is the one picked.
+        let points: Vec<_> = project(sa)
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| p.map(|p| (i, p.pos, node_radius(&p))))
+            .collect();
+        for &(i, pos, _) in points.iter().step_by(7) {
+            let picked = camera::pick(&points, pos, 3.0).unwrap();
+            assert!(points[picked].1.distance(pos) <= 1e-3, "{i} -> {picked}");
+        }
+    }
+
+    /// `cargo test --release -- --ignored frame_cost`: the CPU side of a frame (layout and
+    /// tessellation; the GPU upload is not measured) on 600 nodes stays under 60 Hz.
+    #[test]
+    #[ignore]
+    fn frame_cost() {
+        let timeline = Timeline::from_report(testkit::graph(600));
+        let step = timeline.current().unwrap();
+        let layer = layer_for(step, NodeStatus::Running);
+        let n = step.report.nodes.len();
+        let (visible, targets) = (vec![true; n], vec![false; n]);
+        let view = View {
+            step,
+            blend: 0.5,
+            diff: false,
+            visible: &visible,
+            selected: Some(10),
+            targets: &targets,
+            layer: Some(&layer),
+        };
+        let ctx = egui::Context::default();
+        let (mut camera, mut buf) = (Orbit::default(), Buffers::default());
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
+            ..Default::default()
+        };
+        let frames = 120;
+        let start = std::time::Instant::now();
+        for _ in 0..frames {
+            camera.rotate(3.0, 0.0);
+            let mut output = ctx.run_ui(input(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    show(ui, &view, &mut camera, &mut buf);
+                });
+            });
+            output.textures_delta.clear();
+            ctx.tessellate(output.shapes, 1.0);
+        }
+        let per_frame = start.elapsed() / frames;
+        println!("frame_cost 600 nodes: {per_frame:?}");
+        assert!(per_frame.as_secs_f64() < 1.0 / 60.0, "{per_frame:?}");
     }
 }
