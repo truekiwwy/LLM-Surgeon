@@ -76,7 +76,8 @@ pub enum Glyph {
 pub fn state_style(state: NodeStatus) -> (Glyph, Color32, &'static str) {
     match state {
         NodeStatus::Pending => (Glyph::Dots, theme::DIM, "en attente"),
-        NodeStatus::Running => (Glyph::Square, theme::SELECTION, "en cours"),
+        // The accent is kept for the selection: a running node reads by its square glyph.
+        NodeStatus::Running => (Glyph::Square, theme::TEXT, "en cours"),
         NodeStatus::Done => (Glyph::Check, theme::GOOD, "terminé"),
         NodeStatus::Failed => (Glyph::Cross, theme::BAD, "échoué"),
     }
@@ -481,7 +482,7 @@ fn hover_card(
         ),
     ];
     if let Some(run) = run {
-        lines.push((format!("run : {run}"), theme::SELECTION));
+        lines.push((format!("run : {run}"), theme::TEXT));
     }
     let font = FontId::monospace(11.0);
     let galleys: Vec<_> = lines

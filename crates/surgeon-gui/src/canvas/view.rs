@@ -312,7 +312,7 @@ fn toolbar(ui: &mut egui::Ui, c: &mut Canvas, status: &Status) {
         }
         ui.label(mono(format!("{:>3.0} %", c.ws.zoom * 100.0)).color(theme::DIM));
         if let Some(live) = status.live {
-            ui.label(mono(live).color(theme::AGENT));
+            ui.label(mono(live).color(theme::DIM));
         }
         if let Some(m) = &c.message {
             ui.label(RichText::new(m).small().color(theme::BAD));
@@ -709,11 +709,11 @@ fn state_lines(
     result: Option<&Finished>,
 ) {
     if status.running == Some(id) {
-        ui.label(mono("en cours...").color(theme::SELECTION));
+        ui.label(mono("en cours...").color(theme::TEXT));
         return;
     }
     if let (CardKind::GraphDiff(_), Some(live)) = (kind, status.live) {
-        ui.label(mono(live).small().color(theme::AGENT));
+        ui.label(mono(live).small().color(theme::DIM));
     }
     let Some(run) = result else {
         return;
