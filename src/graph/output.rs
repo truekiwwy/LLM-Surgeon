@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 
 use super::diff::{BaselineDiff, EdgeDiff, NodeDiff};
 use super::error::{GraphError, Result};
+use super::layout::Position;
 use super::metrics::NodeMetrics;
 use super::model::SkippedTensor;
 use super::GraphRole;
@@ -108,6 +109,13 @@ pub struct NodeReport {
     pub cols: usize,
     pub seq: usize,
     pub metrics: NodeMetrics,
+    /// `Colonne par couches` position in the unit ball (`layout::column`). Zero in reports
+    /// older than this field.
+    #[serde(default)]
+    pub pos_column: Position,
+    /// `Constellation 3D` position in the unit ball (`layout::constellation`).
+    #[serde(default)]
+    pub pos_constellation: Position,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1127,6 +1135,8 @@ mod tests {
                     cols: 4,
                     seq: 0,
                     metrics: metrics(),
+                    pos_column: [0.0; 3],
+                    pos_constellation: [0.0; 3],
                 },
                 NodeReport {
                     id: "L0.q".into(),
@@ -1141,6 +1151,8 @@ mod tests {
                     cols: 4,
                     seq: 1,
                     metrics: metrics(),
+                    pos_column: [0.0; 3],
+                    pos_constellation: [0.0; 3],
                 },
             ],
             edges: vec![EdgeReport {

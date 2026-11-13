@@ -225,7 +225,8 @@ Le schéma est généré depuis `GraphReport` (`src/graph/output.rs`) et imprim�
   `outlier_channels`, `kurtosis_median`, `kurtosis_max`, `mean_erank_energy_lower`,
   `mean_erank_energy_upper`, `full_spectrum_nodes`, `non_finite_values`, `warnings` ;
 - `nodes[]` : `id`, `role`, `kind` (`writer`/`reader`), `layer`, `expert`, `tensor`,
-  `dtype`, `weight_bytes`, `rows`, `cols`, `seq`, `metrics` ;
+  `dtype`, `weight_bytes`, `rows`, `cols`, `seq`, `metrics`, `pos_column`,
+  `pos_constellation` (positions 3D précalculées, section 7.6) ;
 - `edges[]` : `source`, `target`, `writer_role`, `reader_role`, `source_seq`,
   `target_seq`, `layer_gap`, `rank_used`, `alignment`, `chance`, `alignment_norm`,
   `coupling`, `cos_theta`, `weight`, `structural` ;
@@ -302,12 +303,11 @@ JSON dans un bloc `<script type="application/json">`, où chaque `<` est échapp
 - Navigation : glisser pour l'orbite, Maj+glisser ou clic droit pour déplacer, molette
   pour le zoom, `R` ou le bouton pour revenir à la vue initiale, Échap pour désélectionner.
 - Disposition (sélecteur du panneau de gauche, bascule en direct avec animation) :
-  `Colonne par couches` (défaut) place l'axe vertical selon l'ordre causal (`seq`, `embed`
-  en bas, `lm_head` en haut), chaque rôle ayant son angle sur un anneau ; `Constellation 3D
-  (forces)` lance une simulation de forces déterministe (répulsion entre tous les nœuds,
-  attraction le long des arêtes proportionnelle au couplage, départ sur une sphère de
-  Fibonacci, sans aléatoire) : le même rapport donne toujours la même constellation. Les
-  filtres, la recherche, la vue Diff et l'inspection fonctionnent dans les deux dispositions.
+  `Colonne par couches` (défaut) ou `Constellation 3D (forces)`. Les deux jeux de
+  coordonnées sont calculés en Rust (section 7.6) et lus dans `pos_column` et
+  `pos_constellation` ; la vue ne fait aucune simulation, elle met seulement les positions
+  à l'échelle et interpole d'une disposition à l'autre. Les filtres, la recherche, la vue
+  Diff et l'inspection fonctionnent dans les deux dispositions.
 - Clic sur un nœud : dimensions, dtype, bornes certifiées de `sigma1`, du rang stable et
   du rang effectif, énergies, `e_write`/`e_read`, kurtosis, canaux outliers, arêtes les
   plus fortes et, s'il existe, son diff.
@@ -363,6 +363,66 @@ changent l'empreinte ; une modification de même taille hors des fenêtres, avec
 remise à l'identique, ne la change pas. Le préfixe empêche toute confusion avec un SHA-256
 dans le rapport et dans les clés de cache, et une copie du modèle a une autre date, donc
 une autre empreinte.
+
+### 7.6 Moteur de disposition 3D (`src/graph/layout.rs`)
+
+Chaque nœud porte deux positions `[x, y, z]` en `f32`, centrées sur l'origine et mises à
+l'échelle de la boule unité (le point le plus éloigné est à distance 1) :
+
+- `pos_column` : axe vertical selon l'ordre causal (`seq`), un angle par rôle sur l'anneau
+  de la couche, les experts répartis sur des anneaux plus larges ; `embed` et `lm_head`
+  sur l'axe.
+- `pos_constellation` : équilibre d'un modèle de forces de Fruchterman-Reingold en 3D.
+  Départ sur une sphère de Fibonacci (points distincts, sans aléatoire), répulsion
+  `K²/d` entre toutes les paires, attraction `s·d²/K` le long des arêtes avec
+  `s = 0,2 + 0,8 · couplage / couplage max` (0,5 pour une arête structurelle), rappel
+  faible vers le centre. Le pas est adaptatif (Hu, 2005) : il est amorti (×0,9) dès que
+  l'énergie des forces remonte et regagne du terrain après 5 baisses de suite. Arrêt quand
+  l'énergie cinétique (déplacement quadratique moyen) passe sous `(10⁻³·K)²`, ou au bout
+  du budget `2·10⁹ / N²` itérations, borné entre 50 et 1000.
+
+Déterminisme : le calcul n'utilise que `+ - * /` et `sqrt`, correctement arrondis en
+IEEE-754 sur toutes les plateformes. `sin`, `cos` et la racine cubique sont réécrits
+(série de Taylor, méthode de Newton) parce que la libm de chaque système peut différer
+sur le dernier bit. La répulsion est répartie par nœud entre les threads, chaque nœud
+sommant dans un ordre fixe : un même rapport donne les mêmes bits sous Windows, Linux et
+macOS, quel que soit le nombre de threads. Un test compare l'empreinte SHA-256 des bits
+d'une constellation synthétique à une valeur de référence.
+
+Le résultat de `layout::constellation(n, liens)` indique aussi `iterations`, `energy` et
+`converged`. Sur des graphes de 2 à 2000 nœuds, le solveur converge en 50 à 950
+itérations (de moins d'une milliseconde à 0,5 s en release) ; une chaîne de 2000 nœuds
+atteint le budget avant la tolérance (`converged: false`). La répulsion reste exacte en
+`O(N²)`, sans approximation de Barnes-Hut.
+
+Les rapports antérieurs à ces champs se relisent (`--baseline`) avec des positions nulles.
+
+### 7.7 Flux incrémental pour une GUI (`src/graph/stream.rs`)
+
+Pour suivre une chirurgie en temps réel ou rejouer un historique, `GraphPatch` décrit
+l'état du graphe en NDJSON, un objet JSON par ligne (`GraphPatch::to_ndjson`) :
+
+```json
+{"type":"snapshot","report":{ ...graph.json complet... }}
+{"type":"update","nodes":[{"node":{ ...NodeReport... },"diff":{"id":"L1.attn_out","relative_change":-0.5, ...}}],"model":{ ... }}
+{"type":"update","moves":[{"id":"L2.q","pos_column":[0.1,0.4,-0.2],"pos_constellation":[0.3,-0.1,0.7]}]}
+```
+
+- `snapshot` : l'état complet, au début d'un flux ou quand la forme change.
+- `update` (`GraphPatch::between(prev, next)`) ne porte que ce qui a changé ; chaque champ
+  est omis quand il est vide :
+  - `nodes` : les nœuds dont l'analyse a changé, avec `diff`, le `NodeDiff` contre l'état
+    précédent (mêmes champs et même seuil que `--baseline`) ;
+  - `moves` : les nœuds dont seules les positions ont bougé (`NodeMove`) ;
+  - `edges` : les arêtes modifiées ;
+  - `model` et `global` quand ils diffèrent (empreinte, agrégats et avertissements).
+- Un ensemble de nœuds ou d'arêtes différent, d'autres paramètres ou un autre
+  `baseline_diff` donnent un `snapshot`.
+- `GraphPatch::apply(&mut report)` rejoue un patch. Un `update` qui nomme un nœud ou une
+  arête inconnus est refusé sans rien modifier : le récepteur doit redemander un
+  `snapshot`. Rejouer les patches dans l'ordre reconstruit chaque état exactement.
+
+Le flux est une API de bibliothèque : `surgeon graph` n'écrit pas encore de NDJSON.
 
 ## 8. Cache, reprise, estimation, annulation
 
