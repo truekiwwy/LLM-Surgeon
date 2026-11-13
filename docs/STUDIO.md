@@ -233,7 +233,6 @@ formulaires, puis supprime tout.
 
 - Pas de télémétrie, aucune donnée ne sort de la machine ; aucun secret n'est écrit par ce
   socle (les arguments des jobs sont journalisés tels quels : ne pas y mettre de secret).
-- Les captures hors écran (`--screenshot`) n'existent pas : la fenêtre se vérifie à la main.
 - Un job lancé par l'agent en mode « Demander » porte `"read_only": true` dans son
   `params.json` : le moteur le reçoit comme `surgeon mcp --read-only`.
 - Un job `surgeon_pipeline start` lance un travailleur détaché : le run du studio se

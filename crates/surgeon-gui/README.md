@@ -20,15 +20,17 @@ cargo run --release -- --self-test
 
 ## Desktop app
 
-No argument opens the **home screen**: open a graph, a workspace or a folder (typed path or
-drag and drop), see the state of each dependency, replay the **first-run wizard** (machine
-diagnostic, llama.cpp install with verified hashes, workspace, optional sample model), open
-**Diagnostics** (repair, reinstall, redacted export) or check for a new version (manual, never
-silent). A second launch hands its arguments to the running window.
+One borderless window, five tabs (**Atelier**, **3D Graph**, **Analyses**, **Agents**,
+**Diagnostics**), a `[SCALPING]` / `[ADVANCE]` switch and a command palette (`Ctrl+K`, which
+also opens a typed path). Open a graph, a workspace or a folder by drag and drop or the
+palette; replay the **first-run wizard** and repair dependencies from **Diagnostics**; check
+for a new version there (manual, never silent). A second launch hands its arguments to the
+running window. Design rules: [../../docs/design/DIRECTION.md](../../docs/design/DIRECTION.md).
 
 ```bash
 cargo run --release -- --self-test            # engine, OpenGL window, data folder; exit code 0 / 1
-cargo run --release -- --screenshot home.png  # renders the screen off-screen (CPU, no window)
+cargo run --release -- --screenshot a.png     # renders the Atelier off-screen (CPU, no window)
+cargo run --release -- --demo-data --no-motion --screen agents --size 1440x900 --screenshot b.png
 # the 3D view with a recorded run replayed over it, off-screen
 cargo run --release -- --screenshot run.png --screen graph --replay runs/<id>/events.ndjson graph.json
 cargo run --release -- --reset-settings       # the wizard runs again at the next start

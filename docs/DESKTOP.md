@@ -75,9 +75,10 @@ Diagnostics > Repair).
 ```powershell
 surgeon-gui --version
 surgeon-gui --self-test                      # engine, OpenGL window, data folder; exit code 0 or 1
-surgeon-gui --screenshot home.png            # renders the current screen without a window or a GPU
-surgeon-gui --screenshot d.png --screen diagnostics
-surgeon-gui --screenshot a.png --screen agents   # the Agents page (docs/AGENTS.md)
+surgeon-gui --screenshot a.png              # renders the Atelier without a window or a GPU
+surgeon-gui --screenshot d.png --screen diagnostics   # atelier, graph, analyses, agents, diagnostics, wizard
+surgeon-gui --demo-data --no-motion --size 1920x1080 --scale 1.0 --screenshot g.png --screen graph
+surgeon-gui --demo-data                      # a throwaway workspace filled by the real engine, offline
 surgeon-gui --reset-settings                 # the wizard runs again at the next start
 surgeon-gui graph.json                       # still accepted: graph.json, graph.ndjson, - (stdin)
 surgeon-gui "C:\Modèles\mon espace"          # a folder becomes the workspace; so does a drop on the window

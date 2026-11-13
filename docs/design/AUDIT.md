@@ -104,3 +104,41 @@ Chaque constat est suivi dans les redlines de la passe indiquée.
 
 Le slop est donc léger sur la couleur et lourd sur la structure (navigation, grille,
 densité, micro-copie, i18n) : la refonte porte d'abord sur le shell et les composants.
+
+## 5. Suivi des constats (après refonte)
+
+État au commit de livraison de `feat/gui-g5-unified-ui`. Le détail chiffré est dans
+[AUDIT_FINAL.md](AUDIT_FINAL.md).
+
+| Id | Statut | Ce qui a changé |
+| --- | --- | --- |
+| S-001 | corrigé | Barre de titre de 40 : marque, cinq onglets, mode, fenêtre ; les contrôles 3D vivent dans l'en-tête du panneau 3D |
+| S-002 | corrigé | Un seul niveau : Atelier, Graphe 3D, Analyses, Agents, Diagnostics ; cartes et éditeur dans l'Atelier (D-04) |
+| S-003 | corrigé dans `ui/` | Grille de 8 pour les zones, paddings {4, 8, 12, 16, 24} ; testé par `layout::tests` |
+| S-004 | corrigé | Colonnes 280 / fluide / 320, bornes 240-400 et 280-480, pas de 8, persistées |
+| S-005 | corrigé | Deux bleus à rôle fixe, une échelle de données à sept paliers ; plus de couleur de rôle |
+| S-006 | partiel | Les arêtes gardent un alpha continu (donnée, région exclue du plafond d'accent) |
+| S-007 | corrigé | `theme::style()` fixe tous les états depuis les jetons ; `ui_render` vérifie qu'ils en viennent |
+| S-008 | corrigé | 0 `Color32::` hors `ui/theme.rs` et `ui/components.rs` (`tests/ui_lint.rs`) |
+| S-009 | corrigé | Point dessiné plus mot (`components::status`) |
+| S-010 | corrigé | Transport en icônes vectorielles du jeu `ui/icons.rs` |
+| S-011 | corrigé | Lignes d'outils du chat derrière des icônes dessinées, colonne de 16 |
+| S-012 | corrigé | Fenêtre sans bordure système, boutons dessinés, glisser, double-clic, 4 bords et 4 coins |
+| S-013 | corrigé | Plus de bloc d'avertissement permanent : la politique est un panneau à droite |
+| S-014 | partiel | Verdicts en mots localisés ; les descriptions des outils viennent du schéma du moteur (français) |
+| S-015 | partiel | Shell, vues et 3D bilingues (381 clés) ; restent en `Lang::pick` ou français seul : assistant, canvas de cartes, éditeur de patch, dialogue backend, messages du moteur |
+| S-016 | corrigé | Un terme par sens ; « Annuler » ne désigne plus que l'annulation |
+| S-017 | corrigé dans `ui/` | Cinq tailles (11, 12, 13, 14, 16) ; Barlow et JetBrains Mono embarquées ; les modules hérités gardent 10,5 et 11,5 |
+| S-018 | corrigé | `components::kv` : clé secondaire, valeur mono à droite, un seul pas de 24 |
+| S-019 | corrigé | Arbre dessiné par lignes, couches repliées par défaut ; reste un recalcul par frame (rapide à 30 tenseurs, à mesurer sur un 70B) |
+| S-020 | corrigé | Analyses : formulaire typé à mesure de 720, file et historique dans un tableau à colonnes |
+| S-021 | corrigé | L'écran d'accueil disparaît (D-02) |
+| S-022 | corrigé | 0 `Frame::group` ; panneaux à une bordure, jamais imbriqués |
+| S-023 | corrigé | Rayon 2 partout, bordures de 1 pixel physique alignées sur la grille de pixels |
+| S-024 | corrigé | Anneau de focus d'accent ; `Ctrl+1..5`, `Ctrl+K`, flèches et Échap testés |
+| S-025 | corrigé | Tracé filaire : nœuds en contour, repère d'axes orthogonal ; la projection reste en perspective |
+| S-026 | corrigé | Rôle lu à la forme (cercle, carré, losange) |
+| S-027 | corrigé | 0 spinner ; morphose 3D de 120 ms ; barre de progression sans boucle |
+| S-028 | partiel | `--no-motion` coupe toute transition ; le réglage système n'est pas lu |
+| S-029 | corrigé | Copie active et nombre d'écritures dans l'explorateur et la barre d'état (D-06) |
+| S-030 | corrigé | Chaque état vide dit ce qui manque puis quoi faire |
