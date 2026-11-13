@@ -454,6 +454,7 @@ impl Studio {
                         priority: 10,
                         budgets: Budgets::default(),
                         resumed_from: None,
+                        read_only: false,
                     });
                     match submitted {
                         Ok(id) => self.estimating = Some((id, key.clone())),
