@@ -103,6 +103,13 @@ impl Orbit {
         self.distance = (self.distance * (-scroll * 0.002).exp()).clamp(0.25, 25.0);
     }
 
+    /// The screen direction of the world axes x, y and z, without perspective: what the
+    /// axis gizmo draws.
+    pub fn axes(&self) -> [(f32, f32); 3] {
+        let (_, right, up, _) = self.frame();
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|a| (dot(a, right), -dot(a, up)))
+    }
+
     /// `None` behind the eye.
     pub fn project(&self, p: Vec3, rect: Rect) -> Option<Projected> {
         let (eye, right, up, forward) = self.frame();
@@ -135,6 +142,18 @@ pub fn pick(points: &[(usize, Pos2, f32)], pointer: Pos2, slack: f32) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gizmo_axes_are_projections_of_an_orthonormal_frame() {
+        let mut cam = Orbit::default();
+        cam.rotate(37.0, -12.0);
+        let axes = cam.axes();
+        // Each world axis projects to at most unit length, and the three lengths squared add
+        // up to the screen's two dimensions.
+        let sum: f32 = axes.iter().map(|(x, y)| x * x + y * y).sum();
+        assert!(axes.iter().all(|(x, y)| x * x + y * y <= 1.0 + 1e-5));
+        assert!((sum - 2.0).abs() < 1e-4, "{sum}");
+    }
 
     fn rect() -> Rect {
         Rect::from_min_max(Pos2::ZERO, Pos2::new(800.0, 600.0))

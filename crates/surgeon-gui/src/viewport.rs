@@ -355,13 +355,16 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
             let radius = node_radius(&p);
             let shape = theme::role_shape(report.nodes[i].role);
             painter.add(icons::role_fill(shape, p.pos, radius, theme::SELECTION));
-            painter.text(
-                p.pos + Vec2::new(radius + 7.0, 0.0),
-                Align2::LEFT_CENTER,
+            // On a canvas-colored plate, so the name reads over the edges behind it.
+            let galley = painter.layout_no_wrap(
                 node_title(&report.nodes[i]),
                 components::font_mono(),
                 theme::TEXT,
             );
+            let min = p.pos + Vec2::new(radius + 8.0, -galley.size().y / 2.0);
+            let plate = Rect::from_min_size(min, galley.size()).expand2(Vec2::new(4.0, 0.0));
+            painter.rect_filled(plate, 0.0, theme::BG);
+            painter.galley(min, galley, theme::TEXT);
         }
     }
     if let (Some(i), Some(pointer)) = (hovered, response.hover_pos()) {
@@ -394,6 +397,7 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
         }
         legend(&painter, rect, layer);
     }
+    axis_gizmo(&painter, rect, camera);
     // The help line only where it fits (not in the Atelier's small preview).
     if rect.width() < 560.0 {
         return match response.clicked() {
@@ -412,6 +416,30 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
     match response.clicked() {
         true => Some(hovered),
         false => None,
+    }
+}
+
+/// The drafting-table mark of the view: three orthogonal axes in the top right corner, in
+/// the secondary text color (a role or an axis never gets a hue of its own).
+fn axis_gizmo(painter: &egui::Painter, rect: Rect, camera: &Orbit) {
+    let t = &theme::TOKENS;
+    let origin = rect.right_top() + Vec2::new(-2.0 * t.space.xl, 2.0 * t.space.xl);
+    let reach = t.space.l + t.space.xs;
+    for ((dx, dy), name) in camera.axes().into_iter().zip(["x", "y", "z"]) {
+        let tip = origin + Vec2::new(dx, dy) * reach;
+        // A path, not a segment: segments are the graph's edges (the edge budget counts them).
+        painter.add(Shape::line(
+            vec![origin, tip],
+            Stroke::new(t.stroke, t.color.text_secondary),
+        ));
+        let label = origin + Vec2::new(dx, dy) * (reach + t.space.s);
+        painter.text(
+            label,
+            Align2::CENTER_CENTER,
+            name,
+            components::font_meta(),
+            t.color.text_secondary,
+        );
     }
 }
 
