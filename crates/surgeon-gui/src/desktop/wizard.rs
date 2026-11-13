@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use eframe::egui::{self, Align, Layout, ProgressBar, RichText, Spinner};
+use eframe::egui::{self, Align, Layout, ProgressBar, RichText};
 
 use crate::actions::{self, Env};
 use crate::diag::SystemReport;
@@ -375,7 +375,6 @@ impl Wizard {
     fn system(&mut self, ui: &mut egui::Ui, cx: &Context<'_>, l: Lang) {
         let Some(s) = cx.system else {
             ui.horizontal(|ui| {
-                ui.add(Spinner::new());
                 ui.label(l.pick("Diagnostic en cours…", "Diagnosing…"));
             });
             return;
@@ -446,7 +445,6 @@ impl Wizard {
         }
         if self.plan_task.is_some() {
             ui.horizontal(|ui| {
-                ui.add(Spinner::new());
                 ui.label(l.pick(
                     "Interrogation de api.github.com…",
                     "Querying api.github.com…",

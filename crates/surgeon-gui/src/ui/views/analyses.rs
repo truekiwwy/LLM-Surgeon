@@ -16,6 +16,9 @@ use crate::studio::forms::FieldKind;
 use crate::studio::jobs::RunStatus;
 use crate::studio::view::{is_surgery, Target};
 
+/// The widest a launch form grows, on the 8 grid.
+const FORM_WIDTH: f32 = 720.0;
+
 pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     explorer(ui, app, regions.left);
     c::Panel::new("analysis")
@@ -25,6 +28,8 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 c::empty(ui, t("project.missing"), t("project.missing.hint"));
                 return;
             }
+            // A form keeps a reading measure; a wide window does not stretch its action.
+            ui.set_max_width(FORM_WIDTH);
             c::section(ui, t("analysis.step.tool"));
             tool_picker(ui, app, false);
             c::section(ui, t("analysis.step.params"));

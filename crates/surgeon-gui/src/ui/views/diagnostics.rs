@@ -253,7 +253,7 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, rect: egui::Rect) {
         rect,
         &[
             Part::Flex(1.0),
-            Part::Fixed(T.size.header + 3.0 * T.size.row),
+            Part::Fixed(T.size.header + 4.0 * T.size.row),
         ],
     );
     c::Panel::new("journal")
