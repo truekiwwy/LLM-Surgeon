@@ -381,7 +381,7 @@ fn connections(ui: &mut Ui, app: &mut SurgeonApp) {
                             }
                         });
                         if stored
-                            && c::button(ui, t("conn.key.revoke"), ButtonKind::Ghost).clicked()
+                            && c::button(ui, t("conn.key.revoke"), ButtonKind::Secondary).clicked()
                         {
                             hub.revoke_key(&id);
                         }
@@ -437,7 +437,7 @@ fn connections(ui: &mut Ui, app: &mut SurgeonApp) {
                     }
                     ui.horizontal(|ui| {
                         if hub.cfg.consent(&id).is_some()
-                            && c::button(ui, t("conn.consent.withdraw"), ButtonKind::Ghost)
+                            && c::button(ui, t("conn.consent.withdraw"), ButtonKind::Secondary)
                                 .clicked()
                         {
                             hub.withdraw_consent(&id);

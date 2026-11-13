@@ -165,7 +165,10 @@ pub fn mono_wrapped(ui: &mut Ui, text: impl Into<String>, color: Color32) -> Res
 
 /// A sub-heading inside a panel: closer to its own content than to what is above.
 pub fn section(ui: &mut Ui, title: &str) {
-    ui.add_space(T.space.m);
+    // Opening a panel, the panel's own padding is the space above.
+    if ui.cursor().top() > ui.max_rect().top() + 1.0 {
+        ui.add_space(T.space.m);
+    }
     meta(ui, title);
     ui.add_space(T.space.xs);
 }
@@ -450,7 +453,11 @@ fn button_at(ui: &mut Ui, text: &str, kind: ButtonKind, width: Option<f32>) -> R
         ButtonKind::Primary => T.size.cta,
         _ => T.size.control,
     };
-    let size = Vec2::new(width.unwrap_or(galley.size().x + 2.0 * T.space.m), height);
+    let pad = match kind {
+        ButtonKind::Ghost => T.space.s,
+        _ => T.space.m,
+    };
+    let size = Vec2::new(width.unwrap_or(galley.size().x + 2.0 * pad), height);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let enabled = response.enabled();
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, text));
@@ -768,7 +775,7 @@ fn field_frame(ui: &mut Ui, size: Vec2) -> Rect {
 
 fn edit(ui: &mut Ui, rect: Rect, edit: TextEdit<'_>) -> Response {
     let inner = rect.shrink2(Vec2::new(T.space.s, 0.0));
-    let response = ui.put(
+    let response = ui.place(
         inner,
         edit.frame(egui::Frame::NONE)
             .margin(egui::Margin::ZERO)
@@ -827,7 +834,7 @@ pub fn field_multiline(ui: &mut Ui, text: &mut String, hint: &str, rows: usize) 
     let height = rows as f32 * T.size.row;
     let rect = field_frame(ui, Vec2::new(ui.available_width(), height));
     let inner = rect.shrink2(Vec2::new(T.space.s, T.space.xs));
-    let response = ui.put(
+    let response = ui.place(
         inner,
         TextEdit::multiline(text)
             .font(font_body())
@@ -852,7 +859,7 @@ pub fn search(ui: &mut Ui, id: Id, text: &mut String, hint: &str) -> Response {
         Pos2::new(icon.right(), rect.top()),
         Pos2::new(rect.right() - T.space.s, rect.bottom()),
     );
-    let response = ui.put(
+    let response = ui.place(
         inner,
         TextEdit::singleline(text)
             .id(id)

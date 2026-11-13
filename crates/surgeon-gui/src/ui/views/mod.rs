@@ -179,7 +179,8 @@ pub fn context(ui: &mut Ui, app: &mut SurgeonApp) {
             c::status(ui, icons::State::Idle, t("copy.none"));
         }
     });
-    if c::button(ui, t("copy.new"), ButtonKind::Ghost)
+    ui.add_space(T.space.s);
+    if c::button(ui, t("copy.new"), ButtonKind::Secondary)
         .on_hover_text(t("copy.new.tip"))
         .clicked()
     {

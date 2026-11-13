@@ -45,9 +45,9 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     let right = layout::stack(
         regions.right,
         &[
+            Part::Flex(1.25),
             Part::Flex(1.0),
-            Part::Flex(1.0),
-            Part::Fixed(7.0 * T.size.row + T.size.header),
+            Part::Fixed(8.0 * T.size.row + T.size.header),
         ],
     );
     c::Panel::new("preview")

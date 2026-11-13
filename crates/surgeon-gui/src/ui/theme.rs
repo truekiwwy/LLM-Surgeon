@@ -353,7 +353,7 @@ pub fn style() -> egui::Style {
     s.scroll = egui::style::ScrollStyle::solid();
     s.scroll.bar_width = t.space.s;
     s.scroll.handle_min_length = t.size.row;
-    s.scroll.bar_inner_margin = 0.0;
+    s.scroll.bar_inner_margin = t.space.xs;
     s.scroll.bar_outer_margin = 0.0;
     s.scroll.foreground_color = false;
 
