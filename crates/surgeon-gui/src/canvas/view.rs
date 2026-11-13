@@ -709,7 +709,7 @@ fn state_lines(
     result: Option<&Finished>,
 ) {
     if status.running == Some(id) {
-        ui.label(mono("en cours...").color(theme::TEXT));
+        ui.label(mono("en cours…").color(theme::TEXT));
         return;
     }
     if let (CardKind::GraphDiff(_), Some(live)) = (kind, status.live) {
