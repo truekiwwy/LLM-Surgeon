@@ -1635,6 +1635,8 @@ outputs:
   graph-demo\edges.csv
 ```
 
+`crates/surgeon-gui` est aussi le **LLM Surgery Studio**, trois espaces de travail choisis dans sa barre du haut : `Studio (Canvas)`, `Graphe 3D` et `Split (Canvas + 3D)`. Le canvas porte des cartes typées reliées de sortie en entrée : Model (`inspect`), Extract (`extract`), Patch (`apply`, en dry-run par défaut), Graph Diff (`graph --baseline`, puis ouvert et cadré dans la vue 3D) et Eval / Gate (`bench refusal --fail-on-warn`, GO ou NO-GO). `Run` sur une carte exécute d'abord les cartes en amont, chacune exactement comme ce CLI avec les mêmes options, dans le processus et annulable. Une branche se forke pour comparer deux réglages côte à côte, et le workspace s'enregistre en `*.surgeon-studio.json`. Le tiroir `patch.json` valide pendant la frappe (même `validate_patch`, chaque problème sur sa ligne), illumine en 3D les tenseurs ciblés avant toute écriture, et propose `Dry-Run`, `Apply (avec backup)` et `Rollback`. Détails dans [crates/surgeon-gui/README.md](crates/surgeon-gui/README.md).
+
 <a id="patch-format"></a>
 ### 3.3 `patch.json` et les axes `rows` / `cols`
 

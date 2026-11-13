@@ -98,7 +98,11 @@ impl BackendDialog {
             .ok()
             .filter(|&b| b >= 1)
             .ok_or_else(|| format!("batch_size « {} » : entier >= 1 attendu", self.batch_size))?;
-        let path = |text: &str| Some(text.trim()).filter(|t| !t.is_empty()).map(PathBuf::from);
+        let path = |text: &str| {
+            Some(text.trim())
+                .filter(|t| !t.is_empty())
+                .map(PathBuf::from)
+        };
         Ok(BackendConfig {
             backend: Some(self.backend),
             gpu_layers: Some(gpu_layers),
@@ -159,7 +163,9 @@ impl BackendDialog {
             .and_then(|l| l.devices.first());
         let mistralrs_note = match report.and_then(|r| r.mistralrs.as_ref()) {
             Some(_) => "recommandé · mistral.rs, dossier SafeTensors tel quel, GPU selon le build",
-            None => "mistral.rs (mistralrs-server), dossier SafeTensors tel quel, GPU selon le build",
+            None => {
+                "mistral.rs (mistralrs-server), dossier SafeTensors tel quel, GPU selon le build"
+            }
         };
         let llama_note = match gpu {
             Some(gpu) => format!("{} ({}) via llama.cpp", gpu.name, gpu.api()),
@@ -171,7 +177,11 @@ impl BackendDialog {
             (Backend::MistralRs, "mistralrs", mistralrs_note.to_string()),
             (Backend::LlamaServer, "llama-server", llama_note),
             (Backend::Hipfire, "hipfire", hipfire_note),
-            (Backend::Native, "native", "CPU, Rust pur, dossier SafeTensors".into()),
+            (
+                Backend::Native,
+                "native",
+                "CPU, Rust pur, dossier SafeTensors".into(),
+            ),
         ] {
             if ui.radio_value(&mut self.backend, backend, name).changed() {
                 self.touched = true;

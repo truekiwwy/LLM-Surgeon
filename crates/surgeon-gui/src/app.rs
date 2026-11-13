@@ -1,8 +1,12 @@
-//! State and layout of the window: top bar, layer list (left), 3D viewport (center),
-//! inspector (right) and, for a stream, the patch timeline (bottom).
+//! State and layout of the window. Three workspaces share the top bar: `Studio` (the card
+//! canvas), `Graphe 3D` (layer list, 3D viewport, inspector) and `Split` (canvas and 3D side
+//! by side). The patch editor is a drawer on the right in all three; a running job and, for
+//! a stream, the patch timeline sit at the bottom.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use eframe::egui::{
     self, Align, CentralPanel, CollapsingHeader, Grid, Key, Layout, Panel, RichText, ScrollArea,
@@ -18,6 +22,11 @@ use weight_surgeon::graph::GraphRole;
 
 use crate::backend_dialog::BackendDialog;
 use crate::camera::Orbit;
+use crate::canvas::view::{self as canvas_view, Action, Canvas, Status};
+use crate::canvas::{self, CardKind};
+use crate::editor::view::{self as editor_view, Request};
+use crate::editor::{self, Editor};
+use crate::runner::{self, Finished, Job, Task};
 use crate::source::{self, Input, Step, Timeline};
 use crate::theme::{self, mono};
 use crate::viewport::{self, node_title, View};
@@ -26,6 +35,13 @@ use crate::viewport::{self, node_title, View};
 enum LayoutMode {
     Column,
     Constellation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Studio,
+    Graph,
+    Split,
 }
 
 /// The role filters of the layer list.
@@ -54,11 +70,27 @@ pub struct SurgeonApp {
     dialog: BackendDialog,
     probe: Option<Receiver<BackendReport>>,
     hardware: Option<BackendReport>,
+    mode: Mode,
+    show_editor: bool,
+    canvas: Canvas,
+    editor: Editor,
+    job: Option<Job>,
+    /// The step that finished last, shown in the job bar.
+    last_run: Option<Finished>,
+    /// Backups of the last apply: what Rollback restores.
+    backups: Vec<PathBuf>,
+    /// Where card patches are written before `apply` reads them.
+    scratch: PathBuf,
 }
 
 impl SurgeonApp {
     pub fn new(ctx: &egui::Context, input: Option<Input>) -> Self {
         theme::apply(ctx);
+        // A graph on the command line opens on the 3D view, nothing on the studio.
+        let mode = match input {
+            Some(_) => Mode::Graph,
+            None => Mode::Studio,
+        };
         let (timeline, feed) = match input {
             Some(Input::Report(report)) => (Timeline::from_report(*report), None),
             Some(Input::Stream { reader, follow }) => {
@@ -92,11 +124,242 @@ impl SurgeonApp {
             dialog,
             probe: Some(probe),
             hardware: None,
+            mode,
+            show_editor: false,
+            canvas: Canvas::default(),
+            editor: Editor::default(),
+            job: None,
+            last_run: None,
+            backups: Vec::new(),
+            scratch: std::env::temp_dir().join(format!("surgeon-studio-{}", std::process::id())),
         }
     }
 
-    /// Drains the background channels.
-    fn poll(&mut self) {
+    fn busy(&self) -> bool {
+        self.job.as_ref().is_some_and(|j| !j.finished)
+    }
+
+    fn start(&mut self, ctx: &egui::Context, steps: Vec<runner::Step>) {
+        if self.busy() || steps.is_empty() {
+            return;
+        }
+        for id in steps.iter().filter_map(|s| s.card) {
+            self.canvas.results.remove(&id);
+        }
+        let wake = ctx.clone();
+        self.job = Some(Job::spawn(steps, move || wake.request_repaint()));
+    }
+
+    fn rollback(&mut self, ctx: &egui::Context) {
+        let step = runner::Step {
+            card: None,
+            label: "rollback".into(),
+            task: Task::Restore(self.backups.clone()),
+        };
+        self.start(ctx, vec![step]);
+    }
+
+    /// Records a finished step on its card, the editor and the rollback state.
+    fn finish(&mut self, done: Finished) {
+        let data = &done.envelope["data"];
+        if done.code == 0 && data["report"]["dry_run"] == false {
+            self.backups = canvas::backups_of(&done);
+        }
+        if done.code == 0 && data["restored"].is_array() {
+            self.backups.clear();
+        }
+        match done.card {
+            Some(id) => {
+                self.canvas.results.insert(id, done.clone());
+            }
+            None => self.editor.message = Some((outcome_line(&done), done.code != 0)),
+        }
+        self.last_run = Some(done);
+    }
+
+    fn canvas_action(&mut self, ctx: &egui::Context, action: Action) {
+        match action {
+            Action::Run(id) => match self.canvas.ws.plan(id, &self.scratch) {
+                Ok(steps) => self.start(ctx, steps),
+                Err(e) => self.canvas.message = Some(e),
+            },
+            Action::OpenInEditor(id) => match self.canvas.ws.patch_json(id) {
+                Ok(text) => {
+                    let file = self.scratch.join(format!("card-{id}.patch.json"));
+                    self.editor.file = file.display().to_string();
+                    self.editor.model = self.canvas.ws.model_of(id).unwrap_or_default().into();
+                    self.editor.set_text(text);
+                    self.show_editor = true;
+                }
+                Err(e) => self.canvas.message = Some(e),
+            },
+            Action::ShowGraph(id) => {
+                if let Err(e) = self.show_graph(id) {
+                    self.canvas.message = Some(e);
+                }
+            }
+            Action::Rollback => self.rollback(ctx),
+        }
+    }
+
+    /// Loads the `graph.json` of a Graph Diff card as a new state and frames its changes.
+    fn show_graph(&mut self, id: u32) -> Result<(), String> {
+        let Some(CardKind::GraphDiff(card)) = self.canvas.ws.card(id).map(|c| &c.kind) else {
+            return Ok(());
+        };
+        let path = PathBuf::from(card.out_dir.trim()).join("graph.json");
+        let Input::Report(report) = source::open(&path)? else {
+            return Err(format!("{} n'est pas un graph.json", path.display()));
+        };
+        let changed: Vec<&NodeDiff> = report
+            .baseline_diff
+            .iter()
+            .flat_map(|d| &d.nodes)
+            .filter(|n| n.changed)
+            .collect();
+        let points: Vec<[f32; 3]> = report
+            .nodes
+            .iter()
+            .filter(|n| changed.iter().any(|d| d.id == n.id))
+            .map(|n| match self.layout {
+                LayoutMode::Column => n.pos_column,
+                LayoutMode::Constellation => n.pos_constellation,
+            })
+            .collect();
+        let top = report
+            .baseline_diff
+            .as_ref()
+            .and_then(|d| d.top_changed_layers.first())
+            .map(|l| l.top_node.clone());
+        self.timeline.push(&GraphPatch::snapshot(&report))?;
+        self.timeline.seek(usize::MAX);
+        self.diff = true;
+        self.selected = top;
+        if !points.is_empty() {
+            let n = points.len() as f32;
+            let mean = |k: usize| points.iter().map(|p| p[k]).sum::<f32>() / n;
+            self.camera.target = [mean(0), mean(1), mean(2)];
+        }
+        if self.mode == Mode::Studio {
+            self.mode = Mode::Split;
+        }
+        Ok(())
+    }
+
+    fn job_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(job) = &self.job else {
+            return;
+        };
+        let mut close = false;
+        ui.horizontal_centered(|ui| {
+            if !job.finished {
+                ui.spinner();
+                let label = job.labels.get(job.current).map_or("", String::as_str);
+                ui.label(mono(format!(
+                    "étape {}/{} · {label} · {:.1} s",
+                    job.current + 1,
+                    job.labels.len(),
+                    job.started.elapsed().as_secs_f64()
+                )));
+                let cancel = ui.add_enabled(!job.cancelled(), egui::Button::new("Annuler"));
+                if cancel
+                    .on_hover_text("arrêt coopératif, rollback si une écriture a commencé")
+                    .clicked()
+                {
+                    job.cancel();
+                }
+                ui.ctx().request_repaint_after(Duration::from_millis(250));
+                return;
+            }
+            match &self.last_run {
+                Some(run) => {
+                    let color = if run.code == 0 {
+                        theme::GOOD
+                    } else {
+                        theme::BAD
+                    };
+                    ui.label(mono(format!("{} · {}", run.label, outcome_line(run))).color(color));
+                }
+                None => {
+                    ui.label(mono("annulé").color(theme::DIM));
+                }
+            }
+            close = ui.button("Fermer").clicked();
+        });
+        if close {
+            self.job = None;
+        }
+    }
+
+    /// The 3D nodes the patch being edited would touch: the editor's selectors when the
+    /// drawer is open, else those of the selected Patch card.
+    fn targets(&self, report: &GraphReport) -> Vec<bool> {
+        let from_editor = self.show_editor && !self.editor.checked.selections.is_empty();
+        let selections = match from_editor {
+            true => self.editor.checked.selections.clone(),
+            false => self
+                .canvas
+                .selected
+                .and_then(|id| self.canvas.ws.card(id))
+                .and_then(|c| match &c.kind {
+                    CardKind::Patch(p) => p.selection(),
+                    _ => None,
+                })
+                .into_iter()
+                .collect(),
+        };
+        editor::targets(&selections, report)
+    }
+
+    fn live_line(&self) -> Option<String> {
+        self.feed.as_ref()?;
+        let touched = self.timeline.current().map_or(0, |s| s.touched.len());
+        Some(format!(
+            "flux NDJSON : {} état(s), {touched} nœud(s) touché(s){}",
+            self.timeline.len(),
+            if self.timeline.is_live() {
+                " · direct"
+            } else {
+                ""
+            }
+        ))
+    }
+
+    fn canvas_ui(&mut self, ui: &mut egui::Ui) {
+        let live = self.live_line();
+        let status = Status {
+            running: self
+                .job
+                .as_ref()
+                .filter(|j| !j.finished)
+                .and_then(|j| j.cards.get(j.current).copied().flatten()),
+            busy: self.busy(),
+            can_rollback: !self.backups.is_empty(),
+            live: live.as_deref(),
+        };
+        let actions = canvas_view::show(ui, &mut self.canvas, &status);
+        let ctx = ui.ctx().clone();
+        for action in actions {
+            self.canvas_action(&ctx, action);
+        }
+    }
+
+    fn editor_ui(&mut self, ui: &mut egui::Ui) {
+        let (busy, can_rollback) = (self.busy(), !self.backups.is_empty());
+        let request = editor_view::show(ui, &mut self.editor, busy, can_rollback);
+        let ctx = ui.ctx().clone();
+        match request {
+            Some(Request::Run(run)) => match self.editor.step(run) {
+                Ok(step) => self.start(&ctx, vec![step]),
+                Err(e) => self.editor.message = Some((e, true)),
+            },
+            Some(Request::Rollback) => self.rollback(&ctx),
+            None => {}
+        }
+    }
+
+    /// Drains the background channels and runs the debounced validation.
+    fn poll(&mut self, ctx: &egui::Context) {
         if let Some(feed) = &self.feed {
             for patch in feed.try_iter() {
                 if let Err(e) = patch.and_then(|p| self.timeline.push(&p)) {
@@ -108,6 +371,13 @@ impl SurgeonApp {
             self.dialog.prefill(&report);
             self.hardware = Some(report);
             self.probe = None;
+        }
+        let finished = self.job.as_mut().map(Job::poll).unwrap_or_default();
+        for done in finished {
+            self.finish(done);
+        }
+        if let Some(wait) = self.editor.tick() {
+            ctx.request_repaint_after(wait);
         }
     }
 
@@ -162,6 +432,11 @@ impl SurgeonApp {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
+            ui.selectable_value(&mut self.mode, Mode::Studio, "Studio (Canvas)");
+            ui.selectable_value(&mut self.mode, Mode::Graph, "Graphe 3D");
+            ui.selectable_value(&mut self.mode, Mode::Split, "Split (Canvas + 3D)");
+            ui.toggle_value(&mut self.show_editor, "Éditeur JSON");
+            ui.separator();
             match self.timeline.current() {
                 Some(step) => {
                     let m = &step.report.model;
@@ -192,9 +467,11 @@ impl SurgeonApp {
             if toggle.clicked() {
                 self.diff = !self.diff;
             }
-            ui.separator();
-            ui.toggle_value(&mut self.show_layers, "Couches");
-            ui.toggle_value(&mut self.show_inspector, "Inspecteur");
+            if self.mode == Mode::Graph {
+                ui.separator();
+                ui.toggle_value(&mut self.show_layers, "Couches");
+                ui.toggle_value(&mut self.show_inspector, "Inspecteur");
+            }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Backend…").clicked() {
@@ -362,6 +639,7 @@ impl SurgeonApp {
             return;
         };
         let visible = self.visible(&step.report);
+        let targets = self.targets(&step.report);
         let selected = self
             .selected
             .as_deref()
@@ -372,6 +650,7 @@ impl SurgeonApp {
             diff: self.diff,
             visible: &visible,
             selected,
+            targets: &targets,
         };
         if let Some(click) = viewport::show(ui, &view, &mut self.camera) {
             self.selected = click.map(|i| step.report.nodes[i].id.clone());
@@ -381,9 +660,12 @@ impl SurgeonApp {
 
 impl eframe::App for SurgeonApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.poll();
         let ctx = ui.ctx().clone();
-        if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(Key::R)) {
+        self.poll(&ctx);
+        if self.mode != Mode::Studio
+            && !ctx.egui_wants_keyboard_input()
+            && ctx.input(|i| i.key_pressed(Key::R))
+        {
             self.camera = Orbit::default();
         }
 
@@ -395,21 +677,78 @@ impl eframe::App for SurgeonApp {
                 .exact_size(32.0)
                 .show(ui, |ui| self.timeline_bar(ui));
         }
-        let mut open = self.show_layers;
-        Panel::left("layers")
-            .default_size(255.0)
-            .size_range(240.0..=270.0)
-            .show_collapsible(ui, &mut open, |ui| self.layer_panel(ui));
-        self.show_layers = open;
-        let mut open = self.show_inspector;
-        Panel::right("inspector")
-            .default_size(295.0)
-            .size_range(280.0..=310.0)
-            .show_collapsible(ui, &mut open, |ui| self.inspector(ui));
-        self.show_inspector = open;
-        CentralPanel::no_frame().show(ui, |ui| self.viewport(ui));
+        if self.job.is_some() {
+            Panel::bottom("job")
+                .exact_size(28.0)
+                .show(ui, |ui| self.job_bar(ui));
+        }
+        let mut open = self.show_editor;
+        Panel::right("editor")
+            .default_size(480.0)
+            .size_range(360.0..=820.0)
+            .show_collapsible(ui, &mut open, |ui| self.editor_ui(ui));
+        self.show_editor = open;
+        match self.mode {
+            Mode::Graph => {
+                let mut open = self.show_layers;
+                Panel::left("layers")
+                    .default_size(255.0)
+                    .size_range(240.0..=270.0)
+                    .show_collapsible(ui, &mut open, |ui| self.layer_panel(ui));
+                self.show_layers = open;
+                let mut open = self.show_inspector;
+                Panel::right("inspector")
+                    .default_size(295.0)
+                    .size_range(280.0..=310.0)
+                    .show_collapsible(ui, &mut open, |ui| self.inspector(ui));
+                self.show_inspector = open;
+                CentralPanel::no_frame().show(ui, |ui| self.viewport(ui));
+            }
+            Mode::Studio => {
+                CentralPanel::default().show(ui, |ui| self.canvas_ui(ui));
+            }
+            Mode::Split => {
+                let half = ui.available_width() / 2.0;
+                Panel::left("canvas-split")
+                    .default_size(half)
+                    .size_range(320.0..=half * 1.6)
+                    .show(ui, |ui| self.canvas_ui(ui));
+                CentralPanel::no_frame().show(ui, |ui| self.viewport(ui));
+            }
+        }
 
         self.dialog.show(&ctx, self.hardware.as_ref());
+    }
+}
+
+/// One line about a finished step: what an apply touched, what a rollback restored, or the
+/// first line of the error.
+fn outcome_line(run: &Finished) -> String {
+    let data = &run.envelope["data"];
+    if run.code != 0 {
+        let message = run.envelope["error"]["message"].as_str().unwrap_or("échec");
+        return format!(
+            "échec (code {}) : {}",
+            run.code,
+            message.lines().next().unwrap_or("")
+        );
+    }
+    if let Some(files) = data["restored"].as_array() {
+        return format!("{} fichier(s) restauré(s)", files.len());
+    }
+    let tensors: usize = data["report"]["operations"].as_array().map_or(0, |ops| {
+        ops.iter()
+            .filter_map(|o| o["tensors"].as_array())
+            .map(Vec::len)
+            .sum()
+    });
+    match data["report"]["dry_run"].as_bool() {
+        Some(true) => format!("dry-run : {tensors} tenseur(s) ciblé(s), rien écrit"),
+        Some(false) => format!(
+            "appliqué : {tensors} tenseur(s), {} backup(s)",
+            data["backups"].as_array().map_or(0, Vec::len)
+        ),
+        None => format!("ok en {:.1} s", run.seconds),
     }
 }
 
@@ -693,6 +1032,30 @@ mod tests {
             GraphPatch::Snapshot { report } => *report,
             GraphPatch::Update { .. } => unreachable!(),
         }
+    }
+
+    #[test]
+    fn outcome_lines_describe_apply_rollback_and_errors() {
+        let run = |code: i32, envelope: serde_json::Value| Finished {
+            card: None,
+            label: String::new(),
+            code,
+            envelope,
+            seconds: 0.5,
+        };
+        let report = serde_json::json!({"data": {"report": {"dry_run": false,
+            "operations": [{"tensors": [{}, {}]}]}, "backups": ["a.bak-1"]}});
+        assert_eq!(
+            outcome_line(&run(0, report)),
+            "appliqué : 2 tenseur(s), 1 backup(s)"
+        );
+        let restored = serde_json::json!({"data": {"restored": ["a", "b"]}});
+        assert_eq!(outcome_line(&run(0, restored)), "2 fichier(s) restauré(s)");
+        let failed = serde_json::json!({"error": {"message": "patch invalide :\n  - x"}});
+        assert_eq!(
+            outcome_line(&run(2, failed)),
+            "échec (code 2) : patch invalide :"
+        );
     }
 
     #[test]

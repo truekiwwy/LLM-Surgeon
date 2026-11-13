@@ -78,6 +78,8 @@ pub struct View<'a> {
     /// Nodes kept by the filters; the others are drawn faint and cannot be picked.
     pub visible: &'a [bool],
     pub selected: Option<usize>,
+    /// Nodes the patch being edited will touch (empty: no preview).
+    pub targets: &'a [bool],
 }
 
 /// What a click did: `Some(Some(i))` picked node `i`, `Some(None)` clicked empty space.
@@ -185,6 +187,9 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit) -> Click {
         if view.step.touched.contains_key(&node.id) {
             painter.circle_stroke(p.pos, radius + 2.5, Stroke::new(1.5, theme::AGENT));
         }
+        if view.targets.get(i).copied().unwrap_or(false) {
+            painter.circle_stroke(p.pos, radius + 2.0, Stroke::new(1.0, theme::SELECTION));
+        }
         if view.visible[i] {
             targets.push((i, p.pos, radius));
         }
@@ -217,6 +222,16 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit) -> Click {
         hover_card(&painter, rect, pointer, &report.nodes[i]);
     }
 
+    let targeted = view.targets.iter().filter(|t| **t).count();
+    if targeted > 0 {
+        painter.text(
+            rect.left_top() + Vec2::new(10.0, 8.0),
+            Align2::LEFT_TOP,
+            format!("dry-run visuel : {targeted} tenseur(s) ciblé(s)"),
+            FontId::monospace(11.0),
+            theme::SELECTION,
+        );
+    }
     painter.text(
         rect.left_bottom() + Vec2::new(10.0, -8.0),
         Align2::LEFT_BOTTOM,

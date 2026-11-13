@@ -1,5 +1,6 @@
-//! surgeon-gui: open a weight graph (`surgeon graph --format json` or `ndjson`) in a native
-//! 3D viewer, or follow a stream of graph patches live.
+//! surgeon-gui (LLM Surgery Studio): the surgery card canvas and patch editor, and the
+//! native 3D viewer of a weight graph (`surgeon graph --format json` or `ndjson`), followed
+//! live when it is a stream of graph patches.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,7 +14,7 @@ use surgeon_gui::source;
 #[command(
     name = "surgeon-gui",
     version,
-    about = "Visualiseur natif du graphe des poids (colonne, constellation, diff, flux GraphPatch)"
+    about = "LLM Surgery Studio : canvas de cartes, éditeur de patchs et graphe des poids en 3D"
 )]
 struct Cli {
     /// graph.json, graph.ndjson (suivi en direct) ou `-` (NDJSON sur l'entrée standard).
