@@ -24,6 +24,15 @@ eframe = { version = "0.36.2", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+# Already in this lockfile through weight-surgeon (same versions): docs/GUI_DEPENDENCIES.md.
+schemars = { version = "0.8", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# Free disk space before a working copy, and whether a project lock's process is alive.
+sysinfo = { version = "0.40.1", default-features = false, features = ["disk", "system"] }
 weight-surgeon = { path = "../.." }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+# The mini Qwen2 of examples/make_fake_qwen2.rs (same version and features as the engine).
+tokenizers = { version = "0.23.2", default-features = false, features = ["unstable_wasm"] }

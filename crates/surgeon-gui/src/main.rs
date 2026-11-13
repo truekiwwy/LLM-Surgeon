@@ -20,10 +20,30 @@ struct Cli {
     /// graph.json, graph.ndjson (suivi en direct) ou `-` (NDJSON sur l'entrée standard).
     #[arg(value_name = "GRAPH")]
     graph: Option<PathBuf>,
+    /// Dossier des projets (défaut : ~/surgeon-studio).
+    #[arg(long, value_name = "DOSSIER")]
+    workspace: Option<PathBuf>,
+    /// Vérifie projets, copies, jobs, rejeu et journal sans fenêtre, puis quitte.
+    #[arg(long)]
+    self_test: bool,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if cli.self_test {
+        return match surgeon_gui::studio::selftest::run(&mut std::io::stdout()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("échec : {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let workspace = cli.workspace.unwrap_or_else(|| {
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+        home.map_or_else(|| PathBuf::from("."), PathBuf::from)
+            .join("surgeon-studio")
+    });
     // Read before opening the window: errors print normally.
     let input = match cli.graph.as_deref().map(source::open).transpose() {
         Ok(input) => input,
@@ -42,7 +62,7 @@ fn main() -> ExitCode {
     let outcome = eframe::run_native(
         "surgeon-gui",
         options,
-        Box::new(|cc| Ok(Box::new(SurgeonApp::new(&cc.egui_ctx, input)))),
+        Box::new(|cc| Ok(Box::new(SurgeonApp::new(&cc.egui_ctx, input, workspace)))),
     );
     match outcome {
         Ok(()) => ExitCode::SUCCESS,

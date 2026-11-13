@@ -1,0 +1,22 @@
+//! The studio foundation (docs/STUDIO.md): persistent projects, a job manager that runs the
+//! engine as a library, and one event stream for the 3D view, the log and the agent.
+//!
+//! - [`project`]: the project folder, its versioned manifest and its states.
+//! - [`copy`]: working copies, the only models the studio writes.
+//! - [`jobs`]: queue, heavy-job lock, budgets, cancellation, crash recovery.
+//! - [`exec`]: the engine executor (`weight_surgeon::mcp::call_tool`).
+//! - [`bus`]: the NDJSON recorder, the 60 Hz fold and the replay.
+//! - [`ledger`]: the append-only experiment ledger.
+//! - [`forms`]: launch forms generated from the engine's tool schemas.
+//! - [`selftest`]: `surgeon-gui --self-test`, all of the above without a window.
+//! - [`view`]: the Projects workspace of the window.
+
+pub mod bus;
+pub mod copy;
+pub mod exec;
+pub mod forms;
+pub mod jobs;
+pub mod ledger;
+pub mod project;
+pub mod selftest;
+pub mod view;

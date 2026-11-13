@@ -12,12 +12,16 @@ cargo run --release -- ../../graph-out/graph.json
 cargo run --release -- ../../graph-out/graph.ndjson
 # NDJSON on stdin (an orchestrator, or an agent driving the MCP server)
 my-orchestrator | cargo run --release -- -
+# projects in another folder than ~/surgeon-studio
+cargo run --release -- --workspace D:/surgery
+# projects, working copy, a real engine job, replay and ledger, without a window
+cargo run --release -- --self-test
 ```
 
 ## Workspaces
 
-The top bar switches between `Studio (Canvas)`, `Graphe 3D` and `Split (Canvas + 3D)`, and
-opens the `Éditeur JSON` drawer on the right in any of them.
+The top bar switches between `Studio (Canvas)`, `Graphe 3D`, `Split (Canvas + 3D)` and
+`Projets`, and opens the `Éditeur JSON` drawer on the right in any of them.
 
 - `Graphe 3D`: layer list (left), 3D viewport (center), inspector (right). Left drag orbits,
   right drag pans, wheel zooms, `R` resets. `Colonne` / `Constellation`, `Diff (Δ)`, GPU
@@ -26,6 +30,16 @@ opens the `Éditeur JSON` drawer on the right in any of them.
   middle drag or Space + drag pans, right click adds a card, `Suppr` deletes the selected
   one, `Recentrer` frames everything, the minimap (bottom right) moves the view.
 - `Split (Canvas + 3D)`: both, side by side.
+- `Projets`: the projects of the workspace (create one on a source model, which is hashed
+  and never written; open one), the open project (state, source, `Copie de travail`, a
+  resume or acknowledge banner after a crash or a failure), the launch form of any engine
+  tool (generated from its MCP schema; `{out}` is the run's output folder; priority,
+  `durée max`, `candidats max` for a pipeline), the running and queued jobs with `Annuler`,
+  the followed run (progress, node states, metrics, artifacts, log, replayed from its
+  `events.ndjson` once finished), the history and the ledger exports. `Graphe éphémère`
+  opens a `graph.json` / `graph.ndjson` in the 3D view without a project. While a job runs,
+  the 3D view rings the nodes it has reached. Model, guarantees and event protocol:
+  [docs/STUDIO.md](../../docs/STUDIO.md).
 - Bottom: the running job (step, elapsed time, `Annuler`), and for a stream the patch
   timeline; at the last state the view follows new patches.
 

@@ -1,6 +1,6 @@
-//! State and layout of the window. Three workspaces share the top bar: `Studio` (the card
-//! canvas), `Graphe 3D` (layer list, 3D viewport, inspector) and `Split` (canvas and 3D side
-//! by side). The patch editor is a drawer on the right in all three; a running job and, for
+//! State and layout of the window. Four workspaces share the top bar: `Studio` (the card
+//! canvas), `Graphe 3D` (layer list, 3D viewport, inspector), `Split` (canvas and 3D side
+//! by side) and `Projets` (projects, jobs and ledger, `studio::view`). The patch editor is a drawer on the right in all three; a running job and, for
 //! a stream, the patch timeline sit at the bottom.
 
 use std::collections::BTreeMap;
@@ -28,6 +28,7 @@ use crate::editor::view::{self as editor_view, Request};
 use crate::editor::{self, Editor};
 use crate::runner::{self, Finished, Job, Task};
 use crate::source::{self, Input, Step, Timeline};
+use crate::studio::view::{self as studio_view, Studio};
 use crate::theme::{self, mono};
 use crate::viewport::{self, node_title, View};
 
@@ -42,6 +43,7 @@ enum Mode {
     Studio,
     Graph,
     Split,
+    Projects,
 }
 
 /// The role filters of the layer list.
@@ -81,25 +83,19 @@ pub struct SurgeonApp {
     backups: Vec<PathBuf>,
     /// Where card patches are written before `apply` reads them.
     scratch: PathBuf,
+    /// Projects, jobs and ledger.
+    studio: Studio,
 }
 
 impl SurgeonApp {
-    pub fn new(ctx: &egui::Context, input: Option<Input>) -> Self {
+    pub fn new(ctx: &egui::Context, input: Option<Input>, workspace: PathBuf) -> Self {
         theme::apply(ctx);
         // A graph on the command line opens on the 3D view, nothing on the studio.
         let mode = match input {
             Some(_) => Mode::Graph,
             None => Mode::Studio,
         };
-        let (timeline, feed) = match input {
-            Some(Input::Report(report)) => (Timeline::from_report(*report), None),
-            Some(Input::Stream { reader, follow }) => {
-                let wake = ctx.clone();
-                let rx = source::spawn_reader(reader, follow, move || wake.request_repaint());
-                (Timeline::default(), Some(rx))
-            }
-            None => (Timeline::default(), None),
-        };
+        let (timeline, feed) = load(ctx, input);
         let dialog = BackendDialog::load();
         // `llama-server --list-devices` can take seconds: probe off the UI thread.
         let (tx, probe) = std::sync::mpsc::channel();
@@ -132,6 +128,20 @@ impl SurgeonApp {
             last_run: None,
             backups: Vec::new(),
             scratch: std::env::temp_dir().join(format!("surgeon-studio-{}", std::process::id())),
+            studio: Studio::new(workspace),
+        }
+    }
+
+    /// An external graph, outside any project (ephemeral): replaces the one shown.
+    fn open_graph(&mut self, ctx: &egui::Context, path: &std::path::Path) {
+        match source::open(path) {
+            Ok(input) => {
+                (self.timeline, self.feed) = load(ctx, Some(input));
+                self.stream_error = None;
+                self.selected = None;
+                self.mode = Mode::Graph;
+            }
+            Err(e) => self.studio.message = Some((e, true)),
         }
     }
 
@@ -308,7 +318,16 @@ impl SurgeonApp {
                 .into_iter()
                 .collect(),
         };
-        editor::targets(&selections, report)
+        let mut targets = editor::targets(&selections, report);
+        // The nodes a running job has reached, matched by graph id or tensor name.
+        let live = self.studio.node_states();
+        if !live.is_empty() {
+            for (t, node) in targets.iter_mut().zip(&report.nodes) {
+                *t |=
+                    live.contains_key(node.id.as_str()) || live.contains_key(node.tensor.as_str());
+            }
+        }
+        targets
     }
 
     fn live_line(&self) -> Option<String> {
@@ -372,6 +391,7 @@ impl SurgeonApp {
             self.hardware = Some(report);
             self.probe = None;
         }
+        self.studio.tick(ctx);
         let finished = self.job.as_mut().map(Job::poll).unwrap_or_default();
         for done in finished {
             self.finish(done);
@@ -435,6 +455,7 @@ impl SurgeonApp {
             ui.selectable_value(&mut self.mode, Mode::Studio, "Studio (Canvas)");
             ui.selectable_value(&mut self.mode, Mode::Graph, "Graphe 3D");
             ui.selectable_value(&mut self.mode, Mode::Split, "Split (Canvas + 3D)");
+            ui.selectable_value(&mut self.mode, Mode::Projects, "Projets");
             ui.toggle_value(&mut self.show_editor, "Éditeur JSON");
             ui.separator();
             match self.timeline.current() {
@@ -662,7 +683,7 @@ impl eframe::App for SurgeonApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
-        if self.mode != Mode::Studio
+        if matches!(self.mode, Mode::Graph | Mode::Split)
             && !ctx.egui_wants_keyboard_input()
             && ctx.input(|i| i.key_pressed(Key::R))
         {
@@ -707,6 +728,13 @@ impl eframe::App for SurgeonApp {
             Mode::Studio => {
                 CentralPanel::default().show(ui, |ui| self.canvas_ui(ui));
             }
+            Mode::Projects => {
+                CentralPanel::default().show(ui, |ui| {
+                    if let Some(studio_view::Action::OpenGraph(path)) = self.studio.show(ui) {
+                        self.open_graph(&ctx, &path);
+                    }
+                });
+            }
             Mode::Split => {
                 let half = ui.available_width() / 2.0;
                 Panel::left("canvas-split")
@@ -718,6 +746,22 @@ impl eframe::App for SurgeonApp {
         }
 
         self.dialog.show(&ctx, self.hardware.as_ref());
+    }
+}
+
+/// The timeline of a graph input, and the patch feed of a stream.
+fn load(
+    ctx: &egui::Context,
+    input: Option<Input>,
+) -> (Timeline, Option<Receiver<Result<GraphPatch, String>>>) {
+    match input {
+        Some(Input::Report(report)) => (Timeline::from_report(*report), None),
+        Some(Input::Stream { reader, follow }) => {
+            let wake = ctx.clone();
+            let rx = source::spawn_reader(reader, follow, move || wake.request_repaint());
+            (Timeline::default(), Some(rx))
+        }
+        None => (Timeline::default(), None),
     }
 }
 

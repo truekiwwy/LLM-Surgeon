@@ -146,7 +146,7 @@ impl Job {
 
 /// The dependencies of the CLI without its Ctrl-C handler: the window keeps the default
 /// terminal behavior, and the job's own flag is the cancellation.
-fn deps(interrupted: Arc<AtomicBool>) -> AppDeps {
+pub(crate) fn deps(interrupted: Arc<AtomicBool>) -> AppDeps {
     AppDeps {
         probe: Box::new(SystemProbe::detect()),
         runner: Box::new(SystemCommandRunner),

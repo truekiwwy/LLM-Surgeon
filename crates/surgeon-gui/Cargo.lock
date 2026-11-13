@@ -3920,8 +3920,12 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "eframe",
+ "schemars",
  "serde",
  "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokenizers",
  "weight-surgeon",
 ]
 

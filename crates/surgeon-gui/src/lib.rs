@@ -14,6 +14,7 @@
 //! - [`editor`]: the patch.json editor, live validation and 3D target preview.
 //! - [`runner`]: background jobs (CLI commands in process, backup restore).
 //! - [`backend_dialog`]: the backend setup modal.
+//! - [`studio`]: projects, the job manager and the event stream (docs/STUDIO.md).
 //! - [`app`]: state and the docked panels.
 //! - [`theme`]: colors and style.
 #![deny(unsafe_code)]
@@ -25,5 +26,6 @@ pub mod canvas;
 pub mod editor;
 pub mod runner;
 pub mod source;
+pub mod studio;
 pub mod theme;
 pub mod viewport;

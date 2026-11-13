@@ -424,7 +424,7 @@ What it means: this patch changed the model a lot on these prompts (KL 0.41 agai
 <a id="envelope"></a>
 ### 3.1 Conventions: JSON envelope, exit codes, environment
 
-Global options, valid before or after any subcommand: `--json` (machine-readable output), `-v`, `-vv`, `-vvv` (verbosity), `-h`, `-V`. With `--json`, every command prints one envelope on stdout; the same envelope is what the MCP tools return.
+Global options, valid before or after any subcommand: `--json` (machine-readable output), `-v`, `-vv`, `-vvv` (verbosity), `--events <FILE|->` (the progress as versioned NDJSON events, `-` for stderr; schema: `surgeon schema --kind events`, protocol: [docs/STUDIO.md](docs/STUDIO.md)), `-h`, `-V`. With `--json`, every command prints one envelope on stdout; the same envelope is what the MCP tools return, and `--events` does not change it.
 
 ```text
 {"ok": true, "command": "check", "exit_code": 0, "data": {...}, "error": null, "warnings": []}
@@ -689,7 +689,7 @@ surgeon schema [OPTIONS]
 
 | Option | Default | Role |
 | --- | --- | --- |
-| `--kind` | `patch` | `patch` (schema of `patch.json`), `tools` (the tool definitions exactly as `tools/list` returns them), `surgery` (schema of the `.surgery` header), `arch` (schema of an architecture spec, `--arch-spec`), `pipeline` (schema of `pipeline.json`), `graph` (schema of `graph.json`). |
+| `--kind` | `patch` | `patch` (schema of `patch.json`), `tools` (the tool definitions exactly as `tools/list` returns them), `surgery` (schema of the `.surgery` header), `arch` (schema of an architecture spec, `--arch-spec`), `pipeline` (schema of `pipeline.json`), `graph` (schema of `graph.json`), `events` (schema of one `--events` line). |
 
 ```bash
 # the five schemas, as raw JSON
@@ -1635,7 +1635,7 @@ outputs:
   graph-demo\edges.csv
 ```
 
-`crates/surgeon-gui` is also the **LLM Surgery Studio**, three workspaces chosen in its top bar: `Studio (Canvas)`, `Graphe 3D` and `Split (Canvas + 3D)`. The canvas holds typed cards wired output to input: Model (`inspect`), Extract (`extract`), Patch (`apply`, dry run by default), Graph Diff (`graph --baseline`, then opened and framed in the 3D view) and Eval / Gate (`bench refusal --fail-on-warn`, GO or NO-GO). `Run` on a card runs the cards upstream first, each one exactly as this CLI with the same flags, in process and cancellable. A branch can be forked to compare two settings side by side, and the workspace is saved as `*.surgeon-studio.json`. The `patch.json` drawer validates while you type (same `validate_patch`, every issue on its line), lights the targeted tensors in 3D before anything is written, and offers `Dry-Run`, `Apply (avec backup)` and `Rollback`. Details in [crates/surgeon-gui/README.md](crates/surgeon-gui/README.md).
+`crates/surgeon-gui` is also the **LLM Surgery Studio**, three workspaces chosen in its top bar: `Studio (Canvas)`, `Graphe 3D` and `Split (Canvas + 3D)`. The canvas holds typed cards wired output to input: Model (`inspect`), Extract (`extract`), Patch (`apply`, dry run by default), Graph Diff (`graph --baseline`, then opened and framed in the 3D view) and Eval / Gate (`bench refusal --fail-on-warn`, GO or NO-GO). `Run` on a card runs the cards upstream first, each one exactly as this CLI with the same flags, in process and cancellable. A branch can be forked to compare two settings side by side, and the workspace is saved as `*.surgeon-studio.json`. The `patch.json` drawer validates while you type (same `validate_patch`, every issue on its line), lights the targeted tensors in 3D before anything is written, and offers `Dry-Run`, `Apply (avec backup)` and `Rollback`. A fourth workspace, `Projets`, keeps persistent projects (the source model hashed and never written, working copies, runs, an append-only ledger) and runs any MCP tool from a form generated from its schema, through a job queue that replays every run from its event file ([docs/STUDIO.md](docs/STUDIO.md)). Details in [crates/surgeon-gui/README.md](crates/surgeon-gui/README.md).
 
 <a id="patch-format"></a>
 ### 3.3 `patch.json` and the `rows` / `cols` axes

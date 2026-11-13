@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ProjectState": {
+      "enum": [
+        "ready",
+        "running",
+        "interrupted",
+        "needs_attention"
+      ],
+      "type": "string"
+    },
+    "SourceModel": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Absolute path of the model file or directory.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 of the file, or of the directory's top-level files (names and contents), as `surgeon pipeline` computes it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bytes",
+        "path",
+        "sha256"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "created_unix": {
+      "description": "Seconds since the Unix epoch.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "name": {
+      "type": "string"
+    },
+    "schema_version": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "source": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SourceModel"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "The model the project works on, read only."
+    },
+    "state": {
+      "$ref": "#/definitions/ProjectState"
+    }
+  },
+  "required": [
+    "created_unix",
+    "name",
+    "schema_version",
+    "state"
+  ],
+  "title": "Manifest",
+  "type": "object"
+}
