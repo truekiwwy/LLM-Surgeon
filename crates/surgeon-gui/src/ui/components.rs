@@ -112,8 +112,14 @@ pub fn font_mono() -> FontId {
     FontId::new(T.text.mono, FontFamily::Monospace)
 }
 
-pub fn font_title() -> FontId {
+/// Medium body: emphasis inside a panel, the primary action.
+pub fn font_strong() -> FontId {
     FontId::new(T.text.body, theme::medium())
+}
+
+/// Panel titles: the cartouche of a drawing.
+pub fn font_title() -> FontId {
+    FontId::new(T.text.title, theme::medium())
 }
 
 /// Tabs of the title bar.
@@ -141,7 +147,7 @@ pub fn secondary(ui: &mut Ui, text: impl Into<String>) -> Response {
 
 /// One line of medium-weight text.
 pub fn strong(ui: &mut Ui, text: impl Into<String>) -> Response {
-    ui.add(Label::new(rich(text, font_title(), T.color.text)).truncate())
+    ui.add(Label::new(rich(text, font_strong(), T.color.text)).truncate())
 }
 
 /// One line of small secondary text.
@@ -455,7 +461,7 @@ pub enum ButtonKind {
 
 fn button_at(ui: &mut Ui, text: &str, kind: ButtonKind, width: Option<f32>) -> Response {
     let font = match kind {
-        ButtonKind::Primary => font_title(),
+        ButtonKind::Primary => font_strong(),
         _ => font_body(),
     };
     let galley = ui

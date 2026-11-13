@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, PointerButton, Pos2, Rect, Sense, Shape, Stroke,
+    self, Align2, Color32, CornerRadius, PointerButton, Pos2, Rect, Sense, Shape, Stroke,
     StrokeKind, Vec2,
 };
 use weight_surgeon::events::NodeStatus;
@@ -23,7 +23,7 @@ use crate::camera::{self, Orbit, Projected};
 use crate::source::Step;
 use crate::studio::live::Layer;
 use crate::theme;
-use crate::ui::icons;
+use crate::ui::{components, icons};
 
 /// Past this many nodes, the lighter edge budget.
 pub const LOD_NODES: usize = 400;
@@ -357,7 +357,7 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
                 p.pos + Vec2::new(radius + 7.0, 0.0),
                 Align2::LEFT_CENTER,
                 node_title(&report.nodes[i]),
-                FontId::monospace(11.0),
+                components::font_mono(),
                 theme::TEXT,
             );
         }
@@ -372,7 +372,7 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
 
     let mut top = rect.left_top() + Vec2::new(10.0, 8.0);
     let mut caption = |text: String, color: Color32| {
-        let r = painter.text(top, Align2::LEFT_TOP, text, FontId::monospace(11.0), color);
+        let r = painter.text(top, Align2::LEFT_TOP, text, components::font_mono(), color);
         top.y += r.height() + 2.0;
     };
     let targeted = view.targets.iter().filter(|t| **t).count();
@@ -406,7 +406,7 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
         rect.left_bottom() + Vec2::new(10.0, -8.0),
         Align2::LEFT_BOTTOM,
         "gauche : orbite   droit : pan   molette : zoom   R : recentrer",
-        FontId::proportional(10.5),
+        components::font_meta(),
         theme::DIM,
     );
 
@@ -428,7 +428,7 @@ pub fn run_line(layer: &Layer, i: usize) -> String {
 
 /// Glyph, label and count of each state, bottom right.
 fn legend(painter: &egui::Painter, rect: Rect, layer: &Layer) {
-    let font = FontId::monospace(11.0);
+    let font = components::font_mono();
     let row = 16.0;
     let size = Vec2::new(150.0, row * STATES.len() as f32 + 8.0);
     let card = Rect::from_min_size(rect.right_bottom() - size - Vec2::splat(10.0), size);
@@ -484,7 +484,7 @@ fn hover_card(
     if let Some(run) = run {
         lines.push((format!("run : {run}"), theme::TEXT));
     }
-    let font = FontId::monospace(11.0);
+    let font = components::font_mono();
     let galleys: Vec<_> = lines
         .into_iter()
         .map(|(text, color)| painter.layout_no_wrap(text, font.clone(), color))
