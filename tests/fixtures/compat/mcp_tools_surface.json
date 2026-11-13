@@ -1937,7 +1937,6 @@
               "dot",
               "mmd",
               "csv",
-              "html",
               "ndjson"
             ],
             "type": "string"

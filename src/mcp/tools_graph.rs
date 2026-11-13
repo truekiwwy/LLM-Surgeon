@@ -35,12 +35,12 @@ pub struct GraphToolArgs {
     pub model: PathBuf,
     #[serde(default)]
     #[schemars(
-        description = "Dossier des sorties (graph.json, graph.dot, graph.mmd, matrices.csv, edges.csv, index.html). Absent : synthèse bornée seulement, aucun fichier écrit."
+        description = "Dossier des sorties (graph.json, graph.dot, graph.mmd, matrices.csv, edges.csv, graph.ndjson). Absent : synthèse bornée seulement, aucun fichier écrit."
     )]
     pub out_dir: Option<PathBuf>,
     #[serde(default)]
     #[schemars(
-        description = "Formats écrits avec out_dir : json, dot, mmd, csv, html (vue 3D autonome index.html, sans réseau)."
+        description = "Formats écrits avec out_dir : json, dot, mmd, csv, ndjson (graph.ndjson : instantané GraphPatch, ouvert et suivi par surgeon-gui)."
     )]
     pub format: Option<Vec<OutputFormat>>,
     #[serde(default)]
@@ -147,7 +147,7 @@ pub(super) fn definitions() -> Vec<Value> {
     vec![tool(
         TOOL_GRAPH,
         "Graphe de poids",
-        "Transforme les matrices du flux résiduel en graphe orienté : écritures (embed, o_proj, down_proj) vers lectures postérieures (q/k/v, gate/up, lm_head), avec alignement de sous-espaces, couplage énergétique, angle principal, erank énergétique borné, rang stable certifié, kurtosis et canaux outliers. Sans out_dir : synthèse bornée seulement, aucun fichier. Avec out_dir : graph.json (schéma surgeon schema --kind graph), graph.dot, graph.mmd, matrices.csv, edges.csv, index.html (vue 3D autonome). baseline compare à une référence (modèle ou graph.json). Le graphe complet n'est jamais renvoyé en ligne.",
+        "Transforme les matrices du flux résiduel en graphe orienté : écritures (embed, o_proj, down_proj) vers lectures postérieures (q/k/v, gate/up, lm_head), avec alignement de sous-espaces, couplage énergétique, angle principal, erank énergétique borné, rang stable certifié, kurtosis et canaux outliers. Sans out_dir : synthèse bornée seulement, aucun fichier. Avec out_dir : graph.json (schéma surgeon schema --kind graph), graph.dot, graph.mmd, matrices.csv, edges.csv, graph.ndjson (flux GraphPatch pour surgeon-gui). baseline compare à une référence (modèle ou graph.json). Le graphe complet n'est jamais renvoyé en ligne.",
         schema_value::<GraphToolArgs>(),
         json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
     )]

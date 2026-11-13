@@ -1,5 +1,5 @@
 //! Deterministic 3D layouts of the graph, computed once in Rust and stored in every node
-//! (`pos_column`, `pos_constellation`), so the HTML view and any future GUI only draw.
+//! (`pos_column`, `pos_constellation`), so a viewer (`surgeon-gui`) only draws.
 //!
 //! Both layouts are centred on the origin and scaled to the unit ball. They use the basic
 //! IEEE-754 operations and `sqrt` only, which are correctly rounded everywhere, never the

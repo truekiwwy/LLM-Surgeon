@@ -1572,7 +1572,7 @@ surgeon graph [OPTIONS] --model <MODEL>
 | --- | --- | --- |
 | `--model` | obligatoire | Fichier `.safetensors`, dossier shardé ou `.gguf`. |
 | `--out-dir` | aucun | Dossier des sorties ; sans lui, seule une synthèse bornée est renvoyée et rien n'est écrit. |
-| `--format` | `json` | `json`, `dot`, `mmd`, `csv`, `html`, `ndjson`, séparés par des virgules. `html` écrit `index.html`, une vue 3D autonome (orbite, zoom, filtres, inspecteur de nœud, vue absolue ou diff) qui n'a besoin d'aucun réseau. `ndjson` écrit `graph.ndjson`, des lignes `GraphPatch` pour un orchestrateur ou une GUI : le snapshot, puis avec `--baseline` l'update de la référence vers le modèle (voir [docs/GRAPH.md](docs/GRAPH.md), section 7.7). |
+| `--format` | `json` | `json`, `dot`, `mmd`, `csv`, `ndjson`, séparés par des virgules. `ndjson` écrit `graph.ndjson`, des lignes `GraphPatch` : le snapshot, puis avec `--baseline` l'update de la référence vers le modèle (voir [docs/GRAPH.md](docs/GRAPH.md), section 7.7). Le visualiseur natif `crates/surgeon-gui` l'ouvre et le suit en direct (colonne par couches ou constellation 3D, filtres, inspecteur, vue diff, timeline des patches ; docs/GRAPH.md section 7.3). |
 | `--layers` | `all` | `all`, une plage `1-3`, ou une liste `0,2,4`. |
 | `--matrices` | tous les rôles du graphe | `q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head` ; répétable ou séparé par des virgules. |
 | `--rank` | 32 | Rang cible du SVD randomisé (au moins 1). |
@@ -1603,9 +1603,9 @@ surgeon graph [OPTIONS] --model <MODEL>
 # écrit les quatre formats sur le mini-modèle factice, spectres exacts jusqu'à 64
 surgeon graph --model qwen2-mini --out-dir graph-demo --format json,dot,mmd,csv \
   --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64
-# compare une copie patchée à ce rapport, vue 3D du diff dans graph-diff/index.html
+# compare une copie patchée à ce rapport ; ouvrir graph-diff/graph.ndjson dans surgeon-gui pour la vue 3D du diff
 surgeon graph --model qwen2-mini-patched --baseline graph-demo/graph.json --out-dir graph-diff \
-  --format json,html --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64 --fast-hash
+  --format json,ndjson --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64 --fast-hash
 ```
 
 ```text

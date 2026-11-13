@@ -853,7 +853,7 @@ fn mcp_read_only_refuses_out_dir_and_cache_dir_before_writing() {
     assert_eq!(env["data"]["outputs"], json!([]));
 }
 
-// ------------------------------------------------------------------ fast hash, baseline, html
+// ------------------------------------------------------------------ fast hash, baseline, ndjson
 
 /// Multiplies the F32 tensor `name` of `<model>/model.safetensors` in place.
 fn scale_tensor(model: &Path, name: &str, factor: f32) {
@@ -1086,68 +1086,37 @@ fn baseline_misuse_exits_2_and_parameter_mismatches_are_reported() {
     );
 }
 
-/// The JSON inlined in `index.html`.
-fn html_data(html: &str) -> Value {
-    let open = "<script id=\"graph-data\" type=\"application/json\">";
-    let start = html.find(open).unwrap() + open.len();
-    let end = start + html[start..].find("</script>").unwrap();
-    serde_json::from_str(&html[start..end]).unwrap()
-}
-
 #[test]
-fn html_view_is_self_contained_and_carries_the_graph_and_its_diff() {
+fn ndjson_output_matches_graph_json_and_no_html_is_written() {
     let dir = tempfile::tempdir().unwrap();
     let (reference, candidate) = twin_models(dir.path());
     scale_tensor(&candidate, "model.layers.1.self_attn.o_proj.weight", 0.5);
     for (name, baseline) in [("plain", None), ("diff", Some(&reference))] {
         let out = dir.path().join(name);
         let mut args = graph_args(s(&candidate), s(&out));
-        args.extend(["--format", "json,html"]);
+        args.extend(["--format", "json,ndjson"]);
         if let Some(baseline) = baseline {
             args.extend(["--baseline", s(baseline)]);
         }
         let (code, env) = run_json(&deps(), &args);
         assert_eq!(code, 0, "{env}");
-        // json, dot, mmd, two csv and html: the repeated json is written once.
+        // json, dot, mmd, two csv and ndjson: the repeated json is written once.
         assert_eq!(env["data"]["outputs"].as_array().unwrap().len(), 6);
-        let html = std::fs::read_to_string(out.join("index.html")).unwrap();
-        assert!(html.starts_with("<!DOCTYPE html>"));
-        assert!(html.trim_end().ends_with("</html>"));
-        for forbidden in ["http://", "https://", "<link", "src=", "@import"] {
-            assert!(!html.contains(forbidden), "{name}: {forbidden}");
-        }
-        assert!(!html.contains("/*GRAPH_DATA*/"), "placeholder replaced");
-        let data = html_data(&html);
-        assert_eq!(data, read_json(&out.join("graph.json")), "{name}");
-        // Positions come from Rust: the view stays offline and draws only.
-        for forbidden in [
-            "Math.random",
-            "fetch(",
-            "XMLHttpRequest",
-            "WebSocket",
-            "computeForces",
-        ] {
-            assert!(!html.contains(forbidden), "{name}: {forbidden}");
-        }
-        for layout in ["layers", "forces"] {
-            assert!(
-                html.contains(&format!("<option value=\"{layout}\"")),
-                "{layout}"
-            );
-        }
-        for control in [
-            "layout",
-            "view-abs",
-            "view-diff",
-            "color-by",
-            "layer-min",
-            "layer-max",
-            "coupling",
-            "search",
-            "reset",
-            "panel",
-        ] {
-            assert!(html.contains(&format!("id=\"{control}\"")), "{control}");
+        assert!(!out.join("index.html").exists(), "{name}");
+        let ndjson = std::fs::read_to_string(out.join("graph.ndjson")).unwrap();
+        assert!(ndjson.ends_with('\n'));
+        // With a baseline the stream is the reference snapshot, then the update to the model.
+        assert_eq!(
+            ndjson.lines().count(),
+            if baseline.is_some() { 2 } else { 1 },
+            "{name}"
+        );
+        let data = read_json(&out.join("graph.json"));
+        if baseline.is_none() {
+            // The written text, not a re-serialization (which widens the f32 singular values).
+            let line: Value = serde_json::from_str(&ndjson).unwrap();
+            assert_eq!(line["type"], "snapshot", "{name}");
+            assert_eq!(line["report"], data, "{name}");
         }
         match baseline {
             None => assert!(data.get("baseline_diff").is_none()),
@@ -1403,26 +1372,15 @@ fn graph_ndjson_streams_the_reference_then_the_update_to_the_model() {
 }
 
 #[test]
-fn html_view_has_no_physics_and_no_network() {
-    let view = include_str!("../src/graph/view.html");
-    for forbidden in [
-        "computeForces",
-        "Float64Array",
-        "for (let j",
-        "Math.random",
-        "fetch(",
-        "XMLHttpRequest",
-        "WebSocket",
-        "EventSource",
-        "sendBeacon",
-        "import(",
-        "new Worker",
-        "http://",
-        "https://",
-    ] {
-        assert!(!view.contains(forbidden), "{forbidden}");
-    }
-    for field in ["pos_column", "pos_constellation"] {
-        assert!(view.contains(field), "{field}");
-    }
+fn html_format_is_gone() {
+    // The HTML view was replaced by the native viewer: no source, no output format.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(!root.join("src/graph/view.html").exists());
+    let dir = tempfile::tempdir().unwrap();
+    let (_, candidate) = twin_models(dir.path());
+    let out = dir.path().join("out");
+    let mut args = graph_args(s(&candidate), s(&out));
+    args.extend(["--format", "html"]);
+    assert_eq!(run_json(&deps(), &args).0, 2);
+    assert!(!out.join("index.html").exists());
 }

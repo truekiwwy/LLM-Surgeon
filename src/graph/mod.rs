@@ -165,7 +165,6 @@ pub enum OutputFormat {
     Dot,
     Mmd,
     Csv,
-    Html,
     // `graph.ndjson`, see stream::history. A plain comment: a doc comment would split the
     // enum of the MCP schema into a oneOf.
     Ndjson,
@@ -178,7 +177,6 @@ impl OutputFormat {
             Self::Dot => "dot",
             Self::Mmd => "mmd",
             Self::Csv => "csv",
-            Self::Html => "html",
             Self::Ndjson => "ndjson",
         }
     }
@@ -260,7 +258,7 @@ pub struct GraphArgs {
     /// Dossier des sorties ; sans lui, seule une synthèse bornée est renvoyée.
     #[arg(long)]
     pub out_dir: Option<PathBuf>,
-    /// Formats écrits (json, dot, mmd, csv, html, ndjson), séparés par des virgules.
+    /// Formats écrits (json, dot, mmd, csv, ndjson), séparés par des virgules.
     #[arg(long, value_enum, value_delimiter = ',', default_value = "json")]
     pub format: Vec<OutputFormat>,
     /// Couches retenues (`0`, `1-3`, `0,2,4` ou `all`).
@@ -883,10 +881,6 @@ fn render_files(
             OutputFormat::Mmd => files.push(OutputFile {
                 name: "graph.mmd",
                 contents: output::render_mermaid(report),
-            }),
-            OutputFormat::Html => files.push(OutputFile {
-                name: "index.html",
-                contents: output::render_html(report),
             }),
             OutputFormat::Csv => {
                 files.push(OutputFile {
