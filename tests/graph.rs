@@ -9,7 +9,7 @@ mod fake_qwen2;
 #[path = "support/gguf.rs"]
 mod support;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -18,6 +18,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use weight_surgeon::app::{self, AppDeps};
 use weight_surgeon::eval::{CommandOutput, CommandRunner, EvalError};
+use weight_surgeon::graph::layout;
+use weight_surgeon::graph::output::GraphReport;
+use weight_surgeon::graph::stream::GraphPatch;
 use weight_surgeon::hardware::{GpuInfo, HardwareProbe, MemoryInfo};
 use weight_surgeon::mcp::{self, McpConfig};
 
@@ -739,8 +742,9 @@ fn schema_kind_graph_is_the_report_schema() {
     let node = schema["definitions"]["NodeReport"]["properties"]
         .as_object()
         .unwrap();
-    assert!(node.contains_key("metrics"));
-    assert!(node.contains_key("seq"));
+    for key in ["metrics", "seq", "pos_column", "pos_constellation"] {
+        assert!(node.contains_key(key), "{key}");
+    }
     let edge = schema["definitions"]["EdgeReport"]["properties"]
         .as_object()
         .unwrap();
@@ -1115,8 +1119,14 @@ fn html_view_is_self_contained_and_carries_the_graph_and_its_diff() {
         assert!(!html.contains("/*GRAPH_DATA*/"), "placeholder replaced");
         let data = html_data(&html);
         assert_eq!(data, read_json(&out.join("graph.json")), "{name}");
-        // The force layout must stay reproducible and offline.
-        for forbidden in ["Math.random", "fetch(", "XMLHttpRequest", "WebSocket"] {
+        // Positions come from Rust: the view stays offline and draws only.
+        for forbidden in [
+            "Math.random",
+            "fetch(",
+            "XMLHttpRequest",
+            "WebSocket",
+            "computeForces",
+        ] {
             assert!(!html.contains(forbidden), "{name}: {forbidden}");
         }
         for layout in ["layers", "forces"] {
@@ -1180,4 +1190,183 @@ fn mcp_accepts_baseline_and_fast_hash_inside_the_sandbox_only() {
     );
     assert!(is_error);
     assert_eq!(env["error"]["kind"], "path_not_allowed", "{env}");
+}
+
+// ------------------------------------------------------------------ layouts & live stream
+
+fn graph_report(model: &Path, out: &Path) -> GraphReport {
+    let (code, env) = run_json(&deps(), &graph_args(s(model), s(out)));
+    assert_eq!(code, 0, "{env}");
+    serde_json::from_slice(&std::fs::read(out.join("graph.json")).unwrap()).unwrap()
+}
+
+/// SHA-256 of the exact bits of a layout.
+fn bits(positions: &[[f32; 3]]) -> String {
+    let bytes: Vec<u8> = positions
+        .iter()
+        .flatten()
+        .flat_map(|v| v.to_bits().to_le_bytes())
+        .collect();
+    sha256(&bytes)
+}
+
+/// Toy residual stream: 22 stages chained, each also read five stages later.
+fn toy_links() -> Vec<(usize, usize, f64)> {
+    (1..22)
+        .map(|i| (i - 1, i, 1.0))
+        .chain((5..22).map(|i| (i - 5, i, 0.3)))
+        .collect()
+}
+
+fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (0..3).map(|k| (a[k] - b[k]).powi(2)).sum::<f32>().sqrt()
+}
+
+#[test]
+fn layouts_are_bit_exact_across_runs_and_thread_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = graph_report(&model(dir.path()), &dir.path().join("out"));
+    for node in &report.nodes {
+        for position in [node.pos_column, node.pos_constellation] {
+            assert!(distance(position, [0.0; 3]) <= 1.0 + 1e-6, "{}", node.id);
+        }
+    }
+    let distinct: BTreeSet<[u32; 3]> = report
+        .nodes
+        .iter()
+        .map(|n| n.pos_constellation.map(f32::to_bits))
+        .collect();
+    assert_eq!(distinct.len(), report.nodes.len());
+
+    // Recomputing from graph.json gives back the exact bits that were written.
+    let mut again = report.nodes.clone();
+    layout::apply(&mut again, &report.edges);
+    assert_eq!(again, report.nodes);
+
+    let run = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| layout::constellation(22, &toy_links()))
+    };
+    let single = run(1);
+    assert_eq!(single, run(4));
+    // Reference bits from Windows x86_64: Linux and macOS must give the same.
+    assert_eq!(
+        bits(&single.positions),
+        "9c759c3d54006bc856df04e1277588a3de14b41665acc6f08a2267f3d2eeb867"
+    );
+}
+
+#[test]
+fn constellation_converges_on_a_synthetic_graph() {
+    let result = layout::constellation(22, &toy_links());
+    assert!(result.converged, "{result:?}");
+    assert!(result.iterations < 1000, "{result:?}");
+    assert!(result.energy < 1e-5, "{result:?}");
+    let farthest = result
+        .positions
+        .iter()
+        .map(|p| distance(*p, [0.0; 3]))
+        .fold(0.0, f32::max);
+    assert!((farthest - 1.0).abs() < 1e-6, "{farthest}");
+    for k in 0..3 {
+        let mean = result.positions.iter().map(|p| p[k]).sum::<f32>() / 22.0;
+        assert!(mean.abs() < 1e-5, "{mean}");
+    }
+    // Neighbours along the chain end closer than its two ends.
+    let p = &result.positions;
+    assert!(distance(p[0], p[1]) < distance(p[0], p[21]));
+}
+
+#[test]
+fn graph_patches_replay_a_surgery_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let (before_model, after_model) = twin_models(dir.path());
+    scale_tensor(&after_model, "model.layers.1.self_attn.o_proj.weight", 0.5);
+    let before = graph_report(&before_model, &dir.path().join("before"));
+    let after = graph_report(&after_model, &dir.path().join("after"));
+
+    // The initial state, then only what the surgery changed, as an NDJSON history.
+    let history = [
+        GraphPatch::snapshot(&before),
+        GraphPatch::between(&before, &after),
+    ];
+    let ndjson: String = history.iter().map(|p| p.to_ndjson().unwrap()).collect();
+    assert_eq!(ndjson.lines().count(), 2);
+    assert!(ndjson.ends_with('\n'));
+    let lines: Vec<Value> = ndjson
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines[0]["type"], "snapshot");
+    let update = &lines[1];
+    assert_eq!(update["type"], "update");
+    let changed: Vec<&str> = update["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["node"]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(changed, ["L1.attn_out"]);
+    assert_eq!(update["nodes"][0]["diff"]["relative_change"], -0.5);
+    assert_eq!(
+        update["model"]["sha256"].as_str(),
+        Some(after.model.sha256.as_str())
+    );
+
+    // Replaying the history rebuilds the state after the surgery exactly.
+    let mut patches = ndjson
+        .lines()
+        .map(|l| serde_json::from_str::<GraphPatch>(l).unwrap());
+    let Some(GraphPatch::Snapshot { report }) = patches.next() else {
+        panic!("a stream starts with a snapshot");
+    };
+    let mut state = *report;
+    assert_eq!(state, before);
+    for patch in patches {
+        patch.apply(&mut state).unwrap();
+    }
+    assert_eq!(state, after);
+
+    assert_eq!(
+        GraphPatch::between(&after, &after).to_ndjson().unwrap(),
+        "{\"type\":\"update\"}\n"
+    );
+    // Another node set needs a snapshot, and an update for a missing node changes nothing.
+    let mut stale = before.clone();
+    stale.nodes.retain(|n| n.id != "L1.attn_out");
+    assert!(matches!(
+        GraphPatch::between(&before, &stale),
+        GraphPatch::Snapshot { .. }
+    ));
+    let untouched = stale.clone();
+    assert!(history[1].apply(&mut stale).is_err());
+    assert_eq!(stale, untouched);
+}
+
+#[test]
+fn html_view_has_no_physics_and_no_network() {
+    let view = include_str!("../src/graph/view.html");
+    for forbidden in [
+        "computeForces",
+        "Float64Array",
+        "for (let j",
+        "Math.random",
+        "fetch(",
+        "XMLHttpRequest",
+        "WebSocket",
+        "EventSource",
+        "sendBeacon",
+        "import(",
+        "new Worker",
+        "http://",
+        "https://",
+    ] {
+        assert!(!view.contains(forbidden), "{forbidden}");
+    }
+    for field in ["pos_column", "pos_constellation"] {
+        assert!(view.contains(field), "{field}");
+    }
 }

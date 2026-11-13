@@ -18,9 +18,11 @@
 pub mod cache;
 pub mod diff;
 pub mod error;
+pub mod layout;
 pub mod metrics;
 pub mod model;
 pub mod output;
+pub mod stream;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -676,6 +678,9 @@ fn build_report(
             cols: tensor.n(),
             seq,
             metrics: analysis.metrics.clone(),
+            // Filled by layout::apply once the edges are known.
+            pos_column: [0.0; 3],
+            pos_constellation: [0.0; 3],
         };
         computed.push((report, analysis.basis, analysis.energy_weights));
     }
@@ -746,6 +751,8 @@ fn build_report(
             metrics::FULL_SPECTRUM_PRODUCT_CAP
         ));
     }
+    let mut nodes: Vec<NodeReport> = computed.into_iter().map(|(node, _, _)| node).collect();
+    layout::apply(&mut nodes, &edges);
     let report = GraphReport {
         schema_version: SCHEMA_VERSION,
         tool: ToolInfo {
@@ -766,7 +773,7 @@ fn build_report(
             hidden: model.hidden,
             layers: model.layers,
             tied_lm_head: model.tied_lm_head,
-            tensor_count: computed.len(),
+            tensor_count: nodes.len(),
             total_weight_bytes,
             skipped: model.skipped.clone(),
             warnings: model.warnings.clone(),
@@ -792,7 +799,7 @@ fn build_report(
                 .collect(),
         },
         global: GlobalReport {
-            nodes: computed.len(),
+            nodes: nodes.len(),
             edges: edges.len(),
             structural_edges,
             layers: model.layers,
@@ -806,7 +813,7 @@ fn build_report(
             non_finite_values: non_finite,
             warnings: warnings.clone(),
         },
-        nodes: computed.iter().map(|(node, _, _)| node.clone()).collect(),
+        nodes,
         edges,
         baseline_diff: None,
     };

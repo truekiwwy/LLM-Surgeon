@@ -127,7 +127,7 @@ fn erank_mid(metrics: &NodeMetrics) -> f64 {
     (metrics.erank_energy_lower + metrics.erank_energy_upper) / 2.0
 }
 
-fn node_diff(base: &NodeReport, node: &NodeReport) -> NodeDiff {
+pub(crate) fn node_diff(base: &NodeReport, node: &NodeReport) -> NodeDiff {
     let (b, m) = (&base.metrics, &node.metrics);
     let effective_rank_delta = erank_mid(m) - erank_mid(b);
     let norm_delta = m.frobenius_norm - b.frobenius_norm;

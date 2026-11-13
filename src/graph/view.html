@@ -133,21 +133,23 @@
     ["embed", "embed_tokens"], ["q", "q/k/v_proj"], ["attn_out", "o_proj"],
     ["gate", "gate/up_proj"], ["mlp_out", "down_proj"], ["lm_head", "lm_head"],
   ];
-  // Position on the ring of a layer: each stage of the causal order gets its own angle.
-  const ROLE_ANGLE = { q: 0, k: 2.09, v: 4.19, attn_out: 1.05, gate: 0.52, up: 3.67, mlp_out: 5.24 };
   const nodeDiff = new Map(diff ? diff.nodes.map((d) => [d.id, d]) : []);
   const edgeDiff = new Map(diff ? diff.edges.map((d) => [d.source + "\u0000" + d.target, d]) : []);
 
+  // Both layouts come from Rust (src/graph/layout.rs) in the unit ball; the view only scales
+  // them so node sizes stay readable: the column grows with the causal depth, the
+  // constellation with the node count.
   const maxSeq = Math.max(1, ...report.nodes.map((n) => n.seq));
+  const SCALE = { layers: Math.max(4, 0.45 * maxSeq), forces: Math.max(4, 1.8 * Math.cbrt(report.nodes.length)) };
+  const scaled = (p, s) => [p[0] * s, p[1] * s, p[2] * s];
   const nodes = report.nodes.map((n) => {
-    const ring = n.role === "embed" || n.role === "lm_head" ? 0 : 3.2 + 0.45 * ((n.expert || 0) % 8);
-    const angle = (ROLE_ANGLE[n.role] || 0) + 0.39 * (n.expert || 0) + 0.18 * (n.layer || 0);
     const m = n.metrics;
-    const column = [ring * Math.cos(angle), (n.seq - maxSeq / 2) * 0.9, ring * Math.sin(angle)];
+    const column = scaled(n.pos_column, SCALE.layers);
     return {
       src: n, id: n.id,
       // x/y/z is the position drawn now; target is where the active layout wants it.
-      home: { layers: column, forces: null }, target: column, x: column[0], y: column[1], z: column[2],
+      home: { layers: column, forces: scaled(n.pos_constellation, SCALE.forces) },
+      target: column, x: column[0], y: column[1], z: column[2],
       size: Math.min(2.4, Math.max(0.45, 0.45 + 0.35 * Math.log10(1 + Math.max(0, m.frobenius_norm)))),
       erank: (m.erank_energy_lower + m.erank_energy_upper) / 2,
       diff: nodeDiff.get(n.id) || null,
@@ -175,52 +177,6 @@
   const maxErank = maxOf(nodes.map((n) => n.erank));
   const maxRel = maxOf(nodes.map((n) => (n.diff ? Math.abs(n.diff.relative_change) : 0)));
   const maxEdgeDelta = maxOf(edges.map((e) => (e.diff ? Math.abs(e.diff.alignment_delta) : 0)));
-
-  // ---------------------------------------------------------------- constellation layout
-  // Fruchterman-Reingold in 3D: every pair repels, every edge pulls with a strength given by its
-  // spectral coupling. No random source and a fixed iteration count, so one report always gives
-  // the same constellation.
-  function computeForces() {
-    const N = nodes.length, K = 1.8, R = K * Math.cbrt(N);
-    const index = new Map(nodes.map((n, i) => [n, i]));
-    const links = edges.map((e) => [index.get(e.a), index.get(e.b),
-      e.src.structural ? 0.5 : 0.2 + 0.8 * (maxCoupling ? e.src.coupling / maxCoupling : 0)]);
-    const pos = new Float64Array(3 * N), disp = new Float64Array(3 * N);
-    // Fibonacci sphere start: distinct points, no bias toward the layer column.
-    for (let i = 0; i < N; i++) {
-      const y = N > 1 ? 1 - (2 * i) / (N - 1) : 0, r = Math.sqrt(1 - y * y), a = i * 2.399963;
-      pos.set([R * r * Math.cos(a), R * y, R * r * Math.sin(a)], 3 * i);
-    }
-    // shortcut: exact O(N^2) repulsion with a shrinking iteration budget, switch to Barnes-Hut
-    // if reports with several thousand matrices become common.
-    const iters = Math.min(300, Math.max(40, Math.floor(2e7 / (N * N))));
-    for (let it = 0; it < iters; it++) {
-      disp.fill(0);
-      for (let i = 0; i < N; i++) {
-        for (let j = i + 1; j < N; j++) {
-          const dx = pos[3 * i] - pos[3 * j], dy = pos[3 * i + 1] - pos[3 * j + 1], dz = pos[3 * i + 2] - pos[3 * j + 2];
-          const f = (K * K) / (dx * dx + dy * dy + dz * dz + 1e-6);
-          disp[3 * i] += dx * f; disp[3 * i + 1] += dy * f; disp[3 * i + 2] += dz * f;
-          disp[3 * j] -= dx * f; disp[3 * j + 1] -= dy * f; disp[3 * j + 2] -= dz * f;
-        }
-      }
-      for (const [i, j, s] of links) {
-        const dx = pos[3 * i] - pos[3 * j], dy = pos[3 * i + 1] - pos[3 * j + 1], dz = pos[3 * i + 2] - pos[3 * j + 2];
-        const f = (s * Math.hypot(dx, dy, dz)) / K;
-        disp[3 * i] -= dx * f; disp[3 * i + 1] -= dy * f; disp[3 * i + 2] -= dz * f;
-        disp[3 * j] += dx * f; disp[3 * j + 1] += dy * f; disp[3 * j + 2] += dz * f;
-      }
-      const temp = 0.1 * R * (1 - it / iters) + 0.01;
-      for (let i = 0; i < N; i++) {
-        // Weak pull to the centre keeps disconnected parts in view.
-        const gx = disp[3 * i] - 0.05 * pos[3 * i], gy = disp[3 * i + 1] - 0.05 * pos[3 * i + 1], gz = disp[3 * i + 2] - 0.05 * pos[3 * i + 2];
-        const len = Math.hypot(gx, gy, gz) || 1, step = Math.min(len, temp) / len;
-        pos[3 * i] += gx * step; pos[3 * i + 1] += gy * step; pos[3 * i + 2] += gz * step;
-      }
-    }
-    const mean = [0, 1, 2].map((k) => { let s = 0; for (let i = 0; i < N; i++) s += pos[3 * i + k]; return s / N; });
-    nodes.forEach((n, i) => { n.home.forces = [0, 1, 2].map((k) => pos[3 * i + k] - mean[k]); });
-  }
 
   // ---------------------------------------------------------------- colours
   const SEQ = [[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]];
@@ -268,7 +224,6 @@
     return moving;
   }
   function setLayout(layout) {
-    if (layout === "forces" && nodes.length && !nodes[0].home.forces) computeForces();
     state.layout = layout;
     for (const n of nodes) n.target = n.home[layout];
     animating = true; lastFrame = 0;
