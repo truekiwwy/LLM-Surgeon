@@ -11,6 +11,9 @@
 #[allow(dead_code)]
 mod fake_qwen2;
 
+#[path = "support/fake_server.rs"]
+mod support;
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -882,4 +885,87 @@ fn a_cancellation_that_lands_during_apply_is_a_cancellation_not_a_failure() {
     assert_eq!(state["status"], "cancelled", "{state}");
     assert!(state["error"].is_null(), "{state}");
     assert!(!ws.path("job/work").exists(), "working copy removed");
+}
+
+/// The binary pillars generate through the configured backend (here a fake llama-server
+/// standing for a GPU llama.cpp), the drift pillars stay native, and the job records which.
+#[test]
+fn the_binary_pillars_run_on_the_configured_backend_and_the_job_is_bound_to_it() {
+    let ws = Ws::new(12);
+    std::fs::create_dir(ws.path("llama")).unwrap();
+    std::fs::copy(
+        support::fake_server(),
+        ws.path("llama").join(support::server_name()),
+    )
+    .unwrap();
+    let flags = [
+        "--backend",
+        "llama-server",
+        "--llama-cpp-dir",
+        "llama",
+        "--gpu-layers",
+        "99",
+    ];
+    let label = "llama-server (Vulkan, ngl=99, batch=1)";
+    // The mini model's word-level tokenizer cannot be a GGUF vocabulary: give it empty merges
+    // as a BPE (the fake server never reads the file).
+    let tokenizer = ws.path("qwen2-mini/tokenizer.json");
+    let mut json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&tokenizer).unwrap()).unwrap();
+    json["model"]["type"] = json!("BPE");
+    json["model"]["merges"] = json!([]);
+    std::fs::write(&tokenizer, json.to_string()).unwrap();
+
+    // The calibration measures the native CPU engine: no estimate for another backend.
+    let mut plan_args = vec![
+        "pipeline",
+        "plan",
+        "--config",
+        "pipeline.json",
+        "--job-dir",
+        "job",
+    ];
+    plan_args.extend(flags);
+    let (code, plan) = ws.surgeon(&plan_args);
+    assert_eq!(code, 0, "{plan}");
+    assert_eq!(plan["data"]["backend"], label);
+    assert_eq!(plan["data"]["estimated_secs"], Value::Null);
+    assert!(plan["warnings"][0]
+        .as_str()
+        .unwrap()
+        .contains("non estimée"));
+
+    let (code, run) = ws.run("job", &flags);
+    assert_eq!(code, 0, "{run}");
+    assert_eq!(run["data"]["backend"], label);
+    assert_eq!(run["data"]["model"]["unchanged"], true);
+    assert_eq!(
+        ws.read("job/job.json")["config"]["backend"]["backend"],
+        "llama-server"
+    );
+    let report = ws.read("job/report.json");
+    assert_eq!(report["manifest"]["backend"], label);
+    assert_eq!(report["manifest"]["llama_cpp"], "llama");
+    // The fake server answered the generation pillars: no temporary GGUF is left in the job.
+    assert!(tree(&ws.path("job"))
+        .iter()
+        .all(|p| p.extension().is_none_or(|e| e != "gguf")));
+
+    // Bound to its backend: the same file without the flags is another configuration, and a
+    // resume without --config cannot change it.
+    let (code, v) = ws.run("job", &[]);
+    assert_eq!(code, 2, "{v}");
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("autre configuration"));
+    let (code, v) = ws.surgeon(&["pipeline", "run", "--job-dir", "job", "--backend", "native"]);
+    assert_eq!(code, 2, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("reprise"));
+    let (code, v) = ws.run("job-hip", &["--backend", "hipfire"]);
+    assert_eq!(code, 2, "{v}");
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--backend llama-server"));
 }

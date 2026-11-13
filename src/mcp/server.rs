@@ -33,7 +33,7 @@ une couche Qwen2 ; method est un identifiant du registre du moteur : mean_diff, 
 surgeon_bench (mesure d'une chirurgie : mode dump, logits, ppl ou eval), surgeon_autotune \
 (coefficients par couche ajustés par ridge, patch.json en sortie), surgeon_diff (patch \
 .surgery de faible rang entre deux checkpoints), surgeon_lora (fusion ou extraction d'un \
-adaptateur LoRA). Démarche sûre : surgeon_check d'abord, travailler sur une copie du modèle, \
+adaptateur LoRA), surgeon_backends (moteurs d'inférence : CPU natif, GPU llama-server, hipfire). Démarche sûre : surgeon_check d'abord, travailler sur une copie du modèle, \
 dry_run avant tout apply, garder la sauvegarde, mesurer avec surgeon_bench avant de conclure. \
 Garde-fous : chemins limités aux dossiers autorisés, sauvegarde vérifiée imposée avant \
 écriture, rollback automatique sur erreur ou annulation. Le format du patch est le schéma de \

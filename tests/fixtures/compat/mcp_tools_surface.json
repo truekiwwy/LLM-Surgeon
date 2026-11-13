@@ -727,6 +727,12 @@
                     "llama-server"
                   ],
                   "type": "string"
+                },
+                {
+                  "enum": [
+                    "hipfire"
+                  ],
+                  "type": "string"
                 }
               ]
             },
@@ -2104,5 +2110,19 @@
       "type": "object"
     },
     "name": "surgeon_graph"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "name": "surgeon_backends"
   }
 ]

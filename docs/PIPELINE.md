@@ -221,7 +221,8 @@ Tout fichier est écrit en entier, par un fichier temporaire puis un renommage.
   - SHA-256 de la configuration, du modèle, de chaque jeu et de chaque vecteur ;
   - graine du bootstrap ;
   - options ;
-  - llama.cpp « non utilisé » (backend natif).
+  - le moteur réel (`backend`, par exemple `native-cpu` ou `llama-server (Vulkan, ngl=99,
+    batch=1)`) et le dossier llama.cpp, ou « non utilisé » pour le backend natif.
 
 ## 7. Utilisation
 
@@ -251,9 +252,12 @@ Par MCP, `surgeon_pipeline` avec `action` ∈ `plan`, `start`, `status`, `cancel
 
 ## 8. Limites
 
-- **Backend natif seulement** (CPU, glouton), sur un dossier SafeTensors. Les backends
-  llama.cpp de `bench` (P17) ne sont pas branchés : un modèle GGUF ou un GPU ne sont pas
-  utilisables ici.
+- **Piliers binaires sur CPU ou sur GPU, dérives toujours natives.** `safety`, `unblocking` et
+  `gsm8k` génèrent avec le backend du job : `native` (CPU, défaut) ou `llama-server` (GPU, bloc
+  `backend` de `pipeline.json`, options `--backend`, `--gpu-layers`, `--batch-size`,
+  `--llama-cpp-dir`, ou configuration utilisateur : [BACKENDS.md](BACKENDS.md)). Le job est lié à
+  son backend ; `kl` et `logits` lisent des logits natifs ; la durée n'est estimée que pour
+  `native`. `hipfire` est refusé avec un conseil.
 - **Pas de juges LLM** : les piliers de refus utilisent les marqueurs de `bench refusal`, qui
   manquent les refus doux et comptent une réponse dégradée comme une acceptation.
 - **Pas de stratégie de copie en mémoire** : `copy` et `restore-from-backup` seulement.

@@ -2550,9 +2550,7 @@
             {
               "action": "Set",
               "aliases": null,
-              "default_values": [
-                "llama"
-              ],
+              "default_values": [],
               "env": null,
               "global": false,
               "hidden": false,
@@ -2564,7 +2562,8 @@
                 "llama",
                 "native",
                 "llama-completion",
-                "llama-server"
+                "llama-server",
+                "hipfire"
               ],
               "required": false,
               "short": null,
@@ -2889,9 +2888,7 @@
             {
               "action": "Set",
               "aliases": null,
-              "default_values": [
-                "1"
-              ],
+              "default_values": [],
               "env": null,
               "global": false,
               "hidden": false,
@@ -2978,6 +2975,45 @@
               "short": null,
               "value_names": [
                 "CTX_SIZE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "hipfire_bin",
+              "long": "hipfire-bin",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "HIPFIRE_BIN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "gguf_dtype",
+              "long": "gguf-dtype",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "f16",
+                "f32"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "GGUF_DTYPE"
               ]
             },
             {
@@ -3660,9 +3696,7 @@
             {
               "action": "Set",
               "aliases": null,
-              "default_values": [
-                "native"
-              ],
+              "default_values": [],
               "env": null,
               "global": false,
               "hidden": false,
@@ -3674,7 +3708,8 @@
                 "llama",
                 "native",
                 "llama-completion",
-                "llama-server"
+                "llama-server",
+                "hipfire"
               ],
               "required": false,
               "short": null,
@@ -3825,9 +3860,7 @@
             {
               "action": "Set",
               "aliases": null,
-              "default_values": [
-                "1"
-              ],
+              "default_values": [],
               "env": null,
               "global": false,
               "hidden": false,
@@ -3914,6 +3947,45 @@
               "short": null,
               "value_names": [
                 "CTX_SIZE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "hipfire_bin",
+              "long": "hipfire-bin",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "HIPFIRE_BIN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "gguf_dtype",
+              "long": "gguf-dtype",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "f16",
+                "f32"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "GGUF_DTYPE"
               ]
             },
             {
@@ -6445,6 +6517,102 @@
               ]
             },
             {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "backend",
+              "long": "backend",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "llama",
+                "native",
+                "llama-completion",
+                "llama-server",
+                "hipfire"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BACKEND"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "gpu_layers",
+              "long": "gpu-layers",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "GPU_LAYERS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "batch_size",
+              "long": "batch-size",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BATCH_SIZE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": "LLAMA_CPP_DIR",
+              "global": false,
+              "hidden": false,
+              "id": "llama_cpp_dir",
+              "long": "llama-cpp-dir",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "LLAMA_CPP_DIR"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "hipfire_bin",
+              "long": "hipfire-bin",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "HIPFIRE_BIN"
+              ]
+            },
+            {
               "action": "SetTrue",
               "aliases": null,
               "default_values": [
@@ -6623,6 +6791,102 @@
               "short": null,
               "value_names": [
                 "WATCH_STDIN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "backend",
+              "long": "backend",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "llama",
+                "native",
+                "llama-completion",
+                "llama-server",
+                "hipfire"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BACKEND"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "gpu_layers",
+              "long": "gpu-layers",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "GPU_LAYERS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "batch_size",
+              "long": "batch-size",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BATCH_SIZE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": "LLAMA_CPP_DIR",
+              "global": false,
+              "hidden": false,
+              "id": "llama_cpp_dir",
+              "long": "llama-cpp-dir",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "LLAMA_CPP_DIR"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "hipfire_bin",
+              "long": "hipfire-bin",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "HIPFIRE_BIN"
               ]
             },
             {
@@ -7683,6 +7947,255 @@
     },
     {
       "aliases": [],
+      "args": [
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "backend",
+      "subcommand_required": true,
+      "subcommands": [
+        {
+          "aliases": [],
+          "args": [
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "save",
+              "long": "save",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "SAVE"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "Count",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "verbose",
+              "long": "verbose",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "v",
+              "value_names": [
+                "VERBOSE"
+              ]
+            },
+            {
+              "action": "Help",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "h",
+              "value_names": null
+            }
+          ],
+          "hidden": false,
+          "name": "detect",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "Count",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "verbose",
+              "long": "verbose",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "v",
+              "value_names": [
+                "VERBOSE"
+              ]
+            },
+            {
+              "action": "Help",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "h",
+              "value_names": null
+            }
+          ],
+          "hidden": false,
+          "name": "show",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "help",
+          "subcommand_required": false,
+          "subcommands": [
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "detect",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "show",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "help",
+              "subcommand_required": false,
+              "subcommands": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "aliases": [],
       "args": [],
       "hidden": false,
       "name": "help",
@@ -7964,6 +8477,31 @@
           "name": "graph",
           "subcommand_required": false,
           "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "backend",
+          "subcommand_required": false,
+          "subcommands": [
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "detect",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "show",
+              "subcommand_required": false,
+              "subcommands": []
+            }
+          ]
         },
         {
           "aliases": [],

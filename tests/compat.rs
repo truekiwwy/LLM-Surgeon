@@ -27,6 +27,13 @@
 //!   ones kept), eight optional properties of `surgeon_bench` and the same two values of
 //!   its `backend` (`top_k`, `threads`, `n_gpu_layers` and `ctx` reused). Only the tool
 //!   schema hash moved; every reference output with the default options is unchanged.
+//! - the inference backends and the user configuration (docs/BACKENDS.md): the subcommand
+//!   `backend` (`detect`, `show`), `--hipfire-bin` and `--gguf-dtype` of `bench eval` and `bench
+//!   refusal`, the backend options of `pipeline plan` and `pipeline run`, the value `hipfire` of
+//!   `--backend`, the tool `surgeon_backends`. One deliberate change: `--backend` and `--batch-size`
+//!   of `bench eval` / `bench refusal` no longer carry a clap default (llama, native, 1) because
+//!   the user file may supply them; without that file the effective defaults are unchanged and every
+//!   reference output hash is too, but the tool schema hash moved.
 //! - the decision pipeline: the subcommand `pipeline` (plan, run, status, cancel, report,
 //!   promote), the value `pipeline` of `schema --kind`, the tenth tool `surgeon_pipeline`.
 //!   Only the tool schema hash moved; no existing option, property or output changed.
@@ -204,7 +211,7 @@ fn mcp_tools_surface() -> Value {
 #[test]
 fn mcp_tools_surface_is_unchanged() {
     let current = mcp_tools_surface();
-    assert_eq!(current.as_array().unwrap().len(), 11, "eleven MCP tools");
+    assert_eq!(current.as_array().unwrap().len(), 12, "twelve MCP tools");
     let reference = read_fixture("mcp_tools_surface.json");
     assert!(
         current == reference,

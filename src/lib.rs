@@ -3,6 +3,7 @@ pub mod kernel;
 
 pub mod app;
 pub mod arch;
+pub mod backend;
 pub mod bench;
 pub mod cli;
 pub mod engine;

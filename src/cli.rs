@@ -88,6 +88,28 @@ pub enum Commands {
     Pipeline(PipelineArgs),
     /// Weight graph: residual-stream write/read alignment with certified spectral bounds.
     Graph(crate::graph::GraphArgs),
+    /// Inference backends of this machine: detection, recommendation, user configuration.
+    Backend(BackendCmdArgs),
+}
+
+/// `surgeon backend`: which engine runs the generations (`native`, `llama-server`,
+/// `hipfire`) and the user file that remembers the choice (docs/BACKENDS.md).
+#[derive(Debug, Clone, Args)]
+pub struct BackendCmdArgs {
+    #[command(subcommand)]
+    pub command: BackendCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum BackendCommand {
+    /// Probe llama.cpp, its GPUs and hipfire, and recommend a backend.
+    Detect {
+        /// Write the recommendation as the user configuration (replaces the file).
+        #[arg(long)]
+        save: bool,
+    },
+    /// The user configuration file, and the settings it gives.
+    Show,
 }
 
 /// `surgeon pipeline`: the atomic decision on a patch (`src/pipeline`, docs/PIPELINE.md).
@@ -127,6 +149,42 @@ pub struct PipelinePlanArgs {
     /// Skip the decoding-rate measurement (no time estimate).
     #[arg(long)]
     pub no_calibration: bool,
+    #[command(flatten)]
+    pub backend: BackendArgs,
+}
+
+/// The inference backend of a pipeline, over `pipeline.json` "backend", over the user
+/// configuration (`surgeon backend show`). Only the binary pillars (safety, unblocking,
+/// gsm8k) generate; the drift pillars always read native logits.
+#[derive(Debug, Clone, Default, Args)]
+pub struct BackendArgs {
+    /// native (CPU), llama-server (GPU through llama.cpp) or hipfire (AMD, Linux).
+    #[arg(long, value_enum)]
+    pub backend: Option<crate::bench::score::Backend>,
+    /// llama-server: layers offloaded to the GPU (-ngl).
+    #[arg(long)]
+    pub gpu_layers: Option<u32>,
+    /// llama-server: concurrent requests and slots.
+    #[arg(long)]
+    pub batch_size: Option<usize>,
+    #[arg(long, env = "LLAMA_CPP_DIR")]
+    pub llama_cpp_dir: Option<PathBuf>,
+    /// hipfire: the binary.
+    #[arg(long)]
+    pub hipfire_bin: Option<PathBuf>,
+}
+
+impl BackendArgs {
+    pub fn config(&self) -> crate::backend::BackendConfig {
+        crate::backend::BackendConfig {
+            backend: self.backend,
+            gpu_layers: self.gpu_layers,
+            batch_size: self.batch_size,
+            llama_cpp_dir: self.llama_cpp_dir.clone(),
+            hipfire_bin: self.hipfire_bin.clone(),
+            gguf_dtype: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Args)]
@@ -148,6 +206,8 @@ pub struct PipelineRunArgs {
     /// Stop when stdin closes (set by the MCP server for the workers it starts).
     #[arg(long, hide = true)]
     pub watch_stdin: bool,
+    #[command(flatten)]
+    pub backend: BackendArgs,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -425,10 +485,11 @@ pub struct BenchEvalArgs {
     /// JSON array (or JSONL) of {question|problem, answer|solution, id?}.
     #[arg(long)]
     pub dataset: PathBuf,
-    /// Generator: llama (llama.cpp on a GGUF, default; also llama-completion), llama-server, or
-    /// native (pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors directory).
-    #[arg(long, value_enum, default_value_t = crate::bench::score::Backend::Llama)]
-    pub backend: crate::bench::score::Backend,
+    /// Generator: llama (llama.cpp on a GGUF; also llama-completion), llama-server (GPU
+    /// through llama.cpp), native (pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors
+    /// directory) or hipfire (AMD, Linux). Default: the user configuration, else llama.
+    #[arg(long, value_enum)]
+    pub backend: Option<crate::bench::score::Backend>,
     /// Reference model on the same questions (paired comparison).
     #[arg(long)]
     pub baseline_model: Option<PathBuf>,
@@ -483,8 +544,9 @@ pub struct GenerationArgs {
     #[arg(long, default_value_t = 1)]
     pub samples: usize,
     /// native: sequences decoded together; llama-server: concurrent requests and slots.
-    #[arg(long, default_value_t = 1)]
-    pub batch_size: usize,
+    /// Default: the user configuration (llama-server), else 1.
+    #[arg(long)]
+    pub batch_size: Option<usize>,
     /// native: batches decoded in parallel, in one thread pool.
     #[arg(long, default_value_t = 1)]
     pub jobs: usize,
@@ -497,6 +559,13 @@ pub struct GenerationArgs {
     /// llama-server: context size (-c), shared by its slots.
     #[arg(long)]
     pub ctx_size: Option<u32>,
+    /// hipfire: the binary (default: the user configuration, then the PATH).
+    #[arg(long)]
+    pub hipfire_bin: Option<PathBuf>,
+    /// Matrix type of the temporary GGUF of a SafeTensors model: f16 (default) or f32
+    /// (lossless from bf16, twice the size).
+    #[arg(long, value_enum)]
+    pub gguf_dtype: Option<crate::eval::WeightType>,
 }
 
 impl GenerationArgs {
@@ -511,7 +580,9 @@ impl GenerationArgs {
                 seed: self.seed,
             },
             samples: self.samples,
-            batch_size: self.batch_size,
+            batch_size: self.batch_size.unwrap_or(1),
+            gguf_dtype: self.gguf_dtype.unwrap_or_default(),
+            gpu_api: None,
             jobs: self.jobs,
             threads: self.threads,
             gpu_layers: self.gpu_layers,
@@ -586,10 +657,11 @@ pub struct BenchRefusalArgs {
     /// Exit with code 9 when --max-unparsable is exceeded.
     #[arg(long)]
     pub fail_on_warn: bool,
-    /// Generator: native (pure Rust, default), llama-server or llama-completion (on a GGUF,
-    /// a SafeTensors model converted first; --llama-cpp-dir).
-    #[arg(long, value_enum, default_value_t = crate::bench::score::Backend::Native)]
-    pub backend: crate::bench::score::Backend,
+    /// Generator: native (pure Rust), llama-server or llama-completion (on a GGUF, a
+    /// SafeTensors model converted first; --llama-cpp-dir) or hipfire (AMD, Linux). Default:
+    /// the user configuration, else native.
+    #[arg(long, value_enum)]
+    pub backend: Option<crate::bench::score::Backend>,
     #[command(flatten)]
     pub generation: Box<GenerationArgs>,
 }

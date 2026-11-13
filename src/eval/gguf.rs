@@ -251,6 +251,19 @@ pub struct GgufModel {
 }
 
 impl GgufModel {
+    /// A not yet written temporary file in the temp dir; the unique name keeps concurrent
+    /// runs (and a leftover of a killed one) apart.
+    fn temporary(tag: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let name = format!("weight-surgeon-{tag}-{}-{nanos}.gguf", std::process::id());
+        Self {
+            path: std::env::temp_dir().join(name),
+            temporary: true,
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -283,9 +296,9 @@ pub fn model_dir(model: &Path) -> PathBuf {
     }
 }
 
-/// `.gguf` as is; otherwise one unquantized f16 conversion to
-/// `<model dir>/.weight-surgeon-<tag>-<pid>.gguf`, next to the model because an f16 copy
-/// can be tens of GB, often too big for the temporary directory. With a llama.cpp checkout
+/// `.gguf` as is; otherwise one unquantized f16 conversion (see [`ensure_gguf_as`] for f32)
+/// to `<temp dir>/weight-surgeon-<tag>-<pid>-<nanos>.gguf`, deleted when the returned value
+/// drops. Point `TMPDIR` / `TEMP` at a big disk for a large model. With a llama.cpp checkout
 /// holding `convert_hf_to_gguf.py` that script converts; otherwise a Qwen2 model goes through
 /// the pure Rust converter (a binaries-only build such as the Vulkan release, no python), and
 /// any other model is refused with [`LLAMA_DIR_REQUIRED`].
@@ -295,6 +308,17 @@ pub fn ensure_gguf(
     tag: &str,
     runner: &dyn CommandRunner,
 ) -> Result<GgufModel> {
+    ensure_gguf_as(model, llama_cpp_dir, tag, runner, WeightType::F16)
+}
+
+/// [`ensure_gguf`] with the matrix type of the conversion (f32 is lossless from bf16).
+pub fn ensure_gguf_as(
+    model: &Path,
+    llama_cpp_dir: Option<&Path>,
+    tag: &str,
+    runner: &dyn CommandRunner,
+    dtype: WeightType,
+) -> Result<GgufModel> {
     if is_gguf(model) {
         return Ok(GgufModel {
             path: model.to_path_buf(),
@@ -302,13 +326,10 @@ pub fn ensure_gguf(
         });
     }
     let model_dir = model_dir(model);
-    let file = GgufModel {
-        path: model_dir.join(format!(".weight-surgeon-{tag}-{}.gguf", std::process::id())),
-        temporary: true,
-    };
+    let file = GgufModel::temporary(tag);
     let has_script = llama_cpp_dir.is_some_and(|d| CONVERTERS.iter().any(|c| d.join(c).is_file()));
     if !has_script && is_qwen2_dir(&model_dir) {
-        convert_qwen2(&model_dir, &file.path, WeightType::F16)?;
+        convert_qwen2(&model_dir, &file.path, dtype)?;
         return Ok(file);
     }
     let llama_cpp_dir =
@@ -318,7 +339,11 @@ pub fn ensure_gguf(
         model_dir,
         output_gguf: file.path.clone(),
         quant: None,
-        intermediate_type: "f16".into(),
+        intermediate_type: match dtype {
+            WeightType::F16 => "f16",
+            WeightType::F32 => "f32",
+        }
+        .into(),
         python_bin: if cfg!(windows) { "python" } else { "python3" }.into(),
         keep_intermediate: false,
     };
@@ -636,5 +661,48 @@ mod tests {
                 .is_some()
         );
         assert_eq!(runner.calls().len(), 4);
+    }
+
+    /// The temporary GGUF is a guard: unique name in the temp dir (two runs never share a
+    /// file), deleted on drop, and deleted too when the conversion fails halfway.
+    #[test]
+    fn the_temporary_gguf_is_unique_in_the_temp_dir_and_removed_on_drop_and_error() {
+        let f = fixture(None);
+        let runner = MockRunner::new(VALID);
+        let (llama, model) = (&f.cfg.llama_cpp_dir, &f.cfg.model_dir);
+        let first = ensure_gguf(model, Some(llama), "guard", &runner).unwrap();
+        let second = ensure_gguf(model, Some(llama), "guard", &runner).unwrap();
+        for g in [&first, &second] {
+            assert!(g.is_temporary() && g.path().is_file());
+            assert_eq!(g.path().parent(), Some(std::env::temp_dir().as_path()));
+            let name = g.path().file_name().unwrap().to_string_lossy().into_owned();
+            let own = format!("weight-surgeon-guard-{}-", std::process::id());
+            assert!(name.starts_with(&own) && name.ends_with(".gguf"), "{name}");
+        }
+        assert_ne!(first.path(), second.path());
+        let (a, b) = (first.path().to_path_buf(), second.path().to_path_buf());
+        drop(first);
+        assert!(!a.exists() && b.exists(), "only the dropped one goes");
+        drop(second);
+        assert!(!b.exists());
+
+        // A failing conversion leaves nothing behind either (the guard exists before it).
+        let failing = MockRunner {
+            fail_call: Some(0),
+            ..MockRunner::new(VALID)
+        };
+        assert!(ensure_gguf(model, Some(llama), "guard", &failing).is_err());
+        let outfile = failing.calls()[0]
+            .1
+            .iter()
+            .position(|a| a == "--outfile")
+            .unwrap();
+        assert!(!Path::new(&failing.calls()[0].1[outfile + 1]).exists());
+
+        // A .gguf given as is is never a temporary file, so never deleted.
+        let own = f.cfg.model_dir.join("m.gguf");
+        std::fs::write(&own, VALID).unwrap();
+        drop(ensure_gguf(&own, None, "guard", &runner).unwrap());
+        assert!(own.exists());
     }
 }

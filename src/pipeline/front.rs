@@ -10,6 +10,7 @@ use super::job::{self, Job};
 use super::run::{self, Ended, RunOptions};
 use super::{plan, PipelineError};
 use crate::app::{exit, AppDeps, CoreResult, Outcome};
+use crate::backend::BackendConfig;
 
 /// The JSON spelling of a unit enum (GO, done...).
 fn name<T: serde::Serialize>(value: &T) -> String {
@@ -39,11 +40,13 @@ pub fn core_plan(
     config_path: &Path,
     job_dir: &Path,
     options: &RunOptions,
+    flags: BackendConfig,
     calibrate: bool,
     write: bool,
     deps: &AppDeps,
 ) -> CoreResult {
-    let config = run::load_config(config_path, options).map_err(failure)?;
+    let mut config = run::load_config(config_path, options).map_err(failure)?;
+    run::resolve_backend(&mut config, flags).map_err(failure)?;
     let canonical = serde_json::to_vec(&config).unwrap_or_default();
     let job_id = job::sha256_bytes(&canonical)[..16].to_string();
     let plan = plan::plan(&config, &job_id, deps, calibrate).map_err(failure)?;
@@ -52,8 +55,9 @@ pub fn core_plan(
         job::write_json(&Job::new(job_dir).path("plan.json"), &plan).map_err(failure)?;
     }
     let human = format!(
-        "[PLAN]     job {} · {} candidat(s) · {} pilier(s) · disque {} Mio · durée estimée {}\n{}",
+        "[PLAN]     job {} · {} · {} candidat(s) · {} pilier(s) · disque {} Mio · durée estimée {}\n{}",
         plan.job_id,
+        plan.backend,
         plan.candidates,
         plan.pillars.len(),
         plan.disk.total_bytes / (1 << 20),
@@ -75,12 +79,22 @@ pub fn core_run(
     config_path: Option<&Path>,
     job_dir: &Path,
     options: RunOptions,
+    flags: BackendConfig,
     watch_stdin: bool,
     deps: &AppDeps,
 ) -> CoreResult {
     let job = Job::new(job_dir);
+    if config_path.is_none() && flags != BackendConfig::default() {
+        return Err(failure(PipelineError::Config(vec![
+            "options de backend sans --config : la reprise garde le backend du job".into(),
+        ])));
+    }
     let config = config_path
-        .map(|p| run::load_config(p, &options))
+        .map(|p| {
+            let mut config = run::load_config(p, &options)?;
+            run::resolve_backend(&mut config, flags)?;
+            Ok(config)
+        })
         .transpose()
         .map_err(failure)?;
     let file = run::bind(&job, config, options).map_err(failure)?;
@@ -102,7 +116,12 @@ pub fn core_run(
 
 /// `run --detach` (CLI only): the worker in a background process, its output in
 /// `<job>/worker.log`; returns at once.
-pub fn core_detach(config_path: Option<&Path>, job_dir: &Path, options: &RunOptions) -> CoreResult {
+pub fn core_detach(
+    config_path: Option<&Path>,
+    job_dir: &Path,
+    options: &RunOptions,
+    flags: &BackendConfig,
+) -> CoreResult {
     let job = Job::new(job_dir);
     if let Some(pid) = job::holder(&job) {
         return Err(failure(PipelineError::Busy(format!(
@@ -110,7 +129,7 @@ pub fn core_detach(config_path: Option<&Path>, job_dir: &Path, options: &RunOpti
         ))));
     }
     std::fs::create_dir_all(job_dir).map_err(|e| failure(job::io_error(job_dir, e)))?;
-    let mut child = worker_command(config_path, job_dir, options, false).map_err(failure)?;
+    let mut child = worker_command(config_path, job_dir, options, flags, false).map_err(failure)?;
     let log = job.path("worker.log");
     let file = std::fs::File::create(&log).map_err(|e| failure(job::io_error(&log, e)))?;
     let err = file
@@ -133,6 +152,7 @@ pub fn worker_command(
     config_path: Option<&Path>,
     job_dir: &Path,
     options: &RunOptions,
+    flags: &BackendConfig,
     watch_stdin: bool,
 ) -> super::job::Result<Command> {
     let exe = std::env::current_exe()
@@ -147,6 +167,21 @@ pub fn worker_command(
     }
     if options.allow_test_reuse {
         cmd.arg("--allow-test-reuse");
+    }
+    if let Some(b) = flags.backend {
+        cmd.args(["--backend", b.label()]);
+    }
+    if let Some(n) = flags.gpu_layers {
+        cmd.arg("--gpu-layers").arg(n.to_string());
+    }
+    if let Some(n) = flags.batch_size {
+        cmd.arg("--batch-size").arg(n.to_string());
+    }
+    if let Some(dir) = &flags.llama_cpp_dir {
+        cmd.arg("--llama-cpp-dir").arg(dir);
+    }
+    if let Some(bin) = &flags.hipfire_bin {
+        cmd.arg("--hipfire-bin").arg(bin);
     }
     if watch_stdin {
         cmd.arg("--watch-stdin");

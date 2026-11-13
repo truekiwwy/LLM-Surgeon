@@ -60,8 +60,8 @@ pub use generator::{
     LlamaCliGenerator, TextGenerator,
 };
 pub use gguf::{
-    ensure_gguf, export_gguf, export_if_healthy, is_gguf, model_dir, GgufExportConfig,
-    GgufExportReport, GgufModel, StepReport, ALLOWED_QUANTS, LLAMA_DIR_REQUIRED,
+    ensure_gguf, ensure_gguf_as, export_gguf, export_if_healthy, is_gguf, model_dir,
+    GgufExportConfig, GgufExportReport, GgufModel, StepReport, ALLOWED_QUANTS, LLAMA_DIR_REQUIRED,
 };
 pub use loop_detector::{LoopDetector, LoopDetectorConfig, LoopReason, LoopVerdict};
 pub use prompts::{load_prompts, EvalPrompt};

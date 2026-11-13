@@ -23,6 +23,8 @@ use super::measure::{self, Measurement, Outcomes};
 use super::stats::{binary_gate, drift_gate, GateResult, PairedCounts, Verdict};
 use super::PipelineError;
 use crate::app::{core_apply, core_check, AppDeps, ApplyRequest, NullSink};
+use crate::backend::BackendConfig;
+use crate::bench::score::Backend;
 use crate::cli::CheckArgs;
 use crate::patch::PatchFile;
 
@@ -43,6 +45,29 @@ pub struct JobFile {
     pub config_sha256: String,
     pub config: PipelineConfig,
     pub options: RunOptions,
+}
+
+/// The configuration's backend: flags over `pipeline.json` over the user file, checked, and
+/// stored in the config so that the job records the engine it was measured with.
+pub fn resolve_backend(config: &mut PipelineConfig, flags: BackendConfig) -> Result<()> {
+    let user = crate::backend::load_user_config().map_err(|e| PipelineError::Config(vec![e]))?;
+    let top = flags.over(config.backend.take().unwrap_or_default());
+    let effective = crate::backend::resolve(top, &user);
+    match effective.backend {
+        Some(Backend::Llama | Backend::LlamaCompletion) => {
+            return Err(PipelineError::Config(vec![
+                "backend : native, llama-server ou hipfire".into(),
+            ]))
+        }
+        Some(Backend::Hipfire) => {
+            return Err(PipelineError::Config(vec![
+                crate::backend::hipfire::unavailable(&effective),
+            ]))
+        }
+        _ => {}
+    }
+    config.backend = effective.for_job();
+    Ok(())
 }
 
 /// Reads, resolves and validates a configuration file.
@@ -172,6 +197,9 @@ pub struct TestResult {
 /// `<job>/results.json`: nothing in it depends on time, so a resume rewrites it identically.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Results {
+    /// Le moteur réel des piliers binaires : `native-cpu`, `llama-server (Vulkan, ngl=99, batch=1)`.
+    #[serde(default)]
+    pub backend: String,
     pub job_id: String,
     pub config_sha256: String,
     /// GO seulement si le candidat retenu sur le Dev passe toutes les portes sur le Test.
@@ -310,12 +338,14 @@ impl Worker<'_> {
         let per_item = self.units(pillar, 1);
         let start = self.state.units_done;
         let deps = self.deps;
+        let backend = self.file.config.backend.clone();
         let (outcomes, items) = {
             let state = std::cell::RefCell::new(&mut *self);
             measure::binary(
                 pillar,
                 dataset,
                 model,
+                backend.as_ref(),
                 deps,
                 &deps.interrupted,
                 &mut |done, _| {
@@ -925,6 +955,7 @@ fn execute(w: &mut Worker) -> Result<Ended> {
         (None, Some(_), _) => (Verdict::Inconclusive, "Test non évalué".into()),
     };
     let results = Results {
+        backend: crate::backend::describe_config(&config.backend.clone().unwrap_or_default()),
         job_id: w.file.job_id.clone(),
         config_sha256: w.file.config_sha256.clone(),
         verdict: if model_after == model_before {
@@ -996,7 +1027,11 @@ fn report(w: &mut Worker, results: &Results) -> Result<Value> {
             "model_sha256": results.model.sha256_before,
             "datasets": datasets,
             "vectors": vectors,
-            "llama_cpp": "non utilisé (backend natif, décodage glouton)",
+            "backend": results.backend,
+            "llama_cpp": match config.backend.as_ref().and_then(|b| b.llama_cpp_dir.as_ref()) {
+                Some(dir) => json!(dir),
+                None => json!("non utilisé (backend natif, décodage glouton)"),
+            },
             "seeds": {"bootstrap": config.seed},
             "options": w.file.options,
         },

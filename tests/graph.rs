@@ -758,7 +758,7 @@ fn schema_kind_graph_is_the_report_schema() {
     assert_eq!(code, 0);
     let tools: Value = serde_json::from_str(&out).unwrap();
     let list = tools.as_array().unwrap();
-    assert_eq!(list.len(), 11);
+    assert_eq!(list.len(), 12);
     let graph = list.iter().find(|t| t["name"] == "surgeon_graph").unwrap();
     assert_eq!(graph["inputSchema"]["required"], json!(["model"]));
     assert!(graph["inputSchema"]["properties"]["out_dir"].is_object());

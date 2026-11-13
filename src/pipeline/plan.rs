@@ -76,6 +76,9 @@ pub struct Plan {
     pub units_total: u64,
     /// Chargements du modèle prévus (un par mesure).
     pub model_loads: u64,
+    /// Le moteur des piliers binaires : native-cpu, llama-server (Vulkan, ngl=99, batch=1).
+    #[serde(default)]
+    pub backend: String,
     /// null si la calibration n'a pas été faite.
     pub calibration: Option<Calibration>,
     /// Estimation haute de la durée, en secondes ; null sans calibration.
@@ -271,7 +274,15 @@ pub fn plan(
         total_bytes: model_bytes + dumps_bytes + backups_bytes,
     };
     let units_total = units_total(config)?;
-    let calibration = match calibrate_rate {
+    // The calibration decodes on the native CPU engine: its rate says nothing about a GPU.
+    let native = config.backend.is_none();
+    if calibrate_rate && !native {
+        warnings.push(
+            "durée non estimée : la calibration mesure le moteur natif (CPU), pas le backend du job"
+                .into(),
+        );
+    }
+    let calibration = match calibrate_rate && native {
         true => Some(calibrate(config, deps)?),
         false => None,
     };
@@ -294,6 +305,7 @@ pub fn plan(
         disk,
         units_total,
         model_loads,
+        backend: crate::backend::describe_config(&config.backend.clone().unwrap_or_default()),
         calibration,
         estimated_secs,
         max_wall_time_secs: config.budgets.max_wall_time_secs,

@@ -134,9 +134,14 @@ fn free_port() -> Result<u16> {
 
 /// Output of `binary --help`, stdout and stderr together (llama.cpp prints usage on both).
 fn help_text(binary: &Path) -> Result<String> {
+    capture(binary, "--help")
+}
+
+/// Output of `binary <flag>` (stdout and stderr together), killed after [`HELP_TIMEOUT`].
+pub(crate) fn capture(binary: &Path, flag: &str) -> Result<String> {
     let mut child = ChildGuard(
         Command::new(binary)
-            .arg("--help")
+            .arg(flag)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

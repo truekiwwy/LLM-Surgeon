@@ -445,3 +445,25 @@ avant et après les runs.
 `convert_hf_to_gguf.py`) ;
 `truncated` renseigné pour `llama-server` (`stop_type: "limit"`), alors qu'il valait toujours
 `false`. `surgeon pipeline` reste sur le backend natif : ses piliers n'ont pas d'option de backend.
+
+## 12. Addendum du 2026-11-13 : `surgeon pipeline` sur le GPU, configuration persistante
+
+Branche `feat/gpu-vulkan-backend`. Le backend se choisit une fois (`surgeon backend detect --save`,
+`%APPDATA%\weight-surgeon\config.toml`) et `bench`, `pipeline` et MCP le suivent ([BACKENDS.md](../BACKENDS.md)).
+
+Job réel sur Qwen2.5-0.5B-Instruct, sans `--llama-cpp-dir` ni option de backend : 2 candidats, 4 piliers
+(`kl`, `logits`, `gsm8k` Dev 30 / Test 20, `safety` Dev 20 / Test 20).
+
+| Mesure | Résultat |
+| --- | --- |
+| Backend du job | `llama-server (Vulkan, ngl=99, batch=1)` (dans `job.json`, `results.json`, `report.json`) |
+| Durée | 316 s |
+| `gsm8k` Dev, modèle d'origine | 26/30 = 0,87, 3 coupées par le budget (comme les sections 10 et 11) |
+| Portes Dev | GO pour alpha 0 et alpha 0,5 |
+| Verdict | INCONCLUSIVE (Test de 20 items) |
+| Fichiers `.gguf` temporaires restants | 0 (garde `Drop`, dans `%TEMP%`) |
+| SHA-256 du modèle d'origine | inchangés |
+
+Les piliers `kl` et `logits` restent natifs (logits). La durée n'est pas estimée par `pipeline plan` pour
+un backend GPU (la calibration mesure le CPU), et le plan le dit. `hipfire` est reconnu et refusé avec un
+message qui renvoie vers `llama-server` : il cible Linux/ROCm et n'expose qu'un endpoint de chat.

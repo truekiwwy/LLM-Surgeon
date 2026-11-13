@@ -641,20 +641,34 @@ fn run_args(deps: &AppDeps, args: &[String]) -> (i32, Value) {
     run_json(deps, &args.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
-fn no_temp_gguf_left(dir: &Path) -> bool {
-    std::fs::read_dir(dir).unwrap().all(|e| {
-        !e.unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".weight-surgeon-eval")
-    })
+/// The temporary GGUF of the evaluation lives in the temp dir under a unique name; it was
+/// written by the conversion (the `--outfile` of a call) and is gone with the generator.
+fn temp_gguf_removed(calls: &RefCell<Vec<Vec<String>>>) -> bool {
+    let outfiles: Vec<PathBuf> = calls
+        .borrow()
+        .iter()
+        .filter_map(|args| {
+            let at = args.iter().position(|a| a == "--outfile")?;
+            Some(PathBuf::from(&args[at + 1]))
+        })
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("weight-surgeon-eval-"))
+        })
+        .collect();
+    !outfiles.is_empty()
+        && outfiles
+            .iter()
+            .all(|p| p.parent() == Some(std::env::temp_dir().as_path()) && !p.exists())
 }
 
 #[test]
 fn eval_healthy_model_converts_evaluates_and_exports() {
     let f = eval_fixture();
     let out = f.dir.path().join("final.gguf");
-    let deps = deps();
+    let runner = MockRunner::default();
+    let calls = Rc::clone(&runner.calls);
+    let deps = deps_with(runner, healthy);
     let (code, v) = run_args(
         &deps,
         &f.args(&["--export-gguf", s(&out), "--quant", "q4_k_m"]),
@@ -663,19 +677,16 @@ fn eval_healthy_model_converts_evaluates_and_exports() {
     assert_eq!(v["data"]["report"]["verdict"], "healthy");
     assert_eq!(v["data"]["export"]["final_gguf"], s(&out));
     assert!(std::fs::read(&out).unwrap().starts_with(b"GGUF"));
-    assert!(
-        no_temp_gguf_left(f.dir.path()),
-        "temporary f16 GGUF removed"
-    );
+    assert!(temp_gguf_removed(&calls), "temporary f16 GGUF removed");
 }
 
 #[test]
 fn eval_broken_model_is_code_5_and_never_exported() {
     let f = eval_fixture();
     let out = f.dir.path().join("final.gguf");
-    let deps = deps_with(MockRunner::default(), || {
-        Box::new(Repeat("Wait... ", 10_000))
-    });
+    let runner = MockRunner::default();
+    let calls = Rc::clone(&runner.calls);
+    let deps = deps_with(runner, || Box::new(Repeat("Wait... ", 10_000)));
     let (code, v) = run_args(
         &deps,
         &f.args(&["--export-gguf", s(&out), "--allow-degraded"]),
@@ -684,7 +695,7 @@ fn eval_broken_model_is_code_5_and_never_exported() {
     assert_eq!(v["data"]["report"]["verdict"], "broken");
     assert_eq!(v["data"]["export"], Value::Null);
     assert!(!out.exists());
-    assert!(no_temp_gguf_left(f.dir.path()));
+    assert!(temp_gguf_removed(&calls));
 }
 
 #[test]
@@ -1514,7 +1525,7 @@ fn mcp_full_session_is_pure_json_rpc() {
         .contains("sauvegarde"));
     assert_eq!(
         responses[1]["result"]["tools"].as_array().unwrap().len(),
-        11
+        12
     );
     let (is_error, env) = envelope(&responses, 3);
     assert!(!is_error, "{env}");
@@ -2146,7 +2157,8 @@ fn schema_tools_kind_equals_tools_list() {
             "surgeon_diff",
             "surgeon_lora",
             "surgeon_pipeline",
-            "surgeon_graph"
+            "surgeon_graph",
+            "surgeon_backends"
         ]
     );
     for tool in exported.as_array().unwrap() {
@@ -3077,7 +3089,7 @@ fn mcp_extract_tool_end_to_end() {
             .as_array()
             .unwrap()
             .len(),
-        11
+        12
     );
     let (is_error, env) = envelope(&responses, 2);
     assert!(!is_error, "{env}");
@@ -3183,7 +3195,7 @@ fn mcp_binary_extract_speaks_only_json_rpc() {
             .as_array()
             .unwrap()
             .len(),
-        11
+        12
     );
     assert!(!envelope(&responses, 2).0, "{out}");
     assert!(f.dir.path().join("bin.safetensors").exists());
@@ -4731,12 +4743,20 @@ fn bench_ppl_failures_are_typed_and_the_temporary_gguf_is_removed() {
     let model_dir = f.dir.path().join("hf");
     std::fs::create_dir_all(&model_dir).unwrap();
     bf16_model(&model_dir);
+    // The temporary GGUF is in the temp dir (unique name), never next to the model.
     let leftovers = || -> Vec<String> {
         std::fs::read_dir(&model_dir)
             .unwrap()
             .filter_map(|e| e.ok()?.file_name().into_string().ok())
             .filter(|n| n.ends_with(".gguf"))
             .collect()
+    };
+    let temp_gguf = |calls: &Calls| -> PathBuf {
+        let path = PathBuf::from(&calls.borrow()[1].1[1]);
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("weight-surgeon-bench-ppl-"), "{name}");
+        assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
+        path
     };
     let hf = ppl_args(&f, &[]);
     let hf: Vec<&str> = hf
@@ -4746,11 +4766,14 @@ fn bench_ppl_failures_are_typed_and_the_temporary_gguf_is_removed() {
     let (deps, calls) = ppl_deps(ColorMode::Plain, vec![ppl_output("8.0")]);
     assert_eq!(run_json(&deps, &hf).0, 0);
     assert_eq!(calls.borrow().len(), 2, "convert, then perplexity");
-    assert!(calls.borrow()[1].1[1].contains(".weight-surgeon-bench-ppl-"));
-    assert!(leftovers().is_empty());
-    let (deps, _) = ppl_deps(ColorMode::Plain, vec![failing]);
+    let converted = temp_gguf(&calls);
+    assert!(!converted.exists() && leftovers().is_empty());
+    let (deps, calls) = ppl_deps(ColorMode::Plain, vec![failing]);
     assert_eq!(run_json(&deps, &hf).0, 8);
-    assert!(leftovers().is_empty(), "removed after an error too");
+    assert!(
+        !temp_gguf(&calls).exists() && leftovers().is_empty(),
+        "removed after an error too"
+    );
     let (code, v) = run_json(
         &deps,
         &[

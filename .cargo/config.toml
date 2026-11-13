@@ -1,0 +1,4 @@
+# The tests must not read the machine's own surgeon configuration (docs/BACKENDS.md).
+# `cargo run` inherits it too: WEIGHT_SURGEON_NO_USER_CONFIG=0 cargo run ... uses the config.
+[env]
+WEIGHT_SURGEON_NO_USER_CONFIG = "1"

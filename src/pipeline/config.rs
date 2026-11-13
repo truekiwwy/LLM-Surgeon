@@ -12,7 +12,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::backend::BackendConfig;
 use crate::bench::dataset::DatasetFormat;
+use crate::bench::score::Backend;
 use crate::extract::ChatTemplate;
 use crate::patch::{PatchFile, MAX_ABS_ALPHA};
 
@@ -52,6 +54,11 @@ pub struct PipelineConfig {
         description = "Registre append-only des consultations du Test Set ; défaut : test_access.json à côté de ce fichier. Partagé par les jobs : un Test Set déjà consulté est refusé."
     )]
     pub test_registry: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Moteur de génération des piliers binaires (safety, unblocking, gsm8k) : native (CPU, défaut), llama-server (GPU via llama.cpp) ou hipfire. Les options de la ligne de commande passent devant, puis la configuration utilisateur (surgeon backend show). Les piliers kl et logits lisent toujours les logits natifs."
+    )]
+    pub backend: Option<BackendConfig>,
 }
 
 /// The candidate values of the patch's `alpha`.
@@ -299,6 +306,14 @@ pub fn validate(config: &PipelineConfig, allow_disable_safety: bool) -> Result<(
     if config.budgets.max_wall_time_secs == 0 || config.budgets.max_candidates == 0 {
         issues.push("budgets : valeurs >= 1".into());
     }
+    if let Some(b) = config.backend.as_ref().and_then(|b| b.backend) {
+        if !matches!(b, Backend::Native | Backend::LlamaServer | Backend::Hipfire) {
+            issues.push(format!(
+                "backend : {} non géré par le pipeline (native, llama-server ou hipfire)",
+                b.label()
+            ));
+        }
+    }
     let mut ids = HashSet::new();
     for p in &config.pillars {
         if p.id.trim().is_empty()
@@ -438,6 +453,10 @@ pub fn resolve(config: &mut PipelineConfig, base: &Path) {
         .test_registry
         .get_or_insert_with(|| PathBuf::from("test_access.json"));
     abs(registry);
+    if let Some(b) = config.backend.as_mut() {
+        b.llama_cpp_dir.iter_mut().for_each(abs);
+        b.hipfire_bin.iter_mut().for_each(abs);
+    }
 }
 
 /// Every file the run reads, with the name of its field (for the MCP sandbox).
@@ -464,6 +483,17 @@ pub fn inputs(config: &PipelineConfig) -> Vec<(String, PathBuf)> {
     }
     if let Some(r) = &config.test_registry {
         out.push(("test_registry".into(), r.clone()));
+    }
+    // Both hold programs that get run.
+    if let Some(b) = &config.backend {
+        for (field, path) in [
+            ("llama_cpp_dir", &b.llama_cpp_dir),
+            ("hipfire_bin", &b.hipfire_bin),
+        ] {
+            if let Some(p) = path {
+                out.push((format!("backend.{field}"), p.clone()));
+            }
+        }
     }
     out
 }

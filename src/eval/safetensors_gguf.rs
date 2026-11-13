@@ -36,8 +36,21 @@ const TAG_ARRAY: u32 = 9;
 const CHUNK_ELEMENTS: usize = 1 << 16;
 
 /// ggml type of the matrices (1-D tensors are always f32).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum WeightType {
+    #[default]
     F16,
     /// Lossless from bf16 / f16 sources, twice the size.
     F32,
@@ -180,9 +193,15 @@ fn vocabulary(tokenizer: &Value, n_vocab: usize) -> Result<(Vec<String>, Vec<i32
         types[id] = kind;
         Ok(())
     };
+    let kind = tokenizer["model"]["type"].as_str().unwrap_or("?");
     let vocab = tokenizer["model"]["vocab"]
         .as_object()
-        .ok_or_else(|| invalid("tokenizer.json : model.vocab absent (BPE attendu)"))?;
+        .filter(|_| kind == "BPE");
+    let vocab = vocab.ok_or_else(|| {
+        invalid(format!(
+            "tokenizer.json : seul un tokenizer BPE (byte-level) se convertit, pas « {kind} »"
+        ))
+    })?;
     for (text, id) in vocab {
         place(id.as_u64(), text, TOKEN_NORMAL)?;
     }
@@ -525,6 +544,17 @@ mod tests {
         std::fs::write(dir.path().join("config.json"), r#"{"model_type": "llama"}"#).unwrap();
         let err = convert_qwen2(dir.path(), &dir.path().join("m.gguf"), WeightType::F16);
         assert!(matches!(err, Err(EvalError::InvalidConfig(m)) if m.contains("seul qwen2")));
+    }
+
+    #[test]
+    fn a_word_level_tokenizer_is_refused_with_its_type() {
+        let dir = tempfile::tempdir().unwrap();
+        tiny_model(dir.path());
+        let tokenizer = dir.path().join("tokenizer.json");
+        let text = std::fs::read_to_string(&tokenizer).unwrap();
+        std::fs::write(&tokenizer, text.replace("\"BPE\"", "\"WordLevel\"")).unwrap();
+        let err = convert_qwen2(dir.path(), &dir.path().join("m.gguf"), WeightType::F16);
+        assert!(matches!(err, Err(EvalError::InvalidConfig(m)) if m.contains("WordLevel")));
     }
 
     #[test]

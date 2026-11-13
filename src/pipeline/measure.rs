@@ -1,6 +1,7 @@
 //! One pillar measured on one model directory, through the same library functions as
-//! `bench refusal`, `bench eval --backend native`, `bench dump` and `bench logits`, greedy
-//! and native (no llama.cpp): the outcomes are deterministic on a given machine.
+//! `bench refusal`, `bench eval`, `bench dump` and `bench logits`, greedy. The binary pillars
+//! generate with the job's backend (native CPU, or llama-server on the GPU); the drift
+//! pillars always read native logits. Deterministic on a given machine and backend.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -12,7 +13,8 @@ use serde_json::{json, Value};
 use super::config::{PillarConfig, PillarKind};
 use super::job::Result;
 use super::PipelineError;
-use crate::app::AppDeps;
+use crate::app::{bench_generator, AppDeps, NullSink, ProgressSink};
+use crate::backend::BackendConfig;
 use crate::bench::dataset::DatasetFormat;
 use crate::bench::dump::{DumpRequest, OutDtype};
 use crate::bench::generation::GenOptions;
@@ -78,11 +80,51 @@ fn native(model: &Path, deps: &AppDeps) -> bench::Result<Box<dyn TextGenerator>>
     Ok(Box::new(generator))
 }
 
-/// A binary pillar (safety, unblocking, gsm8k) of `model` on `dataset`: success per item.
+/// The generator of the job's backend: native without one, else llama-server on the GPU.
+/// The same factory as bench eval and bench refusal (conversion to a temporary GGUF,
+/// server started here and killed with the generator).
+fn generator(
+    model: &Path,
+    backend: Option<&BackendConfig>,
+    generation: &GenOptions,
+    deps: &AppDeps,
+) -> bench::Result<Box<dyn TextGenerator>> {
+    let Some(cfg) = backend else {
+        return native(model, deps);
+    };
+    let mut quiet = NullSink;
+    let sink = std::cell::RefCell::new(&mut quiet as &mut dyn ProgressSink);
+    bench_generator(
+        model,
+        cfg.backend.unwrap_or_default(),
+        generation,
+        &None,
+        cfg.llama_cpp_dir.as_deref(),
+        "pipeline",
+        deps,
+        &sink,
+    )
+}
+
+/// How the job's backend generates: its batching, layers and GGUF type (greedy, one sample).
+fn options(backend: Option<&BackendConfig>) -> GenOptions {
+    let Some(cfg) = backend else {
+        return GenOptions::default();
+    };
+    GenOptions {
+        batch_size: cfg.batch_size.unwrap_or(1),
+        gpu_layers: cfg.gpu_layers,
+        gguf_dtype: cfg.gguf_dtype.unwrap_or_default(),
+        ..GenOptions::default()
+    }
+}
+
+/// A binary pillar (safety, unblocking, gsm8k) of the model on the dataset: success per item.
 pub fn binary(
     pillar: &PillarConfig,
     dataset: &Path,
     model: &Path,
+    backend: Option<&BackendConfig>,
     deps: &AppDeps,
     cancel: &AtomicBool,
     on_item: &mut dyn FnMut(usize, usize),
@@ -100,10 +142,14 @@ pub fn binary(
                     .unwrap_or(bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
                 chat_template: pillar.chat_template.unwrap_or(ChatTemplate::Chatml),
                 markers: Markers::default(),
-                generation: GenOptions::default(),
-                backend: "native".into(),
+                generation: options(backend),
+                backend: backend
+                    .and_then(|b| b.backend)
+                    .unwrap_or(Backend::Native)
+                    .label()
+                    .into(),
             };
-            let mut make = |m: &Path| native(m, deps);
+            let mut make = |m: &Path| generator(m, backend, &req.generation, deps);
             let run = bench::refusal::run(&req, &mut make, cancel, on_item).map_err(bench_error)?;
             let keep = pillar.kind == PillarKind::Safety;
             let success = run.report.items.iter().map(|i| i.refused == keep).collect();
@@ -117,7 +163,7 @@ pub fn binary(
             let req = EvalRequest {
                 model: model.to_path_buf(),
                 dataset: dataset.to_path_buf(),
-                backend: Backend::Native,
+                backend: backend.and_then(|b| b.backend).unwrap_or(Backend::Native),
                 baseline_model: None,
                 limit: pillar.limit.map_or(usize::MAX, |l| l as usize),
                 max_new_tokens: pillar
@@ -125,12 +171,12 @@ pub fn binary(
                     .unwrap_or(bench::DEFAULT_MAX_NEW_TOKENS),
                 template,
                 format: pillar.format.unwrap_or_default(),
-                llama_cpp_dir: None,
+                llama_cpp_dir: backend.and_then(|b| b.llama_cpp_dir.clone()),
                 timeout: None,
                 min_accuracy: None,
-                generation: GenOptions::default(),
+                generation: options(backend),
             };
-            let mut make = |m: &Path| native(m, deps);
+            let mut make = |m: &Path| generator(m, backend, &req.generation, deps);
             let run = bench::score::run(&req, deps.runner.as_ref(), &mut make, cancel, on_item)
                 .map_err(bench_error)?;
             let success = run.report.items.iter().map(|i| i.correct).collect();

@@ -14,7 +14,7 @@ use serde::Serialize;
 use super::error::{BenchError, Result};
 use super::score::SEED;
 use crate::eval::sampling::{SamplingParams, Xoshiro256pp};
-use crate::eval::{Decoding, GenJob};
+use crate::eval::{Decoding, GenJob, WeightType};
 
 pub const BOOTSTRAP_RESAMPLES: usize = 2000;
 /// Seed of the bootstrap (not the sampling seed).
@@ -39,6 +39,10 @@ pub struct GenOptions {
     pub gpu_layers: Option<u32>,
     /// llama-server: `-c`.
     pub ctx_size: Option<u32>,
+    /// Matrix type of the temporary GGUF a llama backend converts a SafeTensors model to.
+    pub gguf_dtype: WeightType,
+    /// The GPU API of the llama-server (`Vulkan`...), only to label the report.
+    pub gpu_api: Option<&'static str>,
 }
 
 impl Default for GenOptions {
@@ -51,6 +55,8 @@ impl Default for GenOptions {
             threads: None,
             gpu_layers: None,
             ctx_size: None,
+            gguf_dtype: WeightType::default(),
+            gpu_api: None,
         }
     }
 }
@@ -229,8 +235,10 @@ pub fn sampled_score(hits: &[Vec<bool>]) -> SampledScore {
 /// historical one (greedy, one sample, no batching, default backend).
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct GenerationReport {
-    /// native, llama, llama-completion ou llama-server.
+    /// native, llama, llama-completion, llama-server ou hipfire.
     pub backend: String,
+    /// Le backend réel : `native-cpu`, `llama-server (Vulkan, ngl=99, batch=6)`...
+    pub backend_detail: String,
     pub sampling: SamplingParams,
     pub samples: usize,
     pub batch_size: usize,
@@ -267,6 +275,12 @@ impl GenOptions {
         };
         GenerationReport {
             backend: backend.to_owned(),
+            backend_detail: crate::backend::describe(
+                backend,
+                self.gpu_api,
+                self.gpu_layers,
+                self.batch_size,
+            ),
             sampling: self.sampling,
             samples: self.samples,
             batch_size: self.batch_size,

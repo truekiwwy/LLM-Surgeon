@@ -30,7 +30,7 @@ use super::report::{
 };
 use super::sha256_file;
 use crate::eval::{
-    ensure_gguf, truncate_chars, CommandRunner, EvalError, LoopDetector, LoopDetectorConfig,
+    ensure_gguf_as, truncate_chars, CommandRunner, EvalError, LoopDetector, LoopDetectorConfig,
     LoopVerdict, TextGenerator, LLAMA_DIR_REQUIRED,
 };
 
@@ -372,6 +372,8 @@ pub enum Backend {
     /// llama.cpp `llama-server` : un serveur local, requêtes concurrentes, GPU selon le build.
     #[serde(rename = "llama-server")]
     LlamaServer,
+    /// hipfire (GPU AMD, HIP/ROCm, Linux) : moteur externe facultatif, voir `crate::backend`.
+    Hipfire,
 }
 
 impl Backend {
@@ -381,12 +383,16 @@ impl Backend {
             Backend::Native => "native",
             Backend::LlamaCompletion => "llama-completion",
             Backend::LlamaServer => "llama-server",
+            Backend::Hipfire => "hipfire",
         }
     }
 
     /// Runs llama.cpp on a GGUF (a SafeTensors model is converted first).
     pub fn is_llama(self) -> bool {
-        self != Backend::Native
+        matches!(
+            self,
+            Backend::Llama | Backend::LlamaCompletion | Backend::LlamaServer
+        )
     }
 }
 
@@ -451,8 +457,14 @@ pub fn run(
         // Kept until the suite ends: a converted GGUF is a temporary file.
         let gguf = match req.backend.is_llama() {
             true => Some(
-                ensure_gguf(model, req.llama_cpp_dir.as_deref(), tag, runner)
-                    .map_err(gguf_error)?,
+                ensure_gguf_as(
+                    model,
+                    req.llama_cpp_dir.as_deref(),
+                    tag,
+                    runner,
+                    req.generation.gguf_dtype,
+                )
+                .map_err(gguf_error)?,
             ),
             false => None,
         };

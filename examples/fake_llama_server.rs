@@ -5,6 +5,7 @@
 //!
 //! - `--help`: the usage lines of the flags surgeon may pass; `"hide": ["-np", ...]`
 //!   leaves some out, like an older build.
+//! - `--list-devices`: one fake Vulkan GPU, like `llama-server --list-devices`.
 //! - otherwise: accepts `-m --host --port --api-key -np -c -ngl -t` (and their long
 //!   spellings), each with one value, and exits with code 2 on anything else. Writes its
 //!   arguments, one per line, to `"args_out"` when given. Prints an offload line on stderr
@@ -74,6 +75,13 @@ struct State {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let script = script();
+    if args.iter().any(|a| a == "--list-devices") {
+        println!(
+            "Available devices:
+  Vulkan0: Fake GPU (4096 MiB, 4000 MiB free)"
+        );
+        return;
+    }
     if args.iter().any(|a| a == "--help") {
         let hidden: Vec<&str> = script["hide"]
             .as_array()

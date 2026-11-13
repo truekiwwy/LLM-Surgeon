@@ -422,6 +422,7 @@ pub fn tool_definitions() -> Value {
         list.extend(super::tools_p13::definitions());
         list.push(super::tools_pipeline::definition());
         list.extend(super::tools_graph::definitions());
+        list.extend(super::tools_backend::definitions());
     }
     sorted(tools)
 }
@@ -500,6 +501,7 @@ pub(crate) fn is_known(name: &str) -> bool {
         || super::tools_p13::NAMES.contains(&name)
         || name == super::tools_pipeline::TOOL_PIPELINE
         || super::tools_graph::NAMES.contains(&name)
+        || super::tools_backend::NAMES.contains(&name)
 }
 
 pub(crate) struct ToolContext<'a> {
@@ -528,6 +530,7 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
             super::tools_pipeline::call(arguments, ctx),
         ),
         super::tools_graph::TOOL_GRAPH => super::tools_graph::call(arguments, ctx),
+        super::tools_backend::TOOL_BACKENDS => super::tools_backend::call(arguments, ctx),
         _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);
@@ -1334,7 +1337,51 @@ fn generation(args: &BenchToolArgs) -> crate::bench::generation::GenOptions {
         threads: args.threads.map(|n| n as usize),
         gpu_layers: args.n_gpu_layers,
         ctx_size: args.ctx,
+        gguf_dtype: Default::default(),
+        gpu_api: None,
     }
+}
+
+/// The backend and generation options of an eval or refusal call: the arguments over the
+/// operator's user configuration (the agent never names a binary), as the CLI resolves them.
+fn effective_generation(
+    args: &BenchToolArgs,
+    user: &Result<crate::backend::BackendConfig, String>,
+    default: crate::bench::score::Backend,
+    llama_cpp_dir: Option<&Path>,
+) -> Result<
+    (
+        crate::bench::score::Backend,
+        crate::bench::generation::GenOptions,
+    ),
+    Outcome,
+> {
+    use crate::bench::score::Backend;
+    let user = user
+        .clone()
+        .map_err(|e| invalid("invalid_input", format!("configuration utilisateur : {e}")))?;
+    let top = crate::backend::BackendConfig {
+        backend: args.backend,
+        gpu_layers: args.n_gpu_layers,
+        batch_size: args.batch_size.map(|n| n as usize),
+        ..Default::default()
+    };
+    let effective = crate::backend::resolve(top, &user);
+    let backend = effective.backend.unwrap_or(default);
+    if backend == Backend::Hipfire {
+        return Err(invalid(
+            "invalid_arguments",
+            crate::backend::hipfire::unavailable(&effective),
+        ));
+    }
+    let mut options = generation(args);
+    options.gpu_layers = effective.gpu_layers;
+    options.batch_size = effective.batch_size.unwrap_or(options.batch_size);
+    options.gguf_dtype = effective.gguf_dtype.unwrap_or_default();
+    if backend == Backend::LlamaServer {
+        options.gpu_api = crate::backend::gpu_api(llama_cpp_dir);
+    }
+    Ok((backend, options))
 }
 
 fn bench_command(arguments: &Value) -> &'static str {
@@ -1439,9 +1486,13 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     };
     // Same trust rule as surgeon_eval: a tool-provided directory is sandboxed, the
     // operator's $LLAMA_CPP_DIR is not.
+    // A broken user file only matters to the modes that generate (below).
+    let user = crate::backend::load_user_config();
     let llama_cpp_dir = match optional_path(ctx, "llama_cpp_dir", &args.llama_cpp_dir)? {
         Some(dir) => Some(dir),
-        None => std::env::var_os("LLAMA_CPP_DIR").map(PathBuf::from),
+        None => std::env::var_os("LLAMA_CPP_DIR")
+            .map(PathBuf::from)
+            .or_else(|| user.as_ref().ok().and_then(|u| u.llama_cpp_dir.clone())),
     };
     let timeout = args.timeout_secs.map(std::time::Duration::from_secs);
     let fail_on_warn = args.fail_on_warn.unwrap_or(false);
@@ -1491,10 +1542,16 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 None => Ok(Template::default()),
             }
             .map_err(|e| invalid("invalid_arguments", e))?;
+            let (eval_backend, eval_generation) = effective_generation(
+                &args,
+                &user,
+                crate::bench::score::Backend::Llama,
+                llama_cpp_dir.as_deref(),
+            )?;
             let req = EvalRequest {
                 model: path(ctx, "model", &args.model)?,
                 dataset: path(ctx, "dataset", &args.dataset)?,
-                backend: args.backend.unwrap_or_default(),
+                backend: eval_backend,
                 baseline_model: optional_path(ctx, "baseline_model", &args.baseline_model)?,
                 limit: args.limit.map_or(bench::DEFAULT_LIMIT, |l| l as usize),
                 max_new_tokens: args.max_new_tokens.unwrap_or(bench::DEFAULT_MAX_NEW_TOKENS),
@@ -1503,7 +1560,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 llama_cpp_dir,
                 timeout,
                 min_accuracy: args.min_accuracy,
-                generation: generation(&args),
+                generation: eval_generation,
             };
             core_bench_eval(&req, fail_on_warn, ctx.deps, &ui, ctx.sink)
         }
@@ -1537,7 +1594,12 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 markers_file.as_deref(),
             )
             .map_err(|e| invalid("invalid_arguments", e))?;
-            let refusal_backend = args.backend.unwrap_or(crate::bench::score::Backend::Native);
+            let (refusal_backend, refusal_generation) = effective_generation(
+                &args,
+                &user,
+                crate::bench::score::Backend::Native,
+                llama_cpp_dir.as_deref(),
+            )?;
             let req = RefusalRequest {
                 model: path(ctx, "model", &args.model)?,
                 prompts,
@@ -1547,7 +1609,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                     .unwrap_or(bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
                 chat_template: args.chat_template.unwrap_or(ChatTemplate::Chatml),
                 markers,
-                generation: generation(&args),
+                generation: refusal_generation,
                 backend: refusal_backend.label().into(),
             };
             // Every judge path is sandboxed; nothing an agent writes reaches llama.cpp but

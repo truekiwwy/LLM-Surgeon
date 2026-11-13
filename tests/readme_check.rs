@@ -232,11 +232,11 @@ fn nested_bench_commands_and_mcp_tool_count_are_checked() {
     let count = tools.as_array().unwrap().len();
     let words = [
         "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-        "eleven",
+        "eleven", "twelve",
     ];
     let mots = [
         "zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf", "dix",
-        "onze",
+        "onze", "douze",
     ];
     let (en, fr) = (read("README.md"), read("README.fr.md"));
     assert!(
@@ -516,6 +516,7 @@ fn quoted_options_exist_somewhere_in_the_cli() {
         "--ubatch-size",
         "--ppl-stride",
         "--no-mmap",
+        "--list-devices",
         "--mlock",
     ];
     for name in READMES {

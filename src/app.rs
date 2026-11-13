@@ -78,8 +78,8 @@ use crate::bench::report::{self as bench_report, BenchRun};
 use crate::bench::score::{Backend, EvalRequest};
 use crate::bench::{self, BenchError};
 use crate::cli::{
-    ApplyArgs, AutotuneArgs, BenchArgs, BenchCommand, CheckArgs, Cli, Commands, EvalArgs,
-    ExtractArgs, ExtractCommand, InspectArgs, JudgeArgs, MarkerArgs,
+    ApplyArgs, AutotuneArgs, BackendCommand, BenchArgs, BenchCommand, CheckArgs, Cli, Commands,
+    EvalArgs, ExtractArgs, ExtractCommand, InspectArgs, JudgeArgs, MarkerArgs,
 };
 use crate::engine::stats::TensorStats;
 use crate::engine::{
@@ -301,7 +301,7 @@ where
     Err(emit(&mut io, json, None, failure))
 }
 
-pub fn run_with(cli: Cli, deps: &AppDeps, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+pub fn run_with(mut cli: Cli, deps: &AppDeps, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     // Raw outputs: no envelope, no UI, whatever `--json` says. Routed before the panic
     // catcher so that, in `mcp` mode, the hook reports on stderr and never on stdout.
     match &cli.command {
@@ -313,6 +313,12 @@ pub fn run_with(cli: Cli, deps: &AppDeps, out: &mut dyn Write, err: &mut dyn Wri
         _ => {}
     }
     let mut io = Io::new(out, err, &deps.ui, cli.json);
+    // The user file fills the flags the command line left out; a broken file or an unusable
+    // backend stops here, before any work.
+    if let Err(message) = crate::backend::apply_user_config(&mut cli.command) {
+        let failure = Outcome::fail(exit::INVALID_INPUT, message).with_kind("invalid_input");
+        return emit(&mut io, cli.json, Some(command_name(&cli.command)), failure);
+    }
     CATCHING.store(true, Ordering::SeqCst);
     // A panic unwinds through BackupSet::drop, which rolls back an uncommitted patch.
     let outcome = catch_unwind(AssertUnwindSafe(|| dispatch(&cli.command, deps, &mut io)))
@@ -348,6 +354,10 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Arch(args) => match args.command {
             crate::cli::ArchCommand::List => "arch list",
             crate::cli::ArchCommand::Detect(_) => "arch detect",
+        },
+        Commands::Backend(args) => match args.command {
+            BackendCommand::Detect { .. } => "backend detect",
+            BackendCommand::Show => "backend show",
         },
         Commands::Pipeline(args) => match args.command {
             crate::cli::PipelineCommand::Plan(_) => "pipeline plan",
@@ -412,6 +422,7 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         Commands::Lora(args) => crate::lora::core_lora(args, deps, &mut CliSink::new(io)),
         Commands::Pipeline(args) => pipeline_cli(&args.command, deps),
         Commands::Graph(args) => crate::graph::core_graph(args, deps, &mut CliSink::new(io)),
+        Commands::Backend(args) => backend_cli(&args.command, io),
         // Routed by run_with before dispatch: they have no envelope.
         Commands::Schema(_) | Commands::Mcp(_) | Commands::Tui(_) => Err(Outcome::fail(
             exit::INTERNAL,
@@ -437,6 +448,7 @@ fn pipeline_cli(command: &crate::cli::PipelineCommand, deps: &AppDeps) -> CoreRe
                 &a.config,
                 &a.job_dir,
                 &options,
+                a.backend.config(),
                 !a.no_calibration,
                 true,
                 deps,
@@ -448,11 +460,17 @@ fn pipeline_cli(command: &crate::cli::PipelineCommand, deps: &AppDeps) -> CoreRe
                 allow_test_reuse: a.allow_test_reuse,
             };
             match a.detach {
-                true => front::core_detach(a.config.as_deref(), &a.job_dir, &options),
+                true => front::core_detach(
+                    a.config.as_deref(),
+                    &a.job_dir,
+                    &options,
+                    &a.backend.config(),
+                ),
                 false => front::core_run(
                     a.config.as_deref(),
                     &a.job_dir,
                     options,
+                    a.backend.config(),
                     a.watch_stdin,
                     deps,
                 ),
@@ -2976,6 +2994,105 @@ fn bench_outcome<R: Serialize>(run: &BenchRun<R>, fail_on_warn: bool, human: Str
     Ok(outcome)
 }
 
+/// The options with the GPU API of the llama-server, for the report label only.
+fn labelled(
+    mut generation: bench::generation::GenOptions,
+    backend: Backend,
+    llama_cpp_dir: Option<&Path>,
+) -> bench::generation::GenOptions {
+    if backend == Backend::LlamaServer {
+        generation.gpu_api = crate::backend::gpu_api(llama_cpp_dir);
+    }
+    generation
+}
+
+/// `surgeon backend detect|show`: the machine's engines and the user configuration.
+fn backend_cli(command: &BackendCommand, io: &mut Io) -> CoreResult {
+    use crate::backend::{
+        detect_hardware_and_backends, load_user_config, save_to, user_config_path,
+    };
+    let ui = io.ui;
+    let invalid = |m: String| Outcome::fail(exit::INVALID_INPUT, m).with_kind("invalid_input");
+    let user = load_user_config().map_err(invalid)?;
+    let path = user_config_path();
+    match command {
+        BackendCommand::Detect { save } => {
+            let report = detect_hardware_and_backends(&user);
+            let saved = match (save, &path) {
+                (true, Some(p)) => {
+                    save_to(p, &report.recommended).map_err(invalid)?;
+                    Some(p.clone())
+                }
+                (true, None) => {
+                    return Err(invalid(format!(
+                        "aucun dossier de configuration (désactivé par {})",
+                        crate::backend::NO_USER_CONFIG_ENV
+                    )))
+                }
+                _ => None,
+            };
+            let mut text = String::new();
+            match &report.llama {
+                Some(l) => {
+                    text.push_str(&format!(
+                        "{} llama-server {}\n",
+                        ui::badge(&ui, "BACKEND"),
+                        l.server.display()
+                    ));
+                    for d in &l.devices {
+                        text.push_str(&format!(
+                            "  {} {} ({} Mio)\n",
+                            ui::metric(&ui, format!("{:<8}", d.id)),
+                            d.name,
+                            d.vram_mib.map_or("?".into(), |v| v.to_string())
+                        ));
+                    }
+                    if let Some(e) = &l.error {
+                        text.push_str(&format!("  ! --list-devices : {e}\n"));
+                    }
+                }
+                None => text.push_str(&format!(
+                    "{} llama-server introuvable\n",
+                    ui::badge(&ui, "BACKEND")
+                )),
+            }
+            text.push_str(&format!(
+                "{} hipfire : {}\n",
+                ui::badge(&ui, "BACKEND"),
+                report.hipfire.note
+            ));
+            text.push_str(&format!(
+                "{} recommandé : {} ({})\n",
+                ui::badge(&ui, "BACKEND"),
+                crate::backend::describe_config(&report.recommended),
+                report.reason
+            ));
+            if let Some(p) = &saved {
+                text.push_str(&format!("  configuration écrite : {}\n", p.display()));
+            }
+            Ok(Outcome::ok(json!({"report": report, "saved": saved}), text))
+        }
+        BackendCommand::Show => {
+            let text = format!(
+                "{} {} · {}\n",
+                ui::badge(&ui, "BACKEND"),
+                path.as_ref()
+                    .map_or("(désactivée)".into(), |p| p.display().to_string()),
+                crate::backend::describe_config(&user)
+            );
+            Ok(Outcome::ok(
+                json!({
+                    "path": path,
+                    "exists": path.as_ref().is_some_and(|p| p.exists()),
+                    "config": user,
+                    "effective": crate::backend::describe_config(&user),
+                }),
+                text,
+            ))
+        }
+    }
+}
+
 fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
     let ui = io.ui;
     let mut sink = CliSink::new(io);
@@ -3025,10 +3142,11 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
             core_bench_ppl(&req, a.fail_on_warn, deps, &ui, &mut sink)
         }
         BenchCommand::Eval(a) => {
+            let eval_backend = a.backend.unwrap_or_default();
             let req = EvalRequest {
                 model: a.model.clone(),
                 dataset: a.dataset.clone(),
-                backend: a.backend,
+                backend: eval_backend,
                 baseline_model: a.baseline_model.clone(),
                 limit: a.limit,
                 max_new_tokens: a.max_new_tokens,
@@ -3037,7 +3155,11 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 llama_cpp_dir: a.llama_cpp_dir.clone(),
                 timeout: timeout(a.timeout_secs)?,
                 min_accuracy: a.min_accuracy,
-                generation: a.generation.options(),
+                generation: labelled(
+                    a.generation.options(),
+                    eval_backend,
+                    a.llama_cpp_dir.as_deref(),
+                ),
             };
             core_bench_eval(&req, a.fail_on_warn, deps, &ui, &mut sink)
         }
@@ -3057,6 +3179,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
             core_bench_dump(&req, deps, &ui, &mut sink)
         }
         BenchCommand::Refusal(a) => {
+            let refusal_backend = a.backend.unwrap_or(Backend::Native);
             let prompts = extract::load_prompt_texts(&a.prompts)
                 .map_err(|m| invalid(BenchError::input(&a.prompts, m)))?;
             let req = RefusalRequest {
@@ -3066,8 +3189,12 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 max_new_tokens: a.max_new_tokens,
                 chat_template: a.chat_template,
                 markers: markers(&a.markers).map_err(invalid)?,
-                generation: a.generation.options(),
-                backend: a.backend.label().into(),
+                generation: labelled(
+                    a.generation.options(),
+                    refusal_backend,
+                    a.judge_args.llama_cpp_dir.as_deref(),
+                ),
+                backend: refusal_backend.label().into(),
             };
             let judging = match a.judge {
                 JudgeMode::Rules if a.judge_args.judge_model.is_some() => {
@@ -3089,7 +3216,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
             let llama_cpp_dir = a.judge_args.llama_cpp_dir.as_deref();
             core_bench_refusal(
                 &req,
-                a.backend,
+                refusal_backend,
                 judging.as_ref(),
                 llama_cpp_dir,
                 a.fail_on_warn,
@@ -3266,7 +3393,7 @@ pub fn core_bench_eval(
 /// model given to a llama backend is converted to a temporary GGUF, kept as long as the
 /// generator.
 #[allow(clippy::too_many_arguments)]
-fn bench_generator(
+pub(crate) fn bench_generator(
     model: &Path,
     backend: Backend,
     generation: &bench::generation::GenOptions,
@@ -3281,8 +3408,19 @@ fn bench_generator(
         native.set_batching(generation.batch_size, generation.jobs, pool.clone());
         return Ok(Box::new(native));
     }
-    let gguf = crate::eval::ensure_gguf(model, llama_cpp_dir, tag, deps.runner.as_ref())
-        .map_err(|e| BenchError::Conversion(e.to_string()))?;
+    if backend == Backend::Hipfire {
+        return Err(BenchError::InvalidArgument(
+            crate::backend::hipfire::unavailable(&crate::backend::BackendConfig::default()),
+        ));
+    }
+    let gguf = crate::eval::ensure_gguf_as(
+        model,
+        llama_cpp_dir,
+        tag,
+        deps.runner.as_ref(),
+        generation.gguf_dtype,
+    )
+    .map_err(|e| BenchError::Conversion(e.to_string()))?;
     let inner: Box<dyn TextGenerator> = match backend {
         Backend::LlamaServer => {
             let binary = crate::eval::server::locate_server(llama_cpp_dir)?;

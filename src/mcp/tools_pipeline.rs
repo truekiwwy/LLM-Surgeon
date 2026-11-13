@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 
 use super::tools::ToolContext;
 use crate::app::{exit, CoreResult, Outcome};
+use crate::backend::BackendConfig;
 use crate::pipeline::config::inputs;
 use crate::pipeline::front::{self, failure};
 use crate::pipeline::job::{self, Job};
@@ -202,6 +203,7 @@ pub(super) fn call(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 &config,
                 &job_dir,
                 &options,
+                BackendConfig::default(),
                 true,
                 !ctx.cfg.read_only,
                 ctx.deps,
@@ -256,13 +258,22 @@ fn start(ctx: &ToolContext, config: Option<&Path>, job_dir: &Path) -> CoreResult
     let config = config.map(|c| checked_config(ctx, c)).transpose()?;
     let loaded = config
         .as_deref()
-        .map(|c| run::load_config(c, &RunOptions::default()))
+        .map(|c| {
+            let mut loaded = run::load_config(c, &RunOptions::default())?;
+            run::resolve_backend(&mut loaded, BackendConfig::default())?;
+            Ok(loaded)
+        })
         .transpose()
         .map_err(failure)?;
     // Bound here so that a mismatch fails now, not in the worker's log.
     let file = run::bind(&job, loaded, RunOptions::default()).map_err(failure)?;
     if config.is_none() {
+        // The backend folders of a bound job come from the operator's file, or were checked
+        // when the job was bound.
         for (field, path) in inputs(&file.config) {
+            if field.starts_with("backend.") {
+                continue;
+            }
             sandboxed(ctx, &format!("config.{field}"), &path)?;
         }
     }
@@ -273,8 +284,14 @@ fn start(ctx: &ToolContext, config: Option<&Path>, job_dir: &Path) -> CoreResult
              reprenez-le en ligne de commande",
         ));
     }
-    let mut cmd = front::worker_command(config.as_deref(), job_dir, &RunOptions::default(), true)
-        .map_err(failure)?;
+    let mut cmd = front::worker_command(
+        config.as_deref(),
+        job_dir,
+        &RunOptions::default(),
+        &BackendConfig::default(),
+        true,
+    )
+    .map_err(failure)?;
     let log = job.path("worker.log");
     let out = std::fs::File::create(&log).map_err(|e| failure(job::io_error(&log, e)))?;
     let err = out
