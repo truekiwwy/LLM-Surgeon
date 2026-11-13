@@ -58,6 +58,12 @@ candle-transformers = { version = "0.11.1", default-features = false }
 jsonschema = { version = "0.61.0", default-features = false }
 tempfile = "3.27.0"
 
+# The `surgeon` executable shipped in the desktop packages (packaging/build-windows.ps1).
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
 # gemm-f16 (through candle-core) keeps its FP16 inline assembly in #[inline] helpers of
 # gemm-common, which only assemble once inlined into functions that enable `fp16`. Without
 # optimization they are not, and debug builds (`cargo test`) fail on aarch64 Linux with

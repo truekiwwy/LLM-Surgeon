@@ -9,3 +9,5 @@ graphify-out/
 
 # Pipeline job artifacts (model copies, logs, per-item outputs)
 .jobs/
+dist/
+dist-dry/

@@ -1,0 +1,88 @@
+name: Release
+
+# Builds the Windows distribution when a version tag is pushed: portable ZIP, per-user
+# installer and SHA256SUMS, attached to a DRAFT release that a maintainer publishes after
+# checking it. Code signing is optional: without the two secrets below the binaries are
+# built unsigned (see docs/DESKTOP.md for the SmartScreen warning that comes with that).
+#
+#   SIGN_CERT_BASE64    base64 of a code-signing .pfx
+#   SIGN_CERT_PASSWORD  its password
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: windows x86_64
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/surgeon-gui
+
+      - name: Tag matches the crate version
+        shell: pwsh
+        run: |
+          $crate = (Select-String -Path crates/surgeon-gui/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $tag = "${env:GITHUB_REF_NAME}".TrimStart('v')
+          if ($crate -ne $tag) { throw "tag $tag does not match crates/surgeon-gui/Cargo.toml version $crate" }
+
+      - name: Engine stays pure (deps_purity)
+        run: cargo test --locked --test deps_purity
+
+      - name: GUI format, lint and tests
+        working-directory: crates/surgeon-gui
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+
+      - name: NSIS
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
+          "C:\Program Files (x86)\NSIS" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+
+      - name: Build ZIP, installer and checksums
+        shell: pwsh
+        env:
+          SIGN_CERT_BASE64: ${{ secrets.SIGN_CERT_BASE64 }}
+          SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD }}
+        run: ./packaging/build-windows.ps1 -Version ("${env:GITHUB_REF_NAME}".TrimStart('v'))
+
+      # The graphics check needs an OpenGL driver; if the runner has none this step reports
+      # it without blocking the release, and the line stays in the job log.
+      - name: Self-test of the built binary
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $out = & ./crates/surgeon-gui/target/release/surgeon-gui.exe --self-test | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "self-test failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/*
+
+      - name: Draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${env:GITHUB_REF_NAME}" dist/* --draft --generate-notes --title "${env:GITHUB_REF_NAME}"

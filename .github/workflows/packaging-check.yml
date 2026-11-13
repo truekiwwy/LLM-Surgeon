@@ -1,0 +1,36 @@
+name: Packaging check
+
+# Compiles the installer script with placeholder executables on every change to the
+# packaging files, so that a broken installer is caught before a release tag.
+
+on:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/packaging-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer-dry-run:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: NSIS
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
+          "C:\Program Files (x86)\NSIS" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+      - name: Dry run
+        shell: pwsh
+        run: ./packaging/build-windows.ps1 -DryRun -Version 0.0.0
+      - name: The installer and the ZIP exist
+        shell: pwsh
+        run: |
+          foreach ($f in "weight-surgeon-0.0.0-windows-x64-setup.exe", "weight-surgeon-0.0.0-windows-x64.zip", "SHA256SUMS") {
+            if (-not (Test-Path "dist/$f")) { throw "missing dist/$f" }
+          }
