@@ -17,6 +17,10 @@ use super::{logo, palette, views};
 use crate::app::{Mode, SurgeonApp, Tab};
 use crate::settings::Lang;
 
+/// Below these window widths the title bar drops the name, then the edition.
+const COMPACT_NAME: f32 = 1104.0;
+const COMPACT_EDITION: f32 = 1280.0;
+
 pub fn tab_label(tab: Tab) -> &'static str {
     match tab {
         Tab::Atelier => t("tab.atelier"),
@@ -111,23 +115,34 @@ fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
         Vec2::splat(T.size.icon + T.space.s),
     );
     logo::paint(&painter, mark);
-    let name = painter.text(
-        Pos2::new(mark.right() + T.space.m, rect.center().y),
-        Align2::LEFT_CENTER,
-        t("app.name"),
-        c::font_brand(),
-        T.color.text,
-    );
-    let edition = painter.text(
-        Pos2::new(name.right() + T.space.s, rect.center().y + 1.0),
-        Align2::LEFT_CENTER,
-        tf("app.edition", &[("version", &env!("CARGO_PKG_VERSION"))]),
-        c::font_meta(),
-        T.color.text_secondary,
-    );
+    // A narrow window drops the edition, then the name: the mark, the tabs and the mode
+    // switch always fit (960 is the smallest window).
+    let mut x = mark.right();
+    if rect.width() >= COMPACT_NAME {
+        x = painter
+            .text(
+                Pos2::new(x + T.space.m, rect.center().y),
+                Align2::LEFT_CENTER,
+                t("app.name"),
+                c::font_brand(),
+                T.color.text,
+            )
+            .right();
+    }
+    if rect.width() >= COMPACT_EDITION {
+        x = painter
+            .text(
+                Pos2::new(x + T.space.s, rect.center().y + 1.0),
+                Align2::LEFT_CENTER,
+                tf("app.edition", &[("version", &env!("CARGO_PKG_VERSION"))]),
+                c::font_meta(),
+                T.color.text_secondary,
+            )
+            .right();
+    }
 
     // Tabs.
-    let mut x = edition.right() + T.space.xl + T.space.l;
+    x += T.space.xl;
     for tab in Tab::ALL {
         let label = tab_label(tab);
         let width = painter

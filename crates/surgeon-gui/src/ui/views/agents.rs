@@ -332,6 +332,7 @@ fn connections(ui: &mut Ui, app: &mut SurgeonApp) {
                 let response = c::row(
                     ui,
                     hub.selected.as_deref() == Some(conn.id.as_str()),
+                    &conn.label,
                     |ui| {
                         let (state, word) = match (consented, conn.is_local()) {
                             (_, true) => (State::Ok, t("conn.local")),

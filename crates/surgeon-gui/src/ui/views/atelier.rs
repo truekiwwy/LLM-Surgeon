@@ -334,6 +334,9 @@ fn editor(ui: &mut Ui, app: &mut SurgeonApp) {
 
 // ------------------------------------------------------------------ deltas
 
+/// Below this center width the delta table drops two columns.
+const NARROW_TABLE: f32 = 640.0;
+
 /// A row of the delta table: the node, its five cells, the value it is sorted by.
 type DeltaRow = (usize, [String; 5], f64);
 
@@ -471,6 +474,20 @@ fn deltas(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
                 }
             };
             rows.sort_by(|a, b| b.2.total_cmp(&a.2));
+            // A narrow center keeps the tensor, its change and its share; the role and the
+            // third measure come back with the room.
+            let keep: &[usize] = match ui.available_width() < NARROW_TABLE {
+                true => &[0, 1, 3, 4],
+                false => &[0, 1, 2, 3, 4, 5],
+            };
+            let columns: Vec<Column> = keep
+                .iter()
+                .map(|&k| Column {
+                    title: columns[k].title,
+                    width: columns[k].width,
+                    right: columns[k].right,
+                })
+                .collect();
             let table = Table { columns: &columns };
             table.header(ui);
             let mut pick = None;
@@ -487,7 +504,7 @@ fn deltas(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
                             true => Cell::state(State::Active, &index),
                             false => Cell::dim(&index),
                         };
-                        let row = [
+                        let mut all = vec![
                             first,
                             Cell::new(&cells[0]),
                             Cell::dim(&cells[1]),
@@ -495,7 +512,12 @@ fn deltas(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
                             Cell::new(&cells[3]),
                             Cell::new(&cells[4]),
                         ];
-                        let response = table.row(ui, selected == Some(*i), &row);
+                        let mut k = 0;
+                        all.retain(|_| {
+                            k += 1;
+                            keep.contains(&(k - 1))
+                        });
+                        let response = table.row(ui, selected == Some(*i), &all);
                         let response = match target {
                             true => response.on_hover_text(t("deltas.target")),
                             false => response,

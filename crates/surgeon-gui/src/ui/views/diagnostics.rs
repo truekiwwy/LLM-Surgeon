@@ -27,7 +27,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         .title(t("panel.sections"))
         .show(ui, regions.left, |ui| {
             for k in 0..3 {
-                if c::row(ui, app.diag_section == k, |ui| {
+                if c::row(ui, app.diag_section == k, section_label(k), |ui| {
                     c::label(ui, section_label(k));
                 })
                 .clicked()

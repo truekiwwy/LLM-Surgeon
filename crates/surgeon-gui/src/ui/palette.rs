@@ -12,6 +12,8 @@ use crate::settings::Lang;
 
 /// On the 8-point grid, like every layout dimension.
 const WIDTH: f32 = 560.0;
+/// Commands shown at once; typing narrows the rest.
+const ROWS: usize = 10;
 
 #[derive(Default)]
 pub struct Palette {
@@ -141,12 +143,12 @@ pub fn show(ctx: &egui::Context, app: &mut SurgeonApp) {
     });
     let p = &mut app.palette;
     if down {
-        p.cursor = (p.cursor + 1).min(list.len().saturating_sub(1));
+        p.cursor = (p.cursor + 1).min(list.len().min(ROWS).saturating_sub(1));
     }
     if up {
         p.cursor = p.cursor.saturating_sub(1);
     }
-    p.cursor = p.cursor.min(list.len().saturating_sub(1));
+    p.cursor = p.cursor.min(list.len().min(ROWS).saturating_sub(1));
     if escape {
         p.toggle();
         return;
@@ -157,7 +159,7 @@ pub fn show(ctx: &egui::Context, app: &mut SurgeonApp) {
     ctx.layer_painter(scrim)
         .rect_filled(screen, 0.0, T.color.scrim);
     let width = WIDTH;
-    let rows = list.len().min(10) as f32;
+    let rows = list.len().min(ROWS) as f32;
     let height = T.size.control + T.space.s + rows * T.size.row + 2.0 * T.space.s;
     let rect = Rect::from_min_size(
         Pos2::new(
@@ -190,8 +192,8 @@ pub fn show(ctx: &egui::Context, app: &mut SurgeonApp) {
                 if list.is_empty() {
                     c::secondary(ui, t("palette.empty"));
                 }
-                for (k, (command, text)) in list.iter().enumerate().take(10) {
-                    let response = c::row(ui, k == app.palette.cursor, |ui| {
+                for (k, (command, text)) in list.iter().enumerate().take(ROWS) {
+                    let response = c::row(ui, k == app.palette.cursor, text, |ui| {
                         c::label(ui, text.as_str());
                     });
                     if response.clicked() {

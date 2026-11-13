@@ -381,10 +381,12 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
         top.y += r.height() + 2.0;
     };
     let targeted = view.targets.iter().filter(|t| **t).count();
-    if targeted > 0 {
+    // The small preview keeps its room for the graph; the 3D tab carries the captions.
+    let wide = rect.width() >= 560.0;
+    if targeted > 0 && wide {
         caption(tf("view3d.targets", &[("n", &targeted)]), theme::TEXT);
     }
-    if let Some(layer) = view.layer {
+    if let Some(layer) = view.layer.filter(|_| wide) {
         caption(job_caption(layer.kind).into(), theme::TEXT);
         if let (Some(metric), Some((lo, hi))) = (layer.kind.metric(), layer.range) {
             caption(format!("{metric} : {lo:.3e} – {hi:.3e}"), theme::DIM);
@@ -399,7 +401,7 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
     }
     axis_gizmo(&painter, rect, camera);
     // The help line only where it fits (not in the Atelier's small preview).
-    if rect.width() < 560.0 {
+    if !wide {
         return match response.clicked() {
             true => Some(hovered),
             false => None,

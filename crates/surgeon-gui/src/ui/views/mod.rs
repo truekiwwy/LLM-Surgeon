@@ -247,7 +247,7 @@ pub fn tree(ui: &mut Ui, app: &mut SurgeonApp) {
                     Some(l) => format!("layers.{l}"),
                     None => t("tree.outside").to_owned(),
                 };
-                let header = c::row(ui, false, |ui| {
+                let header = c::row(ui, false, &title, |ui| {
                     let icon = if open {
                         Icon::ChevronDown
                     } else {
@@ -269,7 +269,7 @@ pub fn tree(ui: &mut Ui, app: &mut SurgeonApp) {
                 for &i in nodes {
                     let node = &step.report.nodes[i];
                     let is_selected = Some(i) == selected;
-                    let response = c::row(ui, is_selected, |ui| {
+                    let response = c::row(ui, is_selected, &node.tensor, |ui| {
                         ui.add_space(T.space.l);
                         let (r, _) =
                             ui.allocate_exact_size(Vec2::splat(T.size.icon), Sense::hover());

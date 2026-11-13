@@ -410,10 +410,13 @@ pub fn row_background(ui: &Ui, rect: Rect, response: &Response, selected: bool) 
     }
 }
 
-/// A clickable full-width row of the standard height; `body` lays its content out.
-pub fn row(ui: &mut Ui, selected: bool, body: impl FnOnce(&mut Ui)) -> Response {
+/// A clickable full-width row of the standard height; `body` lays its content out, `label`
+/// names it for screen readers.
+pub fn row(ui: &mut Ui, selected: bool, label: &str, body: impl FnOnce(&mut Ui)) -> Response {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), T.size.row), Sense::click());
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, label));
     row_background(ui, rect, &response, selected);
     let inner = rect.shrink2(Vec2::new(T.space.s, 0.0));
     let mut child = ui.new_child(
@@ -826,9 +829,10 @@ pub fn field_mono(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Res
     edit(
         ui,
         rect,
+        // The hint is a label, not data: it reads in the interface face.
         TextEdit::singleline(text).font(font_mono()).hint_text(rich(
             hint,
-            font_mono(),
+            font_body(),
             T.color.text_disabled,
         )),
     )
@@ -1089,6 +1093,15 @@ impl Table<'_> {
     pub fn row(&self, ui: &mut Ui, selected: bool, cells: &[Cell<'_>]) -> Response {
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), T.size.row), Sense::click());
+        let label: Vec<&str> = cells.iter().map(|c| c.text).collect();
+        response.widget_info(|| {
+            WidgetInfo::selected(
+                WidgetType::SelectableLabel,
+                true,
+                selected,
+                label.join(" · "),
+            )
+        });
         row_background(ui, rect, &response, selected);
         for ((column, span), cell) in self.columns.iter().zip(self.spans(rect)).zip(cells) {
             let clip = Rect::from_x_y_ranges(span, rect.y_range());
