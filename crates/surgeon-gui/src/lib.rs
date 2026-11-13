@@ -18,12 +18,32 @@
 //! - [`theme`]: colors and style.
 #![deny(unsafe_code)]
 
+pub mod actions;
 pub mod app;
 pub mod backend_dialog;
 pub mod camera;
 pub mod canvas;
+pub mod cli;
+pub mod desktop;
+pub mod diag;
 pub mod editor;
+pub mod extract;
+pub mod install;
+pub mod instance;
+pub mod logging;
+pub mod net;
+pub mod paths;
+pub mod platform;
+pub mod raster;
+pub mod releases;
 pub mod runner;
+pub mod sample_model;
+pub mod selftest;
+pub mod settings;
 pub mod source;
+pub mod task;
+#[cfg(test)]
+mod testkit;
 pub mod theme;
+pub mod update;
 pub mod viewport;
