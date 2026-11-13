@@ -161,11 +161,9 @@ pub fn run_session_with<B: Backend>(
 
 /// One frame as plain text (no ANSI at all): trailing spaces trimmed, one line per row.
 pub fn render_snapshot(app: &App, cols: u16, rows: u16) -> Result<String, TuiError> {
-    let mut terminal = Terminal::new(TestBackend::new(cols, rows))
-        .map_err(|e| TuiError::Terminal(e.to_string()))?;
-    terminal
-        .draw(|frame| view(frame, app))
-        .map_err(|e| TuiError::Terminal(e.to_string()))?;
+    // TestBackend cannot fail (its error type is Infallible).
+    let Ok(mut terminal) = Terminal::new(TestBackend::new(cols, rows));
+    let Ok(_) = terminal.draw(|frame| view(frame, app));
     Ok(buffer_text(terminal.backend().buffer()))
 }
 

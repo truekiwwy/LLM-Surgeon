@@ -235,7 +235,7 @@ pub fn sampled_score(hits: &[Vec<bool>]) -> SampledScore {
 /// historical one (greedy, one sample, no batching, default backend).
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct GenerationReport {
-    /// native, llama, llama-completion, llama-server ou hipfire.
+    /// native, llama, llama-completion, llama-server, mistralrs ou hipfire.
     pub backend: String,
     /// Le backend réel : `native-cpu`, `llama-server (Vulkan, ngl=99, batch=6)`...
     pub backend_detail: String,

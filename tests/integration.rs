@@ -203,8 +203,16 @@ fn deps() -> AppDeps {
     deps_with(MockRunner::default(), healthy)
 }
 
-/// Runs a command line; returns (exit code, stdout, stderr).
+/// Runs a command line in process; returns (exit code, stdout, stderr). The engine folders
+/// of the machine are cleared first, once: clap reads them as flag defaults. No test sets
+/// them, so the removal races with nothing.
 fn run(deps: &AppDeps, args: &[&str]) -> (i32, String, String) {
+    static CLEAN_ENV: std::sync::Once = std::sync::Once::new();
+    CLEAN_ENV.call_once(|| {
+        for name in ["LLAMA_CPP_DIR", "MISTRALRS_DIR"] {
+            std::env::remove_var(name);
+        }
+    });
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let argv = std::iter::once("weight-surgeon").chain(args.iter().copied());
     let code = match app::parse_cli(argv, &mut out, &mut err) {

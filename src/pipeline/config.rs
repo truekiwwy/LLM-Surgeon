@@ -56,7 +56,7 @@ pub struct PipelineConfig {
     pub test_registry: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "Moteur de génération des piliers binaires (safety, unblocking, gsm8k) : native (CPU, défaut), llama-server (GPU via llama.cpp) ou hipfire. Les options de la ligne de commande passent devant, puis la configuration utilisateur (surgeon backend show). Les piliers kl et logits lisent toujours les logits natifs."
+        description = "Moteur de génération des piliers binaires (safety, unblocking, gsm8k) : native (CPU, défaut), mistralrs (mistral.rs sur le dossier SafeTensors), llama-server (GPU via llama.cpp) ou hipfire (démon AMD). Les options de la ligne de commande passent devant, puis la configuration utilisateur (surgeon backend show). Les piliers kl et logits lisent toujours les logits natifs."
     )]
     pub backend: Option<BackendConfig>,
 }
@@ -307,9 +307,12 @@ pub fn validate(config: &PipelineConfig, allow_disable_safety: bool) -> Result<(
         issues.push("budgets : valeurs >= 1".into());
     }
     if let Some(b) = config.backend.as_ref().and_then(|b| b.backend) {
-        if !matches!(b, Backend::Native | Backend::LlamaServer | Backend::Hipfire) {
+        if !matches!(
+            b,
+            Backend::Native | Backend::MistralRs | Backend::LlamaServer | Backend::Hipfire
+        ) {
             issues.push(format!(
-                "backend : {} non géré par le pipeline (native, llama-server ou hipfire)",
+                "backend : {} non géré par le pipeline (native, mistralrs, llama-server ou hipfire)",
                 b.label()
             ));
         }
@@ -455,6 +458,8 @@ pub fn resolve(config: &mut PipelineConfig, base: &Path) {
     abs(registry);
     if let Some(b) = config.backend.as_mut() {
         b.llama_cpp_dir.iter_mut().for_each(abs);
+        b.mistralrs_dir.iter_mut().for_each(abs);
+        b.mistralrs_bin.iter_mut().for_each(abs);
         b.hipfire_bin.iter_mut().for_each(abs);
     }
 }
@@ -484,10 +489,12 @@ pub fn inputs(config: &PipelineConfig) -> Vec<(String, PathBuf)> {
     if let Some(r) = &config.test_registry {
         out.push(("test_registry".into(), r.clone()));
     }
-    // Both hold programs that get run.
+    // They hold programs that get run.
     if let Some(b) = &config.backend {
         for (field, path) in [
             ("llama_cpp_dir", &b.llama_cpp_dir),
+            ("mistralrs_dir", &b.mistralrs_dir),
+            ("mistralrs_bin", &b.mistralrs_bin),
             ("hipfire_bin", &b.hipfire_bin),
         ] {
             if let Some(p) = path {

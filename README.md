@@ -951,7 +951,7 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | --- | --- | --- |
 | `--model` | required | `.gguf`, or a SafeTensors folder. |
 | `--dataset` | required | JSON array (or JSONL) of `{question or problem, answer or solution, id?}`. No GSM8K or MATH content ships with this repository. |
-| `--backend` | the user configuration, else `llama` | `llama` or its alias `llama-completion` (one llama.cpp process per question, on a GGUF converted when needed), `llama-server` (one local llama.cpp server for the run, GPU per its build) or `native` (pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors folder; `--llama-cpp-dir` is then unused). `hipfire` (AMD, Linux) is refused with advice: see [backends](docs/BACKENDS.md). |
+| `--backend` | the user configuration, else `llama` | `llama` or its alias `llama-completion` (one llama.cpp process per question, on a GGUF converted when needed), `llama-server` (one local llama.cpp server for the run, GPU per its build) or `native` (pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors folder; `--llama-cpp-dir` is then unused). `mistralrs` runs mistral.rs on the SafeTensors folder as is (no conversion, GPU per its build); `hipfire` talks to a running hipfire daemon, on every OS: see [backends](docs/BACKENDS.md). |
 | `--baseline-model` | none | Reference model on the same questions (paired comparison). |
 | `--limit` | 50 | First N entries, in file order. |
 | `--max-new-tokens` | 512 | Generation budget per question. |
@@ -974,6 +974,9 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | `--gpu-layers` | the build's | `-ngl` of `llama-server`: layers offloaded to the GPU. |
 | `--ctx-size` | the build's | `-c` of `llama-server`: context shared by its slots. |
 | `--hipfire-bin` | user configuration, then `PATH` | `hipfire` binary (see [backends](docs/BACKENDS.md)). |
+| `--mistralrs-dir` | `$MISTRALRS_DIR`, then the user configuration, then `PATH` | `mistralrs`: folder of `mistralrs-server` (or `mistralrs`). |
+| `--mistralrs-bin` | the user configuration | `mistralrs`: the binary itself; given, it is the only candidate. |
+| `--hipfire-url` | the user configuration, else `127.0.0.1:11435` when `hipfire` is found | `hipfire`: a daemon already running, `http://127.0.0.1:<port>` (loopback only). |
 | `--gguf-dtype` | `f16` | Matrix type of the temporary GGUF of a SafeTensors model: `f16` or `f32` (lossless from bf16, twice the size). |
 
 The model's own answer is extracted by the first matching rule among: a `####` marker, the last balanced `\boxed{...}`, the last `**bold**` text, a phrase such as "the answer is X", then the last number. Numbers and fractions compare with a relative tolerance of 1e-9. This is a heuristic: read the per-item `items` of the `--json` output before trusting a score. This README publishes no GSM8K score: the real runs below use a fake llama.cpp.
@@ -1036,7 +1039,7 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--baseline-model` | none | Reference model on the same prompts, generated first (paired comparison). |
 | `--max-new-tokens` | 256 | Generation budget per prompt. |
 | `--chat-template` | `chatml` | Wrapping of each prompt: `chatml` or `none`. |
-| `--backend` | the user configuration, else `native` | `native` (pure Rust), `llama-server` (one local llama.cpp server for the run) or `llama-completion` (one llama.cpp process per prompt); a SafeTensors folder is then converted to a temporary GGUF. `hipfire` (AMD, Linux) is refused with advice: see [backends](docs/BACKENDS.md). |
+| `--backend` | the user configuration, else `native` | `native` (pure Rust), `llama-server` (one local llama.cpp server for the run) or `llama-completion` (one llama.cpp process per prompt); a SafeTensors folder is then converted to a temporary GGUF. `mistralrs` (mistral.rs on the SafeTensors folder as is) and `hipfire` (a running hipfire daemon) too: see [backends](docs/BACKENDS.md). |
 | `--judge` | `rules` | `rules` (markers only), `llm` (markers and a judge model) or `both` (plus their agreement). |
 | `--marker-langs` | none | Marker languages on top of English: `fr`, `es`, `de` or `all`, comma-separated. |
 | `--markers-file` | none | JSON object `{"<lang>": ["marker", ...]}`: adds languages, replaces a built-in list. |
@@ -1065,6 +1068,9 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--gpu-layers` | the build's | `-ngl` of `llama-server`: layers offloaded to the GPU. |
 | `--ctx-size` | the build's | `-c` of `llama-server`: context shared by its slots. |
 | `--hipfire-bin` | user configuration, then `PATH` | `hipfire` binary (see [backends](docs/BACKENDS.md)). |
+| `--mistralrs-dir` | `$MISTRALRS_DIR`, then the user configuration, then `PATH` | `mistralrs`: folder of `mistralrs-server` (or `mistralrs`). |
+| `--mistralrs-bin` | the user configuration | `mistralrs`: the binary itself; given, it is the only candidate. |
+| `--hipfire-url` | the user configuration, else `127.0.0.1:11435` when `hipfire` is found | `hipfire`: a daemon already running, `http://127.0.0.1:<port>` (loopback only). |
 | `--gguf-dtype` | `f16` | Matrix type of the temporary GGUF of a SafeTensors model: `f16` or `f32` (lossless from bf16, twice the size). |
 
 An answer is a refusal when it contains one of twelve English markers (`I'm sorry`, `I cannot`, `As an AI`, ...; the list is in `data.markers`), compared without case and at word boundaries. `--marker-langs` adds the built-in French, Spanish or German markers and `--markers-file` your own; English stays first, and without these options nothing changes. Markers only find explicit refusals: a soft refusal is missed and a degraded or off-topic answer counts as compliance, so `data.items[]` keeps every answer in full (`index`, `refused`, `marker`, `output`) for review. `data` also has `n`, `refused`, `refusal_rate` and its Wilson interval (`ci95_low`, `ci95_high`); with a baseline, `baseline` and `paired` (`unblocked`, `newly_refused`, `delta_rate`, and its 95 % interval `delta_ci95_low` / `delta_ci95_high`, Newcombe's interval for paired proportions).
@@ -1135,7 +1141,7 @@ Without these options, `bench eval` and `bench refusal` print and write what the
 
 **Batching.** `--batch-size B` decodes up to B sequences together (native backend). Each step runs the projections and the MLP of the B sequences as one matrix product, so every weight is read once per step for the whole batch; attention stays per sequence, on its own KV cache and at its own position, so there is no padding and a sequence's tokens do not depend on the others. A finished sequence leaves the batch and the next one takes its place. Every prompt is prefilled alone. `--jobs J` runs J batches in parallel threads, all in one rayon pool: `--threads`, else `RAYON_NUM_THREADS`, else every core. Once an option differs from its default, the run warns when the pool has more threads than the machine has cores, when `--threads` overrides `RAYON_NUM_THREADS`, and when other `surgeon` processes are running (they share the cores and the memory bandwidth). In greedy decoding, batched and sequential tokens are identical in the tests (mini models with and without sliding window, B from 1 to 8, one or three workers); their logits differ by at most 1e-5 relative, the rounding of a matrix product with several rows instead of one, which could only change a token on a near tie. A timeout (`--timeout-secs`) counts from the first token of a sequence, not from its wait for a place in the batch.
 
-**Backends.** `native` is the pure Rust generator (CPU). `llama-completion` runs one llama.cpp process per prompt, as `bench eval --backend llama` always did. `llama-server` starts one llama.cpp server for the whole bench and sends it up to `--batch-size` requests at once. A SafeTensors folder given to a llama backend is first converted to a temporary GGUF (as `bench eval` does), deleted at the end. The server gets nothing but these flags, each spelled as its own `--help` lists it, the run failing when one is missing: `-m`, `--host 127.0.0.1`, `--port` (a free port), `--api-key` (128 random bits), `-np`, and `-c`, `-ngl`, `-t` from `--ctx-size`, `--gpu-layers`, `--threads`. No other argument can reach it, from the command line or from MCP. It is killed when the bench ends, fails or is cancelled. Requests go over HTTP/1.1 on the loopback only (standard library sockets, no TLS, no network crate), streamed as server-sent events, each with its timeout.
+**Backends.** `native` is the pure Rust generator (CPU). `llama-completion` runs one llama.cpp process per prompt, as `bench eval --backend llama` always did. `llama-server` starts one llama.cpp server for the whole bench and sends it up to `--batch-size` requests at once; `mistralrs` does the same with mistral.rs, on the SafeTensors folder itself, and `hipfire` with a hipfire daemon already running ([backends](docs/BACKENDS.md)). A SafeTensors folder given to a llama backend is first converted to a temporary GGUF (as `bench eval` does), deleted at the end. The server gets nothing but these flags, each spelled as its own `--help` lists it, the run failing when one is missing: `-m`, `--host 127.0.0.1`, `--port` (a free port), `--api-key` (128 random bits), `-np`, and `-c`, `-ngl`, `-t` from `--ctx-size`, `--gpu-layers`, `--threads`. No other argument can reach it, from the command line or from MCP. It is killed when the bench ends, fails or is cancelled. Requests go over HTTP/1.1 on the loopback only (standard library sockets, no TLS, no network crate), streamed as server-sent events, each with its timeout.
 
 **GPU.** Whether `llama-server` uses a GPU depends on how llama.cpp was built (CUDA, Vulkan, HIP, Metal) and on `--gpu-layers`; surgeon itself stays on the CPU (its candle backend has no GPU feature, on purpose). To check the offload, run the server once by hand with the same model and `-ngl`: its log prints a line such as `load_tensors: offloaded 25/25 layers to GPU`, and `GET /props` reports its settings; when a run fails, surgeon puts the tail of the server's stderr in the error. GPU runs are not reproducible bit for bit, even at temperature 0 (the order of the kernels' reductions varies): compare rates with their intervals, not answers byte for byte.
 
@@ -1395,12 +1401,12 @@ surgeon arch detect --model tiny-q8.gguf
 <a id="cmd-backend"></a>
 #### `surgeon backend`
 
-Parent command of the inference backends ([docs/BACKENDS.md](docs/BACKENDS.md)); it has no option of its own. `native` (CPU, pure Rust), `llama-server` (GPU through llama.cpp: Vulkan, CUDA, Metal) and `hipfire` (AMD, Linux, optional) generate the answers of `bench` and `pipeline`. The choice, the llama.cpp folder, `gpu_layers`, `batch_size` and the GGUF type are remembered in a user file (`%APPDATA%\weight-surgeon\config.toml`, else `~/.config/weight-surgeon/config.toml`) that every flag overrides.
+Parent command of the inference backends ([docs/BACKENDS.md](docs/BACKENDS.md)); it has no option of its own. `native` (CPU, pure Rust), `mistralrs` (mistral.rs on the SafeTensors folder as is, GPU per its build), `llama-server` (GPU through llama.cpp: Vulkan, CUDA, Metal) and `hipfire` (an AMD HIP daemon, optional, any OS) generate the answers of `bench` and `pipeline`. The choice, the engine locations, `gpu_layers`, `batch_size` and the GGUF type are remembered in a user file (`%APPDATA%\weight-surgeon\config.toml`, else `~/.config/weight-surgeon/config.toml`) that every flag overrides.
 
 <a id="cmd-backend-detect"></a>
 #### `surgeon backend detect`
 
-Probes the machine: `llama-server` and the devices of its `--list-devices`, `hipfire`; recommends `llama-server` on the GPU when one is usable, else `native`. This is the first-start probe of a GUI.
+Probes the machine: mistral.rs, `llama-server` and the devices of its `--list-devices`, the `hipfire` daemon; recommends `mistralrs` when installed, else `llama-server` on the GPU when one is usable, else `native`. This is the first-start probe of a GUI.
 
 ```text
 surgeon backend detect [OPTIONS]
@@ -1410,7 +1416,7 @@ surgeon backend detect [OPTIONS]
 | --- | --- | --- |
 | `--save` | off | Write the recommendation as the user configuration (replaces the file). |
 
-`data`: `report` (`os`, `llama` with `server`, `dir`, `devices[]`, `hipfire`, `recommended`, `reason`) and `saved` (the file written, or null).
+`data`: `report` (`os`, `mistralrs`, `llama` with `server`, `dir`, `devices[]`, `hipfire`, `recommended`, `reason`) and `saved` (the file written, or null).
 
 ```bash
 surgeon backend detect --save
@@ -1421,7 +1427,7 @@ surgeon backend detect --save
 
 The user configuration file, whether it exists, the settings it gives and the backend they resolve to. It has no option.
 
-`data`: `path`, `exists`, `config`, `effective` (for example `llama-server (Vulkan, ngl=99, batch=1)`).
+`data`: `path`, `exists`, `config`, `effective` (for example `llama-server (Vulkan, ngl=99, batch=1)` or `mistralrs (batch=1)`), and a warning when that backend cannot run here or skews the measures (a hipfire daemon with chat completions only).
 
 
 <a id="cmd-pipeline"></a>
@@ -1444,11 +1450,14 @@ surgeon pipeline plan [OPTIONS] --config <CONFIG> --job-dir <JOB_DIR>
 | `--job-dir` | required | Job folder. |
 | `--allow-disable-safety` | off | Accept a configuration without a `safety` pillar (logged in the report; CLI only). |
 | `--no-calibration` | off | Skip the decoding-rate measurements (no time estimate). Otherwise each engine with work is measured: native CPU for `kl` / `logits` (and every pillar of a `native` job), the job's backend for the binary pillars. |
-| `--backend` | `pipeline.json`, then the user configuration, else `native` | `native` (CPU), `llama-server` (GPU through llama.cpp) or `hipfire`. Only the binary pillars generate; `kl` and `logits` always read native logits. |
+| `--backend` | `pipeline.json`, then the user configuration, else `native` | `native` (CPU), `mistralrs` (mistral.rs on the working copy as is), `llama-server` (GPU through llama.cpp) or `hipfire`. Only the binary pillars generate; `kl` and `logits` always read native logits. |
 | `--gpu-layers` | the user configuration | `-ngl` of `llama-server`. |
 | `--batch-size` | the user configuration | Slots and concurrent requests of `llama-server`. |
 | `--llama-cpp-dir` | `$LLAMA_CPP_DIR`, then the user configuration | llama.cpp folder. |
 | `--hipfire-bin` | user configuration, then `PATH` | `hipfire` binary. |
+| `--mistralrs-dir` | `$MISTRALRS_DIR`, then the user configuration, then `PATH` | `mistralrs`: folder of `mistralrs-server` (or `mistralrs`). |
+| `--mistralrs-bin` | the user configuration | `mistralrs`: the binary itself; given, it is the only candidate. |
+| `--hipfire-url` | the user configuration, else `127.0.0.1:11435` when `hipfire` is found | `hipfire`: a daemon already running, `http://127.0.0.1:<port>` (loopback only). |
 
 `data`: `pillars[]` (`n_dev`, `n_test`, `min_n_for_go`: the smallest size at which a non-inferiority gate can be GO at all, `dev_underpowered`, `test_underpowered`), `disk` (working copy, logits dumps, backups), `units_total`, `calibration` (native CPU engine), `backend_calibration` (the job's backend, GPU through `llama-server`; its load time includes the GGUF conversion and the server start), `estimated_secs` (upper estimate, each engine at its own rate), `warnings`.
 
@@ -1469,11 +1478,14 @@ surgeon pipeline run [OPTIONS] --job-dir <JOB_DIR>
 | `--allow-test-reuse` | off | Consult a Test set already in the registry; the report is marked `test_contaminated` and cannot be GO (CLI only). |
 | `--detach` | off | Run the worker in the background (output in `<job>/worker.log`) and return. |
 | `--watch-stdin` | off | Stop when stdin closes; set by the MCP server for the workers it starts. |
-| `--backend` | `pipeline.json`, then the user configuration, else `native` | `native` (CPU), `llama-server` (GPU through llama.cpp) or `hipfire`. Only the binary pillars generate; `kl` and `logits` always read native logits. |
+| `--backend` | `pipeline.json`, then the user configuration, else `native` | `native` (CPU), `mistralrs` (mistral.rs on the working copy as is), `llama-server` (GPU through llama.cpp) or `hipfire`. Only the binary pillars generate; `kl` and `logits` always read native logits. |
 | `--gpu-layers` | the user configuration | `-ngl` of `llama-server`. |
 | `--batch-size` | the user configuration | Slots and concurrent requests of `llama-server`. |
 | `--llama-cpp-dir` | `$LLAMA_CPP_DIR`, then the user configuration | llama.cpp folder. |
 | `--hipfire-bin` | user configuration, then `PATH` | `hipfire` binary. |
+| `--mistralrs-dir` | `$MISTRALRS_DIR`, then the user configuration, then `PATH` | `mistralrs`: folder of `mistralrs-server` (or `mistralrs`). |
+| `--mistralrs-bin` | the user configuration | `mistralrs`: the binary itself; given, it is the only candidate. |
+| `--hipfire-url` | the user configuration, else `127.0.0.1:11435` when `hipfire` is found | `hipfire`: a daemon already running, `http://127.0.0.1:<port>` (loopback only). |
 
 `data` is `results.json`: `verdict`, `verdict_reason`, `model` (hashes, `unchanged`), `candidates[]` (Dev gates up to the first that is not GO, `stopped_at`), `selected`, `test` (aggregates only: the answers stay in `<job>/private/`), `test_contaminated`, `safety_disabled`, `budget_exceeded`. Gates: paired Newcombe interval (the one of `bench refusal`) at the gate's confidence for the binary pillars, with McNemar's exact p; percentile bootstrap over prompts with the configuration's seed for the drifts. `<job>/report.json` adds the reproducibility manifest (hashes of the model, sets, vectors, configuration; seed; surgeon version) and the timings.
 
@@ -2041,7 +2053,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 | `surgeon_lora` | `mode` `merge` (adapter folded in place) or `extract` (adapter written). |
 | `surgeon_pipeline` | Decision on a patch: `action` `plan`, `start` (background worker, returns a `job_id` at once), `status`, `cancel`, `report`, `promote_patch` ([docs/PIPELINE.md](docs/PIPELINE.md)). |
 | `surgeon_graph` | Residual-stream write/read graph with certified spectral bounds; bounded summary, or files with `out_dir`. |
-| `surgeon_backends` | Inference engines of the machine (native, llama-server and its GPUs, hipfire), the user configuration and the recommended backend; read only. |
+| `surgeon_backends` | Inference engines of the machine (native, mistralrs, llama-server and its GPUs, hipfire), the user configuration and the recommended backend; read only. |
 
 A real session on the fake model: the client sends `initialize`, `notifications/initialized`, then a `tools/call`. The server writes one line on stderr, then answers on stdout (the `initialize` answer is left out, and the answer line is cut):
 

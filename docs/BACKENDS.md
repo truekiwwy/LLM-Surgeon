@@ -4,40 +4,48 @@ Qui génère les réponses de `surgeon bench eval`, `bench refusal`, `surgeon pi
 `surgeon_bench` / `surgeon_pipeline`, comment ce choix est mémorisé, et comment une interface
 graphique s'en sert au premier démarrage. Code : `src/backend/`.
 
-## 1. Les trois backends
+## 1. Les quatre backends
 
 | Backend | Matériel | Ce que c'est | État |
 | --- | --- | --- | --- |
+| `mistralrs` | GPU selon le build (CUDA, Metal...) ou CPU | Un serveur [mistral.rs](https://github.com/EricLBuehler/mistral.rs) local (`mistralrs-server`, ou `mistralrs serve`) qui charge le dossier SafeTensors tel quel, sans conversion (un `.gguf` est aussi accepté). | Recommandé en premier par `backend detect` quand il est installé (section 6). |
+| `llama-server` | GPU (Vulkan, CUDA, Metal...) ou CPU | Un serveur `llama.cpp` local pour toute l'exécution. Un dossier SafeTensors Qwen2, Llama, Mistral, Gemma, Gemma 2 ou Phi-3 est converti par `surgeon` lui-même en GGUF (Rust pur, sans Python). | Backend GPU sans mistral.rs. |
+| `hipfire` | GPU AMD, HIP/ROCm | Démon externe [`warpfront/hipfire`](https://github.com/warpfront/hipfire), déjà lancé. | Utilisable sur tout système, Windows compris (section 7). |
 | `native` | CPU | Générateur en Rust pur de `surgeon` (Qwen2, Llama/Mistral, Qwen3 en SafeTensors). Aucun programme externe. | Repli, défaut historique de `bench refusal` et du pipeline. |
-| `llama-server` | GPU (Vulkan, CUDA, Metal...) ou CPU | Un serveur `llama.cpp` local pour toute l'exécution. Un dossier SafeTensors Qwen2, Llama, Mistral, Gemma, Gemma 2 ou Phi-3 est converti par `surgeon` lui-même en GGUF (Rust pur, sans Python). | Backend GPU principal. |
-| `hipfire` | GPU AMD, HIP/ROCm, Linux | Moteur externe [`warpfront/hipfire`](https://github.com/warpfront/hipfire). | Reconnu et vérifié, pilote non branché (section 6). |
 
-Les trois partagent l'interface `TextGenerator` (`src/eval/generator.rs`) : un bench ne sait pas
-lequel il utilise. `src/backend/` ajoute les réglages communs, leur ordre de priorité, la sonde de
-la machine et les libellés des rapports. Le chemin de calcul n'a pas changé : `llama-server` est le
-même pilote qu'avant (liste blanche d'options, port libre, clé aléatoire, serveur tué avec le
-bench), le convertisseur est `src/eval/safetensors_gguf.rs`.
+Tous partagent l'interface `TextGenerator` (`src/eval/generator.rs`) : un bench ne sait pas
+lequel il utilise. Les trois serveurs passent par le même client (`src/eval/server.rs`), qui parle
+le dialecte de chacun : `/completion` de llama.cpp, `/v1/completions` ou `/v1/chat/completions`
+OpenAI. `src/backend/` ajoute les réglages communs, leur ordre de priorité, la sonde de la machine
+et les libellés des rapports. Le convertisseur GGUF est `src/eval/safetensors_gguf.rs`.
 
 ## 2. Réglages et priorité
 
 `BackendConfig` (`src/backend/config.rs`) : `backend`, `gpu_layers`, `batch_size`, `llama_cpp_dir`,
-`hipfire_bin`, `gguf_dtype`. Chaque champ est facultatif ; une couche ne dit que ce qu'elle sait.
+`mistralrs_dir`, `mistralrs_bin`, `hipfire_bin`, `hipfire_url`, `gguf_dtype`. Chaque champ est
+facultatif ; une couche ne dit que ce qu'elle sait.
 
 ```text
 option de la ligne de commande  >  "backend" de pipeline.json  >  config.toml utilisateur  >  défaut
 ```
 
 Les défauts sans configuration sont ceux d'avant : `bench eval` garde `llama`, `bench refusal` et
-`pipeline` gardent `native`. Deux règles :
+`pipeline` gardent `native`. mistral.rs devient le défaut par la configuration : `backend detect
+--save` l'écrit quand il le trouve, et une commande ne sonde jamais la machine d'elle-même (un run
+reste reproductible, un job repris garde son backend). Trois règles :
 
-- `gpu_layers` et `batch_size` du fichier utilisateur ne valent que pour `llama-server` et
-  `hipfire` : ils ne changent pas le découpage en lots du moteur natif. Une option de la ligne de
-  commande, elle, s'applique toujours.
-- `$LLAMA_CPP_DIR` reste entre l'option `--llama-cpp-dir` et le fichier utilisateur.
+- `gpu_layers` et `batch_size` du fichier utilisateur ne valent que pour les serveurs
+  (`mistralrs`, `llama-server`, `hipfire`) : ils ne changent pas le découpage en lots du moteur
+  natif. Une option de la ligne de commande, elle, s'applique toujours. `gpu_layers` ne concerne
+  que `llama-server`.
+- `$LLAMA_CPP_DIR` reste entre l'option `--llama-cpp-dir` et le fichier utilisateur, comme
+  `$MISTRALRS_DIR` pour `--mistralrs-dir`.
+- `mistralrs_bin` donné, c'est ce fichier et lui seul : absent, la commande s'arrête au lieu d'en
+  prendre un autre dans le `PATH`.
 
 Options concernées : `--backend`, `--gpu-layers`, `--batch-size`, `--llama-cpp-dir`,
-`--hipfire-bin` (`bench eval`, `bench refusal`, `pipeline plan`, `pipeline run`) et `--gguf-dtype`
-(`bench eval`, `bench refusal`).
+`--mistralrs-dir`, `--mistralrs-bin`, `--hipfire-bin`, `--hipfire-url` (`bench eval`,
+`bench refusal`, `pipeline plan`, `pipeline run`) et `--gguf-dtype` (`bench eval`, `bench refusal`).
 
 ## 3. Configuration persistante
 
@@ -50,8 +58,10 @@ Fichier `config.toml` :
 
 ```toml
 # weight-surgeon: backend d'inférence
-default_backend = "llama-server"
+default_backend = "mistralrs"
 llama_cpp_dir = "C:\\Users\\<vous>\\tools\\llama-vulkan"
+mistralrs_bin = "C:\\Users\\<vous>\\tools\\mistral.rs\\mistralrs-server.exe"
+hipfire_url = "http://127.0.0.1:11435"
 gpu_layers = 99
 batch_size = 1
 gguf_dtype = "f16"
@@ -82,23 +92,33 @@ surgeon backend detect --save   # écrit la recommandation comme configuration u
 surgeon backend show            # le fichier, et le backend qui en résulte
 ```
 
-La sonde cherche `llama-server` (dossier configuré, `$LLAMA_CPP_DIR`, `PATH`, puis
-`~/tools/llama-vulkan`), lance `llama-server --list-devices` (délai de 30 s) et cherche `hipfire`. Elle
-recommande `llama-server` avec `gpu_layers = 99` quand un GPU est listé, sinon `native`. `hipfire`
-n'est jamais recommandé. Exemple réel (Radeon RX 7600 XT) :
+La sonde cherche mistral.rs (`mistralrs_bin`, sinon `mistralrs-server` puis `mistralrs` dans
+`mistralrs_dir`, `$MISTRALRS_DIR`, puis le `PATH`), `llama-server` (dossier configuré,
+`$LLAMA_CPP_DIR`, `PATH`, puis `~/tools/llama-vulkan`) et lance `llama-server --list-devices` (délai
+de 30 s), puis interroge hipfire (section 7). Elle recommande, dans l'ordre : `mistralrs` quand il
+est installé ; `llama-server` avec `gpu_layers = 99` quand un GPU est listé ; sinon `native`.
+`hipfire` n'est jamais recommandé. Les moteurs trouvés sont tous enregistrés (`llama_cpp_dir`,
+`mistralrs_bin`, `hipfire_bin`) : un `--backend llama-server` explicite les retrouve ensuite.
+Exemple (Radeon RX 7600 XT, sans mistral.rs) :
 
 ```text
+[BACKEND]  mistral.rs introuvable
 [BACKEND]  llama-server C:\Users\<vous>\tools\llama-vulkan\llama-server.exe
   Vulkan0  AMD Radeon RX 7600 XT (16368 Mio)
-[BACKEND]  hipfire : hipfire cible Linux avec ROCm (Windows et WSL2 non testés par ses auteurs)
+[BACKEND]  hipfire : hipfire introuvable : donnez --hipfire-bin ou --hipfire-url ...
 [BACKEND]  recommandé : llama-server (Vulkan, ngl=99, batch=1) (llama-server voit AMD Radeon RX 7600 XT (Vulkan) : tous les calques sur le GPU)
 ```
+
+`surgeon backend show` ajoute un avertissement, sans échouer, quand le backend configuré ne pourra
+pas tourner (mistral.rs introuvable, démon hipfire injoignable) ou faussera les mesures (hipfire
+qui n'expose que `/v1/chat/completions`).
 
 **API pour une interface graphique.** Rien n'est propre au terminal :
 
 - Rust : `weight_surgeon::backend::detect_hardware_and_backends(&BackendConfig) -> BackendReport`
-  (`os`, `llama { server, dir, devices[], error }`, `hipfire { binary, supported_os, note }`,
-  `recommended`, `reason`) ; `load_user_config()`, `save_to(path, &config)`, `user_config_path()` ;
+  (`os`, `mistralrs { binary }`, `llama { server, dir, devices[], error }`, `hipfire { binary,
+  note }`, `recommended`, `reason`) ; `load_user_config()`, `save_to(path, &config)`,
+  `user_config_path()` ;
   `BackendConfig` est `Serialize` / `Deserialize` (JSON : `{"backend":"llama-server",...}`, champs
   absents omis, champ inconnu refusé).
 - Sans lier la bibliothèque : `surgeon --json backend detect` et `surgeon --json backend show`, ou
@@ -106,7 +126,10 @@ n'est jamais recommandé. Exemple réel (Radeon RX 7600 XT) :
 
 Parcours conseillé au premier lancement : `detect` ; montrer `report.llama.devices` et
 `report.reason` ; sur confirmation, `detect --save` (ou `save_to` avec la configuration que
-l'utilisateur a modifiée). Ensuite aucune option de backend n'est nécessaire.
+l'utilisateur a modifiée). Ensuite aucune option de backend n'est nécessaire. `crates/surgeon-gui`
+suit ce parcours : la sonde tourne en tâche de fond, pré-remplit le formulaire (backend
+recommandé, `llama_cpp_dir`, `mistralrs_bin`) et ne change plus le backend dès que l'utilisateur
+en a cliqué un ; `hipfire` y est sélectionnable sur tout système.
 
 ## 5. `llama-server` : GPU, conversion, GGUF temporaire
 
@@ -141,26 +164,57 @@ l'utilisateur a modifiée). Ensuite aucune option de backend n'est nécessaire.
   noyaux) : comparez des taux avec leurs intervalles. Dans un pipeline, avant et après le patch
   tournent sur le même moteur.
 
-## 6. `hipfire` : ce qui est modélisé et ce qui ne l'est pas
+## 6. `mistralrs` : le dossier SafeTensors sans conversion
+
+Doc lue le 2026-11-13 : deux lignes de commande existent selon la version, et `surgeon` choisit
+d'après le `--help` du binaire installé (sous-commande `serve`, sinon `plain` / `gguf`), chaque
+option venant de l'aide du niveau qui la liste. Rien n'est deviné ; une version qui ne liste pas
+ces options est refusée avec son nom.
+
+```text
+mistralrs        --seed 42 serve -p <port> --host 127.0.0.1 --max-seqs <batch> -m <dossier>
+mistralrs-server --port <port> --serve-ip 127.0.0.1 --seed 42 --max-seqs <batch> plain -m <dossier>
+un GGUF :        ... serve|gguf ... -m <dossier parent> -f <fichier.gguf>
+```
+
+- **Sans conversion.** Le dossier SafeTensors (le modèle patché, une copie de travail du
+  pipeline) est passé tel quel : aucun GGUF temporaire, aucun `gguf_dtype`.
+- **GPU.** Celui du build de mistral.rs (CUDA, Metal...) ; `--cpu` n'est jamais passé. Le serveur
+  écoute en boucle locale seulement ; il est tué avec le bench.
+- **Décodage.** Requêtes `/v1/completions` (le prompt brut : le gabarit du bench reste le seul),
+  `temperature = 0`, `top_p = 1`, graine 42 globale et par requête, `model = "default"`. Les réglages
+  hors OpenAI (`top_k`, `min_p`, `repetition_penalty`) ne sont envoyés que s'ils sont actifs.
+- **Non vérifié sur une vraie installation.** Les deux formes sont testées contre un faux serveur
+  (`examples/fake_llama_server.rs`), pas contre mistral.rs lui-même : à valider sur la machine
+  cible avec `bench eval` sur quelques questions avant un pipeline.
+
+## 7. `hipfire` : un démon, sur tout système
 
 Lu le 2026-11-13 dans le README du projet : binaire `hipfire`, sous-commandes `pull`, `run`, `chat`,
 `serve`, `bench`, `quantize` ; démon OpenAI-compatible sur `127.0.0.1:11435`
-(`/v1/chat/completions` avec `model`, `messages`, `max_tokens`) ; Linux avec ROCm 6, « Windows et WSL2
-non testés sur GPU » ; formats quantifiés propres (`hipfire quantize`) ; Qwen2.5 absent de la liste.
+(`/v1/chat/completions` avec `model`, `messages`, `max_tokens`, et `/v1/models`) ; Linux avec
+ROCm 6, « Windows et WSL2 non testés sur GPU » ; modèles nommés par étiquette ou produits par
+`hipfire quantize`.
 
-`--backend hipfire` (ou `default_backend = "hipfire"`) est donc reconnu partout (CLI, `pipeline.json`,
-MCP), vérifié avant tout calcul, et refusé avec un message qui dit pourquoi et quoi faire :
+`--backend hipfire` (ou `default_backend = "hipfire"`) est accepté sur tout système, Windows
+compris. `surgeon` ne lance pas le démon, il s'y connecte :
 
-- hors Linux : « moteur HIP/ROCm pour Linux, non supporté sur windows... Utilisez --backend
-  llama-server (Vulkan, llama.cpp) ou native » (une RX 7600 XT, `gfx1102`, passe par Vulkan) ;
-- sous Linux sans le binaire : `--hipfire-bin` (ou `hipfire_bin`) ou le `PATH` ;
-- avec le binaire : le pilote n'est pas branché. Le bench envoie des prompts déjà rendus par son
-  gabarit, avec une graine et un décodage glouton ; un endpoint de chat appliquerait un second gabarit
-  et la documentation de hipfire ne mentionne ni graine ni glouton, donc les mesures ne seraient pas
-  comparables. Le pilote se branche sur `Backend::Hipfire` (`bench_generator` dans `src/app.rs`)
-  dès qu'un endpoint de complétion brute pourra être validé sur une machine Linux ROCm.
+1. **Où.** `hipfire_url` (`--hipfire-url`, boucle locale seulement : `http://127.0.0.1:<port>` ou
+   `http://localhost:<port>`), sinon `127.0.0.1:11435` quand le binaire est trouvé
+   (`hipfire_bin` / `--hipfire-bin`, sinon le `PATH`). Ni l'un ni l'autre : erreur qui nomme ces
+   réglages et `--backend mistralrs, llama-server ou native`.
+2. **Quoi.** Une requête vide sur `/v1/completions`, puis sur `/v1/chat/completions` : une route
+   qui ne répond pas 404 ou 405 existe. Démon injoignable : « lancez `hipfire serve` ».
+3. **Comment.** `/v1/completions` garde le prompt brut. Si seul `/v1/chat/completions` existe, le
+   run continue, avec un avertissement (`backend show` et le bench) : le gabarit de chat de
+   hipfire s'ajoute à celui du bench et aucune graine n'est documentée, donc les mesures ne sont ni
+   reproductibles ni comparables aux autres backends.
 
-## 7. Pipeline
+Le champ `model` des requêtes est le nom du modèle donné au bench (son dossier, ou son fichier sans
+extension) : le démon doit connaître un modèle sous ce nom. Comme pour mistral.rs, seul un faux
+démon l'a vérifié ici.
+
+## 8. Pipeline
 
 `pipeline.json` accepte un bloc `backend` (mêmes champs que `config.toml`) ; les options de
 `pipeline plan` et `pipeline run` passent devant, puis le fichier utilisateur. Le résultat est
@@ -176,14 +230,17 @@ pour les piliers `kl` et `logits` (`calibration`), le backend du job pour les pi
 serveur, payés à chaque mesure). `estimated_secs` additionne les deux, chacun à son débit. Un
 moteur sans travail n'est pas lancé ; `--no-calibration` ne lance rien. Le rapport donne le moteur réel :
 `results.backend`, `manifest.backend` et `plan.backend`, par exemple
-`llama-server (Vulkan, ngl=99, batch=1)`, `native-cpu`. Les rapports de `bench eval` et
+`llama-server (Vulkan, ngl=99, batch=1)`, `mistralrs (batch=1)`, `native-cpu`. Avant tout calcul,
+`pipeline run` refuse un backend introuvable (mistral.rs absent, hipfire sans binaire ni URL).
+Les rapports de `bench eval` et
 `bench refusal` ajoutent `generation.backend_detail` quand ils portent un bloc `generation`.
 
 **MCP.** Les outils `surgeon_bench` et `surgeon_pipeline` appliquent le fichier utilisateur de
 l'opérateur, jamais un chemin de binaire donné par l'agent : `llama_cpp_dir` d'un argument ou d'un
-`pipeline.json` reste soumis au bac à sable, `hipfire_bin` n'est pas un argument MCP.
+`pipeline.json` reste soumis au bac à sable ; `mistralrs_dir`, `mistralrs_bin`, `hipfire_bin` et
+`hipfire_url` ne sont pas des arguments MCP. L'agent peut choisir `backend: "mistralrs"`.
 
-## 8. Mesure réelle (2026-11-13)
+## 9. Mesure réelle (2026-11-13)
 
 Radeon RX 7600 XT (16 Go, Vulkan), Qwen2.5-0.5B-Instruct, configuration utilisateur écrite par
 `surgeon backend detect --save`, aucune option de backend ni `$LLAMA_CPP_DIR` sur la ligne de commande.

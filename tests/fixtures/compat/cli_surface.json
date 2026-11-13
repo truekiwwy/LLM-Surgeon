@@ -2563,7 +2563,8 @@
                 "native",
                 "llama-completion",
                 "llama-server",
-                "hipfire"
+                "hipfire",
+                "mistralrs"
               ],
               "required": false,
               "short": null,
@@ -2981,6 +2982,42 @@
               "action": "Set",
               "aliases": null,
               "default_values": [],
+              "env": "MISTRALRS_DIR",
+              "global": false,
+              "hidden": false,
+              "id": "mistralrs_dir",
+              "long": "mistralrs-dir",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MISTRALRS_DIR"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "mistralrs_bin",
+              "long": "mistralrs-bin",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MISTRALRS_BIN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
               "env": null,
               "global": false,
               "hidden": false,
@@ -2993,6 +3030,24 @@
               "short": null,
               "value_names": [
                 "HIPFIRE_BIN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "hipfire_url",
+              "long": "hipfire-url",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "HIPFIRE_URL"
               ]
             },
             {
@@ -3709,7 +3764,8 @@
                 "native",
                 "llama-completion",
                 "llama-server",
-                "hipfire"
+                "hipfire",
+                "mistralrs"
               ],
               "required": false,
               "short": null,
@@ -3953,6 +4009,42 @@
               "action": "Set",
               "aliases": null,
               "default_values": [],
+              "env": "MISTRALRS_DIR",
+              "global": false,
+              "hidden": false,
+              "id": "mistralrs_dir",
+              "long": "mistralrs-dir",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MISTRALRS_DIR"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "mistralrs_bin",
+              "long": "mistralrs-bin",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MISTRALRS_BIN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
               "env": null,
               "global": false,
               "hidden": false,
@@ -3965,6 +4057,24 @@
               "short": null,
               "value_names": [
                 "HIPFIRE_BIN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "hipfire_url",
+              "long": "hipfire-url",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "HIPFIRE_URL"
               ]
             },
             {
@@ -6532,7 +6642,8 @@
                 "native",
                 "llama-completion",
                 "llama-server",
-                "hipfire"
+                "hipfire",
+                "mistralrs"
               ],
               "required": false,
               "short": null,
@@ -6598,6 +6709,42 @@
               "action": "Set",
               "aliases": null,
               "default_values": [],
+              "env": "MISTRALRS_DIR",
+              "global": false,
+              "hidden": false,
+              "id": "mistralrs_dir",
+              "long": "mistralrs-dir",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MISTRALRS_DIR"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "mistralrs_bin",
+              "long": "mistralrs-bin",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MISTRALRS_BIN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
               "env": null,
               "global": false,
               "hidden": false,
@@ -6610,6 +6757,24 @@
               "short": null,
               "value_names": [
                 "HIPFIRE_BIN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "hipfire_url",
+              "long": "hipfire-url",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "HIPFIRE_URL"
               ]
             },
             {
@@ -6809,7 +6974,8 @@
                 "native",
                 "llama-completion",
                 "llama-server",
-                "hipfire"
+                "hipfire",
+                "mistralrs"
               ],
               "required": false,
               "short": null,
@@ -6875,6 +7041,42 @@
               "action": "Set",
               "aliases": null,
               "default_values": [],
+              "env": "MISTRALRS_DIR",
+              "global": false,
+              "hidden": false,
+              "id": "mistralrs_dir",
+              "long": "mistralrs-dir",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MISTRALRS_DIR"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "mistralrs_bin",
+              "long": "mistralrs-bin",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "MISTRALRS_BIN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
               "env": null,
               "global": false,
               "hidden": false,
@@ -6887,6 +7089,24 @@
               "short": null,
               "value_names": [
                 "HIPFIRE_BIN"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "hipfire_url",
+              "long": "hipfire-url",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "HIPFIRE_URL"
               ]
             },
             {

@@ -16,7 +16,7 @@ mod support;
 
 use support::{fake_server, server_name};
 use weight_surgeon::eval::sampling::{sequence_seed, SamplingParams};
-use weight_surgeon::eval::server::{LlamaServerGenerator, ServerOptions};
+use weight_surgeon::eval::server::{ServerGenerator, ServerOptions};
 use weight_surgeon::eval::{Decoding, EvalError, GenJob, TextGenerator};
 
 /// A copy of the fake as `llama-server` in its own directory, with its script.
@@ -52,10 +52,10 @@ impl Fake {
 
     /// Retried while the executable is busy (ETXTBSY, os error 26): only the copy fallback
     /// of `new` can meet it, for the time a concurrently forked child takes to exec.
-    fn start(&self, opts: &ServerOptions) -> weight_surgeon::eval::Result<LlamaServerGenerator> {
+    fn start(&self, opts: &ServerOptions) -> weight_surgeon::eval::Result<ServerGenerator> {
         let mut attempts = 0;
         loop {
-            let started = LlamaServerGenerator::start(
+            let started = ServerGenerator::start(
                 &self.binary(),
                 &self.path("model.gguf"),
                 opts,
@@ -105,7 +105,7 @@ fn job(prompt: &str, id: u64) -> GenJob {
     }
 }
 
-fn whole(g: &mut LlamaServerGenerator, prompt: &str) -> weight_surgeon::eval::Result<String> {
+fn whole(g: &mut ServerGenerator, prompt: &str) -> weight_surgeon::eval::Result<String> {
     g.generate(prompt, 64, &mut |_| ControlFlow::Continue(()))
         .map(|o| o.text)
 }

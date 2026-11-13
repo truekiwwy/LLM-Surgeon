@@ -372,8 +372,12 @@ pub enum Backend {
     /// llama.cpp `llama-server` : un serveur local, requêtes concurrentes, GPU selon le build.
     #[serde(rename = "llama-server")]
     LlamaServer,
-    /// hipfire (GPU AMD, HIP/ROCm, Linux) : moteur externe facultatif, voir `crate::backend`.
+    /// hipfire (GPU AMD, HIP/ROCm) : démon externe facultatif, voir `crate::backend`.
     Hipfire,
+    /// mistral.rs (`mistralrs-server` / `mistralrs serve`) : serveur local qui charge le
+    /// dossier SafeTensors directement (ou un GGUF), GPU selon le build.
+    #[value(name = "mistralrs")]
+    MistralRs,
 }
 
 impl Backend {
@@ -384,6 +388,7 @@ impl Backend {
             Backend::LlamaCompletion => "llama-completion",
             Backend::LlamaServer => "llama-server",
             Backend::Hipfire => "hipfire",
+            Backend::MistralRs => "mistralrs",
         }
     }
 

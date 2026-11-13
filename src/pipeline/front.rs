@@ -180,8 +180,17 @@ pub fn worker_command(
     if let Some(dir) = &flags.llama_cpp_dir {
         cmd.arg("--llama-cpp-dir").arg(dir);
     }
-    if let Some(bin) = &flags.hipfire_bin {
-        cmd.arg("--hipfire-bin").arg(bin);
+    for (flag, path) in [
+        ("--mistralrs-dir", &flags.mistralrs_dir),
+        ("--mistralrs-bin", &flags.mistralrs_bin),
+        ("--hipfire-bin", &flags.hipfire_bin),
+    ] {
+        if let Some(path) = path {
+            cmd.arg(flag).arg(path);
+        }
+    }
+    if let Some(url) = &flags.hipfire_url {
+        cmd.arg("--hipfire-url").arg(url);
     }
     if watch_stdin {
         cmd.arg("--watch-stdin");

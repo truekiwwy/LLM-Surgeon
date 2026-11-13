@@ -19,10 +19,13 @@ pub struct BackendDialog {
     pub open: bool,
     /// The user file (`None`: disabled by the environment, nothing can be saved).
     path: Option<PathBuf>,
-    /// What the user file holds; its other fields (`hipfire_bin`, `gguf_dtype`) are kept.
+    /// What the user file holds; its other fields (`hipfire_bin`, `gguf_dtype`...) are kept.
     saved: BackendConfig,
     backend: Backend,
+    /// The user picked a backend: the probe, answering later, no longer changes it.
+    touched: bool,
     llama_cpp_dir: String,
+    mistralrs_bin: String,
     gpu_layers: String,
     batch_size: String,
     /// Why the last load or save failed.
@@ -52,11 +55,9 @@ impl BackendDialog {
             open,
             path,
             backend: saved.backend.unwrap_or(Backend::Native),
-            llama_cpp_dir: saved
-                .llama_cpp_dir
-                .as_ref()
-                .map(|d| d.display().to_string())
-                .unwrap_or_default(),
+            touched: false,
+            llama_cpp_dir: shown(&saved.llama_cpp_dir),
+            mistralrs_bin: shown(&saved.mistralrs_bin),
             gpu_layers: saved.gpu_layers.unwrap_or(GPU_LAYERS).to_string(),
             batch_size: saved.batch_size.unwrap_or(BATCH_SIZE).to_string(),
             saved,
@@ -69,15 +70,17 @@ impl BackendDialog {
         &self.saved
     }
 
-    /// Fills what the user file leaves empty from the probe (never overrides a saved value).
+    /// Fills what the user file and the user left empty from the probe (never overrides a
+    /// saved value, nor a backend already clicked).
     pub fn prefill(&mut self, report: &BackendReport) {
-        if self.saved.backend.is_none() {
+        if self.saved.backend.is_none() && !self.touched {
             self.backend = report.recommended.backend.unwrap_or(Backend::Native);
         }
         if self.llama_cpp_dir.is_empty() {
-            if let Some(llama) = &report.llama {
-                self.llama_cpp_dir = llama.dir.display().to_string();
-            }
+            self.llama_cpp_dir = shown(&report.llama.as_ref().map(|l| l.dir.clone()));
+        }
+        if self.mistralrs_bin.is_empty() {
+            self.mistralrs_bin = shown(&report.mistralrs.as_ref().map(|m| m.binary.clone()));
         }
     }
 
@@ -95,12 +98,13 @@ impl BackendDialog {
             .ok()
             .filter(|&b| b >= 1)
             .ok_or_else(|| format!("batch_size « {} » : entier >= 1 attendu", self.batch_size))?;
-        let dir = self.llama_cpp_dir.trim();
+        let path = |text: &str| Some(text.trim()).filter(|t| !t.is_empty()).map(PathBuf::from);
         Ok(BackendConfig {
             backend: Some(self.backend),
             gpu_layers: Some(gpu_layers),
             batch_size: Some(batch_size),
-            llama_cpp_dir: (!dir.is_empty()).then(|| PathBuf::from(dir)),
+            llama_cpp_dir: path(&self.llama_cpp_dir),
+            mistralrs_bin: path(&self.mistralrs_bin),
             ..self.saved.clone()
         })
     }
@@ -153,34 +157,35 @@ impl BackendDialog {
         let gpu = report
             .and_then(|r| r.llama.as_ref())
             .and_then(|l| l.devices.first());
+        let mistralrs_note = match report.and_then(|r| r.mistralrs.as_ref()) {
+            Some(_) => "recommandé · mistral.rs, dossier SafeTensors tel quel, GPU selon le build",
+            None => "mistral.rs (mistralrs-server), dossier SafeTensors tel quel, GPU selon le build",
+        };
         let llama_note = match gpu {
-            Some(gpu) => format!("recommandé · {} ({})", gpu.name, gpu.api()),
+            Some(gpu) => format!("{} ({}) via llama.cpp", gpu.name, gpu.api()),
             None => "llama.cpp, GPU selon le build (Vulkan, CUDA, Metal)".into(),
         };
-        ui.radio_value(&mut self.backend, Backend::LlamaServer, "llama-server");
-        ui.label(RichText::new(llama_note).small().color(theme::DIM));
-
-        // Only the probe knows the OS verdict; until it answers, hipfire stays disabled.
-        let hipfire_ok = report.is_some_and(|r| r.hipfire.supported_os);
-        ui.add_enabled_ui(hipfire_ok, |ui| {
-            ui.radio_value(&mut self.backend, Backend::Hipfire, "hipfire");
-        });
+        // The probe may still be running: no choice waits for it, and a click is final.
         let hipfire_note = report.map_or("détection en cours".into(), |r| r.hipfire.note.clone());
-        ui.label(RichText::new(hipfire_note).small().color(match hipfire_ok {
-            true => theme::DIM,
-            false => theme::WARN,
-        }));
-
-        ui.radio_value(&mut self.backend, Backend::Native, "native");
-        ui.label(
-            RichText::new("CPU, Rust pur, dossier SafeTensors")
-                .small()
-                .color(theme::DIM),
-        );
+        for (backend, name, note) in [
+            (Backend::MistralRs, "mistralrs", mistralrs_note.to_string()),
+            (Backend::LlamaServer, "llama-server", llama_note),
+            (Backend::Hipfire, "hipfire", hipfire_note),
+            (Backend::Native, "native", "CPU, Rust pur, dossier SafeTensors".into()),
+        ] {
+            if ui.radio_value(&mut self.backend, backend, name).changed() {
+                self.touched = true;
+            }
+            ui.label(RichText::new(note).small().color(theme::DIM));
+        }
     }
 
     fn fields(&mut self, ui: &mut egui::Ui) {
-        let gpu = matches!(self.backend, Backend::LlamaServer | Backend::Hipfire);
+        let llama = self.backend == Backend::LlamaServer;
+        let server = matches!(
+            self.backend,
+            Backend::LlamaServer | Backend::Hipfire | Backend::MistralRs
+        );
         Grid::new("backend-fields")
             .num_columns(2)
             .spacing([12.0, 6.0])
@@ -192,9 +197,16 @@ impl BackendDialog {
                         .desired_width(300.0),
                 );
                 ui.end_row();
+                ui.label(theme::mono("mistralrs_bin"));
+                ui.add(
+                    TextEdit::singleline(&mut self.mistralrs_bin)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(300.0),
+                );
+                ui.end_row();
                 ui.label(theme::mono("gpu_layers"));
                 ui.add_enabled(
-                    gpu,
+                    llama,
                     TextEdit::singleline(&mut self.gpu_layers)
                         .font(egui::TextStyle::Monospace)
                         .desired_width(60.0),
@@ -202,7 +214,7 @@ impl BackendDialog {
                 ui.end_row();
                 ui.label(theme::mono("batch_size"));
                 ui.add_enabled(
-                    gpu,
+                    server,
                     TextEdit::singleline(&mut self.batch_size)
                         .font(egui::TextStyle::Monospace)
                         .desired_width(60.0),
@@ -238,6 +250,13 @@ impl BackendDialog {
             ui.label(RichText::new(e).small().color(theme::BAD));
         }
     }
+}
+
+/// A path as the form shows it, empty when unset.
+fn shown(path: &Option<PathBuf>) -> String {
+    path.as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -291,6 +310,45 @@ mod tests {
         form.batch_size = "4".into();
         form.gpu_layers = "-1".into();
         assert!(form.to_config().unwrap_err().contains("gpu_layers"));
+    }
+
+    fn report() -> BackendReport {
+        use weight_surgeon::backend::detect::{HipfireDetection, MistralRsDetection};
+        BackendReport {
+            os: "windows",
+            mistralrs: Some(MistralRsDetection {
+                binary: PathBuf::from("C:/tools/mistralrs-server.exe"),
+            }),
+            llama: None,
+            hipfire: HipfireDetection {
+                binary: None,
+                note: "hipfire introuvable".into(),
+            },
+            recommended: BackendConfig {
+                backend: Some(Backend::MistralRs),
+                ..Default::default()
+            },
+            reason: "mistral.rs".into(),
+        }
+    }
+
+    #[test]
+    fn the_probe_fills_the_form_until_the_user_picks() {
+        let mut form = dialog(BackendConfig::default());
+        form.prefill(&report());
+        assert_eq!(form.backend, Backend::MistralRs);
+        assert_eq!(form.mistralrs_bin, "C:/tools/mistralrs-server.exe");
+        assert_eq!(
+            form.to_config().unwrap().mistralrs_bin,
+            Some(PathBuf::from("C:/tools/mistralrs-server.exe"))
+        );
+
+        // hipfire clicked before the probe answered: the answer does not take it back.
+        let mut form = dialog(BackendConfig::default());
+        form.backend = Backend::Hipfire;
+        form.touched = true;
+        form.prefill(&report());
+        assert_eq!(form.backend, Backend::Hipfire);
     }
 
     #[test]

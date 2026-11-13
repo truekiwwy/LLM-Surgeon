@@ -733,6 +733,12 @@
                     "hipfire"
                   ],
                   "type": "string"
+                },
+                {
+                  "enum": [
+                    "mistralrs"
+                  ],
+                  "type": "string"
                 }
               ]
             },

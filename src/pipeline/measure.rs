@@ -80,7 +80,7 @@ fn native(model: &Path, deps: &AppDeps) -> bench::Result<Box<dyn TextGenerator>>
     Ok(Box::new(generator))
 }
 
-/// The generator of the job's backend: native without one, else llama-server on the GPU.
+/// The generator of the job's backend: native without one, else its GPU server.
 /// The same factory as bench eval and bench refusal (conversion to a temporary GGUF,
 /// server started here and killed with the generator).
 pub(super) fn generator(
@@ -99,7 +99,7 @@ pub(super) fn generator(
         cfg.backend.unwrap_or_default(),
         generation,
         &None,
-        cfg.llama_cpp_dir.as_deref(),
+        cfg,
         "pipeline",
         deps,
         &sink,

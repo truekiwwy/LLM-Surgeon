@@ -19,7 +19,7 @@
 //! - 3: execution error, original intact (never touched or restored from backup)
 //! - 4: CRITICAL, rollback failed or model left partially patched without backup
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::builder::{PossibleValue, PossibleValuesParser};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -158,20 +158,20 @@ pub struct PipelinePlanArgs {
 /// gsm8k) generate; the drift pillars always read native logits.
 #[derive(Debug, Clone, Default, Args)]
 pub struct BackendArgs {
-    /// native (CPU), llama-server (GPU through llama.cpp) or hipfire (AMD, Linux).
+    /// native (CPU), mistralrs (mistral.rs on the SafeTensors folder, GPU by its build),
+    /// llama-server (GPU through llama.cpp) or hipfire (an AMD HIP daemon).
     #[arg(long, value_enum)]
     pub backend: Option<crate::bench::score::Backend>,
     /// llama-server: layers offloaded to the GPU (-ngl).
     #[arg(long)]
     pub gpu_layers: Option<u32>,
-    /// llama-server: concurrent requests and slots.
+    /// GPU servers: concurrent requests and slots.
     #[arg(long)]
     pub batch_size: Option<usize>,
     #[arg(long, env = "LLAMA_CPP_DIR")]
     pub llama_cpp_dir: Option<PathBuf>,
-    /// hipfire: the binary.
-    #[arg(long)]
-    pub hipfire_bin: Option<PathBuf>,
+    #[command(flatten)]
+    pub engines: EngineArgs,
 }
 
 impl BackendArgs {
@@ -180,10 +180,48 @@ impl BackendArgs {
             backend: self.backend,
             gpu_layers: self.gpu_layers,
             batch_size: self.batch_size,
-            llama_cpp_dir: self.llama_cpp_dir.clone(),
-            hipfire_bin: self.hipfire_bin.clone(),
-            gguf_dtype: None,
+            ..self.engines.config(self.llama_cpp_dir.as_deref())
         }
+    }
+}
+
+/// Where the external engines other than llama.cpp are. Default: the user configuration,
+/// then their usual places.
+#[derive(Debug, Clone, Default, Args)]
+pub struct EngineArgs {
+    /// mistralrs: the folder of mistralrs-server (or mistralrs).
+    #[arg(long, env = "MISTRALRS_DIR")]
+    pub mistralrs_dir: Option<PathBuf>,
+    /// mistralrs: the binary itself (wins over --mistralrs-dir and the PATH).
+    #[arg(long)]
+    pub mistralrs_bin: Option<PathBuf>,
+    /// hipfire: the binary (default: the PATH); found, its daemon is 127.0.0.1:11435.
+    #[arg(long)]
+    pub hipfire_bin: Option<PathBuf>,
+    /// hipfire: a daemon already running, http://127.0.0.1:<port> (loopback only).
+    #[arg(long)]
+    pub hipfire_url: Option<String>,
+}
+
+impl EngineArgs {
+    /// These locations, and the llama.cpp folder, as a configuration layer.
+    pub fn config(&self, llama_cpp_dir: Option<&Path>) -> crate::backend::BackendConfig {
+        crate::backend::BackendConfig {
+            llama_cpp_dir: llama_cpp_dir.map(Path::to_path_buf),
+            mistralrs_dir: self.mistralrs_dir.clone(),
+            mistralrs_bin: self.mistralrs_bin.clone(),
+            hipfire_bin: self.hipfire_bin.clone(),
+            hipfire_url: self.hipfire_url.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// Takes the locations of a resolved configuration.
+    pub fn set(&mut self, config: &crate::backend::BackendConfig) {
+        self.mistralrs_dir.clone_from(&config.mistralrs_dir);
+        self.mistralrs_bin.clone_from(&config.mistralrs_bin);
+        self.hipfire_bin.clone_from(&config.hipfire_bin);
+        self.hipfire_url.clone_from(&config.hipfire_url);
     }
 }
 
@@ -487,7 +525,8 @@ pub struct BenchEvalArgs {
     pub dataset: PathBuf,
     /// Generator: llama (llama.cpp on a GGUF; also llama-completion), llama-server (GPU
     /// through llama.cpp), native (pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors
-    /// directory) or hipfire (AMD, Linux). Default: the user configuration, else llama.
+    /// directory), mistralrs (mistral.rs on that directory as is, GPU by its build) or
+    /// hipfire (an AMD HIP daemon). Default: the user configuration, else llama.
     #[arg(long, value_enum)]
     pub backend: Option<crate::bench::score::Backend>,
     /// Reference model on the same questions (paired comparison).
@@ -559,9 +598,8 @@ pub struct GenerationArgs {
     /// llama-server: context size (-c), shared by its slots.
     #[arg(long)]
     pub ctx_size: Option<u32>,
-    /// hipfire: the binary (default: the user configuration, then the PATH).
-    #[arg(long)]
-    pub hipfire_bin: Option<PathBuf>,
+    #[command(flatten)]
+    pub engines: EngineArgs,
     /// Matrix type of the temporary GGUF of a SafeTensors model: f16 (default) or f32
     /// (lossless from bf16, twice the size).
     #[arg(long, value_enum)]
@@ -657,9 +695,10 @@ pub struct BenchRefusalArgs {
     /// Exit with code 9 when --max-unparsable is exceeded.
     #[arg(long)]
     pub fail_on_warn: bool,
-    /// Generator: native (pure Rust), llama-server or llama-completion (on a GGUF, a
-    /// SafeTensors model converted first; --llama-cpp-dir) or hipfire (AMD, Linux). Default:
-    /// the user configuration, else native.
+    /// Generator: native (pure Rust), mistralrs (mistral.rs on the SafeTensors directory as
+    /// is), llama-server or llama-completion (on a GGUF, a SafeTensors model converted first;
+    /// --llama-cpp-dir) or hipfire (an AMD HIP daemon). Default: the user configuration, else
+    /// native.
     #[arg(long, value_enum)]
     pub backend: Option<crate::bench::score::Backend>,
     #[command(flatten)]
@@ -902,6 +941,7 @@ mod tests {
     use clap::CommandFactory;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        crate::backend::config::clear_machine_env();
         Cli::try_parse_from(std::iter::once("weight-surgeon").chain(args.iter().copied()))
     }
 

@@ -17,7 +17,7 @@ pub(super) const NAMES: [&str; 1] = [TOOL_BACKENDS];
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Arguments de surgeon_backends : aucun. Renvoie les moteurs d'inférence disponibles (native, llama-server et ses GPU, hipfire), la configuration utilisateur et le backend recommandé."
+    description = "Arguments de surgeon_backends : aucun. Renvoie les moteurs d'inférence disponibles (native, mistralrs, llama-server et ses GPU, hipfire), la configuration utilisateur et le backend recommandé."
 )]
 pub struct BackendsToolArgs {}
 
@@ -29,7 +29,7 @@ pub(super) fn definitions() -> Vec<Value> {
         .into_root_schema_for::<BackendsToolArgs>();
     vec![json!({
         "name": TOOL_BACKENDS,
-        "description": "Liste les moteurs d'inférence de la machine : native (CPU), llama-server (GPU Vulkan, CUDA, Metal : périphériques de --list-devices) et hipfire (AMD, Linux), la configuration utilisateur persistante et le backend recommandé. Lecture seule ; à appeler avant surgeon_bench ou surgeon_pipeline pour savoir si un GPU est utilisable.",
+        "description": "Liste les moteurs d'inférence de la machine : native (CPU), mistralrs (mistral.rs : dossier SafeTensors tel quel, GPU selon son build), llama-server (GPU Vulkan, CUDA, Metal : périphériques de --list-devices) et hipfire (démon AMD HIP, tout OS), la configuration utilisateur persistante et le backend recommandé. Lecture seule ; à appeler avant surgeon_bench ou surgeon_pipeline pour savoir si un GPU est utilisable.",
         "inputSchema": serde_json::to_value(schema).unwrap_or(Value::Null),
         "annotations": {
             "title": "Moteurs d'inférence",

@@ -3032,6 +3032,14 @@ fn backend_cli(command: &BackendCommand, io: &mut Io) -> CoreResult {
                 _ => None,
             };
             let mut text = String::new();
+            text.push_str(&format!(
+                "{} mistral.rs {}\n",
+                ui::badge(&ui, "BACKEND"),
+                report
+                    .mistralrs
+                    .as_ref()
+                    .map_or("introuvable".into(), |m| m.binary.display().to_string())
+            ));
             match &report.llama {
                 Some(l) => {
                     text.push_str(&format!(
@@ -3080,7 +3088,7 @@ fn backend_cli(command: &BackendCommand, io: &mut Io) -> CoreResult {
                     .map_or("(désactivée)".into(), |p| p.display().to_string()),
                 crate::backend::describe_config(&user)
             );
-            Ok(Outcome::ok(
+            let mut outcome = Outcome::ok(
                 json!({
                     "path": path,
                     "exists": path.as_ref().is_some_and(|p| p.exists()),
@@ -3088,7 +3096,20 @@ fn backend_cli(command: &BackendCommand, io: &mut Io) -> CoreResult {
                     "effective": crate::backend::describe_config(&user),
                 }),
                 text,
-            ))
+            );
+            // What would stop or skew a run, said now; nothing here blocks.
+            let warning = match user.backend {
+                Some(Backend::Hipfire) => match crate::backend::hipfire::probe(&user) {
+                    Ok(endpoint) => endpoint.warning().map(String::from),
+                    Err(e) => Some(e),
+                },
+                Some(Backend::MistralRs) => crate::backend::mistralrs::locate(&user)
+                    .is_none()
+                    .then(|| crate::backend::mistralrs::not_found(&user)),
+                _ => None,
+            };
+            outcome.warnings.extend(warning);
+            Ok(outcome)
         }
     }
 }
@@ -3161,7 +3182,8 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                     a.llama_cpp_dir.as_deref(),
                 ),
             };
-            core_bench_eval(&req, a.fail_on_warn, deps, &ui, &mut sink)
+            let engines = a.generation.engines.config(a.llama_cpp_dir.as_deref());
+            core_bench_eval(&req, &engines, a.fail_on_warn, deps, &ui, &mut sink)
         }
         BenchCommand::Dump(a) => {
             let prompts = extract::load_prompt_texts(&a.prompts)
@@ -3213,12 +3235,15 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                     min_kappa: a.min_kappa,
                 }),
             };
-            let llama_cpp_dir = a.judge_args.llama_cpp_dir.as_deref();
+            let engines = a
+                .generation
+                .engines
+                .config(a.judge_args.llama_cpp_dir.as_deref());
             core_bench_refusal(
                 &req,
                 refusal_backend,
                 judging.as_ref(),
-                llama_cpp_dir,
+                &engines,
                 a.fail_on_warn,
                 deps,
                 &ui,
@@ -3352,6 +3377,7 @@ fn native_generator(
 /// generation.
 pub fn core_bench_eval(
     req: &EvalRequest,
+    engines: &crate::backend::BackendConfig,
     fail_on_warn: bool,
     deps: &AppDeps,
     ui: &Ui,
@@ -3360,7 +3386,6 @@ pub fn core_bench_eval(
     let sink = RefCell::new(sink);
     req.generation.validate().map_err(|e| bench_failure(&e))?;
     let pool = generation_pool(&req.generation, req.backend, &sink)?;
-    let dir = req.llama_cpp_dir.as_deref();
     let mut make = |gguf: &Path| {
         let tag = "bench-eval";
         bench_generator(
@@ -3368,7 +3393,7 @@ pub fn core_bench_eval(
             req.backend,
             &req.generation,
             &pool,
-            dir,
+            engines,
             tag,
             deps,
             &sink,
@@ -3389,30 +3414,56 @@ pub fn core_bench_eval(
 }
 
 /// A bench generator for `backend`: the native one on a SafeTensors folder (batches,
-/// sampling), `llama-server` or `llama-completion` / `llama-cli` on a GGUF. A SafeTensors
-/// model given to a llama backend is converted to a temporary GGUF, kept as long as the
-/// generator.
+/// sampling), mistral.rs on the model as given (SafeTensors folder or GGUF), a hipfire
+/// daemon, `llama-server` or `llama-completion` / `llama-cli` on a GGUF. A SafeTensors model
+/// given to a llama backend is converted to a temporary GGUF, kept as long as the generator.
+/// `engines` says where the external engines are.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_generator(
     model: &Path,
     backend: Backend,
     generation: &bench::generation::GenOptions,
     pool: &Option<Arc<rayon::ThreadPool>>,
-    llama_cpp_dir: Option<&Path>,
+    engines: &crate::backend::BackendConfig,
     tag: &str,
     deps: &AppDeps,
     sink: &RefCell<&mut dyn ProgressSink>,
 ) -> bench::Result<Box<dyn TextGenerator>> {
-    if backend == Backend::Native {
-        let mut native = native_generator(model, deps, sink)?;
-        native.set_batching(generation.batch_size, generation.jobs, pool.clone());
-        return Ok(Box::new(native));
+    use crate::backend::{hipfire, mistralrs};
+    match backend {
+        Backend::Native => {
+            let mut native = native_generator(model, deps, sink)?;
+            native.set_batching(generation.batch_size, generation.jobs, pool.clone());
+            return Ok(Box::new(native));
+        }
+        Backend::MistralRs => {
+            let binary = mistralrs::locate(engines)
+                .ok_or_else(|| BenchError::BinaryNotFound(mistralrs::not_found(engines)))?;
+            let server = mistralrs::start(
+                &binary,
+                model,
+                bench::score::SEED,
+                &generation.server(),
+                &deps.interrupted,
+            )?;
+            return Ok(Box::new(server));
+        }
+        Backend::Hipfire => {
+            let endpoint = hipfire::probe(engines).map_err(BenchError::InvalidArgument)?;
+            if let Some(warning) = endpoint.warning() {
+                sink.borrow_mut().event(ProgressEvent::Warn(warning.into()));
+            }
+            return Ok(Box::new(crate::eval::server::ServerGenerator::connect(
+                "hipfire",
+                endpoint.port,
+                endpoint.dialect,
+                hipfire::model_name(model),
+                generation.batch_size,
+            )));
+        }
+        _ => {}
     }
-    if backend == Backend::Hipfire {
-        return Err(BenchError::InvalidArgument(
-            crate::backend::hipfire::unavailable(&crate::backend::BackendConfig::default()),
-        ));
-    }
+    let llama_cpp_dir = engines.llama_cpp_dir.as_deref();
     let gguf = crate::eval::ensure_gguf_as(
         model,
         llama_cpp_dir,
@@ -3424,7 +3475,7 @@ pub(crate) fn bench_generator(
     let inner: Box<dyn TextGenerator> = match backend {
         Backend::LlamaServer => {
             let binary = crate::eval::server::locate_server(llama_cpp_dir)?;
-            let server = crate::eval::server::LlamaServerGenerator::start(
+            let server = crate::eval::server::ServerGenerator::start(
                 &binary,
                 gguf.path(),
                 &generation.server(),
@@ -3541,7 +3592,7 @@ pub fn core_bench_refusal(
     req: &RefusalRequest,
     backend: Backend,
     judging: Option<&RefusalJudging>,
-    llama_cpp_dir: Option<&Path>,
+    engines: &crate::backend::BackendConfig,
     fail_on_warn: bool,
     deps: &AppDeps,
     ui: &Ui,
@@ -3555,18 +3606,10 @@ pub fn core_bench_refusal(
         .map_err(|e| bench_failure(&e))?;
     req.generation.validate().map_err(|e| bench_failure(&e))?;
     let pool = generation_pool(&req.generation, backend, &sink)?;
+    let llama_cpp_dir = engines.llama_cpp_dir.as_deref();
     let mut make = |model: &Path| {
         let (tag, generation) = ("bench-refusal", &req.generation);
-        bench_generator(
-            model,
-            backend,
-            generation,
-            &pool,
-            llama_cpp_dir,
-            tag,
-            deps,
-            &sink,
-        )
+        bench_generator(model, backend, generation, &pool, engines, tag, deps, &sink)
     };
     let mut run = bench::refusal::run(req, &mut make, &deps.interrupted, &mut |done, total| {
         sink.borrow_mut()

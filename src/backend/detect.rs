@@ -39,14 +39,20 @@ pub struct LlamaDetection {
 #[derive(Debug, Clone, Serialize)]
 pub struct HipfireDetection {
     pub binary: Option<PathBuf>,
-    /// hipfire targets Linux with ROCm.
-    pub supported_os: bool,
+    /// The daemon's endpoint, or why it cannot be used.
     pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MistralRsDetection {
+    /// `mistralrs-server` or `mistralrs`.
+    pub binary: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BackendReport {
     pub os: &'static str,
+    pub mistralrs: Option<MistralRsDetection>,
     pub llama: Option<LlamaDetection>,
     pub hipfire: HipfireDetection,
     pub recommended: BackendConfig,
@@ -75,7 +81,7 @@ pub fn parse_devices(output: &str) -> Vec<GpuDevice> {
 
 /// The GPUs a `llama-server` build sees; the error when it cannot be asked.
 pub fn list_devices(server: &Path) -> Result<Vec<GpuDevice>, String> {
-    crate::eval::server::capture(server, "--list-devices")
+    crate::eval::server::capture(server, &["--list-devices"])
         .map(|out| parse_devices(&out))
         .map_err(|e| e.to_string())
 }
@@ -106,22 +112,42 @@ fn detect_llama(user: &BackendConfig) -> Option<LlamaDetection> {
     })
 }
 
-/// Probes the machine (llama.cpp and its devices, hipfire) and recommends a backend:
-/// `llama-server` on the GPU when one is usable, the native CPU engine otherwise. hipfire is
-/// never recommended: it is an opt-in AMD engine.
+/// Probes the machine (mistral.rs, llama.cpp and its devices, hipfire) and recommends a
+/// backend: mistral.rs when installed (it reads the SafeTensors folder as is), else
+/// `llama-server` on the GPU when one is usable, else the native CPU engine. hipfire is never
+/// recommended: it is an opt-in AMD daemon. The engines found are recorded either way, so
+/// that an explicit `--backend` finds them.
 pub fn detect_hardware_and_backends(user: &BackendConfig) -> BackendReport {
+    let mistralrs = super::mistralrs::locate(user).map(|binary| MistralRsDetection { binary });
     let llama = detect_llama(user);
     let hipfire = hipfire::detect(user);
     let gpu = llama.as_ref().and_then(|l| l.devices.first());
-    let (recommended, reason) = match (&llama, gpu) {
-        (Some(l), Some(gpu)) => (
+    let found = BackendConfig {
+        llama_cpp_dir: llama.as_ref().map(|l| l.dir.clone()),
+        mistralrs_bin: mistralrs.as_ref().map(|m| m.binary.clone()),
+        hipfire_bin: hipfire.binary.clone(),
+        hipfire_url: user.hipfire_url.clone(),
+        ..Default::default()
+    };
+    let (recommended, reason) = match (&mistralrs, &llama, gpu) {
+        (Some(m), _, _) => (
+            BackendConfig {
+                backend: Some(Backend::MistralRs),
+                batch_size: Some(1),
+                ..found
+            },
+            format!(
+                "mistral.rs ({}) : dossier SafeTensors chargé tel quel, GPU selon son build",
+                m.binary.display()
+            ),
+        ),
+        (None, Some(_), Some(gpu)) => (
             BackendConfig {
                 backend: Some(Backend::LlamaServer),
                 gpu_layers: Some(99),
                 batch_size: Some(1),
-                llama_cpp_dir: Some(l.dir.clone()),
-                hipfire_bin: hipfire.binary.clone(),
                 gguf_dtype: Some(WeightType::F16),
+                ..found
             },
             format!(
                 "llama-server voit {} ({}) : tous les calques sur le GPU",
@@ -129,24 +155,27 @@ pub fn detect_hardware_and_backends(user: &BackendConfig) -> BackendReport {
                 gpu.api()
             ),
         ),
-        (Some(l), None) => (
-            BackendConfig::default(),
+        (None, Some(l), None) => (
+            BackendConfig {
+                backend: Some(Backend::Native),
+                ..found
+            },
             format!(
                 "llama-server ({}) ne voit aucun GPU : moteur natif (CPU)",
                 l.server.display()
             ),
         ),
-        _ => (
-            BackendConfig::default(),
-            "llama-server introuvable : moteur natif (CPU)".into(),
+        (None, None, _) => (
+            BackendConfig {
+                backend: Some(Backend::Native),
+                ..found
+            },
+            "ni mistral.rs ni llama-server : moteur natif (CPU)".into(),
         ),
-    };
-    let recommended = BackendConfig {
-        backend: Some(recommended.backend.unwrap_or(Backend::Native)),
-        ..recommended
     };
     BackendReport {
         os: std::env::consts::OS,
+        mistralrs,
         llama,
         hipfire,
         recommended,
@@ -176,15 +205,36 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_llama_means_native() {
-        // No hint, and an empty PATH / LLAMA_CPP_DIR is not controllable here: the report
-        // must at least be coherent whatever the machine has.
+    fn the_recommendation_follows_what_the_machine_has() {
+        // No hint, and the PATH is not controllable here: the report must at least be
+        // coherent whatever the machine has.
         let report = detect_hardware_and_backends(&BackendConfig::default());
         let backend = report.recommended.backend.unwrap();
-        match report.llama.as_ref().and_then(|l| l.devices.first()) {
-            Some(_) => assert_eq!(backend, Backend::LlamaServer),
-            None => assert_eq!(backend, Backend::Native),
+        let gpu = report.llama.as_ref().and_then(|l| l.devices.first());
+        match (&report.mistralrs, gpu) {
+            (Some(m), _) => {
+                assert_eq!(backend, Backend::MistralRs);
+                assert_eq!(report.recommended.mistralrs_bin.as_ref(), Some(&m.binary));
+            }
+            (None, Some(_)) => assert_eq!(backend, Backend::LlamaServer),
+            (None, None) => assert_eq!(backend, Backend::Native),
         }
         assert_ne!(backend, Backend::Hipfire, "hipfire is opt-in");
+    }
+
+    #[test]
+    fn mistralrs_comes_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("mistralrs-server");
+        std::fs::write(&bin, b"").unwrap();
+        let user = BackendConfig {
+            mistralrs_bin: Some(bin.clone()),
+            ..Default::default()
+        };
+        let report = detect_hardware_and_backends(&user);
+        assert_eq!(report.recommended.backend, Some(Backend::MistralRs));
+        assert_eq!(report.recommended.mistralrs_bin, Some(bin));
+        assert_eq!(report.recommended.batch_size, Some(1));
+        assert!(report.reason.contains("mistral.rs"), "{}", report.reason);
     }
 }

@@ -56,12 +56,17 @@ pub fn resolve_backend(config: &mut PipelineConfig, flags: BackendConfig) -> Res
     match effective.backend {
         Some(Backend::Llama | Backend::LlamaCompletion) => {
             return Err(PipelineError::Config(vec![
-                "backend : native, llama-server ou hipfire".into(),
+                "backend : native, mistralrs, llama-server ou hipfire".into(),
             ]))
         }
+        // Before any work: an engine that cannot be found stops the job now.
         Some(Backend::Hipfire) => {
+            crate::backend::hipfire::port(&effective)
+                .map_err(|e| PipelineError::Config(vec![e]))?;
+        }
+        Some(Backend::MistralRs) if crate::backend::mistralrs::locate(&effective).is_none() => {
             return Err(PipelineError::Config(vec![
-                crate::backend::hipfire::unavailable(&effective),
+                crate::backend::mistralrs::not_found(&effective),
             ]))
         }
         _ => {}

@@ -46,6 +46,12 @@
 //!   view is gone, the native viewer `crates/surgeon-gui` reads the stream. One deliberate
 //!   removal; only the tool schema hash moved. `pipeline plan` gained the output field
 //!   `backend_calibration`, which no reference command prints.
+//! - mistral.rs and hipfire on every OS: the value `mistralrs` of `--backend` and of the
+//!   `backend` of `surgeon_bench`, `--mistralrs-dir` (env `MISTRALRS_DIR`),
+//!   `--mistralrs-bin` and `--hipfire-url` next to `--hipfire-bin` in `bench eval`, `bench
+//!   refusal`, `pipeline plan` and `pipeline run`. Only the tool schema hash moved; no
+//!   existing option, property or output changed. `backend detect` (no reference command)
+//!   reports `mistralrs` and no longer `hipfire.supported_os`.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

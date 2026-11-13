@@ -1353,6 +1353,7 @@ fn effective_generation(
     (
         crate::bench::score::Backend,
         crate::bench::generation::GenOptions,
+        crate::backend::BackendConfig,
     ),
     Outcome,
 > {
@@ -1368,12 +1369,6 @@ fn effective_generation(
     };
     let effective = crate::backend::resolve(top, &user);
     let backend = effective.backend.unwrap_or(default);
-    if backend == Backend::Hipfire {
-        return Err(invalid(
-            "invalid_arguments",
-            crate::backend::hipfire::unavailable(&effective),
-        ));
-    }
     let mut options = generation(args);
     options.gpu_layers = effective.gpu_layers;
     options.batch_size = effective.batch_size.unwrap_or(options.batch_size);
@@ -1381,7 +1376,12 @@ fn effective_generation(
     if backend == Backend::LlamaServer {
         options.gpu_api = crate::backend::gpu_api(llama_cpp_dir);
     }
-    Ok((backend, options))
+    // Where the engines are: the operator's configuration only, never the agent.
+    let engines = crate::backend::BackendConfig {
+        llama_cpp_dir: llama_cpp_dir.map(Path::to_path_buf),
+        ..effective
+    };
+    Ok((backend, options, engines))
 }
 
 fn bench_command(arguments: &Value) -> &'static str {
@@ -1542,7 +1542,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 None => Ok(Template::default()),
             }
             .map_err(|e| invalid("invalid_arguments", e))?;
-            let (eval_backend, eval_generation) = effective_generation(
+            let (eval_backend, eval_generation, engines) = effective_generation(
                 &args,
                 &user,
                 crate::bench::score::Backend::Llama,
@@ -1562,7 +1562,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 min_accuracy: args.min_accuracy,
                 generation: eval_generation,
             };
-            core_bench_eval(&req, fail_on_warn, ctx.deps, &ui, ctx.sink)
+            core_bench_eval(&req, &engines, fail_on_warn, ctx.deps, &ui, ctx.sink)
         }
         BenchMode::Dump => {
             let prompts_file = path(ctx, "prompts", &args.prompts)?;
@@ -1594,7 +1594,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 markers_file.as_deref(),
             )
             .map_err(|e| invalid("invalid_arguments", e))?;
-            let (refusal_backend, refusal_generation) = effective_generation(
+            let (refusal_backend, refusal_generation, engines) = effective_generation(
                 &args,
                 &user,
                 crate::bench::score::Backend::Native,
@@ -1644,7 +1644,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 &req,
                 refusal_backend,
                 judging.as_ref(),
-                llama_cpp_dir.as_deref(),
+                &engines,
                 fail_on_warn,
                 ctx.deps,
                 &ui,

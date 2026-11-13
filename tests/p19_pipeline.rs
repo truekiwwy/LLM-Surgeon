@@ -137,7 +137,11 @@ impl Ws {
 
     fn command(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_surgeon"));
-        cmd.current_dir(self.dir.path()).env("NO_COLOR", "1");
+        // The engine folders come from the test only, never from the machine.
+        cmd.current_dir(self.dir.path())
+            .env("NO_COLOR", "1")
+            .env_remove("LLAMA_CPP_DIR")
+            .env_remove("MISTRALRS_DIR");
         cmd
     }
 
@@ -968,10 +972,15 @@ fn the_binary_pillars_run_on_the_configured_backend_and_the_job_is_bound_to_it()
     let (code, v) = ws.surgeon(&["pipeline", "run", "--job-dir", "job", "--backend", "native"]);
     assert_eq!(code, 2, "{v}");
     assert!(v["error"]["message"].as_str().unwrap().contains("reprise"));
-    let (code, v) = ws.run("job-hip", &["--backend", "hipfire"]);
+    // hipfire without a binary or a daemon URL stops the job before any work, on every OS.
+    let (code, v) = ws.run(
+        "job-hip",
+        &["--backend", "hipfire", "--hipfire-bin", "no-hipfire-here"],
+    );
     assert_eq!(code, 2, "{v}");
-    assert!(v["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("--backend llama-server"));
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("--hipfire-url") && message.contains("llama-server"),
+        "{message}"
+    );
 }

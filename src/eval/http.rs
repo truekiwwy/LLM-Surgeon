@@ -1,5 +1,5 @@
-//! Minimal HTTP/1.1 client for a local `llama-server`: `std::net::TcpStream` only, loopback
-//! only, no TLS, no proxy. One request per connection (`Connection: close`); responses
+//! Minimal HTTP/1.1 client for a local inference server (`llama-server`, mistral.rs, a
+//! hipfire daemon): `std::net::TcpStream` only, loopback only, no TLS, no proxy. One request per connection (`Connection: close`); responses
 //! with `Content-Length`, `Transfer-Encoding: chunked` or read until close; server-sent
 //! events read line by line. Every read has a timeout; dropping the stream (closing the
 //! connection) is how a generation is cancelled, llama-server stopping the slot.
@@ -19,6 +19,9 @@ pub enum HttpError {
     Protocol(String),
     #[error("le serveur a répondu {status} : {body}")]
     Status { status: u16, body: String },
+    /// The peer closed or reset the connection: a server still starting, or dying.
+    #[error("connexion coupée par le serveur : {0}")]
+    Reset(String),
     #[error("E/S : {0}")]
     Io(String),
 }
@@ -26,8 +29,12 @@ pub enum HttpError {
 pub type Result<T> = std::result::Result<T, HttpError>;
 
 fn io(e: std::io::Error) -> HttpError {
+    use std::io::ErrorKind::*;
     match e.kind() {
-        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => HttpError::Timeout,
+        WouldBlock | TimedOut => HttpError::Timeout,
+        ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof => {
+            HttpError::Reset(e.to_string())
+        }
         _ => HttpError::Io(e.to_string()),
     }
 }
@@ -156,7 +163,9 @@ pub fn request(
 
     let mut reader = BufReader::new(stream);
     let mut status_line = String::new();
-    reader.read_line(&mut status_line).map_err(io)?;
+    if reader.read_line(&mut status_line).map_err(io)? == 0 {
+        return Err(HttpError::Reset("fermée avant la réponse".into()));
+    }
     let status: u16 = status_line
         .split_whitespace()
         .nth(1)
@@ -352,7 +361,13 @@ mod tests {
         let (_, body) = request(port, "GET", "/", None, None, SECOND).unwrap();
         assert!(matches!(
             body.text(),
-            Err(HttpError::Protocol(_) | HttpError::Io(_))
+            Err(HttpError::Protocol(_) | HttpError::Reset(_))
+        ));
+        // Accepted, then closed without a word (a server still binding its routes).
+        let (port, _server) = serve(vec![], Duration::ZERO);
+        assert!(matches!(
+            request(port, "GET", "/health", None, None, SECOND),
+            Err(HttpError::Reset(_))
         ));
         // Nothing listens there any more.
         let closed = TcpListener::bind(("127.0.0.1", 0))

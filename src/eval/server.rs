@@ -1,16 +1,20 @@
-//! The `llama-server` backend: one local llama.cpp server for a whole bench, requests sent
-//! concurrently up to its slots. Whether it uses a GPU (Vulkan, HIP, CUDA...) depends on
-//! how llama.cpp was built and on `--gpu-layers`; surgeon builds nothing. GPU runs are not
+//! Local inference servers behind one client: `llama-server` (llama.cpp, started here),
+//! mistral.rs (started by `crate::backend::mistralrs`) and a hipfire daemon already running
+//! (`crate::backend::hipfire`). One server for a whole bench, requests sent concurrently up
+//! to its slots. Whether it uses a GPU (Vulkan, HIP, CUDA...) depends on how the engine was
+//! built (and on `--gpu-layers` for llama.cpp); surgeon builds nothing. GPU runs are not
 //! reproducible bit for bit (reduction order of the kernels), CPU runs of the same build
 //! usually are.
 //!
 //! ```text
-//! start -> flags checked against `llama-server --help` (no free argument, ever)
-//!       -> free loopback port, random API key -> spawn (ChildGuard: killed on drop)
-//!       -> stderr tail kept -> GET /health until 200 (503 while loading), child alive
-//!       -> retry on another port when the bind failed
-//! generate_job  -> POST /completion {"stream": true, sampling...} -> SSE `data:` events
-//!                  -> on_chunk(content); `Break` drops the connection (the slot stops)
+//! start   -> flags checked against the binary's `--help` (no free argument, ever)
+//!         -> free loopback port, random API key -> spawn (ChildGuard: killed on drop)
+//!         -> stderr tail kept -> GET /health until 200 (503, refused or reset while the
+//!            server loads), child alive -> retry on another port when the bind failed
+//! connect -> a server run by someone else: no child, no key
+//! generate_job  -> POST by dialect: /completion (llama.cpp), /v1/completions or
+//!                  /v1/chat/completions (OpenAI), {"stream": true, sampling...}
+//!                  -> SSE `data:` events -> on_chunk(content); `Break` drops the connection
 //! generate_many -> `slots` workers, callbacks on the calling thread through a channel
 //! ```
 
@@ -47,7 +51,7 @@ pub struct ServerOptions {
     pub gpu_layers: Option<u32>,
     /// `-c`: context size of the server (shared by its slots).
     pub ctx_size: Option<u32>,
-    /// `-np`: parallel slots, the most concurrent requests.
+    /// `-np` (`--max-seqs` for mistral.rs): parallel slots, the most concurrent requests.
     pub slots: usize,
     /// `-t`: CPU threads.
     pub threads: Option<usize>,
@@ -66,21 +70,30 @@ impl Default for ServerOptions {
     }
 }
 
-/// The flags surgeon may pass, each with the spellings llama.cpp has used: the first one the
-/// installed `--help` lists is used, none listed is an error.
-const WHITELIST: [(&str, &[&str]); 8] = [
-    ("model", &["-m", "--model"]),
-    ("host", &["--host"]),
+/// The flags surgeon may pass, each with the spellings the engines have used: the first one
+/// the installed `--help` lists is used, none listed is an error.
+const WHITELIST: [(&str, &[&str]); 11] = [
+    (
+        "model",
+        &["-m", "--model", "--model-id", "--quantized-model-id"],
+    ),
+    ("host", &["--host", "--serve-ip"]),
     ("port", &["--port"]),
     ("api-key", &["--api-key"]),
     ("slots", &["-np", "--parallel"]),
     ("ctx", &["-c", "--ctx-size"]),
     ("gpu", &["-ngl", "--gpu-layers", "--n-gpu-layers"]),
     ("threads", &["-t", "--threads"]),
+    ("seed", &["--seed"]),
+    ("max-seqs", &["--max-seqs"]),
+    (
+        "gguf-file",
+        &["-f", "--quantized-file", "--quantized-filename"],
+    ),
 ];
 
 /// `true` when `flag` appears in `help` as a whole option (not inside a longer one).
-fn listed(help: &str, flag: &str) -> bool {
+pub(crate) fn listed(help: &str, flag: &str) -> bool {
     help.match_indices(flag).any(|(at, _)| {
         let before = help[..at].chars().next_back();
         let after = help[at + flag.len()..].chars().next();
@@ -103,7 +116,7 @@ pub fn resolve_flags(help: &str, needed: &[&str]) -> Result<Vec<(&'static str, &
                 .map(|s| (*key, *s))
                 .ok_or_else(|| {
                     EvalError::InvalidConfig(format!(
-                        "llama-server : aucune de {} dans son --help (build trop ancien ou \
+                        "aucune de {} dans le --help du serveur (build trop ancien ou \
                          différent)",
                         spellings.join(", ")
                     ))
@@ -132,16 +145,12 @@ fn free_port() -> Result<u16> {
         .map_err(|e| EvalError::InvalidConfig(format!("aucun port local libre : {e}")))
 }
 
-/// Output of `binary --help`, stdout and stderr together (llama.cpp prints usage on both).
-fn help_text(binary: &Path) -> Result<String> {
-    capture(binary, "--help")
-}
-
-/// Output of `binary <flag>` (stdout and stderr together), killed after [`HELP_TIMEOUT`].
-pub(crate) fn capture(binary: &Path, flag: &str) -> Result<String> {
+/// Output of `binary args` (stdout and stderr together: llama.cpp prints usage on both),
+/// killed after [`HELP_TIMEOUT`].
+pub(crate) fn capture(binary: &Path, args: &[&str]) -> Result<String> {
     let mut child = ChildGuard(
         Command::new(binary)
-            .arg(flag)
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -192,12 +201,66 @@ pub(crate) fn capture(binary: &Path, flag: &str) -> Result<String> {
         .join("\n"))
 }
 
-/// A running `llama-server` and its client.
-pub struct LlamaServerGenerator {
-    // Dropped (killed and reaped) with the generator.
-    _child: ChildGuard,
+/// How a server is asked for a completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    /// llama.cpp's own `/completion`: the raw prompt and its sampler fields.
+    LlamaCpp,
+    /// OpenAI `/v1/completions`: the raw prompt, the bench's template stays the only one.
+    Completions,
+    /// OpenAI `/v1/chat/completions`: the prompt as one user message, so the server's chat
+    /// template is applied on top of the bench's.
+    Chat,
+}
+
+impl Dialect {
+    pub fn path(self) -> &'static str {
+        match self {
+            Dialect::LlamaCpp => "/completion",
+            Dialect::Completions => "/v1/completions",
+            Dialect::Chat => "/v1/chat/completions",
+        }
+    }
+
+    /// The text of one streamed event, and why the generation ended there when it did
+    /// (`limit` for llama.cpp, `length` for OpenAI: the token budget).
+    fn chunk(self, event: &Value) -> (&str, Option<&str>) {
+        let choice = &event["choices"][0];
+        let (content, end) = match self {
+            Dialect::LlamaCpp => (
+                &event["content"],
+                (event["stop"] == true).then(|| event["stop_type"].as_str().unwrap_or("eos")),
+            ),
+            Dialect::Completions => (&choice["text"], choice["finish_reason"].as_str()),
+            Dialect::Chat => (
+                &choice["delta"]["content"],
+                choice["finish_reason"].as_str(),
+            ),
+        };
+        (content.as_str().unwrap_or_default(), end)
+    }
+}
+
+/// A server surgeon starts: its name in messages, how it is asked, and its command line for
+/// a given port and API key.
+pub(crate) struct Launch<'a> {
+    pub name: &'static str,
+    pub binary: &'a Path,
+    pub dialect: Dialect,
+    /// The OpenAI `model` field.
+    pub model: String,
+    pub command: &'a mut dyn FnMut(u16, &str) -> Command,
+}
+
+/// A running local server and its client.
+pub struct ServerGenerator {
+    // Dropped (killed and reaped) with the generator; `None` for a server run by someone else.
+    child: Option<ChildGuard>,
+    name: &'static str,
     port: u16,
-    api_key: String,
+    api_key: Option<String>,
+    dialect: Dialect,
+    model: String,
     slots: usize,
     stderr: Arc<Mutex<Vec<u8>>>,
     timeout: Duration,
@@ -205,22 +268,19 @@ pub struct LlamaServerGenerator {
     sampling: SamplingParams,
 }
 
-impl LlamaServerGenerator {
-    /// Starts the server on `model` (a GGUF) and waits until it is healthy.
+impl ServerGenerator {
+    /// Starts `llama-server` on `model` (a GGUF) and waits until it is healthy.
     pub fn start(
         binary: &Path,
         model: &Path,
         opts: &ServerOptions,
         cancel: &AtomicBool,
     ) -> Result<Self> {
-        if opts.slots == 0 {
-            return Err(EvalError::InvalidConfig("--slots doit être >= 1".into()));
-        }
         let mut needed = vec!["model", "host", "port", "api-key", "slots"];
         needed.extend(opts.ctx_size.map(|_| "ctx"));
         needed.extend(opts.gpu_layers.map(|_| "gpu"));
         needed.extend(opts.threads.map(|_| "threads"));
-        let flags = resolve_flags(&help_text(binary)?, &needed)?;
+        let flags = resolve_flags(&capture(binary, &["--help"])?, &needed)?;
         let flag = |key: &str| {
             flags
                 .iter()
@@ -228,16 +288,13 @@ impl LlamaServerGenerator {
                 .map(|(_, f)| *f)
                 .unwrap_or_default()
         };
-        let mut last = None;
-        for _ in 0..PORT_ATTEMPTS {
-            let port = free_port()?;
-            let api_key = random_key();
+        let mut command = |port: u16, api_key: &str| {
             let mut cmd = Command::new(binary);
             cmd.arg(flag("model"))
                 .arg(model)
                 .args([flag("host"), "127.0.0.1", flag("port")])
                 .arg(port.to_string())
-                .args([flag("api-key"), &api_key, flag("slots")])
+                .args([flag("api-key"), api_key, flag("slots")])
                 .arg(opts.slots.to_string());
             if let Some(c) = opts.ctx_size {
                 cmd.args([flag("ctx"), &c.to_string()]);
@@ -248,31 +305,83 @@ impl LlamaServerGenerator {
             if let Some(t) = opts.threads {
                 cmd.args([flag("threads"), &t.to_string()]);
             }
-            match Self::launch(cmd, binary, port, api_key, opts, cancel) {
+            cmd
+        };
+        let launch = Launch {
+            name: "llama-server",
+            binary,
+            dialect: Dialect::LlamaCpp,
+            model: String::new(),
+            command: &mut command,
+        };
+        Self::spawn(launch, opts, cancel)
+    }
+
+    /// Starts a server on free loopback ports until one binds, and waits for its health.
+    pub(crate) fn spawn(
+        launch: Launch<'_>,
+        opts: &ServerOptions,
+        cancel: &AtomicBool,
+    ) -> Result<Self> {
+        if opts.slots == 0 {
+            return Err(EvalError::InvalidConfig("--slots doit être >= 1".into()));
+        }
+        let mut last = None;
+        for _ in 0..PORT_ATTEMPTS {
+            let port = free_port()?;
+            let api_key = random_key();
+            let cmd = (launch.command)(port, &api_key);
+            match Self::launch(cmd, &launch, port, api_key, opts, cancel) {
                 Ok(server) => return Ok(server),
                 Err((e, port_taken)) if port_taken => last = Some(e),
                 Err((e, _)) => return Err(e),
             }
         }
-        Err(last
-            .unwrap_or_else(|| EvalError::Generator("llama-server : démarrage impossible".into())))
+        Err(last.unwrap_or_else(|| {
+            EvalError::Generator(format!("{} : démarrage impossible", launch.name))
+        }))
+    }
+
+    /// A server already running on `127.0.0.1:port` (a hipfire daemon): nothing is started
+    /// or stopped here.
+    pub fn connect(
+        name: &'static str,
+        port: u16,
+        dialect: Dialect,
+        model: String,
+        slots: usize,
+    ) -> Self {
+        Self {
+            child: None,
+            name,
+            port,
+            api_key: None,
+            dialect,
+            model,
+            slots: slots.max(1),
+            stderr: Arc::default(),
+            timeout: Duration::from_secs(600),
+            seed: 0,
+            sampling: SamplingParams::default(),
+        }
     }
 
     /// Spawns and waits for health; `Err((_, true))` when the port was taken.
     fn launch(
         mut cmd: Command,
-        binary: &Path,
+        launch: &Launch<'_>,
         port: u16,
         api_key: String,
         opts: &ServerOptions,
         cancel: &AtomicBool,
     ) -> std::result::Result<Self, (EvalError, bool)> {
+        let name = launch.name;
         let mut child = ChildGuard(
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .spawn()
-                .map_err(|e| (spawn_error(binary, e), false))?,
+                .map_err(|e| (spawn_error(launch.binary, e), false))?,
         );
         let stderr = Arc::new(Mutex::new(Vec::new()));
         if let Some(mut pipe) = child.0.stderr.take() {
@@ -292,29 +401,26 @@ impl LlamaServerGenerator {
         }
         let started = Instant::now();
         let mut server = Self {
-            _child: child,
-            port,
-            api_key,
-            slots: opts.slots,
+            child: Some(child),
             stderr,
-            timeout: Duration::from_secs(600),
-            seed: 0,
-            sampling: SamplingParams::default(),
+            api_key: Some(api_key),
+            ..Self::connect(name, port, launch.dialect, launch.model.clone(), opts.slots)
         };
         loop {
             if cancel.load(Ordering::SeqCst) {
                 return Err((
-                    EvalError::Generator("interrompu pendant le démarrage de llama-server".into()),
+                    EvalError::Generator(format!("interrompu pendant le démarrage de {name}")),
                     false,
                 ));
             }
-            if let Ok(Some(status)) = server._child.0.try_wait() {
+            let exited = server.child.as_mut().and_then(|c| c.0.try_wait().ok());
+            if let Some(Some(status)) = exited {
                 let tail = server.stderr_tail();
                 let taken = tail.contains("bind")
                     || tail.to_ascii_lowercase().contains("address already in use");
                 return Err((
                     EvalError::CommandFailed {
-                        step: "llama-server".into(),
+                        step: name.into(),
                         code: status.code().unwrap_or(-1),
                         stderr_tail: tail,
                     },
@@ -325,20 +431,20 @@ impl LlamaServerGenerator {
                 port,
                 "GET",
                 "/health",
-                Some(&server.api_key),
+                server.api_key.as_deref(),
                 None,
                 POLL * 10,
             ) {
                 Ok((200, _)) => break,
+                // Not up yet: still loading (503), not listening yet (refused), or accepting
+                // before its routes are ready (a reset or a close, seen on linux aarch64).
                 Ok(_)
                 | Err(HttpError::Status { status: 503, .. })
                 | Err(HttpError::Connect { .. })
+                | Err(HttpError::Reset(_))
                 | Err(HttpError::Timeout) => {}
                 Err(e) => {
-                    return Err((
-                        EvalError::Generator(format!("llama-server /health : {e}")),
-                        false,
-                    ))
+                    return Err((EvalError::Generator(format!("{name} /health : {e}")), false))
                 }
             }
             if started.elapsed() > opts.startup_timeout {
@@ -364,19 +470,27 @@ impl LlamaServerGenerator {
         last_lines(&String::from_utf8_lossy(&tail), 40)
     }
 
-    /// `GET /props`: the server's own view of its settings (slots, model, build).
+    /// `GET /props` (llama.cpp): the server's own view of its settings (slots, model, build).
     pub fn props(&self) -> Result<Value> {
         let (_, body) = http::request(
             self.port,
             "GET",
             "/props",
-            Some(&self.api_key),
+            self.api_key.as_deref(),
             None,
             self.timeout,
         )
         .map_err(|e| self.failed(e))?;
         serde_json::from_str(&body.text().map_err(|e| self.failed(e))?)
-            .map_err(|e| EvalError::Generator(format!("llama-server /props : {e}")))
+            .map_err(|e| EvalError::Generator(format!("{} /props : {e}", self.name)))
+    }
+
+    /// `message` with the server's stderr tail, when it has one.
+    fn with_tail(&self, message: String) -> String {
+        match self.stderr_tail() {
+            tail if tail.is_empty() => message,
+            tail => format!("{message}\n{tail}"),
+        }
     }
 
     fn failed(&self, e: HttpError) -> EvalError {
@@ -384,58 +498,89 @@ impl LlamaServerGenerator {
             HttpError::Timeout => EvalError::Timeout {
                 after_ms: self.timeout.as_millis(),
             },
-            other => {
-                EvalError::Generator(format!("llama-server : {other}\n{}", self.stderr_tail()))
-            }
+            other => EvalError::Generator(self.with_tail(format!("{} : {other}", self.name))),
         }
     }
 
     fn request_body(&self, job: &GenJob, max_new_tokens: u32) -> String {
-        request_body(&self.sampling, self.seed, job, max_new_tokens)
+        request_body(
+            self.dialect,
+            &self.model,
+            &self.sampling,
+            self.seed,
+            job,
+            max_new_tokens,
+        )
     }
 }
 
-/// The `/completion` request: the sampling passed as is (llama.cpp applies it with its
-/// own sampler chain, so the draws are not those of the native backend), the seed of the
-/// decoding when greedy, else the seed of the job's stream.
-fn request_body(p: &SamplingParams, seed: u32, job: &GenJob, max_new_tokens: u32) -> String {
+/// The request: the sampling passed as is (each engine applies it with its own sampler
+/// chain, so the draws are not those of the native backend), the seed of the decoding when
+/// greedy, else the seed of the job's stream. The OpenAI dialects only carry the knobs that
+/// are on beyond the standard fields: a server may reject a field it does not know.
+fn request_body(
+    dialect: Dialect,
+    model: &str,
+    p: &SamplingParams,
+    seed: u32,
+    job: &GenJob,
+    max_new_tokens: u32,
+) -> String {
     let seed = match p.is_greedy() {
         true => seed,
         false => sampling::sequence_seed(p.seed, job.sequence_id),
     };
-    json!({
-        "prompt": job.prompt,
-        "n_predict": max_new_tokens,
+    if dialect == Dialect::LlamaCpp {
+        return json!({
+            "prompt": job.prompt,
+            "n_predict": max_new_tokens,
+            "stream": true,
+            "temperature": p.temperature,
+            "top_k": p.top_k,
+            "top_p": p.top_p,
+            "min_p": p.min_p,
+            "repeat_penalty": p.repetition_penalty,
+            "seed": seed,
+        })
+        .to_string();
+    }
+    let mut body = json!({
+        "model": model,
+        "max_tokens": max_new_tokens,
         "stream": true,
         "temperature": p.temperature,
-        "top_k": p.top_k,
         "top_p": p.top_p,
-        "min_p": p.min_p,
-        "repeat_penalty": p.repetition_penalty,
         "seed": seed,
-    })
-    .to_string()
+    });
+    match dialect {
+        Dialect::Chat => body["messages"] = json!([{"role": "user", "content": job.prompt}]),
+        _ => body["prompt"] = json!(job.prompt),
+    }
+    if p.top_k != 0 {
+        body["top_k"] = json!(p.top_k);
+    }
+    if p.min_p != 0.0 {
+        body["min_p"] = json!(p.min_p);
+    }
+    if p.repetition_penalty != 1.0 {
+        body["repetition_penalty"] = json!(p.repetition_penalty);
+    }
+    body.to_string()
 }
 
-/// One streamed completion: every `content` to `on_content` (`false` stops and drops the
+/// One streamed completion: every content to `on_content` (`false` stops and drops the
 /// connection). Returns the text, whether it was stopped, and whether the server ended it on
-/// the token budget (`stop_type: "limit"`).
+/// the token budget.
 fn complete(
     port: u16,
-    api_key: &str,
+    api_key: Option<&str>,
+    dialect: Dialect,
     body: &str,
     timeout: Duration,
     on_content: &mut dyn FnMut(&str) -> bool,
 ) -> std::result::Result<(String, bool, bool), HttpError> {
     let started = Instant::now();
-    let (_, events) = http::request(
-        port,
-        "POST",
-        "/completion",
-        Some(api_key),
-        Some(body),
-        timeout,
-    )?;
+    let (_, events) = http::request(port, "POST", dialect.path(), api_key, Some(body), timeout)?;
     let mut text = String::new();
     let mut stopped = false;
     let mut limit = false;
@@ -443,12 +588,18 @@ fn complete(
         if started.elapsed() > timeout {
             return Err(HttpError::Timeout);
         }
+        // The OpenAI end of stream.
+        if data == "[DONE]" {
+            return Ok(false);
+        }
         let event: Value = serde_json::from_str(data)
             .map_err(|e| HttpError::Protocol(format!("événement SSE : {e}")))?;
-        let content = event
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        if let Some(error) = event.get("error") {
+            return Err(HttpError::Protocol(format!(
+                "erreur en cours de flux : {error}"
+            )));
+        }
+        let (content, end) = dialect.chunk(&event);
         if !content.is_empty() {
             text.push_str(content);
             if !on_content(content) {
@@ -456,8 +607,8 @@ fn complete(
                 return Ok(false);
             }
         }
-        limit |= event.get("stop_type").and_then(Value::as_str) == Some("limit");
-        Ok(!event.get("stop").and_then(Value::as_bool).unwrap_or(false))
+        limit |= matches!(end, Some("limit" | "length"));
+        Ok(end.is_none())
     })?;
     Ok((text, stopped, limit))
 }
@@ -467,7 +618,7 @@ enum Event {
     Done(usize, Result<GenerationOutcome>),
 }
 
-impl TextGenerator for LlamaServerGenerator {
+impl TextGenerator for ServerGenerator {
     fn generate(
         &mut self,
         prompt: &str,
@@ -489,11 +640,15 @@ impl TextGenerator for LlamaServerGenerator {
     ) -> Result<GenerationOutcome> {
         let started = Instant::now();
         let body = self.request_body(job, max_new_tokens);
-        let (text, stopped, limit) =
-            complete(self.port, &self.api_key, &body, self.timeout, &mut |c| {
-                on_chunk(c).is_continue()
-            })
-            .map_err(|e| self.failed(e))?;
+        let (text, stopped, limit) = complete(
+            self.port,
+            self.api_key.as_deref(),
+            self.dialect,
+            &body,
+            self.timeout,
+            &mut |c| on_chunk(c).is_continue(),
+        )
+        .map_err(|e| self.failed(e))?;
         Ok(GenerationOutcome {
             text,
             stopped_early: stopped,
@@ -531,7 +686,8 @@ impl TextGenerator for LlamaServerGenerator {
         let failed = AtomicBool::new(false);
         let mut outcomes: Vec<Option<Result<GenerationOutcome>>> =
             jobs.iter().map(|_| None).collect();
-        let (port, key, timeout) = (self.port, self.api_key.as_str(), self.timeout);
+        let (port, key, timeout) = (self.port, self.api_key.as_deref(), self.timeout);
+        let (name, dialect) = (self.name, self.dialect);
         let (tx, rx) = mpsc::channel::<Event>();
         thread::scope(|scope| {
             for _ in 0..self.slots.min(jobs.len()) {
@@ -546,7 +702,7 @@ impl TextGenerator for LlamaServerGenerator {
                         break;
                     }
                     let started = Instant::now();
-                    let result = complete(port, key, &bodies[j], timeout, &mut |c| {
+                    let result = complete(port, key, dialect, &bodies[j], timeout, &mut |c| {
                         let _ = tx.send(Event::Chunk(j, c.to_owned()));
                         !stops[j].load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst)
                     })
@@ -562,7 +718,7 @@ impl TextGenerator for LlamaServerGenerator {
                         },
                         other => {
                             failed.store(true, Ordering::SeqCst);
-                            EvalError::Generator(format!("llama-server : {other}"))
+                            EvalError::Generator(format!("{name} : {other}"))
                         }
                     });
                     let _ = tx.send(Event::Done(j, result));
@@ -589,13 +745,29 @@ impl TextGenerator for LlamaServerGenerator {
         for outcome in outcomes {
             match outcome {
                 Some(Err(EvalError::Generator(m))) => {
-                    return Err(EvalError::Generator(format!("{m}\n{}", self.stderr_tail())))
+                    return Err(EvalError::Generator(self.with_tail(m)))
                 }
                 Some(o) => ordered.push(o),
                 None => break,
             }
         }
         Ok(ordered)
+    }
+}
+
+/// Whether the server on `127.0.0.1:port` serves `dialect`: an empty request answered with
+/// anything but 404 or 405 (a 400 for the empty body still says the route exists). `Err`
+/// when nothing answers.
+pub fn serves(port: u16, dialect: Dialect, timeout: Duration) -> Result<bool> {
+    match http::request(port, "POST", dialect.path(), None, Some("{}"), timeout) {
+        Err(HttpError::Status {
+            status: 404 | 405, ..
+        }) => Ok(false),
+        Ok(_) | Err(HttpError::Status { .. }) => Ok(true),
+        Err(HttpError::Timeout) => Err(EvalError::Timeout {
+            after_ms: timeout.as_millis(),
+        }),
+        Err(e) => Err(EvalError::Generator(e.to_string())),
     }
 }
 
@@ -679,36 +851,103 @@ mod tests {
         assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
     }
 
-    #[test]
-    fn sampling_reaches_the_request_as_is() {
-        // The body only: no process is needed for it.
-        let job = GenJob {
+    fn job() -> GenJob {
+        GenJob {
             prompt: "p".into(),
             sequence_id: GenJob::id(2, 1),
-        };
-        let fields = |sampling: SamplingParams, seed: u32| {
-            serde_json::from_str::<Value>(&request_body(&sampling, seed, &job, 9)).unwrap()
-        };
-        let greedy = fields(SamplingParams::default(), 1234);
-        assert_eq!(greedy["seed"], 1234);
-        assert_eq!(greedy["temperature"], 0.0);
-        assert_eq!(greedy["prompt"], "p");
-        assert_eq!(greedy["n_predict"], 9);
-        assert_eq!(greedy["stream"], true);
-        let p = SamplingParams {
+        }
+    }
+
+    fn drawn() -> SamplingParams {
+        SamplingParams {
             temperature: 0.75,
             top_k: 40,
             top_p: 0.5,
             min_p: 0.25,
             repetition_penalty: 1.5,
             seed: 7,
-        };
-        let drawn = fields(p, 1234);
-        assert_eq!(drawn["seed"], sampling::sequence_seed(7, job.sequence_id));
+        }
+    }
+
+    fn fields(dialect: Dialect, sampling: SamplingParams, seed: u32) -> Value {
+        serde_json::from_str(&request_body(dialect, "m", &sampling, seed, &job(), 9)).unwrap()
+    }
+
+    #[test]
+    fn sampling_reaches_the_request_as_is() {
+        // The body only: no process is needed for it.
+        let greedy = fields(Dialect::LlamaCpp, SamplingParams::default(), 1234);
+        assert_eq!(greedy["seed"], 1234);
+        assert_eq!(greedy["temperature"], 0.0);
+        assert_eq!(greedy["prompt"], "p");
+        assert_eq!(greedy["n_predict"], 9);
+        assert_eq!(greedy["stream"], true);
+        let drawn = fields(Dialect::LlamaCpp, drawn(), 1234);
+        assert_eq!(drawn["seed"], sampling::sequence_seed(7, job().sequence_id));
         assert_eq!(drawn["temperature"], 0.75);
         assert_eq!(drawn["top_k"], 40);
         assert_eq!(drawn["top_p"], 0.5);
         assert_eq!(drawn["min_p"], 0.25);
         assert_eq!(drawn["repeat_penalty"], 1.5);
+    }
+
+    #[test]
+    fn openai_requests_are_greedy_and_seeded_by_default() {
+        let greedy = fields(Dialect::Completions, SamplingParams::default(), 1234);
+        assert_eq!(
+            greedy,
+            json!({"model": "m", "prompt": "p", "max_tokens": 9, "stream": true,
+                   "temperature": 0.0, "top_p": 1.0, "seed": 1234})
+        );
+        let chat = fields(Dialect::Chat, SamplingParams::default(), 1234);
+        assert_eq!(chat["messages"], json!([{"role": "user", "content": "p"}]));
+        assert!(chat.get("prompt").is_none());
+        // The knobs beyond OpenAI only when they are on.
+        let drawn = fields(Dialect::Completions, drawn(), 1234);
+        assert_eq!(drawn["top_k"], 40);
+        assert_eq!(drawn["min_p"], 0.25);
+        assert_eq!(drawn["repetition_penalty"], 1.5);
+        assert_eq!(drawn["seed"], sampling::sequence_seed(7, job().sequence_id));
+    }
+
+    #[test]
+    fn each_dialect_reads_its_own_events() {
+        let read = |d: Dialect, event: Value| {
+            let (text, end) = d.chunk(&event);
+            (text.to_owned(), end.map(str::to_owned))
+        };
+        assert_eq!(
+            read(Dialect::LlamaCpp, json!({"content": "a", "stop": false})),
+            ("a".into(), None)
+        );
+        assert_eq!(
+            read(
+                Dialect::LlamaCpp,
+                json!({"content": "", "stop": true, "stop_type": "limit"})
+            ),
+            (String::new(), Some("limit".into()))
+        );
+        assert_eq!(
+            read(
+                Dialect::Completions,
+                json!({"choices": [{"text": "b", "finish_reason": null}]})
+            ),
+            ("b".into(), None)
+        );
+        assert_eq!(
+            read(
+                Dialect::Chat,
+                json!({"choices": [{"delta": {"content": "c"}, "finish_reason": "length"}]})
+            ),
+            ("c".into(), Some("length".into()))
+        );
+        // A role-only first chunk of a chat stream: no text, not the end.
+        assert_eq!(
+            read(
+                Dialect::Chat,
+                json!({"choices": [{"delta": {"role": "assistant"}}]})
+            ),
+            (String::new(), None)
+        );
     }
 }

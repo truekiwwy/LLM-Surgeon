@@ -31,21 +31,32 @@ pub const CONFIG_PATH_ENV: &str = "WEIGHT_SURGEON_CONFIG";
 pub struct BackendConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "native (CPU, Rust pur), llama-server (llama.cpp : GPU Vulkan, CUDA, Metal) ou hipfire (AMD HIP, Linux)."
+        description = "native (CPU, Rust pur), mistralrs (mistral.rs : SafeTensors direct, GPU selon le build), llama-server (llama.cpp : GPU Vulkan, CUDA, Metal) ou hipfire (AMD HIP)."
     )]
     pub backend: Option<Backend>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "llama-server : couches déchargées sur le GPU (-ngl) ; 99 : toutes.")]
     pub gpu_layers: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "llama-server : requêtes simultanées (slots).")]
+    #[schemars(description = "Serveurs GPU : requêtes simultanées (slots, --max-seqs).")]
     pub batch_size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Dossier de llama.cpp (llama-server, convertisseur éventuel).")]
     pub llama_cpp_dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Dossier de mistral.rs (mistralrs-server ou mistralrs).")]
+    pub mistralrs_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Binaire mistral.rs (prioritaire sur mistralrs_dir et le PATH).")]
+    pub mistralrs_bin: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Binaire hipfire.")]
     pub hipfire_bin: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Démon hipfire déjà lancé, en boucle locale : http://127.0.0.1:<port>."
+    )]
+    pub hipfire_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
         description = "Type des matrices du GGUF temporaire : f16 (défaut) ou f32 (sans perte depuis bf16)."
@@ -61,7 +72,10 @@ impl BackendConfig {
             gpu_layers: self.gpu_layers.or(base.gpu_layers),
             batch_size: self.batch_size.or(base.batch_size),
             llama_cpp_dir: self.llama_cpp_dir.or(base.llama_cpp_dir),
+            mistralrs_dir: self.mistralrs_dir.or(base.mistralrs_dir),
+            mistralrs_bin: self.mistralrs_bin.or(base.mistralrs_bin),
             hipfire_bin: self.hipfire_bin.or(base.hipfire_bin),
+            hipfire_url: self.hipfire_url.or(base.hipfire_url),
             gguf_dtype: self.gguf_dtype.or(base.gguf_dtype),
         }
     }
@@ -78,7 +92,10 @@ impl BackendConfig {
 /// must not change how the native engine batches.
 pub fn resolve(top: BackendConfig, user: &BackendConfig) -> BackendConfig {
     let backend = top.backend.or(user.backend);
-    let gpu = matches!(backend, Some(Backend::LlamaServer | Backend::Hipfire));
+    let gpu = matches!(
+        backend,
+        Some(Backend::LlamaServer | Backend::Hipfire | Backend::MistralRs)
+    );
     let user = BackendConfig {
         gpu_layers: user.gpu_layers.filter(|_| gpu),
         batch_size: user.batch_size.filter(|_| gpu),
@@ -88,6 +105,19 @@ pub fn resolve(top: BackendConfig, user: &BackendConfig) -> BackendConfig {
 }
 
 // ------------------------------------------------------------------ user file
+
+/// Clears the machine's engine folders from the unit-test process, once: clap reads them as
+/// flag defaults (`env = "LLAMA_CPP_DIR"`), and no test may depend on the developer's own.
+/// No test sets them, so the removal races with nothing.
+#[cfg(test)]
+pub(crate) fn clear_machine_env() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        for name in ["LLAMA_CPP_DIR", super::mistralrs::DIR_ENV] {
+            std::env::remove_var(name);
+        }
+    });
+}
 
 /// Where the user file is: `$WEIGHT_SURGEON_CONFIG`, else the platform's config folder
 /// (`None` when disabled by [`NO_USER_CONFIG_ENV`] or when no home folder is known).
@@ -209,7 +239,10 @@ pub fn parse_toml(text: &str) -> Result<BackendConfig, String> {
                 );
             }
             "llama_cpp_dir" => config.llama_cpp_dir = Some(text(value)?.into()),
+            "mistralrs_dir" => config.mistralrs_dir = Some(text(value)?.into()),
+            "mistralrs_bin" => config.mistralrs_bin = Some(text(value)?.into()),
             "hipfire_bin" => config.hipfire_bin = Some(text(value)?.into()),
+            "hipfire_url" => config.hipfire_url = Some(text(value)?),
             "gpu_layers" => {
                 config.gpu_layers = Some(
                     u32::try_from(number(value)?)
@@ -239,11 +272,18 @@ pub fn to_toml(config: &BackendConfig) -> String {
     if let Some(b) = config.backend {
         put("default_backend", quoted(b.label()));
     }
-    if let Some(dir) = &config.llama_cpp_dir {
-        put("llama_cpp_dir", quoted(&dir.to_string_lossy()));
+    for (key, path) in [
+        ("llama_cpp_dir", &config.llama_cpp_dir),
+        ("mistralrs_dir", &config.mistralrs_dir),
+        ("mistralrs_bin", &config.mistralrs_bin),
+        ("hipfire_bin", &config.hipfire_bin),
+    ] {
+        if let Some(path) = path {
+            put(key, quoted(&path.to_string_lossy()));
+        }
     }
-    if let Some(bin) = &config.hipfire_bin {
-        put("hipfire_bin", quoted(&bin.to_string_lossy()));
+    if let Some(url) = &config.hipfire_url {
+        put("hipfire_url", quoted(url));
     }
     if let Some(n) = config.gpu_layers {
         put("gpu_layers", n.to_string());
@@ -267,7 +307,10 @@ mod tests {
             gpu_layers: Some(99),
             batch_size: Some(6),
             llama_cpp_dir: Some(r"C:\Users\kiwwy\tools\llama-vulkan".into()),
+            mistralrs_dir: Some(r"C:\tools\mistral.rs".into()),
+            mistralrs_bin: Some(r"C:\tools\mistral.rs\mistralrs-server.exe".into()),
             hipfire_bin: Some("/opt/hipfire/hipfire".into()),
+            hipfire_url: Some("http://127.0.0.1:11435".into()),
             gguf_dtype: Some(WeightType::F32),
         }
     }
@@ -296,15 +339,29 @@ mod tests {
     }
 
     #[test]
-    fn the_three_backends_parse_from_a_file() {
+    fn the_four_backends_parse_from_a_file_and_json() {
         for (name, backend) in [
             ("native", Backend::Native),
+            ("mistralrs", Backend::MistralRs),
             ("llama-server", Backend::LlamaServer),
             ("hipfire", Backend::Hipfire),
         ] {
             let cfg = parse_toml(&format!("default_backend = \"{name}\"")).unwrap();
             assert_eq!(cfg.backend, Some(backend));
+            assert_eq!(backend.label(), name);
+            assert_eq!(serde_json::to_value(backend).unwrap(), name);
         }
+    }
+
+    #[test]
+    fn the_gpu_knobs_of_the_file_apply_to_mistralrs() {
+        let top = BackendConfig {
+            backend: Some(Backend::MistralRs),
+            ..Default::default()
+        };
+        let eff = resolve(top, &full());
+        assert_eq!(eff.batch_size, Some(6));
+        assert_eq!(eff.mistralrs_bin, full().mistralrs_bin);
     }
 
     #[test]

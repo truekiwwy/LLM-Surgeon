@@ -55,7 +55,7 @@ Claude Code, en plugin : le dossier [`plugin/`](../plugin) déclare le même ser
 | `surgeon_diff` | Différence de deux checkpoints, approximée à rang `r`, écrite dans un `.surgery` neuf | écrit un fichier, non destructif, idempotent |
 | `surgeon_lora` | `mode` `merge` (fusionne un adaptateur LoRA en place) ou `extract` (écrit un adaptateur) | destructif |
 | `surgeon_pipeline` | Décision atomique sur un patch : `action` `plan`, `start`, `status`, `cancel`, `report`, `promote_patch` ([PIPELINE.md](PIPELINE.md)) | non destructif (copie de travail, modèle d'origine jamais écrit) |
-| `surgeon_backends` | Moteurs d'inférence de la machine (native, llama-server et ses GPU, hipfire), configuration utilisateur et backend recommandé ([BACKENDS.md](BACKENDS.md)) | lecture seule |
+| `surgeon_backends` | Moteurs d'inférence de la machine (native, mistralrs, llama-server et ses GPU, hipfire), configuration utilisateur et backend recommandé ([BACKENDS.md](BACKENDS.md)) | lecture seule |
 | `surgeon_graph` | Graphe orienté des écritures/lectures du flux résiduel, avec bornes spectrales certifiées ; synthèse bornée sans `out_dir`, fichiers avec | écrit seulement avec `out_dir` ou `cache_dir`, non destructif, idempotent |
 
 Les schémas exacts : `surgeon schema --kind tools`. Le format du patch :
@@ -110,8 +110,8 @@ est une erreur JSON-RPC `-32602` (les cinq autres outils la signalent en
 | --- | --- | --- |
 | `logits` | `before`, `after` | `tensor`, `top_k` (5), `worst` (5), `warn_kl`, `warn_top1_shift`, `fail_on_warn` |
 | `ppl` | `model`, `text` | `baseline_model` ou `baseline_ppl` (+ `baseline_ppl_err`), `ctx` (512), `chunks`, `threads`, `n_gpu_layers` (0), `llama_cpp_dir`, `warn_delta` (0.2), `timeout_secs`, `fail_on_warn` |
-| `eval` | `model`, `dataset` | `backend` (`llama`, `llama-completion`, `llama-server`, `native`), `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn`, options de génération |
-| `refusal` | `model`, `prompts` (fichier) | `backend` (`native`, `llama-server`, `llama-completion`), `baseline_model`, `max_new_tokens` (256), `chat_template` (`chatml`, `none`), `marker_langs`, `markers_file`, `judge` (`rules`, `llm`, `both`), `judge_model`, `judge_role` (`refusal`, `harm`), `judge_template`, `judge_cache`, `judge_calibration`, `min_calibration_n` (100), `min_kappa` (0.6), `partial_as_refusal`, `max_unparsable`, `llama_cpp_dir`, `timeout_secs`, `fail_on_warn`, options de génération |
+| `eval` | `model`, `dataset` | `backend` (`llama`, `llama-completion`, `llama-server`, `mistralrs`, `hipfire`, `native`), `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn`, options de génération |
+| `refusal` | `model`, `prompts` (fichier) | `backend` (`native`, `llama-server`, `llama-completion`, `mistralrs`, `hipfire`), `baseline_model`, `max_new_tokens` (256), `chat_template` (`chatml`, `none`), `marker_langs`, `markers_file`, `judge` (`rules`, `llm`, `both`), `judge_model`, `judge_role` (`refusal`, `harm`), `judge_template`, `judge_cache`, `judge_calibration`, `min_calibration_n` (100), `min_kappa` (0.6), `partial_as_refusal`, `max_unparsable`, `llama_cpp_dir`, `timeout_secs`, `fail_on_warn`, options de génération |
 | `dump` | `model`, `prompts` (fichier), `out` | `dtype`, `out_dtype` (`f32`, `f16`), `max_tokens` (256), `max_total_positions` (4096), `overwrite` |
 
 `data` reçoit le rapport (`BenchLogitsReport`, `BenchPplReport`, `BenchEvalReport`,
@@ -131,7 +131,9 @@ avec elles, il gagne `data.generation` (statistiques par prompt et intervalle bo
 les prompts quand `samples` dépasse 1). Le backend `llama-server` ne reçoit que les options
 de sa liste blanche (`-m`, `--host 127.0.0.1`, `--port`, `--api-key` aléatoire, `-np`,
 `-c`, `-ngl`, `-t`), vérifiées contre son `--help` ; aucune propriété libre n'existe
-(`additionalProperties: false`), et `llama_cpp_dir` passe par le bac à sable. Voir la
+(`additionalProperties: false`), et `llama_cpp_dir` passe par le bac à sable. `mistralrs`
+lance mistral.rs sur le dossier SafeTensors tel quel, `hipfire` interroge un démon déjà lancé ;
+leurs emplacements viennent de la configuration de l'opérateur, jamais d'un argument. Voir la
 section « Échantillonnage, lots et backends » du README.
 
 `eval` avec `backend: "native"` et `refusal` génèrent en Rust pur sur le CPU, sur un dossier

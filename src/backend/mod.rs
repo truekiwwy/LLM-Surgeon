@@ -2,19 +2,22 @@
 //! persistent user configuration that remembers the choice (docs/BACKENDS.md).
 //!
 //! The engines already share one interface, [`TextGenerator`](crate::eval::TextGenerator):
-//! `native` (CPU, pure Rust), `llama-server` (llama.cpp: Vulkan, CUDA, Metal...) and
-//! `hipfire` (AMD HIP, Linux, optional). This module adds the common settings
-//! ([`BackendConfig`]), their layering, the machine probe and the report labels.
+//! `native` (CPU, pure Rust), `mistralrs` (mistral.rs: the SafeTensors folder as is, GPU by
+//! its build), `llama-server` (llama.cpp: Vulkan, CUDA, Metal...) and `hipfire` (an AMD HIP
+//! daemon, optional). This module adds the common settings ([`BackendConfig`]), their
+//! layering, the machine probe and the report labels.
 //!
 //! ```text
 //! flags > pipeline.json > user config.toml > default        (config::resolve)
 //! apply_user_config: fills the optional flags of the bench commands from the user file
-//! detect_hardware_and_backends: llama-server + --list-devices + hipfire -> recommendation
+//! detect_hardware_and_backends: mistral.rs > llama-server + --list-devices > native
+//!                               (hipfire probed, never recommended)
 //! ```
 
 pub mod config;
 pub mod detect;
 pub mod hipfire;
+pub mod mistralrs;
 
 pub use config::{
     load_from, load_user_config, resolve, save_to, user_config_path, BackendConfig,
@@ -43,7 +46,7 @@ pub fn gpu_api(dir: Option<&Path>) -> Option<&'static str> {
 }
 
 /// The backend as a report shows it: `native-cpu`, `llama-server (Vulkan, ngl=99, batch=6)`,
-/// `hipfire`, or the plain label of the llama.cpp process backends.
+/// `mistralrs (batch=6)`, `hipfire`, or the plain label of the llama.cpp process backends.
 pub fn describe(
     label: &str,
     gpu_api: Option<&str>,
@@ -57,6 +60,7 @@ pub fn describe(
             let api = gpu_api.map(|a| format!("{a}, ")).unwrap_or_default();
             format!("llama-server ({api}ngl={ngl}, batch={batch_size})")
         }
+        "mistralrs" => format!("mistralrs (batch={batch_size})"),
         other => other.into(),
     }
 }
@@ -92,27 +96,21 @@ fn generation(
     dir: &mut Option<PathBuf>,
     g: &mut GenerationArgs,
     user: &BackendConfig,
-) -> Result<(), String> {
+) {
     let top = BackendConfig {
         backend: *backend,
         gpu_layers: g.gpu_layers,
         batch_size: g.batch_size,
-        llama_cpp_dir: dir.clone(),
-        hipfire_bin: g.hipfire_bin.clone(),
         gguf_dtype: g.gguf_dtype,
+        ..g.engines.config(dir.as_deref())
     };
     let effective = resolve(top, user);
-    let chosen = effective.backend.unwrap_or(default);
-    *backend = Some(chosen);
+    *backend = Some(effective.backend.unwrap_or(default));
     g.gpu_layers = effective.gpu_layers;
     g.batch_size = effective.batch_size;
-    g.hipfire_bin.clone_from(&effective.hipfire_bin);
     g.gguf_dtype = effective.gguf_dtype;
-    *dir = effective.llama_cpp_dir.clone();
-    match chosen {
-        Backend::Hipfire => Err(hipfire::unavailable(&effective)),
-        _ => Ok(()),
-    }
+    g.engines.set(&effective);
+    *dir = effective.llama_cpp_dir;
 }
 
 /// Whether the command reads the backend settings (the others never fail on a broken file).
@@ -152,11 +150,11 @@ pub fn apply_with(command: &mut Commands, user: &BackendConfig) -> Result<(), St
             BenchCommand::JudgeEval(a) => fill_dir(&mut a.judge_args.llama_cpp_dir, user),
             BenchCommand::Eval(a) => {
                 let (backend, dir, g) = (&mut a.backend, &mut a.llama_cpp_dir, &mut a.generation);
-                generation(backend, Backend::Llama, dir, g, user)?;
+                generation(backend, Backend::Llama, dir, g, user);
             }
             BenchCommand::Refusal(a) => {
                 let (backend, dir) = (&mut a.backend, &mut a.judge_args.llama_cpp_dir);
-                generation(backend, Backend::Native, dir, &mut a.generation, user)?;
+                generation(backend, Backend::Native, dir, &mut a.generation, user);
             }
             _ => {}
         },
@@ -172,6 +170,7 @@ mod tests {
     use clap::Parser;
 
     fn parse(args: &[&str]) -> Commands {
+        config::clear_machine_env();
         Cli::try_parse_from(std::iter::once("surgeon").chain(args.iter().copied()))
             .unwrap()
             .command
@@ -263,10 +262,27 @@ mod tests {
     }
 
     #[test]
-    fn hipfire_is_refused_with_an_actionable_message() {
+    fn the_engine_locations_reach_the_flags_on_every_os() {
+        let user = BackendConfig {
+            backend: Some(Backend::MistralRs),
+            batch_size: Some(4),
+            mistralrs_bin: Some("mistralrs-server".into()),
+            hipfire_url: Some("http://127.0.0.1:11435".into()),
+            ..Default::default()
+        };
+        let mut cmd = parse(&[EVAL.as_slice(), &["30"]].concat());
+        apply_with(&mut cmd, &user).unwrap();
+        let Commands::Bench(b) = cmd else { panic!() };
+        let BenchCommand::Eval(a) = b.command else {
+            panic!()
+        };
+        assert_eq!(a.backend, Some(Backend::MistralRs));
+        assert_eq!(a.generation.batch_size, Some(4), "a GPU server's knob");
+        assert_eq!(a.generation.engines.mistralrs_bin, user.mistralrs_bin);
+        assert_eq!(a.generation.engines.hipfire_url, user.hipfire_url);
+        // hipfire is no longer refused up front, Windows included: the daemon decides.
         let mut cmd = parse(&[EVAL.as_slice(), &["30", "--backend", "hipfire"]].concat());
-        let err = apply_with(&mut cmd, &BackendConfig::default()).unwrap_err();
-        assert!(err.contains("llama-server"), "{err}");
+        apply_with(&mut cmd, &BackendConfig::default()).unwrap();
     }
 
     #[test]
@@ -281,6 +297,7 @@ mod tests {
             "llama-server (ngl=auto, batch=1)"
         );
         assert_eq!(describe("hipfire", None, None, 1), "hipfire");
+        assert_eq!(describe("mistralrs", None, None, 6), "mistralrs (batch=6)");
         assert_eq!(
             describe("llama-completion", None, None, 1),
             "llama-completion"

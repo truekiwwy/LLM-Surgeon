@@ -56,7 +56,8 @@ l'utilisateur est pressé. Si une étape échoue, arrête-toi et rapporte l'erre
   prompts que la référence, puis mode `logits` entre les deux dumps (KL, changements
   top-1). Ajoute `ppl` ou `eval` quand llama.cpp est disponible ; sans llama.cpp, `eval`
   avec `backend: "native"` et `refusal` (taux de refus, avec `baseline_model`) génèrent en
-  Rust pur sur un dossier Qwen2.
+  Rust pur sur un dossier Qwen2. Appelle `surgeon_backends` d'abord : `backend: "mistralrs"`
+  mesure la copie patchée sur le GPU sans conversion quand mistral.rs est installé.
 - Pour une non-régression de génération, utilise `surgeon_eval` sur la copie patchée.
 
 ## 7. Ne rien annoncer sans mesure

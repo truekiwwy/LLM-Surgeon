@@ -56,6 +56,7 @@ pub mod server;
 pub(crate) use command::last_lines;
 pub use command::{CommandOutput, CommandRunner, StreamControl, SystemCommandRunner};
 pub use error::{EvalError, Result};
+pub(crate) use generator::find_binary;
 pub use generator::{
     generate_one_by_one, locate_binary, sampling_flags, Decoding, GenJob, GenerationOutcome,
     LlamaCliGenerator, TextGenerator,
