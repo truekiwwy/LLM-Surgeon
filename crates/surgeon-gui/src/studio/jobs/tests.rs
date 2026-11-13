@@ -27,7 +27,7 @@ impl Executor for Script {
     fn run(&self, spec: &JobSpec, args: &Value, ctx: &RunContext, rec: &mut Recorder) -> Outcome {
         self.started.lock().unwrap().push(spec.label.clone());
         self.active.fetch_add(1, Ordering::SeqCst);
-        let heavy = is_heavy(&spec.tool);
+        let heavy = is_heavy(spec);
         if heavy {
             let now = self.heavy.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_heavy.fetch_max(now, Ordering::SeqCst);
@@ -163,6 +163,36 @@ fn a_cancelled_run_leaves_no_output_and_the_project_ready() {
     assert!(!run_dir.join("out.partial").exists() && !run_dir.join("out").exists());
     assert_eq!(read_status(&run_dir).unwrap().status, RunStatus::Cancelled);
     assert_eq!(m.project.manifest.state, ProjectState::Ready);
+}
+
+#[test]
+fn an_estimate_runs_beside_a_heavy_run_but_a_pipeline_plan_waits() {
+    let (_ws, dir) = project();
+    let script = Arc::new(Script::default());
+    let mut m = open(&dir, script.clone());
+    let heavy = m
+        .submit(spec("surgeon_graph", "h", json!({"behave": "block"})))
+        .unwrap();
+    let estimate = json!({"model": "copies/c", "estimate": true});
+    m.submit(spec("surgeon_graph", "estimate", estimate))
+        .unwrap();
+    m.submit(spec("surgeon_pipeline", "plan", json!({"action": "plan"})))
+        .unwrap();
+    let mut done = Vec::new();
+    while done.is_empty() {
+        done.extend(m.tick(Instant::now()));
+        std::thread::sleep(bus::FRAME);
+    }
+    assert_eq!(done[0].spec.label, "estimate", "the preview did not wait");
+    assert_eq!(m.queue.len(), 1, "the plan waits for the heavy slot");
+    script.release.store(true, Ordering::SeqCst);
+    settle(&mut m);
+    assert_eq!(script.max_heavy.load(Ordering::SeqCst), 1);
+    // "h" and the estimate start in the same tick, on two threads: only the plan is ordered.
+    let order = script.started.lock().unwrap().clone();
+    assert_eq!(order.len(), 3);
+    assert_eq!(order[2], "plan");
+    let _ = heavy;
 }
 
 #[test]

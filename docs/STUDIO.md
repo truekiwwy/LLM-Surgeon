@@ -102,11 +102,17 @@ reste une action explicite, hors de ce socle.
   `surgeon_backends`) ou une copie de travail. L'appel passe par
   `weight_surgeon::mcp::call_tool`, le chemin exact de `surgeon mcp` : même schéma
   d'arguments, même sandbox, mêmes cœurs `core_*` que la CLI.
+- **Estimation** : `Estimer` lance d'abord le mode aperçu de l'outil (`surgeon_graph`
+  `estimate`, `surgeon_apply` et `surgeon_lora` `dry_run`, `surgeon_pipeline` `plan`) comme
+  un run ordinaire ; avec une `durée max`, la mise en file exige l'estimation de ces
+  paramètres exacts et la refuse si elle dépasse le budget ([GUI_3D.md](GUI_3D.md)).
 - **Formulaires** : un par outil, générés depuis `surgeon schema --kind tools` (les
   `inputSchema` de `tools/list`) : mêmes noms, mêmes champs requis, mêmes choix. Un test
   vérifie l'égalité pour chaque outil.
 - **File** : priorité décroissante, puis ordre d'arrivée. Un seul job lourd à la fois ;
-  `surgeon_check`, `surgeon_inspect` et `surgeon_backends` sont légers et passent à côté.
+  `surgeon_check`, `surgeon_inspect`, `surgeon_backends` et les aperçus qui n'écrivent aucun
+  modèle (`estimate`, `dry_run`) sont légers et passent à côté ; un `plan` de pipeline reste
+  lourd (il peut calibrer en faisant tourner le modèle).
 - **`{out}`** : dans les arguments, remplacé par `runs/<id>/out.partial/`. Le dossier
   devient `runs/<id>/out/` seulement si le run réussit (les chemins de l'enveloppe sont
   réécrits) ; sinon il est supprimé. `params.json` garde `{out}` tel quel.
@@ -156,6 +162,8 @@ Une ligne JSON par événement :
   `tests/fixtures/events/v1.ndjson` (test de compatibilité dans les deux sens).
 - Le moteur émet aujourd'hui `node_state` en `done` seulement (tenseur décalé, matrice du
   graphe analysée, prompt évalué) ; `pending`, `running` et `failed` font partie du format.
+  Un tenseur décalé par `apply` porte aussi `metric` `max_abs_delta` (le plus grand |ΔW|
+  de ce tenseur), que la vue 3D colore.
 
 ### Côté moteur : `--events`
 
@@ -183,7 +191,8 @@ ligne. `schema`, `mcp` et `tui` l'ignorent.
 - Rejeu : `RunView::replay` reconstruit un run depuis son fichier ; à la fin d'un run, la
   vue affichée est celle du fichier. Une dernière ligne tronquée (arrêt brutal pendant
   l'écriture) est ignorée ; une ligne illisible ailleurs est une erreur.
-- La vue 3D entoure les nœuds qu'un job en cours a atteints (id de nœud ou nom de tenseur).
+- La vue 3D dessine l'état de chaque nœud qu'un run a atteint (id de nœud ou nom de
+  tenseur), en direct ou en rejeu avec une barre de lecture : [GUI_3D.md](GUI_3D.md).
 
 ## 5. Journal d'expériences
 

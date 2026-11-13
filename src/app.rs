@@ -1240,6 +1240,8 @@ pub enum ProgressEvent {
         total: usize,
         overall_done: usize,
         overall_total: usize,
+        /// Largest |ΔW| element of this tensor.
+        max_abs_delta: f32,
     },
     OpDone {
         op_id: String,
@@ -1429,6 +1431,7 @@ impl<'a, B: PatchBackend> ObservedBackend<'a, B> {
             total: self.total(),
             overall_done: self.overall_done,
             overall_total,
+            max_abs_delta: stats.max_abs_delta,
         });
         if self.done >= self.total() {
             let (op_id, max_delta, tensors) = (self.op_id(), self.max_delta, self.done);

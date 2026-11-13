@@ -75,7 +75,7 @@ fn legacy_graph_arguments_still_open() {
 #[test]
 fn every_screen_can_be_captured_and_unknown_ones_are_refused() {
     let dir = tempfile::tempdir().unwrap();
-    for screen in ["home", "wizard", "diagnostics"] {
+    for screen in ["home", "wizard", "diagnostics", "graph"] {
         let png = dir.path().join(format!("{screen}.png"));
         let out = run(
             dir.path(),
@@ -95,6 +95,40 @@ fn every_screen_can_be_captured_and_unknown_ones_are_refused() {
     )
     .status
     .success());
+}
+
+#[test]
+fn a_run_replays_over_the_graph_and_a_bad_event_file_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/events/v1.ndjson"
+    );
+    let png = dir.path().join("replay.png");
+    let png = png.to_str().unwrap();
+    let args = |events| {
+        [
+            "--screenshot",
+            png,
+            "--screen",
+            "graph",
+            "--replay",
+            events,
+            FIXTURE,
+        ]
+    };
+    let out = run(dir.path(), &args(events));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(is_png(Path::new(png)));
+    let bad = dir.path().join("bad.ndjson");
+    std::fs::write(&bad, "garbage\n").unwrap();
+    let out = run(dir.path(), &args(bad.to_str().unwrap()));
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ligne 1"));
 }
 
 #[test]

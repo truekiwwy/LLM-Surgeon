@@ -177,12 +177,52 @@ pub enum ColorScale {
 }
 
 impl ColorScale {
+    /// The `parameters.color_scale` of a report; quantile when unknown.
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "log" => Self::Log,
+            "linear" => Self::Linear,
+            _ => Self::Quantile,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Quantile => "quantile",
             Self::Log => "log",
             Self::Linear => "linear",
         }
+    }
+
+    /// Position of `value` in `[0, 1]` among `sorted` (ascending), as the edges of the
+    /// exports are colored; the studio colors its 3D nodes with it too.
+    pub fn position(self, value: f64, sorted: &[f64]) -> f64 {
+        match self {
+            Self::Linear => {
+                let min = sorted.first().copied().unwrap_or(0.0);
+                let max = sorted.last().copied().unwrap_or(0.0);
+                match max > min {
+                    true => (value - min) / (max - min),
+                    false => 0.0,
+                }
+            }
+            Self::Log => {
+                let max = sorted.last().copied().unwrap_or(0.0);
+                match max > 0.0 {
+                    true => (1.0 + value.max(0.0)).ln() / (1.0 + max).ln(),
+                    false => 0.0,
+                }
+            }
+            Self::Quantile => {
+                if sorted.is_empty() {
+                    0.0
+                } else {
+                    let at = sorted.partition_point(|v| *v <= value);
+                    at as f64 / sorted.len() as f64
+                }
+            }
+        }
+        .clamp(0.0, 1.0)
     }
 }
 
@@ -193,6 +233,14 @@ pub enum Palette {
 }
 
 impl Palette {
+    /// The `parameters.palette` of a report; diverging when unknown.
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "cb-safe" => Self::CbSafe,
+            _ => Self::Diverging,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Diverging => "diverging",
@@ -231,64 +279,34 @@ impl Palette {
     }
 }
 
-fn interpolate(palette: Palette, t: f64) -> [u8; 3] {
-    let stops = palette.stops();
-    let t = t.clamp(0.0, 1.0) * (stops.len() - 1) as f64;
-    let low = t.floor() as usize;
-    let high = (low + 1).min(stops.len() - 1);
-    let fraction = t - low as f64;
-    [
-        (f64::from(stops[low][0])
-            + (f64::from(stops[high][0]) - f64::from(stops[low][0])) * fraction)
-            .round() as u8,
-        (f64::from(stops[low][1])
-            + (f64::from(stops[high][1]) - f64::from(stops[low][1])) * fraction)
-            .round() as u8,
-        (f64::from(stops[low][2])
-            + (f64::from(stops[high][2]) - f64::from(stops[low][2])) * fraction)
-            .round() as u8,
-    ]
+impl Palette {
+    /// The color at `t` in `[0, 1]` (clamped), linear between the stops.
+    pub fn color(self, t: f64) -> [u8; 3] {
+        let stops = self.stops();
+        let t = t.clamp(0.0, 1.0) * (stops.len() - 1) as f64;
+        let low = t.floor() as usize;
+        let high = (low + 1).min(stops.len() - 1);
+        let fraction = t - low as f64;
+        [
+            (f64::from(stops[low][0])
+                + (f64::from(stops[high][0]) - f64::from(stops[low][0])) * fraction)
+                .round() as u8,
+            (f64::from(stops[low][1])
+                + (f64::from(stops[high][1]) - f64::from(stops[low][1])) * fraction)
+                .round() as u8,
+            (f64::from(stops[low][2])
+                + (f64::from(stops[high][2]) - f64::from(stops[low][2])) * fraction)
+                .round() as u8,
+        ]
+    }
 }
 
 fn edge_position(report: &GraphReport, weight: f64, sorted: &[f64]) -> f64 {
-    match match report.parameters.color_scale.as_str() {
-        "log" => ColorScale::Log,
-        "linear" => ColorScale::Linear,
-        _ => ColorScale::Quantile,
-    } {
-        ColorScale::Linear => {
-            let min = sorted.first().copied().unwrap_or(0.0);
-            let max = sorted.last().copied().unwrap_or(0.0);
-            match max > min {
-                true => (weight - min) / (max - min),
-                false => 0.0,
-            }
-        }
-        ColorScale::Log => {
-            let max = sorted.last().copied().unwrap_or(0.0);
-            match max > 0.0 {
-                true => (1.0 + weight.max(0.0)).ln() / (1.0 + max).ln(),
-                false => 0.0,
-            }
-        }
-        ColorScale::Quantile => {
-            if sorted.is_empty() {
-                0.0
-            } else {
-                let at = sorted.partition_point(|v| *v <= weight);
-                at as f64 / sorted.len() as f64
-            }
-        }
-    }
-    .clamp(0.0, 1.0)
+    ColorScale::from_name(&report.parameters.color_scale).position(weight, sorted)
 }
 
 fn edge_color(report: &GraphReport, weight: f64, sorted: &[f64]) -> [u8; 3] {
-    let palette = match report.parameters.palette.as_str() {
-        "cb-safe" => Palette::CbSafe,
-        _ => Palette::Diverging,
-    };
-    interpolate(palette, edge_position(report, weight, sorted))
+    Palette::from_name(&report.parameters.palette).color(edge_position(report, weight, sorted))
 }
 
 fn hex(rgb: [u8; 3]) -> String {

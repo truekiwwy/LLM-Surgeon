@@ -33,7 +33,9 @@ use crate::editor::view::{self as editor_view, Request};
 use crate::editor::{self, Editor};
 use crate::runner::{self, Finished, Job, Task};
 use crate::source::{self, Input, Step, Timeline};
-use crate::studio::view::{self as studio_view, Studio};
+use crate::studio::bus::RunView;
+use crate::studio::live::{Layer, Replay};
+use crate::studio::view::{self as studio_view, Studio, Target};
 use crate::theme::{self, mono};
 use crate::viewport::{self, node_title, View};
 
@@ -95,6 +97,11 @@ pub struct SurgeonApp {
     agents: Hub,
     /// Home, Diagnostics, the first-run wizard and updates around the studio.
     desktop: Desktop,
+    /// A recorded run on the 3D view, with its time cursor.
+    replay: Option<Replay>,
+    /// The run on the 3D view mapped onto the current graph, refilled every frame.
+    layer: Layer,
+    buffers: viewport::Buffers,
 }
 
 impl SurgeonApp {
@@ -148,6 +155,9 @@ impl SurgeonApp {
             studio: Studio::new(workspace),
             agents: Hub::system(ctx),
             desktop,
+            replay: None,
+            layer: Layer::default(),
+            buffers: viewport::Buffers::default(),
         };
         if let Some(input) = input {
             app.set_input(ctx, input);
@@ -166,6 +176,63 @@ impl SurgeonApp {
         match source::open(path) {
             Ok(input) => self.set_input(ctx, input),
             Err(e) => self.studio.message = Some((e, true)),
+        }
+    }
+
+    /// Replays a run's `events.ndjson` over the graph on screen (`--replay`, the Projects
+    /// space). Opens on the end of the run, its last node selected.
+    pub fn open_replay(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let replay = Replay::open(path)?;
+        if let Some(last) = &replay.view().last_node {
+            self.selected = Some(last.clone());
+        }
+        self.replay = Some(replay);
+        self.mode = Mode::Graph;
+        Ok(())
+    }
+
+    /// A run of the Projects space on the 3D view, over the graph it wrote when it wrote one
+    /// (`out/graph.json`, else `out/graph.ndjson`), else over the graph already open.
+    fn open_run(&mut self, ctx: &egui::Context, dir: &std::path::Path, live: bool, target: Target) {
+        let graph = ["graph.json", "graph.ndjson"]
+            .into_iter()
+            .map(|name| dir.join("out").join(name))
+            .find(|p| p.is_file());
+        if let Some(graph) = &graph {
+            self.open_graph(ctx, graph);
+        }
+        if graph.is_none() && self.timeline.is_empty() && self.feed.is_none() {
+            self.studio.message = Some((
+                "aucun graphe ouvert : ouvrez d'abord celui du modèle (Graphe éphémère, ou un run surgeon_graph)".into(),
+                true,
+            ));
+            return;
+        }
+        self.replay = None;
+        let opened = match live {
+            // Live: the 3D view follows the running job (Studio::live_view).
+            true => Ok(()),
+            false => self.open_replay(&dir.join(crate::studio::bus::EVENTS_FILE)),
+        };
+        if let Err(e) = opened {
+            self.studio.message = Some((e, true));
+            return;
+        }
+        self.mode = Mode::Graph;
+        self.diff = target == Target::Diff;
+        if target == Target::Inspector {
+            self.show_inspector = true;
+            if let Some(last) = self.run_view().and_then(|v| v.last_node.clone()) {
+                self.selected = Some(last);
+            }
+        }
+    }
+
+    /// The run drawn over the 3D view: the replay, else the job running in the project.
+    fn run_view(&self) -> Option<&RunView> {
+        match &self.replay {
+            Some(replay) => Some(replay.view()),
+            None => self.studio.live_view(),
         }
     }
 
@@ -423,16 +490,7 @@ impl SurgeonApp {
                 .into_iter()
                 .collect(),
         };
-        let mut targets = editor::targets(&selections, report);
-        // The nodes a running job has reached, matched by graph id or tensor name.
-        let live = self.studio.node_states();
-        if !live.is_empty() {
-            for (t, node) in targets.iter_mut().zip(&report.nodes) {
-                *t |=
-                    live.contains_key(node.id.as_str()) || live.contains_key(node.tensor.as_str());
-            }
-        }
-        targets
+        editor::targets(&selections, report)
     }
 
     fn live_line(&self) -> Option<String> {
@@ -503,6 +561,10 @@ impl SurgeonApp {
         }
         if self.agents.busy() {
             ctx.request_repaint_after(crate::studio::bus::FRAME);
+        }
+        if let Some(replay) = self.replay.as_mut().filter(|r| r.playing) {
+            replay.advance(Duration::from_secs_f32(ctx.input(|i| i.stable_dt)));
+            ctx.request_repaint();
         }
         let finished = self.job.as_mut().map(Job::poll).unwrap_or_default();
         for done in finished {
@@ -646,24 +708,41 @@ impl SurgeonApp {
             }
         }
         let filtering = !self.filter.trim().is_empty();
-        let mut picked = None;
+        // Up / Down walk the list as shown, Escape clears; not while a field has the keys.
+        let order: Vec<usize> = layers.values().flatten().copied().collect();
+        let current = self
+            .selected
+            .as_ref()
+            .and_then(|s| step.index.get(s))
+            .copied();
+        let keys = !ui.ctx().egui_wants_keyboard_input();
+        let pressed = |key| keys && ui.input(|i| i.key_pressed(key));
+        let moved = match (pressed(Key::ArrowDown), pressed(Key::ArrowUp)) {
+            (true, false) => step_selection(&order, current, 1),
+            (false, true) => step_selection(&order, current, -1),
+            _ => None,
+        };
+        let mut picked = moved.map(|i| Some(step.report.nodes[i].id.clone()));
+        if pressed(Key::Escape) {
+            picked = Some(None);
+        }
+        let shown = moved.or(current);
+        let run_states = self.run_view().map(|_| &self.layer.states);
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for (layer, nodes) in &layers {
                 let title = match layer {
                     Some(l) => format!("Layer {l:>3}"),
                     None => "embed / lm_head".into(),
                 };
-                let holds_selection = nodes
-                    .iter()
-                    .any(|&i| self.selected.as_deref() == Some(&step.report.nodes[i].id));
+                let holds_selection = nodes.iter().any(|&i| Some(i) == shown);
                 CollapsingHeader::new(mono(format!("{title}  ({})", nodes.len())))
                     .id_salt(("layer", *layer))
-                    .open(filtering.then_some(true))
+                    .open((filtering || (moved.is_some() && holds_selection)).then_some(true))
                     .default_open(holds_selection)
                     .show(ui, |ui| {
                         for &i in nodes {
                             let node = &step.report.nodes[i];
-                            let selected = self.selected.as_deref() == Some(&node.id);
+                            let selected = Some(i) == shown;
                             ui.horizontal(|ui| {
                                 let (swatch, _) =
                                     ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
@@ -676,18 +755,31 @@ impl SurgeonApp {
                                 if let Some(e) = node.expert {
                                     text.push_str(&format!(" · e{e}"));
                                 }
-                                if ui.selectable_label(selected, mono(text)).clicked() {
-                                    picked = Some(node.id.clone());
+                                let label = ui
+                                    .selectable_label(selected, mono(text))
+                                    .on_hover_text(&node.tensor);
+                                if selected && moved.is_some() {
+                                    label.scroll_to_me(None);
+                                }
+                                if label.clicked() {
+                                    picked = Some(Some(node.id.clone()));
                                 }
                                 if step.touched.contains_key(&node.id) {
                                     ui.label(mono("patch").small().color(theme::AGENT));
+                                }
+                                // The state in words: the 3D glyph and color repeat it.
+                                if let Some(state) =
+                                    run_states.and_then(|s| s.get(i).copied().flatten())
+                                {
+                                    let (_, color, word) = viewport::state_style(state);
+                                    ui.label(mono(word).small().color(color));
                                 }
                             });
                         }
                     });
             }
         });
-        if picked.is_some() {
+        if let Some(picked) = picked {
             self.selected = picked;
         }
     }
@@ -697,16 +789,109 @@ impl SurgeonApp {
             ui.label(RichText::new("aucun graphe chargé").color(theme::DIM));
             return;
         };
+        let run = self.run_view();
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            let node = self
-                .selected
-                .as_deref()
-                .and_then(|id| step.report.nodes.iter().find(|n| n.id == id));
-            match node {
-                Some(node) => node_inspector(ui, step, node),
+            match self.selected.as_ref().and_then(|s| step.index.get(s)) {
+                Some(&i) => {
+                    node_inspector(ui, step, &step.report.nodes[i]);
+                    if let Some(run) = run {
+                        run_inspector(ui, run, &self.layer, step, i);
+                    }
+                }
                 None => model_summary(ui, &step.report),
             }
         });
+    }
+
+    fn replay_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(replay) = self.replay.as_mut() else {
+            return;
+        };
+        let mut close = false;
+        ui.horizontal_centered(|ui| {
+            let last = replay.len();
+            let mut cursor = replay.cursor();
+            ui.label(mono("run").strong());
+            if ui
+                .button(mono("|<"))
+                .on_hover_text("début du run")
+                .clicked()
+            {
+                cursor = 0;
+            }
+            if ui
+                .button(mono("<"))
+                .on_hover_text("ligne précédente")
+                .clicked()
+            {
+                cursor = cursor.saturating_sub(1);
+            }
+            let play = match replay.playing {
+                true => "pause",
+                false => "lecture",
+            };
+            if ui.button(mono(play)).clicked() {
+                replay.toggle();
+                cursor = replay.cursor();
+            }
+            if ui
+                .button(mono(">"))
+                .on_hover_text("ligne suivante")
+                .clicked()
+            {
+                cursor = (cursor + 1).min(last);
+            }
+            if ui.button(mono(">|")).on_hover_text("fin du run").clicked() {
+                cursor = last;
+            }
+            ui.add(Slider::new(&mut cursor, 0..=last).show_value(false));
+            if cursor != replay.cursor() {
+                replay.seek(cursor);
+            }
+            egui::ComboBox::from_id_salt("replay-speed")
+                .width(64.0)
+                .selected_text(mono(format!("×{}", replay.speed)))
+                .show_ui(ui, |ui| {
+                    for speed in [0.25, 1.0, 4.0, 16.0, 64.0] {
+                        ui.selectable_value(&mut replay.speed, speed, mono(format!("×{speed}")));
+                    }
+                })
+                .response
+                .on_hover_text("vitesse : temps du run par seconde réelle");
+            ui.label(mono(format!(
+                "ligne {}/{} · {:.1}/{:.1} s",
+                replay.cursor(),
+                last,
+                replay.t_ms() as f64 / 1000.0,
+                replay.duration_ms() as f64 / 1000.0
+            )));
+            let name = replay
+                .file
+                .parent()
+                .and_then(|d| d.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            ui.label(mono(name).color(theme::DIM))
+                .on_hover_text(replay.file.display().to_string());
+            close = ui.button("×").on_hover_text("fermer le rejeu").clicked();
+        });
+        if close {
+            self.replay = None;
+        }
+    }
+
+    /// A selection made by tensor name (a run's `node_id`) becomes the graph id.
+    fn normalize_selection(&mut self) {
+        let id = self
+            .timeline
+            .current()
+            .zip(self.selected.as_ref())
+            .and_then(|(step, s)| step.index.get(s).map(|&i| &step.report.nodes[i].id))
+            .filter(|id| Some(*id) != self.selected.as_ref())
+            .cloned();
+        if id.is_some() {
+            self.selected = id;
+        }
     }
 
     fn timeline_bar(&mut self, ui: &mut egui::Ui) {
@@ -781,8 +966,18 @@ impl SurgeonApp {
         let targets = self.targets(&step.report);
         let selected = self
             .selected
-            .as_deref()
-            .and_then(|id| step.report.nodes.iter().position(|n| n.id == id));
+            .as_ref()
+            .and_then(|s| step.index.get(s))
+            .copied();
+        // Field by field, not run_view(): the layer is refilled while the run is borrowed.
+        let run = match &self.replay {
+            Some(replay) => Some(replay.view()),
+            None => self.studio.live_view(),
+        };
+        match run {
+            Some(run) => self.layer.fill(run, step),
+            None => self.layer = Layer::default(),
+        }
         let view = View {
             step,
             blend,
@@ -790,8 +985,9 @@ impl SurgeonApp {
             visible: &visible,
             selected,
             targets: &targets,
+            layer: run.is_some().then_some(&self.layer),
         };
-        if let Some(click) = viewport::show(ui, &view, &mut self.camera) {
+        if let Some(click) = viewport::show(ui, &view, &mut self.camera, &mut self.buffers) {
             self.selected = click.map(|i| step.report.nodes[i].id.clone());
         }
     }
@@ -815,6 +1011,7 @@ impl SurgeonApp {
         if self.desktop.screen != Screen::Workbench {
             return;
         }
+        self.normalize_selection();
         if matches!(self.mode, Mode::Graph | Mode::Split)
             && !ctx.egui_wants_keyboard_input()
             && ctx.input(|i| i.key_pressed(Key::R))
@@ -834,6 +1031,11 @@ impl SurgeonApp {
             Panel::bottom("job")
                 .exact_size(28.0)
                 .show(ui, |ui| self.job_bar(ui));
+        }
+        if self.replay.is_some() && matches!(self.mode, Mode::Graph | Mode::Split) {
+            Panel::bottom("replay")
+                .exact_size(32.0)
+                .show(ui, |ui| self.replay_bar(ui));
         }
         let mut open = self.show_editor;
         Panel::right("editor")
@@ -861,10 +1063,12 @@ impl SurgeonApp {
                 CentralPanel::default().show(ui, |ui| self.canvas_ui(ui));
             }
             Mode::Projects => {
-                CentralPanel::default().show(ui, |ui| {
-                    if let Some(studio_view::Action::OpenGraph(path)) = self.studio.show(ui) {
-                        self.open_graph(&ctx, &path);
+                CentralPanel::default().show(ui, |ui| match self.studio.show(ui) {
+                    Some(studio_view::Action::OpenGraph(path)) => self.open_graph(&ctx, &path),
+                    Some(studio_view::Action::OpenRun { dir, live, target }) => {
+                        self.open_run(&ctx, &dir, live, target)
                     }
+                    None => {}
                 });
             }
             Mode::Agents => self.agents.show(ui, &mut self.studio),
@@ -911,6 +1115,20 @@ fn outcome_line(run: &Finished) -> String {
         ),
         None => format!("ok en {:.1} s", run.seconds),
     }
+}
+
+/// The node `delta` places after `current` in the list as shown, held at both ends. With no
+/// selection, or one the filters hide, Down starts at the top and Up at the bottom.
+fn step_selection(order: &[usize], current: Option<usize>, delta: isize) -> Option<usize> {
+    let at = current.and_then(|c| order.iter().position(|&i| i == c));
+    let next = match (at, delta > 0) {
+        (Some(at), _) => at
+            .saturating_add_signed(delta)
+            .min(order.len().checked_sub(1)?),
+        (None, true) => 0,
+        (None, false) => order.len().checked_sub(1)?,
+    };
+    order.get(next).copied()
 }
 
 // ------------------------------------------------------------------ inspector
@@ -990,6 +1208,27 @@ fn rows(ui: &mut egui::Ui, id: &str, rows: &[(&str, String)]) {
         });
 }
 
+/// What the run on the 3D view did to node `i`: its state and every metric it sent for the
+/// node, under its graph id or its tensor name.
+fn run_inspector(ui: &mut egui::Ui, run: &RunView, layer: &Layer, step: &Step, i: usize) {
+    let node = &step.report.nodes[i];
+    section(ui, "RUN");
+    let mut lines = vec![
+        ("commande", run.command.clone().unwrap_or_default()),
+        ("état", viewport::run_line(layer, i)),
+    ];
+    lines.extend(
+        run.metrics
+            .iter()
+            .filter(|((n, _), _)| {
+                n.as_ref()
+                    .is_some_and(|n| *n == node.id || *n == node.tensor)
+            })
+            .map(|((_, name), value)| (name.as_str(), num(*value))),
+    );
+    rows(ui, "run", &lines);
+}
+
 fn node_inspector(ui: &mut egui::Ui, step: &Step, node: &NodeReport) {
     let m = &node.metrics;
     ui.label(
@@ -1000,16 +1239,18 @@ fn node_inspector(ui: &mut egui::Ui, step: &Step, node: &NodeReport) {
     ui.label(mono(&node.tensor).small().color(theme::DIM));
 
     section(ui, "TENSEUR");
-    rows(
-        ui,
-        "tensor",
-        &[
-            ("forme", format!("{} × {}", node.rows, node.cols)),
-            ("dtype", node.dtype.clone()),
-            ("octets", node.weight_bytes.to_string()),
-            ("id", node.id.clone()),
-        ],
-    );
+    let mut identity = vec![
+        ("forme", format!("{} × {}", node.rows, node.cols)),
+        ("dtype", node.dtype.clone()),
+        ("rôle", viewport::role_label(node.role).to_owned()),
+        ("couche", node.layer.map_or("-".into(), |l| l.to_string())),
+        ("octets", node.weight_bytes.to_string()),
+        ("id", node.id.clone()),
+    ];
+    if let Some(e) = node.expert {
+        identity.insert(4, ("expert", e.to_string()));
+    }
+    rows(ui, "tensor", &identity);
 
     section(ui, "SPECTRE");
     let interval = |lo: Option<f64>, hi: Option<f64>| match (lo, hi) {
@@ -1193,6 +1434,30 @@ mod tests {
             GraphPatch::Snapshot { report } => *report,
             GraphPatch::Update { .. } => unreachable!(),
         }
+    }
+
+    #[test]
+    fn arrow_keys_walk_the_shown_list_and_stop_at_its_ends() {
+        let order = [4, 9, 2];
+        assert_eq!(step_selection(&order, Some(9), 1), Some(2));
+        assert_eq!(step_selection(&order, Some(9), -1), Some(4));
+        assert_eq!(
+            step_selection(&order, Some(2), 1),
+            Some(2),
+            "held at the end"
+        );
+        assert_eq!(
+            step_selection(&order, Some(4), -1),
+            Some(4),
+            "held at the top"
+        );
+        assert_eq!(step_selection(&order, None, 1), Some(4));
+        assert_eq!(
+            step_selection(&order, Some(7), -1),
+            Some(2),
+            "hidden: from the end"
+        );
+        assert_eq!(step_selection(&[], None, 1), None);
     }
 
     #[test]

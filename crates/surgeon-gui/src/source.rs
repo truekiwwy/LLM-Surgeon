@@ -110,19 +110,24 @@ pub struct Step {
     /// Nodes the patch that made this state touched (changed or moved), with their delta
     /// against the previous state when their analysis changed.
     pub touched: BTreeMap<String, Option<NodeDiff>>,
-    /// `(edge, source node, target node)` indices of every edge whose ends exist.
+    /// `(edge, source node, target node)` indices of every edge whose ends exist, structural
+    /// ones first, then by decreasing |weight|: the viewport draws a prefix of it.
     pub edges: Vec<(usize, usize, usize)>,
+    /// Node index by graph id and by tensor name: event `node_id`s use either.
+    pub index: HashMap<String, usize>,
 }
 
 impl Step {
     fn new(report: GraphReport, touched: BTreeMap<String, Option<NodeDiff>>) -> Self {
-        let index: HashMap<&str, usize> = report
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.id.as_str(), i))
-            .collect();
-        let edges = report
+        let mut index = HashMap::with_capacity(report.nodes.len() * 2);
+        for (i, n) in report.nodes.iter().enumerate() {
+            index.insert(n.tensor.clone(), i);
+        }
+        // Ids last: a graph id wins over a tensor name that happens to be equal.
+        for (i, n) in report.nodes.iter().enumerate() {
+            index.insert(n.id.clone(), i);
+        }
+        let mut edges: Vec<_> = report
             .edges
             .iter()
             .enumerate()
@@ -134,10 +139,18 @@ impl Step {
                 ))
             })
             .collect();
+        // Stable: equal weights keep the report's order, so the layout is deterministic.
+        edges.sort_by(|a, b| {
+            let (ea, eb) = (&report.edges[a.0], &report.edges[b.0]);
+            eb.structural
+                .cmp(&ea.structural)
+                .then(eb.weight.abs().total_cmp(&ea.weight.abs()))
+        });
         Self {
             report,
             touched,
             edges,
+            index,
         }
     }
 }
