@@ -43,18 +43,6 @@ impl JobKind {
         }
     }
 
-    /// What the reached nodes mean for this kind of run.
-    pub fn caption(self) -> &'static str {
-        match self {
-            Self::Graph => "graphe : matrices analysées",
-            Self::Extract => "extraction : direction lue sur le flux résiduel",
-            Self::Apply => "apply sur copie : tenseurs décalés, couleur = |ΔW| max",
-            Self::Bench => "bench : prompts et questions (hors graphe)",
-            Self::Pipeline => "pipeline : étapes et portes (hors graphe)",
-            Self::Other => "run",
-        }
-    }
-
     /// The per-node metric the layer colors by.
     pub fn metric(self) -> Option<&'static str> {
         match self {

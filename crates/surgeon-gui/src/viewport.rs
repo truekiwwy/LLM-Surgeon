@@ -21,8 +21,10 @@ use weight_surgeon::graph::GraphRole;
 
 use crate::camera::{self, Orbit, Projected};
 use crate::source::Step;
+use crate::studio::live::JobKind;
 use crate::studio::live::Layer;
 use crate::theme;
+use crate::ui::i18n::{t, tf};
 use crate::ui::{components, icons};
 
 /// Past this many nodes, the lighter edge budget.
@@ -75,11 +77,11 @@ pub enum Glyph {
 
 pub fn state_style(state: NodeStatus) -> (Glyph, Color32, &'static str) {
     match state {
-        NodeStatus::Pending => (Glyph::Dots, theme::DIM, "en attente"),
+        NodeStatus::Pending => (Glyph::Dots, theme::DIM, t("state.pending")),
         // The accent is kept for the selection: a running node reads by its square glyph.
-        NodeStatus::Running => (Glyph::Square, theme::TEXT, "en cours"),
-        NodeStatus::Done => (Glyph::Check, theme::GOOD, "terminé"),
-        NodeStatus::Failed => (Glyph::Cross, theme::BAD, "échoué"),
+        NodeStatus::Running => (Glyph::Square, theme::TEXT, t("state.running")),
+        NodeStatus::Done => (Glyph::Check, theme::GOOD, t("state.done")),
+        NodeStatus::Failed => (Glyph::Cross, theme::BAD, t("state.failed")),
     }
 }
 
@@ -377,19 +379,16 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
     };
     let targeted = view.targets.iter().filter(|t| **t).count();
     if targeted > 0 {
-        caption(
-            format!("dry-run visuel : {targeted} tenseur(s) ciblé(s)"),
-            theme::TEXT,
-        );
+        caption(tf("view3d.targets", &[("n", &targeted)]), theme::TEXT);
     }
     if let Some(layer) = view.layer {
-        caption(layer.kind.caption().into(), theme::TEXT);
+        caption(job_caption(layer.kind).into(), theme::TEXT);
         if let (Some(metric), Some((lo, hi))) = (layer.kind.metric(), layer.range) {
             caption(format!("{metric} : {lo:.3e} – {hi:.3e}"), theme::DIM);
         }
         if layer.unmatched > 0 {
             caption(
-                format!("{} id(s) du run hors de ce graphe", layer.unmatched),
+                tf("view3d.unmatched", &[("n", &layer.unmatched)]),
                 theme::DIM,
             );
         }
@@ -405,7 +404,7 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
     painter.text(
         rect.left_bottom() + Vec2::new(10.0, -8.0),
         Align2::LEFT_BOTTOM,
-        "gauche : orbite   droit : pan   molette : zoom   R : recentrer",
+        t("view3d.help"),
         components::font_meta(),
         theme::DIM,
     );
@@ -416,10 +415,22 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
     }
 }
 
+/// What the reached nodes mean for this kind of run.
+fn job_caption(kind: JobKind) -> &'static str {
+    match kind {
+        JobKind::Graph => t("job.graph"),
+        JobKind::Extract => t("job.extract"),
+        JobKind::Apply => t("job.apply"),
+        JobKind::Bench => t("job.bench"),
+        JobKind::Pipeline => t("job.pipeline"),
+        JobKind::Other => t("job.other"),
+    }
+}
+
 /// `terminé · max_abs_delta 1.250e-2`, or `hors run`.
 pub fn run_line(layer: &Layer, i: usize) -> String {
     let state = layer.states.get(i).copied().flatten();
-    let mut line = state.map_or("hors run".into(), |s| state_style(s).2.to_owned());
+    let mut line = state.map_or(t("state.outside").into(), |s| state_style(s).2.to_owned());
     if let (Some(metric), Some(Some(v))) = (layer.kind.metric(), layer.values.get(i)) {
         line.push_str(&format!(" · {metric} {v:.3e}"));
     }
@@ -482,7 +493,7 @@ fn hover_card(
         ),
     ];
     if let Some(run) = run {
-        lines.push((format!("run : {run}"), theme::TEXT));
+        lines.push((tf("view3d.run", &[("run", &run)]), theme::TEXT));
     }
     let font = components::font_mono();
     let galleys: Vec<_> = lines

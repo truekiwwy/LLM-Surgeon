@@ -135,7 +135,8 @@ fn histogram(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
         .filter_map(|(v, shown)| v.filter(|_| *shown))
         .collect();
     let plot = Rect::from_min_max(
-        rect.min + Vec2::new(T.space.l, T.space.l),
+        // A band of 24 above the plot carries its count and its cut.
+        rect.min + Vec2::new(T.space.l, T.space.xl + T.space.s),
         rect.max - Vec2::new(T.space.l, T.size.row + T.space.s),
     );
     let max = values.iter().copied().fold(0.0_f64, f64::max);
@@ -151,6 +152,18 @@ fn histogram(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
     let top = counts.iter().copied().max().unwrap_or(0).max(1) as f32;
     let x_of = |f: f64| plot.left() + f as f32 * plot.width();
     let y_of = |n: usize| plot.bottom() - n as f32 / top * plot.height();
+    // A quiet count grid in quarters, its top labelled, under the axis and the wire.
+    for k in 1..4 {
+        let y = plot.bottom() - plot.height() * k as f32 / 4.0;
+        c::hline(&painter, plot.x_range(), y, T.color.separator);
+    }
+    painter.text(
+        Pos2::new(plot.left(), rect.top() + T.space.s),
+        Align2::LEFT_TOP,
+        tf("hist.count", &[("n", &(top as usize))]),
+        c::font_meta(),
+        T.color.text_secondary,
+    );
     // Axis, then the stepped outline: wire, no fill.
     c::hline(&painter, plot.x_range(), plot.bottom(), T.color.border);
     c::vline(&painter, plot.left(), plot.y_range(), T.color.border);
@@ -224,7 +237,7 @@ fn histogram(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
     );
     if let Some(cut) = app.threshold {
         painter.text(
-            plot.right_top(),
+            Pos2::new(plot.right(), rect.top() + T.space.s),
             Align2::RIGHT_TOP,
             tf("hist.cut", &[("cut", &num(cut)), ("n", &above)]),
             c::font_mono(),
@@ -232,7 +245,7 @@ fn histogram(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
         );
     } else {
         painter.text(
-            plot.right_top(),
+            Pos2::new(plot.right(), rect.top() + T.space.s),
             Align2::RIGHT_TOP,
             t("hist.cut.hint"),
             c::font_meta(),

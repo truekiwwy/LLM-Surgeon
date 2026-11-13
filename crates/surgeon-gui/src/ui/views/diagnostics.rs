@@ -234,6 +234,20 @@ fn updates(ui: &mut Ui, app: &mut SurgeonApp) {
     }
 }
 
+/// `1794605966 INFO …` as `14:59:26 INFO …` (UTC): the log stamps lines in Unix seconds.
+fn clock(line: &str) -> String {
+    match line.split_once(' ') {
+        Some((stamp, rest)) => match stamp.parse::<u64>() {
+            Ok(t) => {
+                let s = t % 86_400;
+                format!("{:02}:{:02}:{:02} {rest}", s / 3600, s % 3600 / 60, s % 60)
+            }
+            Err(_) => line.to_owned(),
+        },
+        None => line.to_owned(),
+    }
+}
+
 fn journal(ui: &mut Ui, app: &mut SurgeonApp, rect: egui::Rect) {
     let parts = layout::stack(
         rect,
@@ -256,15 +270,15 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, rect: egui::Rect) {
                 .auto_shrink(false)
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    for line in &lines {
+                    for line in lines.iter().map(|l| clock(l)) {
                         let state = match () {
                             _ if line.contains("WARN") => Some(State::Warn),
                             _ if line.contains("ERROR") => Some(State::Error),
                             _ => None,
                         };
                         match state {
-                            Some(state) => c::status(ui, state, line.as_str()),
-                            None => c::mono_secondary(ui, line.as_str()),
+                            Some(state) => c::status(ui, state, line),
+                            None => c::mono_secondary(ui, line),
                         };
                     }
                 });
@@ -283,4 +297,14 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, rect: egui::Rect) {
                 c::meta(ui, tf("report.copied", &[("n", &text.lines().count())]));
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn log_stamps_read_as_a_utc_clock() {
+        assert_eq!(super::clock("86399 INFO x"), "23:59:59 INFO x");
+        assert_eq!(super::clock("3661 WARN y z"), "01:01:01 WARN y z");
+        assert_eq!(super::clock("not a stamp"), "not a stamp");
+    }
 }
