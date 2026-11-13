@@ -38,9 +38,9 @@ fn version_is_printed() {
 }
 
 #[test]
-fn no_argument_renders_the_home_screen_off_screen() {
+fn no_argument_renders_the_atelier_off_screen() {
     let dir = tempfile::tempdir().unwrap();
-    let png = dir.path().join("home.png");
+    let png = dir.path().join("atelier.png");
     let out = run(dir.path(), &["--screenshot", png.to_str().unwrap()]);
     assert!(
         out.status.success(),
@@ -75,7 +75,14 @@ fn legacy_graph_arguments_still_open() {
 #[test]
 fn every_screen_can_be_captured_and_unknown_ones_are_refused() {
     let dir = tempfile::tempdir().unwrap();
-    for screen in ["home", "wizard", "diagnostics", "graph"] {
+    for screen in [
+        "atelier",
+        "graph",
+        "analyses",
+        "agents",
+        "diagnostics",
+        "wizard",
+    ] {
         let png = dir.path().join(format!("{screen}.png"));
         let out = run(
             dir.path(),
@@ -91,10 +98,48 @@ fn every_screen_can_be_captured_and_unknown_ones_are_refused() {
     let png = dir.path().join("x.png");
     assert!(!run(
         dir.path(),
-        &["--screenshot", png.to_str().unwrap(), "--screen", "nope"]
+        &["--screenshot", png.to_str().unwrap(), "--screen", "home"]
     )
     .status
     .success());
+}
+
+#[test]
+fn the_demo_workspace_renders_every_tab_at_both_sizes_and_scales() {
+    let dir = tempfile::tempdir().unwrap();
+    for (screen, size, scale) in [
+        ("atelier", "1440x900", "1.0"),
+        ("agents", "1920x1080", "1.0"),
+        ("graph", "1440x900", "1.5"),
+    ] {
+        let png = dir.path().join(format!("{screen}.png"));
+        let out = run(
+            dir.path(),
+            &[
+                "--screenshot",
+                png.to_str().unwrap(),
+                "--screen",
+                screen,
+                "--demo-data",
+                "--no-motion",
+                "--size",
+                size,
+                "--scale",
+                scale,
+            ],
+        );
+        assert!(
+            out.status.success(),
+            "{screen}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = std::fs::read(&png).unwrap();
+        assert!(is_png(&png), "{screen}");
+        // IHDR: width and height, big endian, right after the signature and chunk header.
+        let w = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let h = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+        assert_eq!(format!("{w}x{h}"), size, "{screen}");
+    }
 }
 
 #[test]

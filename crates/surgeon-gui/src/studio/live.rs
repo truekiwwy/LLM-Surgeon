@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use eframe::egui::Color32;
 use weight_surgeon::events::{EventLine, NodeStatus};
-use weight_surgeon::graph::output::{ColorScale, Palette};
+use weight_surgeon::graph::output::ColorScale;
 
 use super::bus::{self, RunView};
 use crate::source::Step;
@@ -73,7 +73,7 @@ pub struct Layer {
     pub states: Vec<Option<NodeStatus>>,
     /// The kind's metric per node index.
     pub values: Vec<Option<f64>>,
-    /// Its color, on the report's own scale and palette (those of the exported edges).
+    /// Its color: the report's own scale, on the interface's data steps.
     pub colors: Vec<Option<Color32>>,
     /// Node ids of the run that are not in this graph (prompts, operations, another model).
     pub unmatched: usize,
@@ -123,14 +123,11 @@ impl Layer {
             .zip(self.sorted.last())
             .map(|(a, b)| (*a, *b));
         let params = &step.report.parameters;
-        let (scale, palette) = (
-            ColorScale::from_name(&params.color_scale),
-            Palette::from_name(&params.palette),
-        );
+        let scale = ColorScale::from_name(&params.color_scale);
         for (color, value) in self.colors.iter_mut().zip(&self.values) {
             *color = value.map(|v| {
-                let [r, g, b] = palette.color(scale.position(v, &self.sorted));
-                Color32::from_rgb(r, g, b)
+                // The interface's one data scale, whatever palette the report names.
+                crate::theme::data_step(scale.position(v, &self.sorted))
             });
         }
     }

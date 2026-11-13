@@ -23,6 +23,7 @@ use crate::camera::{self, Orbit, Projected};
 use crate::source::Step;
 use crate::studio::live::Layer;
 use crate::theme;
+use crate::ui::icons;
 
 /// Past this many nodes, the lighter edge budget.
 pub const LOD_NODES: usize = 400;
@@ -296,7 +297,7 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
         let radius = node_radius(&p);
         let fill = match view.diff {
             true => delta_color(node_diffs.get(node.id.as_str()).copied()),
-            false => theme::role_color(node.role),
+            false => theme::DIM,
         };
         // A run in view: its values color the nodes they cover, unreached nodes step back.
         let fill = match view.layer {
@@ -311,7 +312,15 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
             true => fill,
             false => fill.gamma_multiply(0.12),
         };
-        shapes.push(Shape::circle_filled(p.pos, radius, fill));
+        // Wireframe: the role reads by the outline's shape, the color is data (diff, run).
+        let shape = theme::role_shape(node.role);
+        shapes.push(icons::role_fill(shape, p.pos, radius, theme::BG));
+        shapes.push(icons::role_outline(
+            shape,
+            p.pos,
+            radius,
+            Stroke::new(1.25, fill),
+        ));
         if view.step.touched.contains_key(&node.id) {
             shapes.push(Shape::circle_stroke(
                 p.pos,
@@ -341,13 +350,14 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
     if let Some(i) = view.selected.filter(|&i| view.visible[i]) {
         if let Some(p) = projected[i] {
             let radius = node_radius(&p);
-            painter.circle_stroke(p.pos, radius + 3.5, Stroke::new(2.0, theme::SELECTION));
+            let shape = theme::role_shape(report.nodes[i].role);
+            painter.add(icons::role_fill(shape, p.pos, radius, theme::SELECTION));
             painter.text(
                 p.pos + Vec2::new(radius + 7.0, 0.0),
                 Align2::LEFT_CENTER,
                 node_title(&report.nodes[i]),
                 FontId::monospace(11.0),
-                theme::SELECTION,
+                theme::TEXT,
             );
         }
     }
@@ -368,7 +378,7 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
     if targeted > 0 {
         caption(
             format!("dry-run visuel : {targeted} tenseur(s) ciblé(s)"),
-            theme::SELECTION,
+            theme::TEXT,
         );
     }
     if let Some(layer) = view.layer {
@@ -383,6 +393,13 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
             );
         }
         legend(&painter, rect, layer);
+    }
+    // The help line only where it fits (not in the Atelier's small preview).
+    if rect.width() < 560.0 {
+        return match response.clicked() {
+            true => Some(hovered),
+            false => None,
+        };
     }
     painter.text(
         rect.left_bottom() + Vec2::new(10.0, -8.0),

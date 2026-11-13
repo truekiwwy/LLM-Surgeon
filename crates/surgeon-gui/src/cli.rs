@@ -11,11 +11,11 @@ use crate::canvas::EXTENSION;
 #[command(
     name = "surgeon-gui",
     version,
-    about = "LLM Surgery Studio : accueil, assistant d'installation, canvas de cartes, éditeur de patchs et graphe des poids en 3D"
+    about = "Weight Surgeon : atelier de chirurgie des poids de LLM locaux (graphe 3D, analyses, agents, diagnostics)"
 )]
 pub struct Cli {
     /// graph.json, graph.ndjson (suivi en direct), `-` (NDJSON sur l'entrée standard), un
-    /// workspace *.surgeon-studio.json ou un dossier. Sans argument : l'écran d'accueil.
+    /// workspace *.surgeon-studio.json ou un dossier. Sans argument : l'Atelier.
     #[arg(value_name = "PATH")]
     pub inputs: Vec<PathBuf>,
     /// Dossier des projets du Studio (défaut : celui des réglages, sinon ~/Documents/weight-surgeon).
@@ -28,9 +28,23 @@ pub struct Cli {
     /// Rend l'écran courant hors écran dans ce PNG, puis quitte.
     #[arg(long, value_name = "PNG")]
     pub screenshot: Option<PathBuf>,
-    /// Avec --screenshot : home (défaut), wizard, diagnostics, agents, graph (la vue 3D du graphe).
-    #[arg(long, value_name = "SCREEN", default_value = "home")]
+    /// L'onglet ouvert : atelier (défaut), graph, analyses, agents, diagnostics, ou wizard
+    /// (l'assistant de configuration par-dessus l'Atelier).
+    #[arg(long, value_name = "SCREEN", default_value = "atelier")]
     pub screen: String,
+    /// Taille de la capture en pixels, `LARGEURxHAUTEUR` (et taille de la fenêtre au lancement).
+    #[arg(long, value_name = "LxH", default_value = "1440x900", value_parser = parse_size)]
+    pub size: [u32; 2],
+    /// Pixels par point : 1.0, 1.25, 1.5, 2.0 (capture et fenêtre).
+    #[arg(long, value_name = "FACTEUR", default_value_t = 1.0)]
+    pub scale: f32,
+    /// Aucune transition (accessibilité, captures stables).
+    #[arg(long)]
+    pub no_motion: bool,
+    /// Un espace de démonstration jetable et rempli : petit modèle analysé par le moteur,
+    /// graphe de test avec sa référence, agent scripté en attente d'approbation. Hors réseau.
+    #[arg(long)]
+    pub demo_data: bool,
     /// Rejoue le events.ndjson d'un run sur la vue 3D du graphe ouvert (barre de lecture).
     #[arg(long, value_name = "EVENTS")]
     pub replay: Option<PathBuf>,
@@ -38,6 +52,23 @@ pub struct Cli {
     /// démarrage. Les composants installés et le config.toml du moteur sont conservés.
     #[arg(long)]
     pub reset_settings: bool,
+}
+
+/// `1440x900` as `[1440, 900]`.
+pub fn parse_size(text: &str) -> Result<[u32; 2], String> {
+    let (w, h) = text
+        .split_once(['x', 'X'])
+        .ok_or_else(|| format!("{text} : LARGEURxHAUTEUR attendu"))?;
+    let parse = |v: &str| {
+        v.trim()
+            .parse::<u32>()
+            .map_err(|_| format!("{text} : entier attendu"))
+    };
+    let size = [parse(w)?, parse(h)?];
+    match size.iter().all(|v| (320..=7680).contains(v)) {
+        true => Ok(size),
+        false => Err(format!("{text} : entre 320 et 7680 pixels")),
+    }
 }
 
 /// What one path means to the app.
@@ -100,5 +131,19 @@ mod tests {
         assert!(cli.self_test && cli.screenshot.is_some());
         let cli = Cli::try_parse_from(["surgeon-gui", "--workspace", "projets"]).unwrap();
         assert_eq!(cli.workspace, Some("projets".into()));
+        let cli = Cli::try_parse_from([
+            "surgeon-gui",
+            "--demo-data",
+            "--scale",
+            "1.5",
+            "--no-motion",
+            "--size",
+            "1920x1080",
+        ])
+        .unwrap();
+        assert!(cli.demo_data && cli.no_motion);
+        assert_eq!((cli.size, cli.scale), ([1920, 1080], 1.5));
+        assert!(Cli::try_parse_from(["surgeon-gui", "--size", "big"]).is_err());
+        assert!(Cli::try_parse_from(["surgeon-gui", "--size", "10x10"]).is_err());
     }
 }

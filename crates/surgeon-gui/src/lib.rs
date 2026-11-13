@@ -18,8 +18,9 @@
 //! - [`runner`]: background jobs (CLI commands in process, backup restore).
 //! - [`backend_dialog`]: the backend setup modal.
 //! - [`studio`]: projects, the job manager and the event stream (docs/STUDIO.md).
-//! - [`app`]: state and the docked panels.
-//! - [`theme`]: colors and style.
+//! - [`app`]: the window state and what the views ask it to do.
+//! - [`ui`]: design tokens, components, the shell (title bar, tabs, status bar, palette)
+//!   and the five views; [`demo`]: the `--demo-data` workspace.
 #![deny(unsafe_code)]
 
 pub mod actions;
@@ -29,6 +30,7 @@ pub mod backend_dialog;
 pub mod camera;
 pub mod canvas;
 pub mod cli;
+pub mod demo;
 pub mod desktop;
 pub mod diag;
 pub mod editor;
@@ -50,6 +52,9 @@ pub mod studio;
 pub mod task;
 #[cfg(test)]
 mod testkit;
-pub mod theme;
+pub mod ui;
 pub mod update;
 pub mod viewport;
+
+/// The design tokens under their historical path.
+pub use ui::theme;

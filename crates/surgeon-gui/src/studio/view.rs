@@ -1,6 +1,6 @@
-//! The Projects workspace: the project list and creation, the open project (state, source,
-//! working copies), the launch form of any engine tool, the queue, the run being followed
-//! and the ledger exports. Only drawing and wiring: the work is in the sibling modules.
+//! The studio state the views draw: the project list and creation, the open project, the two
+//! launch forms (analyses, surgery on a copy), the queue, the run being followed and the
+//! ledger exports. No drawing here: `ui::views` does it, the work is in the sibling modules.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -8,17 +8,16 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Instant;
 
-use eframe::egui::{self, ComboBox, ProgressBar, RichText, ScrollArea, TextEdit};
-use weight_surgeon::events::{LogLevel, NodeStatus, SurgeonEvent};
+use eframe::egui;
+use serde_json::Value;
 
 use super::bus::{RunView, EVENTS_FILE, FRAME};
 use super::estimate::{self, Estimate};
 use super::exec::EngineExecutor;
-use super::forms::{self, FieldKind, Form};
+use super::forms::{self, Form};
 use super::jobs::{Budgets, Ended, JobSpec, Manager, COPY_TOOL, OUT};
 use super::ledger;
-use super::project::{Manifest, Project, ProjectState};
-use crate::theme::{self, mono};
+use super::project::{Manifest, Project};
 
 /// What the window does for this workspace.
 pub enum Action {
@@ -42,33 +41,108 @@ pub enum Target {
     Inspector,
 }
 
+/// The tools that write a model: they belong to the surgery form of the Atelier, the others
+/// to Analyses. A tool the engine adds later lands in Analyses.
+pub const SURGERY_TOOLS: [&str; 5] = [
+    "surgeon_apply",
+    "surgeon_extract",
+    "surgeon_autotune",
+    "surgeon_lora",
+    "surgeon_diff",
+];
+
+pub fn is_surgery(tool: &str) -> bool {
+    SURGERY_TOOLS.contains(&tool)
+}
+
+/// One launch form: the tool picked, what was typed, and the estimate of those arguments.
+#[derive(Default)]
+pub struct Launch {
+    /// Index in [`Studio::forms`].
+    pub tool: usize,
+    pub values: BTreeMap<String, String>,
+    pub label: String,
+    pub priority: i32,
+    pub max_wall: String,
+    pub max_candidates: String,
+    /// The preview run in progress and the key of the arguments it estimates.
+    pub estimating: Option<(String, String)>,
+    /// The last estimate and the key of its arguments: it holds only while they stay.
+    pub estimate: Option<(String, Estimate)>,
+}
+
+/// What the form can do with what is typed in it right now.
+pub struct Prepared {
+    pub args: Result<Value, String>,
+    /// Identifies these exact arguments.
+    pub key: String,
+    /// The arguments of the tool's own preview mode, when it has one.
+    pub preview: Option<Value>,
+}
+
+impl Launch {
+    pub fn prepare(&self, form: &Form) -> Prepared {
+        let args = form.args(&self.values);
+        let key = args
+            .as_ref()
+            .map(|a| format!("{} {a}", form.tool))
+            .unwrap_or_default();
+        let preview = args
+            .as_ref()
+            .ok()
+            .filter(|a| !estimate::is_preview(&form.tool, a))
+            .and_then(|a| estimate::preview_args(&form.tool, a));
+        Prepared { args, key, preview }
+    }
+
+    /// The estimate of these exact arguments, if one was made.
+    pub fn current(&self, key: &str) -> Option<&Estimate> {
+        self.estimate
+            .as_ref()
+            .filter(|(k, _)| k == key)
+            .map(|(_, e)| e)
+    }
+
+    pub fn max_wall_secs(&self) -> Option<u64> {
+        self.max_wall.trim().parse().ok()
+    }
+}
+
+/// The working copy the forms target: the newest folder of `copies/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveCopy {
+    /// `copies/<id>`, relative to the project.
+    pub path: String,
+    /// Successful writes the ledger records on it.
+    pub writes: usize,
+}
+
 pub struct Studio {
     pub workspace: PathBuf,
-    projects: Vec<(PathBuf, Result<Manifest, String>)>,
-    new_name: String,
-    new_source: String,
+    pub projects: Vec<(PathBuf, Result<Manifest, String>)>,
+    pub new_name: String,
+    pub new_source: String,
     creating: Option<Receiver<Result<Project, String>>>,
     pub manager: Option<Manager>,
-    forms: Vec<Form>,
-    tool: usize,
-    values: BTreeMap<String, String>,
-    label: String,
-    priority: i32,
-    max_wall: String,
-    max_candidates: String,
+    pub forms: Vec<Form>,
+    pub analysis: Launch,
+    pub surgery: Launch,
     /// The run shown under the queue: a live one, or one replayed from its file.
-    followed: Option<String>,
+    pub followed: Option<String>,
     replayed: Option<(String, Result<RunView, String>)>,
-    /// The preview run in progress and the key of the arguments it estimates.
-    estimating: Option<(String, String)>,
-    /// The last estimate and the key of its arguments: it holds only while they stay.
-    estimate: Option<(String, Estimate)>,
-    graph_path: String,
+    pub graph_path: String,
     pub message: Option<(String, bool)>,
 }
 
 impl Studio {
     pub fn new(workspace: PathBuf) -> Self {
+        let forms = forms::forms();
+        let first = |surgery: bool| {
+            forms
+                .iter()
+                .position(|f| is_surgery(&f.tool) == surgery)
+                .unwrap_or(0)
+        };
         let mut studio = Self {
             projects: Vec::new(),
             workspace,
@@ -76,26 +150,31 @@ impl Studio {
             new_source: String::new(),
             creating: None,
             manager: None,
-            forms: forms::forms(),
-            tool: 0,
-            values: BTreeMap::new(),
-            label: String::new(),
-            priority: 0,
-            max_wall: String::new(),
-            max_candidates: String::new(),
+            analysis: Launch {
+                tool: first(false),
+                ..Default::default()
+            },
+            surgery: Launch {
+                tool: first(true),
+                ..Default::default()
+            },
+            forms,
             followed: None,
             replayed: None,
-            estimating: None,
-            estimate: None,
             graph_path: String::new(),
             message: None,
         };
         studio.refresh();
+        studio.reset_forms();
         studio
     }
 
-    fn refresh(&mut self) {
+    pub fn refresh(&mut self) {
         self.projects = Project::list(&self.workspace);
+    }
+
+    pub fn creating(&self) -> bool {
+        self.creating.is_some()
     }
 
     /// Advances the jobs; keeps the window repainting at 60 Hz while one runs. Returns the
@@ -121,14 +200,16 @@ impl Studio {
             let line = format!("{} · {} : {:?}", ended.id, ended.spec.label, ended.verdict);
             let bad = ended.verdict != ledger::Verdict::Ok;
             self.message = Some((line, bad));
-            if let Some((_, key)) = self
-                .estimating
-                .take_if(|(id, _)| *id == ended.id)
-                .filter(|_| !bad)
-            {
-                let e = estimate::read(&ended.envelope);
-                self.message = Some((format!("estimation : {}", e.summary()), false));
-                self.estimate = Some((key, e));
+            for launch in [&mut self.analysis, &mut self.surgery] {
+                if let Some((_, key)) = launch
+                    .estimating
+                    .take_if(|(id, _)| *id == ended.id)
+                    .filter(|_| !bad)
+                {
+                    let e = estimate::read(&ended.envelope);
+                    self.message = Some((format!("estimation : {}", e.summary()), false));
+                    launch.estimate = Some((key, e));
+                }
             }
             if self.followed.as_deref() == Some(ended.id.as_str()) {
                 self.replayed = Some((ended.id.clone(), Ok(ended.view.clone())));
@@ -150,6 +231,15 @@ impl Studio {
             .map(|r| &r.view)
     }
 
+    /// Opens the project of `dir`, unless a job of the current one still runs.
+    pub fn open_project(&mut self, ctx: &egui::Context, dir: &Path) {
+        if self.manager.as_ref().is_some_and(Manager::busy) {
+            self.message = Some(("un job tourne : attendez ou annulez-le".into(), true));
+        } else {
+            self.open(ctx, dir);
+        }
+    }
+
     fn open(&mut self, ctx: &egui::Context, dir: &Path) {
         let wake = ctx.clone();
         match Manager::open(
@@ -161,601 +251,228 @@ impl Studio {
                 self.manager = Some(m);
                 self.followed = None;
                 self.replayed = None;
-                self.reset_form();
+                self.reset_forms();
             }
             Err(e) => self.message = Some((e, true)),
         }
     }
 
-    fn reset_form(&mut self) {
-        self.values = match (self.forms.get(self.tool), &self.manager) {
+    /// Creates the project typed in `new_name` / `new_source`, hashing the model off the
+    /// UI thread, then opens it.
+    pub fn create_project(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (ws, name) = (self.workspace.clone(), self.new_name.trim().to_owned());
+        let source =
+            Some(PathBuf::from(self.new_source.trim())).filter(|p| !p.as_os_str().is_empty());
+        let wake = ctx.clone();
+        std::thread::spawn(move || {
+            let created = std::fs::create_dir_all(&ws)
+                .map_err(|e| e.to_string())
+                .and_then(|()| Project::create(&ws, &name, source.as_deref()));
+            let _ = tx.send(created);
+            wake.request_repaint();
+        });
+        self.creating = Some(rx);
+    }
+
+    /// Puts the two forms back on the defaults of the open project.
+    pub fn reset_forms(&mut self) {
+        for surgery in [false, true] {
+            let tool = self.launch(surgery).tool;
+            self.select_tool(surgery, tool);
+        }
+    }
+
+    pub fn launch(&self, surgery: bool) -> &Launch {
+        match surgery {
+            true => &self.surgery,
+            false => &self.analysis,
+        }
+    }
+
+    pub fn launch_mut(&mut self, surgery: bool) -> &mut Launch {
+        match surgery {
+            true => &mut self.surgery,
+            false => &mut self.analysis,
+        }
+    }
+
+    /// Picks the tool of a form and prefills it for the open project.
+    pub fn select_tool(&mut self, surgery: bool, tool: usize) {
+        let values = match (self.forms.get(tool), &self.manager) {
             (Some(form), Some(m)) => default_values(form, &m.project),
             _ => BTreeMap::new(),
         };
-        self.label = self
+        let label = self
             .forms
-            .get(self.tool)
+            .get(tool)
             .map(|f| f.title.clone())
             .unwrap_or_default();
+        let launch = self.launch_mut(surgery);
+        launch.tool = tool;
+        launch.values = values;
+        launch.label = label;
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui) -> Option<Action> {
-        let mut action = None;
-        if let Some((text, bad)) = &self.message {
-            let color = if *bad { theme::BAD } else { theme::GOOD };
-            ui.label(mono(text).color(color));
-        }
-        ui.columns(3, |cols| {
-            action = self.projects_column(&mut cols[0]);
-            ScrollArea::vertical()
-                .id_salt("launch")
-                .show(&mut cols[1], |ui| self.project_column(ui));
-            let opened = ScrollArea::vertical()
-                .id_salt("runs")
-                .show(&mut cols[2], |ui| self.runs_column(ui))
-                .inner;
-            action = action.take().or(opened);
-        });
-        action
-    }
-
-    fn projects_column(&mut self, ui: &mut egui::Ui) -> Option<Action> {
-        ui.heading("Projets");
-        ui.label(
-            mono(self.workspace.display().to_string())
-                .small()
-                .color(theme::DIM),
-        );
-        let ctx = ui.ctx().clone();
-        let mut open = None;
-        for (dir, manifest) in &self.projects {
-            let name = dir.file_name().unwrap_or_default().to_string_lossy();
-            match manifest {
-                Ok(m) => {
-                    let current = self.manager.as_ref().is_some_and(|x| x.project.dir == *dir);
-                    let text = format!("{name} · {}", m.state.label());
-                    if ui.selectable_label(current, mono(text)).clicked() && !current {
-                        open = Some(dir.clone());
-                    }
-                }
-                Err(e) => {
-                    ui.label(mono(format!("{name} · illisible")).color(theme::BAD))
-                        .on_hover_text(e);
-                }
-            }
-        }
-        if let Some(dir) = open {
-            if self.manager.as_ref().is_some_and(Manager::busy) {
-                self.message = Some(("un job tourne : attendez ou annulez-le".into(), true));
-            } else {
-                self.open(&ctx, &dir);
-            }
-        }
-        ui.separator();
-        ui.label(RichText::new("Nouveau projet").strong());
-        ui.add(TextEdit::singleline(&mut self.new_name).hint_text("nom"));
-        ui.add(
-            TextEdit::singleline(&mut self.new_source)
-                .hint_text("modèle d'origine (dossier ou fichier)"),
-        );
-        let creating = self.creating.is_some();
-        let create = ui.add_enabled(!creating, egui::Button::new("Créer"));
-        if creating {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(mono("empreinte SHA-256 du modèle…"));
-            });
-        }
-        if create
-            .on_hover_text("le modèle est référencé et haché, jamais modifié")
-            .clicked()
-        {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let (ws, name) = (self.workspace.clone(), self.new_name.trim().to_owned());
-            let source =
-                Some(PathBuf::from(self.new_source.trim())).filter(|p| !p.as_os_str().is_empty());
-            let wake = ctx.clone();
-            std::thread::spawn(move || {
-                let created = std::fs::create_dir_all(&ws)
-                    .map_err(|e| e.to_string())
-                    .and_then(|()| Project::create(&ws, &name, source.as_deref()));
-                let _ = tx.send(created);
-                wake.request_repaint();
-            });
-            self.creating = Some(rx);
-        }
-        ui.separator();
-        ui.label(RichText::new("Graphe éphémère").strong())
-            .on_hover_text("graph.json ou graph.ndjson, sans projet");
-        ui.add(TextEdit::singleline(&mut self.graph_path).hint_text("chemin du graphe"));
-        let path = self.graph_path.trim();
-        ui.add_enabled(!path.is_empty(), egui::Button::new("Ouvrir dans la vue 3D"))
-            .clicked()
-            .then(|| Action::OpenGraph(PathBuf::from(path)))
-    }
-
-    fn project_column(&mut self, ui: &mut egui::Ui) {
+    /// A working copy of the source model, as a job (`copies/<id>/`).
+    pub fn submit_copy(&mut self) {
         let Some(m) = &mut self.manager else {
-            ui.label(mono("aucun projet ouvert").color(theme::DIM));
             return;
         };
-        let manifest = m.project.manifest.clone();
-        ui.heading(&manifest.name);
-        let state_color = match manifest.state {
-            ProjectState::Ready => theme::GOOD,
-            ProjectState::Running => theme::SELECTION,
-            ProjectState::Interrupted | ProjectState::NeedsAttention => theme::WARN,
+        let spec = JobSpec {
+            tool: COPY_TOOL.into(),
+            label: "copie de travail".into(),
+            args: serde_json::json!({}),
+            priority: 0,
+            budgets: Budgets::default(),
+            resumed_from: None,
+            read_only: false,
         };
-        ui.label(mono(manifest.state.label()).color(state_color));
-        match manifest.state {
-            ProjectState::Interrupted => {
-                ui.label("Le studio s'est arrêté pendant des runs :");
-                for run in m.resumable() {
-                    ui.horizontal(|ui| {
-                        ui.label(mono(format!("{} · {}", run.id, run.spec.label)));
-                        if ui.button("Reprendre").clicked() {
-                            if let Err(e) = m.resume(&run.id) {
-                                self.message = Some((e, true));
-                            }
-                        }
-                    });
-                }
-                if ui.button("Ignorer").clicked() {
-                    let _ = m.acknowledge();
-                }
-            }
-            ProjectState::NeedsAttention => {
-                ui.label("Un run a échoué ou dépassé son budget (voir l'historique).");
-                if ui.button("Vu").clicked() {
-                    let _ = m.acknowledge();
-                }
-            }
-            _ => {}
+        if let Err(e) = m.submit(spec) {
+            self.message = Some((e, true));
         }
-        if let Some(source) = &manifest.source {
-            ui.label(mono(format!("origine : {}", source.path.display())))
-                .on_hover_text(format!("SHA-256 {}", source.sha256));
-            ui.label(
-                mono(format!(
-                    "{:.2} Gio, lecture seule",
-                    source.bytes as f64 / f64::from(1u32 << 30)
-                ))
-                .color(theme::DIM),
-            );
-            if ui
-                .button("Copie de travail")
-                .on_hover_text("copies/<id>/ : le seul endroit où le studio écrit un modèle")
-                .clicked()
-            {
-                let spec = JobSpec {
-                    tool: COPY_TOOL.into(),
-                    label: "copie de travail".into(),
-                    args: serde_json::json!({}),
-                    priority: 0,
-                    budgets: Budgets::default(),
-                    resumed_from: None,
-                    read_only: false,
-                };
-                if let Err(e) = m.submit(spec) {
-                    self.message = Some((e, true));
-                }
-            }
-        }
-        ui.separator();
-        ui.label(RichText::new("Lancer").strong());
-        let before = self.tool;
-        ComboBox::from_id_salt("tool")
-            .selected_text(mono(
-                self.forms.get(self.tool).map_or("", |f| f.tool.as_str()),
-            ))
-            .show_ui(ui, |ui| {
-                for (i, f) in self.forms.iter().enumerate() {
-                    ui.selectable_value(&mut self.tool, i, mono(&f.tool))
-                        .on_hover_text(&f.title);
-                }
-            });
-        let Some(form) = self.forms.get(self.tool) else {
+    }
+
+    /// Runs the tool's own preview mode (estimate, dry_run, plan): nothing is written.
+    pub fn request_estimate(&mut self, surgery: bool) {
+        let launch = self.launch(surgery);
+        let Some(form) = self.forms.get(launch.tool) else {
             return;
         };
-        if before != self.tool {
-            self.values = default_values(form, &m.project);
-            self.label = form.title.clone();
+        let prepared = launch.prepare(form);
+        let label = format!("estimation · {}", launch.label);
+        let tool = form.tool.clone();
+        let (Some(preview), Some(m)) = (prepared.preview, &mut self.manager) else {
+            return;
+        };
+        let submitted = m.submit(JobSpec {
+            tool,
+            label,
+            args: preview,
+            priority: 10,
+            budgets: Budgets::default(),
+            resumed_from: None,
+            read_only: false,
+        });
+        match submitted {
+            Ok(id) => self.launch_mut(surgery).estimating = Some((id, prepared.key)),
+            Err(e) => self.message = Some((e, true)),
         }
-        ui.label(RichText::new(&form.description).small().color(theme::DIM));
-        ui.label(
-            mono(format!("{OUT} = dossier de sortie du run"))
-                .small()
-                .color(theme::DIM),
+    }
+
+    /// Queues the form as typed, after the budget gate.
+    pub fn queue(&mut self, surgery: bool) {
+        let launch = self.launch(surgery);
+        let Some(form) = self.forms.get(launch.tool) else {
+            return;
+        };
+        let prepared = launch.prepare(form);
+        let max_wall = launch.max_wall_secs();
+        let gate = estimate::gate(
+            prepared.preview.is_some(),
+            max_wall,
+            launch.current(&prepared.key),
         );
-        egui::Grid::new("form")
-            .num_columns(2)
-            .striped(true)
-            .show(ui, |ui| {
-                for field in &form.fields {
-                    let name = if field.required {
-                        format!("{} *", field.name)
-                    } else {
-                        field.name.clone()
-                    };
-                    ui.label(mono(name)).on_hover_text(&field.description);
-                    field_widget(
-                        ui,
-                        field,
-                        self.values.entry(field.name.clone()).or_default(),
-                    );
-                    ui.end_row();
-                }
-            });
-        ui.horizontal(|ui| {
-            ui.label("libellé");
-            ui.text_edit_singleline(&mut self.label);
+        let spec = prepared.args.and_then(|args| {
+            gate?;
+            Ok(JobSpec {
+                tool: form.tool.clone(),
+                label: launch.label.clone(),
+                args,
+                priority: launch.priority,
+                budgets: Budgets {
+                    max_wall_time_secs: max_wall,
+                    max_candidates: launch.max_candidates.trim().parse().ok(),
+                },
+                resumed_from: None,
+                read_only: false,
+            })
         });
-        ui.horizontal(|ui| {
-            ui.label("priorité");
-            ui.add(egui::DragValue::new(&mut self.priority).range(-10..=10));
-            ui.label("durée max (s)");
-            ui.add(TextEdit::singleline(&mut self.max_wall).desired_width(60.0));
-            if form.tool == "surgeon_pipeline" {
-                ui.label("candidats max");
-                ui.add(TextEdit::singleline(&mut self.max_candidates).desired_width(40.0));
+        let Some(m) = &mut self.manager else {
+            return;
+        };
+        match spec.and_then(|spec| m.submit(spec)) {
+            Ok(id) => {
+                self.followed = Some(id.clone());
+                self.message = Some((format!("{id} en file"), false));
             }
-        });
-        // The estimate holds for these exact arguments only.
-        let args = form.args(&self.values);
-        let key = args
+            Err(e) => self.message = Some((e, true)),
+        }
+    }
+
+    /// The followed run: live, replayed from its file, or not started yet (`None`).
+    pub fn followed_view(&mut self) -> Option<Result<&RunView, &str>> {
+        let m = self.manager.as_ref()?;
+        let id = self.followed.as_ref()?;
+        if let Some(run) = m.running.iter().find(|r| &r.id == id) {
+            return Some(Ok(&run.view));
+        }
+        let path = m.project.runs_dir().join(id).join(EVENTS_FILE);
+        if self.replayed.as_ref().is_none_or(|(rid, _)| rid != id) && path.exists() {
+            self.replayed = Some((id.clone(), RunView::replay(&path)));
+        }
+        self.replayed
             .as_ref()
-            .map(|a| format!("{} {a}", form.tool))
-            .unwrap_or_default();
-        let preview = args
-            .as_ref()
-            .ok()
-            .filter(|a| !estimate::is_preview(&form.tool, a))
-            .and_then(|a| estimate::preview_args(&form.tool, a));
-        let current = self.estimate.as_ref().filter(|(k, _)| *k == key);
-        match (&preview, current, &self.estimating) {
-            (_, _, Some(_)) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(mono("estimation en cours…"));
-                });
-            }
-            (_, Some((_, e)), _) => {
-                ui.label(mono(format!("estimation : {}", e.summary())));
-                for w in &e.warnings {
-                    ui.label(mono(w).small().color(theme::WARN));
-                }
-            }
-            (Some(_), None, None) => {
-                ui.label(
-                    mono("pas d'estimation pour ces paramètres")
-                        .small()
-                        .color(theme::DIM),
-                );
-            }
-            (None, None, None) => {}
-        }
-        let max_wall: Option<u64> = self.max_wall.trim().parse().ok();
-        let mut queue = false;
-        ui.horizontal(|ui| {
-            let can_estimate = preview.is_some() && self.estimating.is_none();
-            if ui
-                .add_enabled(can_estimate, egui::Button::new("Estimer"))
-                .on_hover_text(
-                    "le mode aperçu de l'outil (estimate, dry_run, plan) : rien n'est écrit",
-                )
-                .on_disabled_hover_text("pas de mode aperçu pour cet outil, ou estimation en cours")
-                .clicked()
-            {
-                if let Some(preview) = preview.clone() {
-                    let submitted = m.submit(JobSpec {
-                        tool: form.tool.clone(),
-                        label: format!("estimation · {}", self.label),
-                        args: preview,
-                        priority: 10,
-                        budgets: Budgets::default(),
-                        resumed_from: None,
-                        read_only: false,
-                    });
-                    match submitted {
-                        Ok(id) => self.estimating = Some((id, key.clone())),
-                        Err(e) => self.message = Some((e, true)),
-                    }
-                }
-            }
-            queue = ui.button("Mettre en file").clicked();
-        });
-        if queue {
-            let submitted = args.and_then(|args| {
-                estimate::gate(preview.is_some(), max_wall, current.map(|(_, e)| e))?;
-                let parse = |s: &str| s.trim().parse().ok();
-                m.submit(JobSpec {
-                    tool: form.tool.clone(),
-                    label: self.label.clone(),
-                    args,
-                    priority: self.priority,
-                    budgets: Budgets {
-                        max_wall_time_secs: max_wall,
-                        max_candidates: parse(&self.max_candidates).map(|n: u64| n as u32),
-                    },
-                    resumed_from: None,
-                    read_only: false,
-                })
-            });
-            match submitted {
-                Ok(id) => {
-                    self.followed = Some(id.clone());
-                    self.message = Some((format!("{id} en file"), false));
-                }
-                Err(e) => self.message = Some((e, true)),
-            }
-        }
+            .filter(|(rid, _)| rid == id)
+            .map(|(_, view)| view.as_ref().map_err(String::as_str))
     }
 
-    fn runs_column(&mut self, ui: &mut egui::Ui) -> Option<Action> {
-        let mut action = None;
-        let m = self.manager.as_mut()?;
-        ui.heading("Jobs");
-        let mut cancel = None;
-        for run in &m.running {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                let followed = self.followed.as_deref() == Some(run.id.as_str());
-                if ui
-                    .selectable_label(followed, mono(format!("{} · {}", run.id, run.spec.label)))
-                    .clicked()
-                {
-                    self.followed = Some(run.id.clone());
-                }
-                let label = if run.cancelling() {
-                    "annulation…"
-                } else {
-                    "Annuler"
-                };
-                if ui
-                    .add_enabled(!run.cancelling(), egui::Button::new(label))
-                    .clicked()
-                {
-                    cancel = Some(run.id.clone());
-                }
-            });
-        }
-        for q in &m.queue {
-            ui.horizontal(|ui| {
-                ui.label(
-                    mono(format!("en file · p{} · {}", q.spec.priority, q.spec.label))
-                        .color(theme::DIM),
-                );
-                if ui.small_button("×").clicked() {
-                    cancel = Some(q.id.clone());
-                }
-            });
-        }
-        if let Some(id) = cancel {
-            if let Err(e) = m.cancel(&id) {
-                self.message = Some((e, true));
-            }
-        }
-        if let Some(id) = &self.followed {
-            ui.separator();
-            let live = m.running.iter().any(|r| &r.id == id);
-            ui.horizontal(|ui| {
-                ui.label(mono("ouvrir :").color(theme::DIM));
-                for (label, target, hint) in [
-                    (
-                        "3D",
-                        Target::Graph,
-                        "les nœuds atteints, avec rejeu temporel",
-                    ),
-                    (
-                        "Diff Δ",
-                        Target::Diff,
-                        "la vue 3D colorée par le Δ du graphe",
-                    ),
-                    ("Inspecteur", Target::Inspector, "le dernier nœud atteint"),
-                ] {
-                    if ui.button(label).on_hover_text(hint).clicked() {
-                        action = Some(Action::OpenRun {
-                            dir: m.project.runs_dir().join(id),
-                            live,
-                            target,
-                        });
-                    }
-                }
-            });
-            match m.running.iter().find(|r| &r.id == id) {
-                Some(run) => run_view(ui, &run.view),
-                None => {
-                    let path = m.project.runs_dir().join(id).join(EVENTS_FILE);
-                    if self.replayed.as_ref().is_none_or(|(rid, _)| rid != id) && path.exists() {
-                        self.replayed = Some((id.clone(), RunView::replay(&path)));
-                    }
-                    match self.replayed.as_ref().filter(|(rid, _)| rid == id) {
-                        Some((_, Ok(view))) => run_view(ui, view),
-                        Some((_, Err(e))) => {
-                            ui.label(mono(e).color(theme::BAD));
-                        }
-                        None => {
-                            ui.label(mono("en attente").color(theme::DIM));
-                        }
-                    }
-                }
-            }
-        }
-        ui.separator();
-        ui.label(RichText::new("Historique").strong());
-        for run in m.history().iter().rev().take(30) {
-            let text = format!("{} · {:?} · {}", run.id, run.status.status, run.spec.label);
-            let followed = self.followed.as_deref() == Some(run.id.as_str());
-            if ui
-                .selectable_label(followed, mono(text).small())
-                .on_hover_text(run.status.note.clone().unwrap_or_default())
-                .clicked()
-            {
-                self.followed = Some(run.id.clone());
-            }
-        }
-        ui.separator();
-        ui.horizontal(|ui| {
-            for (label, file, render) in [
-                (
-                    "Exporter JSON",
-                    "ledger.json",
-                    ledger::to_json as fn(&[ledger::Entry]) -> String,
-                ),
-                ("Exporter Markdown", "ledger.md", ledger::to_markdown),
-            ] {
-                if ui.button(label).clicked() {
-                    let path = m.project.dir.join(file);
-                    let written = ledger::read(&m.project.ledger_path()).and_then(|entries| {
-                        std::fs::write(&path, render(&entries)).map_err(|e| e.to_string())
-                    });
-                    self.message = Some(match written {
-                        Ok(()) => (format!("journal exporté : {}", path.display()), false),
-                        Err(e) => (e, true),
-                    });
-                }
-            }
+    /// Writes the ledger next to the project as `ledger.json` or `ledger.md`.
+    pub fn export_ledger(&mut self, markdown: bool) {
+        let Some(m) = &self.manager else {
+            return;
+        };
+        let (file, render): (_, fn(&[ledger::Entry]) -> String) = match markdown {
+            true => ("ledger.md", ledger::to_markdown),
+            false => ("ledger.json", ledger::to_json),
+        };
+        let path = m.project.dir.join(file);
+        let written = ledger::read(&m.project.ledger_path())
+            .and_then(|entries| std::fs::write(&path, render(&entries)).map_err(|e| e.to_string()));
+        self.message = Some(match written {
+            Ok(()) => (format!("journal exporté : {}", path.display()), false),
+            Err(e) => (e, true),
         });
-        action
+    }
+
+    /// The working copy in use and how many writes the ledger records on it.
+    pub fn active_copy(&self, entries: &[ledger::Entry]) -> Option<ActiveCopy> {
+        let path = newest_copy(&self.manager.as_ref()?.project)?;
+        let writes = entries.iter().filter(|e| is_write_on(e, &path)).count();
+        Some(ActiveCopy { path, writes })
     }
 }
 
-fn field_widget(ui: &mut egui::Ui, field: &forms::Field, value: &mut String) {
-    let hint = field
-        .default
-        .as_ref()
-        .map(|d| d.to_string())
-        .unwrap_or_default();
-    match &field.kind {
-        FieldKind::Bool => {
-            ui.horizontal(|ui| {
-                let mut on = value == "true";
-                if ui.checkbox(&mut on, "").changed() {
-                    *value = on.to_string();
-                }
-                if !value.is_empty()
-                    && ui
-                        .small_button("×")
-                        .on_hover_text("valeur par défaut")
-                        .clicked()
-                {
-                    value.clear();
-                }
-            });
-        }
-        FieldKind::Choice(options) => {
-            let shown = if value.is_empty() {
-                "—"
-            } else {
-                value.as_str()
-            };
-            ComboBox::from_id_salt(("field", &field.name))
-                .selected_text(mono(shown))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(value, String::new(), mono("—"));
-                    for o in options {
-                        ui.selectable_value(value, o.clone(), mono(o));
-                    }
-                });
-        }
-        _ => {
-            ui.add(
-                TextEdit::singleline(value)
-                    .hint_text(hint)
-                    .desired_width(220.0),
-            );
-        }
-    }
+/// Whether the ledger entry is a successful write on the copy `path`: a surgery tool that
+/// ran for real (no preview mode) on that model.
+pub fn is_write_on(entry: &ledger::Entry, path: &str) -> bool {
+    entry.verdict == ledger::Verdict::Ok
+        && is_surgery(&entry.tool)
+        && !estimate::is_preview(&entry.tool, &entry.params)
+        && entry.params["model"] == path
+        // Extraction and diff read the model: only these three change it.
+        && matches!(
+            entry.tool.as_str(),
+            "surgeon_apply" | "surgeon_lora" | "surgeon_autotune"
+        )
 }
 
-fn run_view(ui: &mut egui::Ui, view: &RunView) {
-    ui.label(mono(view.command.as_deref().unwrap_or("…")).strong());
-    for (unit, (done, total)) in &view.progress {
-        match total {
-            Some(t) if *t > 0 => {
-                ui.add(
-                    ProgressBar::new(*done as f32 / *t as f32)
-                        .text(mono(format!("{unit} {done}/{t}"))),
-                );
-            }
-            _ => {
-                ui.label(mono(format!("{unit} {done}")));
-            }
-        }
-    }
-    if !view.nodes.is_empty() {
-        let count = |s: NodeStatus| view.nodes.values().filter(|v| **v == s).count();
-        ui.label(mono(format!(
-            "nœuds : {} terminés · {} en cours · {} échoués",
-            count(NodeStatus::Done),
-            count(NodeStatus::Running),
-            count(NodeStatus::Failed)
-        )));
-    }
-    for ((node, name), value) in view.metrics.iter().take(12) {
-        let node = node
-            .as_deref()
-            .map(|n| format!("{n} · "))
-            .unwrap_or_default();
-        ui.label(mono(format!("{node}{name} = {value:.4}")).small());
-    }
-    for (kind, path, _) in &view.artifacts {
-        ui.label(
-            mono(format!("{kind} : {}", path.display()))
-                .small()
-                .color(theme::DIM),
-        );
-    }
-    if view.sampled > 0 {
-        ui.label(
-            mono(format!(
-                "{} ligne(s) de progression échantillonnée(s) à l'écran",
-                view.sampled
-            ))
-            .small()
-            .color(theme::DIM),
-        );
-    }
-    match &view.end {
-        Some(SurgeonEvent::Finished { .. }) => {
-            ui.label(mono("terminé").color(theme::GOOD));
-        }
-        Some(SurgeonEvent::Cancelled) => {
-            ui.label(mono("annulé").color(theme::WARN));
-        }
-        Some(SurgeonEvent::Failed { kind, message, .. }) => {
-            ui.label(mono(format!("échec ({kind}) : {message}")).color(theme::BAD));
-        }
-        _ => {}
-    }
-    ScrollArea::vertical()
-        .id_salt("logs")
-        .max_height(180.0)
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            for (level, message) in &view.logs {
-                let color = match level {
-                    LogLevel::Info => theme::TEXT,
-                    LogLevel::Warn => theme::WARN,
-                    LogLevel::Error => theme::BAD,
-                };
-                ui.label(mono(message).small().color(color));
-            }
-        });
-}
-
-/// Prefilled values of a form: outputs in the run folder, the model on the newest working
-/// copy (or the source when there is none).
-pub fn default_values(form: &Form, project: &Project) -> BTreeMap<String, String> {
-    let newest_copy = std::fs::read_dir(project.copies_dir())
+/// `copies/<id>` of the newest finished working copy.
+pub fn newest_copy(project: &Project) -> Option<String> {
+    std::fs::read_dir(project.copies_dir())
         .ok()
         .into_iter()
         .flatten()
         .flatten()
         .filter(|e| e.path().is_dir() && !e.file_name().to_string_lossy().ends_with(".partial"))
         .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
-        .map(|e| format!("copies/{}", e.file_name().to_string_lossy()));
-    let model = newest_copy.or_else(|| {
+        .map(|e| format!("copies/{}", e.file_name().to_string_lossy()))
+}
+
+/// Prefilled values of a form: outputs in the run folder, the model on the newest working
+/// copy (or the source when there is none).
+pub fn default_values(form: &Form, project: &Project) -> BTreeMap<String, String> {
+    let model = newest_copy(project).or_else(|| {
         project
             .manifest
             .source
@@ -816,5 +533,59 @@ mod tests {
         assert_eq!(v["model"], "copies/c1");
         assert_eq!(v["out_dir"], OUT);
         assert!(form("surgeon_graph").args(&v).is_ok());
+    }
+
+    #[test]
+    fn every_engine_tool_is_in_exactly_one_form_and_the_surgery_ones_exist() {
+        let forms = forms::forms();
+        for tool in SURGERY_TOOLS {
+            assert!(forms.iter().any(|f| f.tool == tool), "{tool}");
+        }
+        let studio = Studio::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        assert!(is_surgery(&studio.forms[studio.surgery.tool].tool));
+        assert!(!is_surgery(&studio.forms[studio.analysis.tool].tool));
+    }
+
+    #[test]
+    fn a_copy_counts_only_the_real_writes_the_ledger_records_on_it() {
+        let entry = |tool: &str, params: Value, verdict| ledger::Entry {
+            run_id: "r".into(),
+            tool: tool.into(),
+            label: String::new(),
+            params,
+            resumed_from: None,
+            started_unix: 0,
+            finished_unix: 1,
+            hashes: Default::default(),
+            versions: Default::default(),
+            verdict,
+            exit_code: 0,
+            result: Value::Null,
+            error: None,
+        };
+        let on_c1 = serde_json::json!({"model": "copies/c1", "patch": "p.json"});
+        let ok = ledger::Verdict::Ok;
+        assert!(is_write_on(
+            &entry("surgeon_apply", on_c1.clone(), ok),
+            "copies/c1"
+        ));
+        assert!(!is_write_on(
+            &entry("surgeon_apply", on_c1.clone(), ok),
+            "copies/c2"
+        ));
+        assert!(!is_write_on(
+            &entry("surgeon_apply", on_c1.clone(), ledger::Verdict::Failed),
+            "copies/c1"
+        ));
+        let dry = serde_json::json!({"model": "copies/c1", "patch": "p.json", "dry_run": true});
+        assert!(!is_write_on(&entry("surgeon_apply", dry, ok), "copies/c1"));
+        assert!(!is_write_on(
+            &entry("surgeon_extract", on_c1.clone(), ok),
+            "copies/c1"
+        ));
+        assert!(!is_write_on(
+            &entry("surgeon_graph", on_c1, ok),
+            "copies/c1"
+        ));
     }
 }

@@ -1,6 +1,7 @@
-//! surgeon-gui (LLM Surgery Studio): the desktop app. No argument opens the home screen (and
-//! the first-run wizard on a fresh profile); `graph.json`, `graph.ndjson` and `-` still open
-//! the 3D viewer directly; folders and `*.surgeon-studio.json` are accepted too.
+//! surgeon-gui (Weight Surgeon): the desktop app, in a window without system frame. No
+//! argument opens the Atelier (and the first-run wizard on a fresh profile); `graph.json`,
+//! `graph.ndjson` and `-` open the 3D graph directly; folders and `*.surgeon-studio.json` are
+//! accepted too. `--demo-data` fills every view with a throwaway workspace.
 //!
 //! Release builds on Windows use the GUI subsystem (no console window); the process then
 //! attaches to the parent console so that `--version`, `--help` and `--self-test` print.
@@ -11,13 +12,13 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use eframe::egui;
-use surgeon_gui::app::SurgeonApp;
+use surgeon_gui::app::{SurgeonApp, Tab};
 use surgeon_gui::cli::{self, Cli, Item};
-use surgeon_gui::desktop::{Desktop, Screen};
+use surgeon_gui::desktop::Desktop;
 use surgeon_gui::instance::{self, Role};
 use surgeon_gui::settings::{Lang, Settings};
 use surgeon_gui::source::Input;
-use surgeon_gui::{actions, diag, logging, paths, raster, selftest, source};
+use surgeon_gui::{actions, demo, diag, logging, paths, raster, selftest, source};
 use weight_surgeon::backend::config;
 
 /// Reuses the console of the shell that launched the GUI-subsystem binary, if any.
@@ -109,7 +110,7 @@ fn main() -> ExitCode {
         },
     };
 
-    // The first graph opens the viewer at once; a failure shows on the home screen.
+    // The first graph opens the 3D view at once; a failure shows in the status bar.
     let mut notice = None;
     let mut input: Option<Input> = None;
     let mut rest = Vec::new();
@@ -125,29 +126,41 @@ fn main() -> ExitCode {
     if let Some(e) = &notice {
         eprintln!("{e}");
     }
-    let start = match input.is_some() {
-        true => Screen::Workbench,
-        false => Screen::Home,
-    };
     let replay = cli.replay.clone();
+    let [w, h] = cli.size;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("LLM Surgery Studio")
-            .with_inner_size([1440.0, 900.0])
+            .with_title("Weight Surgeon")
+            .with_decorations(false)
+            .with_inner_size([w as f32, h as f32])
             .with_min_inner_size([960.0, 600.0])
             .with_icon(window_icon().unwrap_or_default()),
         ..Default::default()
     };
+    let (demo_data, no_motion, scale) = (cli.demo_data, cli.no_motion, cli.scale);
+    let tab = Tab::from_name(&cli.screen);
     let outcome = eframe::run_native(
-        "LLM Surgery Studio",
+        "Weight Surgeon",
         options,
         Box::new(move |cc| {
-            let mut desktop = Desktop::new(&cc.egui_ctx, inbox, start, false);
+            let ctx = &cc.egui_ctx;
+            let mut desktop = Desktop::new(ctx, inbox, false);
             if let Some(e) = notice {
                 desktop.notify(e);
             }
-            let mut app = SurgeonApp::with_shell(&cc.egui_ctx, input, desktop, workspace);
-            app.open_items(&cc.egui_ctx, rest);
+            let mut app = SurgeonApp::with_shell(ctx, input, desktop, workspace);
+            if demo_data {
+                if let Err(e) = demo::install(ctx, &mut app) {
+                    logging::warn(&e);
+                    app.desktop.notify(e);
+                }
+            }
+            if let Some(tab) = tab {
+                app.tab = tab;
+            }
+            app.set_motion(ctx, !no_motion);
+            ctx.set_zoom_factor(scale);
+            app.open_items(ctx, rest);
             if let Some(Err(e)) = replay.as_deref().map(|r| app.open_replay(r)) {
                 logging::warn(&e);
                 eprintln!("{e}");
@@ -173,24 +186,24 @@ fn absolute(paths: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// `--screenshot`: the current screen, rendered without a window or a GPU.
+/// `--screenshot`: one tab (or the wizard over the Atelier), rendered without a window or a
+/// GPU at `--size` pixels and `--scale` pixels per point.
 fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
     let ctx = egui::Context::default();
-    let screen = match cli.screen.as_str() {
-        "home" | "wizard" => Screen::Home,
-        "diagnostics" => Screen::Diagnostics,
-        "agents" | "graph" => Screen::Workbench,
-        other => {
-            return Err(format!(
-                "--screen {other} : home, wizard, diagnostics, agents ou graph"
-            ))
-        }
+    let (tab, wizard) = match cli.screen.as_str() {
+        "wizard" => (Tab::Atelier, true),
+        name => (
+            Tab::from_name(name).ok_or_else(|| {
+                format!("--screen {name} : atelier, graph, analyses, agents, diagnostics ou wizard")
+            })?,
+            false,
+        ),
     };
     let mut settings = Settings::load(&paths::settings_path()).unwrap_or_default();
     settings.language.get_or_insert_with(Lang::system);
-    let mut desktop = Desktop::detached(None, screen, settings, actions::Env::current());
+    let mut desktop = Desktop::detached(None, settings, actions::Env::current());
     desktop.capture_system(diag::probe(&paths::data_dir()));
-    if cli.screen == "wizard" {
+    if wizard {
         desktop.capture_wizard(diag::probe(&paths::data_dir()));
     }
     let input = match cli.inputs.first().map(|p| cli::classify(p)) {
@@ -202,12 +215,16 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
         .clone()
         .unwrap_or_else(paths::default_workspace);
     let mut app = SurgeonApp::with_shell(&ctx, input, desktop, workspace);
-    if cli.screen == "agents" {
-        app.open_agents();
+    if cli.demo_data {
+        demo::install(&ctx, &mut app)?;
     }
+    app.tab = tab;
+    // A capture shows the tab, not the first-run backend dialog over it.
+    app.dialog.open = false;
+    app.set_motion(&ctx, !cli.no_motion);
     if let Some(replay) = &cli.replay {
         app.open_replay(replay)?;
     }
-    let frame = raster::render(&ctx, [1440, 900], 1.0, |ui| app.draw(ui));
+    let frame = raster::render(&ctx, cli.size, cli.scale, |ui| app.draw(ui));
     frame.image.save_png(png)
 }

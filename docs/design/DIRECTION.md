@@ -65,7 +65,7 @@ données.
 | `text` | `#E6EDF3` | texte principal (≥ 7:1) |
 | `text_secondary` | `#9AA7B8` | libellés, méta (≥ 4,5:1) |
 | `text_disabled` | `#6B7788` | désactivé, indices (≥ 3:1) |
-| `ok` / `warn` / `error` | `#3FB950` / `#D29922` / `#F85149` | états (≥ 4,5:1), toujours avec un mot |
+| `ok` / `warn` / `error` | `#3FB950` / `#D29922` / `#FA5C54` | états (≥ 4,5:1), toujours avec un mot |
 | `data[0..7]` | sept paliers d'un seul bleu | échelles de données, par quantiles |
 
 Les ratios exacts sont calculés par le test `theme_contrast` (WCAG 2.x) et reportés dans

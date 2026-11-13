@@ -286,9 +286,10 @@ pub fn targets(selections: &[Selection], report: &GraphReport) -> Vec<bool> {
 }
 
 const KEY: Color32 = theme::TEXT;
-const STRING: Color32 = Color32::from_rgb(135, 175, 255);
-const NUMBER: Color32 = Color32::from_rgb(215, 175, 95);
-const LITERAL: Color32 = Color32::from_rgb(95, 175, 255);
+const STRING: Color32 = theme::TOKENS.color.data[5];
+const NUMBER: Color32 = theme::TOKENS.color.data[6];
+// true, false, null: plain text, as keys; strings and numbers carry the two data steps.
+const LITERAL: Color32 = theme::TEXT;
 
 /// Sober JSON coloring, never wrapped (rows are lines, the gutter relies on it).
 pub fn highlight(text: &str, font: FontId) -> LayoutJob {

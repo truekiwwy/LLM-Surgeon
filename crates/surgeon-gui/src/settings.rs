@@ -59,6 +59,9 @@ pub struct Settings {
     pub pins: BTreeMap<String, String>,
     /// The user allowed the (manual, never silent) check for a newer version.
     pub check_updates: bool,
+    /// Widths of the left and right columns, in points (put back on the grid when read).
+    pub left_width: Option<f32>,
+    pub right_width: Option<f32>,
 }
 
 impl Settings {

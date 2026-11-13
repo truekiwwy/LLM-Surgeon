@@ -136,6 +136,18 @@ pub fn is_software(renderer: &str) -> bool {
     .any(|s| r.contains(s))
 }
 
+/// The color pairs of the theme against their WCAG thresholds.
+fn interface() -> Result<String, String> {
+    let failures = crate::ui::theme::contrast_failures();
+    match failures.is_empty() {
+        true => Ok(format!(
+            "{} paires de couleurs au-dessus de leur seuil WCAG",
+            crate::ui::theme::pairs().len()
+        )),
+        false => Err(failures.join(" ; ")),
+    }
+}
+
 /// Runs every check and prints the report; `true` when all passed.
 pub fn run(workspace: Option<&Path>) -> bool {
     let mut checks = vec![
@@ -143,6 +155,7 @@ pub fn run(workspace: Option<&Path>) -> bool {
         check("studio", studio()),
         check("agent", crate::agent::selftest::run()),
         check("données", writable(&crate::paths::data_dir())),
+        check("interface", interface()),
     ];
     if let Some(dir) = workspace {
         checks.push(check("workspace", writable(dir)));

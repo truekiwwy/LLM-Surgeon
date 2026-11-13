@@ -194,6 +194,11 @@ impl Timeline {
         self.cursor = cursor.min(self.steps.len().saturating_sub(1));
     }
 
+    /// The state at `index`, whatever the cursor.
+    pub fn get(&self, index: usize) -> Option<&Step> {
+        self.steps.get(index)
+    }
+
     pub fn current(&self) -> Option<&Step> {
         self.steps.get(self.cursor)
     }

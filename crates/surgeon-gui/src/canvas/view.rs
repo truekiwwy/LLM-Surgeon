@@ -115,7 +115,7 @@ fn wire(painter: &egui::Painter, from: Pos2, to: Pos2, color: Color32) {
     painter.add(CubicBezierShape::from_points_stroke(
         points,
         false,
-        Color32::TRANSPARENT,
+        theme::TRANSPARENT,
         Stroke::new(1.5, color),
     ));
 }

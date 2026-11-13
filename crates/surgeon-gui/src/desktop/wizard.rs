@@ -610,7 +610,7 @@ impl Wizard {
             "A small model to try the engine right away (optional).",
         ));
         ui.add_space(6.0);
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        crate::ui::components::inset_frame().show(ui, |ui| {
             ui.label(RichText::new(QWEN.id).strong());
             ui.label(mono(format!(
                 "{}  ·  {:.0} MiB  ·  {} {}",
@@ -868,7 +868,7 @@ fn progress_bar(p: &crate::task::Progress) -> ProgressBar {
 }
 
 fn plan_card(ui: &mut egui::Ui, plan: &Plan, pinned: Option<&String>, l: Lang) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
+    crate::ui::components::inset_frame().show(ui, |ui| {
         ui.label(RichText::new(format!("llama.cpp {} - {}", plan.tag, plan.variant)).strong());
         ui.label(mono(&plan.name));
         ui.label(mono(format!("URL      {}", plan.url)).size(11.0));
@@ -926,7 +926,7 @@ fn engine_done(ui: &mut egui::Ui, done: &EngineSummary, l: Lang) {
 }
 
 fn manual_engine(ui: &mut egui::Ui, env: &Env, l: Lang) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
+    crate::ui::components::inset_frame().show(ui, |ui| {
         ui.label(RichText::new(l.pick("Installation manuelle", "Manual install")).strong());
         ui.label(l.pick(
             "1. Ouvrez https://github.com/ggml-org/llama.cpp/releases et prenez l'archive llama-<tag>-bin-win-vulkan-x64.zip (ou -cpu-x64).\n2. Comparez son SHA-256 à celui affiché sur la page de la release.\n3. Décompressez-la dans le dossier ci-dessous.\n4. Dans Backend…, indiquez ce dossier comme dossier llama.cpp.",
@@ -937,7 +937,7 @@ fn manual_engine(ui: &mut egui::Ui, env: &Env, l: Lang) {
 }
 
 pub(super) fn system_card(ui: &mut egui::Ui, s: &SystemReport, l: Lang) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
+    crate::ui::components::inset_frame().show(ui, |ui| {
         egui::Grid::new("system-grid").num_columns(2).spacing([14.0, 4.0]).show(ui, |ui| {
             ui.label(RichText::new("OS").color(theme::DIM));
             ui.label(mono(format!("{} {}", s.os, s.arch)));
@@ -1008,7 +1008,7 @@ fn tour(ui: &mut egui::Ui, l: Lang) {
             l.pick("L'état de chaque dépendance, avec Réparer et Réinstaller, et un export expurgé à joindre à un rapport.", "The state of every dependency, with Repair and Reinstall, and a redacted export to attach to a report."),
         ),
     ] {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        crate::ui::components::inset_frame().show(ui, |ui| {
             ui.label(RichText::new(title).strong());
             ui.label(text);
         });
