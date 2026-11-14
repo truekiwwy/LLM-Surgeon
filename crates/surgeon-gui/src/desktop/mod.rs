@@ -178,8 +178,9 @@ impl Desktop {
         ));
     }
 
-    /// The dependency rows: components, toolchain, workspace, machine.
-    pub fn rows(&self, backend: &BackendConfig) -> Vec<Row> {
+    /// The dependency rows: components, toolchain, workspace, machine, with their severity
+    /// under `uses`.
+    pub fn rows(&self, backend: &BackendConfig, uses: diag::Uses) -> Vec<Row> {
         let latest = None; // the releases API is only asked on an explicit click
         diag::dependencies(
             &self.env.components,
@@ -187,6 +188,7 @@ impl Desktop {
             self.settings.workspace.as_deref(),
             self.system.as_ref(),
             latest,
+            uses,
             self.lang(),
         )
     }

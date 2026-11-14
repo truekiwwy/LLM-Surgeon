@@ -14,7 +14,8 @@ use super::left_column;
 use crate::agent::config::ProviderKind;
 use crate::app::{Section, SurgeonApp};
 use crate::desktop::UpdateState;
-use crate::diag::{Fix, Status};
+use crate::diag::{actions_needed, Fix, Group, Row, Severity, Status, Uses};
+use weight_surgeon::bench::score::Backend;
 
 fn section_label(section: Section) -> &'static str {
     match section {
@@ -128,53 +129,99 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 }
             },
         );
-    let rows = app.desktop.rows(app.dialog.saved());
+    let rows = app.desktop.rows(app.dialog.saved(), uses(app));
     let mut fix = None;
     c::Panel::new("dependencies")
         .title(t("panel.dependencies"))
         .show(ui, regions.center, |ui| {
+            readiness(ui, &rows);
             ScrollArea::vertical()
                 .id_salt("deps")
                 .auto_shrink(false)
                 .show(ui, |ui| {
-                    for row in &rows {
-                        let state = match row.status {
-                            Status::Ok => State::Ok,
-                            Status::Missing => State::Error,
-                            Status::Outdated => State::Warn,
-                        };
-                        ui.horizontal(|ui| {
-                            c::status(ui, state, row.name);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if row.fix != Fix::None {
-                                        if c::button(ui, t("diag.reinstall"), ButtonKind::Ghost)
-                                            .clicked()
-                                        {
-                                            fix = Some((row.fix, true));
-                                        }
-                                        if c::button(ui, t("diag.repair"), ButtonKind::Secondary)
-                                            .clicked()
-                                        {
-                                            fix = Some((row.fix, false));
-                                        }
-                                    }
-                                    c::meta(
-                                        ui,
-                                        crate::diag::status_word(row.status, app.desktop.lang()),
-                                    );
-                                },
-                            );
-                        });
-                        c::secondary(ui, row.detail.as_str());
-                        ui.add_space(T.space.s);
+                    for group in [
+                        Group::Essential,
+                        Group::Acceleration,
+                        Group::Agents,
+                        Group::Samples,
+                    ] {
+                        c::section(ui, group_label(group));
+                        for row in rows.iter().filter(|r| r.group == group) {
+                            if let Some(f) = dependency(ui, row) {
+                                fix = Some(f);
+                            }
+                        }
                     }
                 });
         });
     if let Some((what, force)) = fix {
         app.desktop.open_fix(what, force);
     }
+}
+
+/// The active choices the severities follow: the backend picked, a CLI runtime configured.
+fn uses(app: &SurgeonApp) -> Uses {
+    Uses {
+        llama_backend: app.dialog.saved().backend == Some(Backend::LlamaServer),
+        cli: app
+            .agents
+            .cfg
+            .connections
+            .iter()
+            .find(|c| c.kind.is_cli())
+            .map(|c| c.kind.name()),
+    }
+}
+
+/// One line over the list: ready, or how many rows need the user.
+fn readiness(ui: &mut Ui, rows: &[Row]) {
+    let blocking = rows.iter().any(|r| r.severity == Severity::Blocking);
+    match (actions_needed(rows), blocking) {
+        (0, _) => c::status(ui, State::Ok, t("deps.ready")),
+        (n, true) => c::status(ui, State::Error, tf("deps.actions", &[("n", &n)])),
+        (n, false) => c::status(ui, State::Warn, tf("deps.actions", &[("n", &n)])),
+    };
+    c::separator(ui);
+}
+
+fn group_label(group: Group) -> &'static str {
+    match group {
+        Group::Essential => t("deps.group.essential"),
+        Group::Acceleration => t("deps.group.acceleration"),
+        Group::Agents => t("deps.group.agents"),
+        Group::Samples => t("deps.group.samples"),
+    }
+}
+
+/// One dependency: its state in words, what to do about it, its detail. The repair asked for.
+fn dependency(ui: &mut Ui, row: &Row) -> Option<(Fix, bool)> {
+    let (state, word) = match (row.severity, row.status) {
+        (Severity::Ok, _) => (State::Ok, t("deps.ok").to_owned()),
+        (Severity::Optional, Status::Outdated) => (State::Idle, t("deps.outdated").to_owned()),
+        (Severity::Optional, _) => (State::Idle, t("deps.optional").to_owned()),
+        (Severity::NeededBy(who), _) => (State::Warn, tf("deps.needed_by", &[("who", &who)])),
+        (Severity::Blocking, _) => (State::Error, t("deps.required").to_owned()),
+    };
+    let mut fix = None;
+    ui.horizontal(|ui| {
+        c::status(ui, state, row.name);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if row.fix != Fix::None {
+                let (text, kind, force) = match row.status {
+                    Status::Missing => (t("diag.install"), ButtonKind::Secondary, false),
+                    Status::Outdated => (t("diag.repair"), ButtonKind::Secondary, false),
+                    Status::Ok => (t("diag.reinstall"), ButtonKind::Ghost, true),
+                };
+                if c::button(ui, text, kind).clicked() {
+                    fix = Some((row.fix, force));
+                }
+            }
+            c::meta(ui, word);
+        });
+    });
+    c::secondary(ui, row.detail.as_str());
+    ui.add_space(T.space.s);
+    fix
 }
 
 fn updates(ui: &mut Ui, app: &mut SurgeonApp) {
@@ -279,7 +326,7 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                     }
                 });
         });
-    let rows = app.desktop.rows(app.dialog.saved());
+    let rows = app.desktop.rows(app.dialog.saved(), uses(app));
     c::Panel::new("report")
         .title(t("panel.report"))
         .show(ui, regions.right, |ui| {

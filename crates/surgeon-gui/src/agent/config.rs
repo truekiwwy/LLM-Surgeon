@@ -50,6 +50,17 @@ impl ProviderKind {
         }
     }
 
+    /// The product name alone, for sentences ("needed by Claude Code").
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Anthropic => "Anthropic",
+            Self::OpenAi => "OpenAI",
+            Self::Compatible => "OpenAI-compatible",
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
+
     pub fn is_cli(self) -> bool {
         matches!(self, Self::ClaudeCode | Self::Codex)
     }

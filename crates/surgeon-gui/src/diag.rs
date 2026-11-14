@@ -166,12 +166,60 @@ pub enum Fix {
     None,
 }
 
+/// What a dependency is for: the group it is listed under, in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    Essential,
+    Acceleration,
+    Agents,
+    Samples,
+}
+
+/// How much a row's state matters, from what the user actually uses: only `Blocking` stops
+/// the work, `NeededBy` names the active choice that needs an optional piece.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Ok,
+    Optional,
+    NeededBy(&'static str),
+    Blocking,
+}
+
+/// The active choices that make an optional dependency needed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Uses {
+    /// The backend picked is `llama-server`.
+    pub llama_backend: bool,
+    /// A CLI runtime is configured (it starts `surgeon mcp`): its name.
+    pub cli: Option<&'static str>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Row {
     pub name: &'static str,
     pub status: Status,
     pub detail: String,
     pub fix: Fix,
+    pub group: Group,
+    pub severity: Severity,
+}
+
+/// `Blocking` and `NeededBy` rows: what the user has to act on.
+pub fn actions_needed(rows: &[Row]) -> usize {
+    rows.iter()
+        .filter(|r| matches!(r.severity, Severity::Blocking | Severity::NeededBy(_)))
+        .count()
+}
+
+/// A missing piece is `Blocking` when the work needs it, `NeededBy(who)` when an active
+/// choice does, else `Optional`.
+fn severity(status: Status, required: bool, needed_by: Option<&'static str>) -> Severity {
+    match (status, required, needed_by) {
+        (Status::Ok, _, _) => Severity::Ok,
+        (_, true, _) => Severity::Blocking,
+        (Status::Missing, false, Some(who)) => Severity::NeededBy(who),
+        _ => Severity::Optional,
+    }
 }
 
 /// `b12360` -> 12360.
@@ -184,29 +232,55 @@ pub fn is_outdated(installed: &str, latest: &str) -> bool {
     matches!((build_number(installed), build_number(latest)), (Some(i), Some(l)) if l > i)
 }
 
-/// The state of each dependency. `latest_tag` is the newest llama.cpp release when the
-/// releases API was reachable (no network call is made here).
+/// The state of each dependency, its group and its severity under `uses`. `latest_tag` is
+/// the newest llama.cpp release when the releases API was reachable (no network call is
+/// made here).
 pub fn dependencies(
     components: &Path,
     config: &BackendConfig,
     workspace: Option<&Path>,
     system: Option<&SystemReport>,
     latest_tag: Option<&str>,
+    uses: Uses,
     lang: Lang,
 ) -> Vec<Row> {
     let tr = |fr: &str, en: &str| match lang {
         Lang::Fr => fr.to_owned(),
         Lang::En => en.to_owned(),
     };
+    // Group and severity are set once every row is known.
+    struct Base {
+        name: &'static str,
+        status: Status,
+        detail: String,
+        fix: Fix,
+    }
     let mut rows = Vec::new();
+
+    rows.push(Base {
+        name: "weight-surgeon",
+        status: Status::Ok,
+        detail: format!(
+            "{} {}",
+            tr(
+                "moteur de chirurgie intégré à l'application",
+                "surgery engine built into the app"
+            ),
+            env!("CARGO_PKG_VERSION")
+        ),
+        fix: Fix::None,
+    });
 
     let trusted: Option<Installed> = config.llama_cpp_dir.as_ref().and_then(|dir| {
         install::list_installed(components)
             .into_iter()
             .find(|i| &i.dir == dir)
     });
+    let vulkan_build = trusted
+        .as_ref()
+        .is_some_and(|i| i.manifest.variant == "vulkan");
     rows.push(match (&config.llama_cpp_dir, trusted) {
-        (None, _) => Row {
+        (None, _) => Base {
             name: "llama.cpp",
             status: Status::Missing,
             detail: tr(
@@ -215,7 +289,7 @@ pub fn dependencies(
             ),
             fix: Fix::LlamaCpp,
         },
-        (Some(dir), None) if dir.join(install::server_name()).is_file() => Row {
+        (Some(dir), None) if dir.join(install::server_name()).is_file() => Base {
             name: "llama.cpp",
             status: Status::Ok,
             detail: tr(
@@ -224,7 +298,7 @@ pub fn dependencies(
             ),
             fix: Fix::LlamaCpp,
         },
-        (Some(_), None) => Row {
+        (Some(_), None) => Base {
             name: "llama.cpp",
             status: Status::Missing,
             detail: tr(
@@ -235,7 +309,7 @@ pub fn dependencies(
         },
         (Some(_), Some(i)) => {
             let outdated = latest_tag.is_some_and(|l| is_outdated(&i.manifest.tag, l));
-            Row {
+            Base {
                 name: "llama.cpp",
                 status: if outdated {
                     Status::Outdated
@@ -257,13 +331,13 @@ pub fn dependencies(
     });
 
     rows.push(match system.and_then(|s| s.vulkan) {
-        Some(true) => Row {
+        Some(true) => Base {
             name: "Vulkan",
             status: Status::Ok,
             detail: tr("chargeur Vulkan présent", "Vulkan loader present"),
             fix: Fix::None,
         },
-        Some(false) => Row {
+        Some(false) => Base {
             name: "Vulkan",
             status: Status::Missing,
             detail: tr(
@@ -272,7 +346,7 @@ pub fn dependencies(
             ),
             fix: Fix::None,
         },
-        None => Row {
+        None => Base {
             name: "Vulkan",
             status: Status::Missing,
             detail: tr("diagnostic en cours ou indisponible", "diagnostic pending or unavailable"),
@@ -285,13 +359,13 @@ pub fn dependencies(
             .map(|d| d.join(format!("surgeon{}", std::env::consts::EXE_SUFFIX)))
     });
     rows.push(match cli.filter(|p| p.is_file()) {
-        Some(path) => Row {
+        Some(path) => Base {
             name: "surgeon (CLI)",
             status: Status::Ok,
             detail: path.display().to_string(),
             fix: Fix::None,
         },
-        None => Row {
+        None => Base {
             name: "surgeon (CLI)",
             status: Status::Missing,
             detail: tr("surgeon.exe absent à côté de l'application (utilisation de la bibliothèque intégrée)", "surgeon.exe not next to the app (the built-in library is used)"),
@@ -300,13 +374,13 @@ pub fn dependencies(
     });
 
     rows.push(match workspace {
-        Some(dir) if dir.is_dir() => Row {
+        Some(dir) if dir.is_dir() => Base {
             name: "workspace",
             status: Status::Ok,
             detail: dir.display().to_string(),
             fix: Fix::Workspace,
         },
-        _ => Row {
+        _ => Base {
             name: "workspace",
             status: Status::Missing,
             detail: tr(
@@ -318,13 +392,40 @@ pub fn dependencies(
     });
 
     let sample = workspace.is_some_and(|w| QWEN.is_installed(w));
-    rows.push(Row {
+    rows.push(Base {
         name: "Qwen2.5-0.5B-Instruct",
         status: if sample { Status::Ok } else { Status::Missing },
-        detail: tr("modèle d'exemple (optionnel)", "sample model (optional)"),
+        detail: tr("modèle d'exemple", "sample model"),
         fix: Fix::SampleModel,
     });
-    rows
+
+    rows.into_iter()
+        .map(|b| {
+            let (group, required, needed_by) = match b.name {
+                "weight-surgeon" | "workspace" => (Group::Essential, true, None),
+                "llama.cpp" => (
+                    Group::Acceleration,
+                    false,
+                    uses.llama_backend.then_some("llama-server"),
+                ),
+                "Vulkan" => (
+                    Group::Acceleration,
+                    false,
+                    (uses.llama_backend && vulkan_build).then_some("llama.cpp Vulkan"),
+                ),
+                "surgeon (CLI)" => (Group::Agents, false, uses.cli),
+                _ => (Group::Samples, false, None),
+            };
+            Row {
+                severity: severity(b.status, required, needed_by),
+                name: b.name,
+                status: b.status,
+                detail: b.detail,
+                fix: b.fix,
+                group,
+            }
+        })
+        .collect()
 }
 
 pub fn status_word(status: Status, lang: Lang) -> &'static str {
@@ -418,10 +519,18 @@ mod tests {
     fn rows_report_missing_then_ok_then_outdated() {
         let dir = tempfile::tempdir().unwrap();
         let none = BackendConfig::default();
-        let rows = dependencies(dir.path(), &none, None, None, None, Lang::En);
-        assert_eq!(rows[0].status, Status::Missing);
-        assert_eq!(rows[0].fix, Fix::LlamaCpp);
-        assert_eq!(rows[3].status, Status::Missing, "no workspace");
+        let rows = dependencies(
+            dir.path(),
+            &none,
+            None,
+            None,
+            None,
+            Uses::default(),
+            Lang::En,
+        );
+        assert_eq!(rows[1].status, Status::Missing);
+        assert_eq!(rows[1].fix, Fix::LlamaCpp);
+        assert_eq!(rows[4].status, Status::Missing, "no workspace");
 
         let build = dir.path().join("llama.cpp").join("b10-vulkan");
         std::fs::create_dir_all(&build).unwrap();
@@ -444,17 +553,91 @@ mod tests {
         };
         let ws = dir.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
-        let rows = dependencies(dir.path(), &cfg, Some(&ws), None, Some("b10"), Lang::En);
-        assert_eq!(rows[0].status, Status::Ok);
-        assert_eq!(rows[3].status, Status::Ok);
-        let rows = dependencies(dir.path(), &cfg, Some(&ws), None, Some("b99"), Lang::En);
-        assert_eq!(rows[0].status, Status::Outdated);
+        let rows = dependencies(
+            dir.path(),
+            &cfg,
+            Some(&ws),
+            None,
+            Some("b10"),
+            Uses::default(),
+            Lang::En,
+        );
+        assert_eq!(rows[1].status, Status::Ok);
+        assert_eq!(rows[4].status, Status::Ok);
+        let rows = dependencies(
+            dir.path(),
+            &cfg,
+            Some(&ws),
+            None,
+            Some("b99"),
+            Uses::default(),
+            Lang::En,
+        );
+        assert_eq!(rows[1].status, Status::Outdated);
         std::fs::remove_file(build.join(install::server_name())).unwrap();
-        let rows = dependencies(dir.path(), &cfg, Some(&ws), None, None, Lang::En);
+        let rows = dependencies(
+            dir.path(),
+            &cfg,
+            Some(&ws),
+            None,
+            None,
+            Uses::default(),
+            Lang::En,
+        );
         assert_eq!(
-            rows[0].status,
+            rows[1].status,
             Status::Missing,
             "a deleted binary is reported"
+        );
+    }
+
+    #[test]
+    fn only_what_stops_the_work_is_blocking_and_choices_raise_optional_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let none = BackendConfig::default();
+        let severity =
+            |rows: &[Row], name: &str| rows.iter().find(|r| r.name == name).unwrap().severity;
+        // A fresh profile: no workspace, nothing installed, nothing chosen.
+        let rows = dependencies(
+            dir.path(),
+            &none,
+            None,
+            None,
+            None,
+            Uses::default(),
+            Lang::En,
+        );
+        assert_eq!(severity(&rows, "workspace"), Severity::Blocking);
+        assert_eq!(severity(&rows, "weight-surgeon"), Severity::Ok);
+        for name in ["llama.cpp", "Vulkan", "Qwen2.5-0.5B-Instruct"] {
+            assert_eq!(severity(&rows, name), Severity::Optional, "{name}");
+        }
+        assert_eq!(actions_needed(&rows), 1, "only the workspace");
+        assert_eq!(
+            rows.iter().filter(|r| r.group == Group::Essential).count(),
+            2
+        );
+
+        // Claude Code configured and llama-server picked: their pieces become needed.
+        let uses = Uses {
+            llama_backend: true,
+            cli: Some("Claude Code"),
+        };
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let rows = dependencies(dir.path(), &none, Some(&ws), None, None, uses, Lang::En);
+        assert_eq!(severity(&rows, "workspace"), Severity::Ok);
+        assert_eq!(
+            severity(&rows, "llama.cpp"),
+            Severity::NeededBy("llama-server")
+        );
+        // No Vulkan build installed: a missing loader does not matter.
+        assert_eq!(severity(&rows, "Vulkan"), Severity::Optional);
+        let cli = severity(&rows, "surgeon (CLI)");
+        // Tests run from target/, where the CLI may or may not sit next to the binary.
+        assert!(
+            matches!(cli, Severity::Ok | Severity::NeededBy("Claude Code")),
+            "{cli:?}"
         );
     }
 
