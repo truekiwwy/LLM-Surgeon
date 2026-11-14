@@ -131,7 +131,7 @@ fn capture(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
         .spawn()
         .ok()?;
     let (tx, rx) = mpsc::channel();
-    for pipe in [
+    for (k, pipe) in [
         child
             .stdout
             .take()
@@ -142,13 +142,14 @@ fn capture(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
             .map(|p| Box::new(p) as Box<dyn Read + Send>),
     ]
     .into_iter()
-    .flatten()
+    .enumerate()
+    .filter_map(|(k, p)| Some((k, p?)))
     {
         let tx = tx.clone();
         std::thread::spawn(move || {
             let mut text = String::new();
             let _ = BufReader::new(pipe).take(1 << 20).read_to_string(&mut text);
-            let _ = tx.send(text);
+            let _ = tx.send((k, text));
         });
     }
     drop(tx);
@@ -164,7 +165,11 @@ fn capture(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
             }
         }
     }
-    Some(rx.iter().collect::<Vec<_>>().join("\n"))
+    // The two readers end in any order: stdout first, whichever came back first.
+    let mut parts: Vec<(usize, String)> = rx.iter().collect();
+    parts.sort_by_key(|(k, _)| *k);
+    let texts: Vec<String> = parts.into_iter().map(|(_, text)| text).collect();
+    Some(texts.join("\n"))
 }
 
 /// The `surgeon` engine binary the runtime launches as its MCP server: next to this app,
