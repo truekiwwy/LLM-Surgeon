@@ -16,7 +16,6 @@ use weight_surgeon::graph::output::GraphReport;
 use weight_surgeon::graph::stream::GraphPatch;
 use weight_surgeon::graph::GraphRole;
 
-use crate::agent::policy::AgentMode;
 use crate::agent::view::Hub;
 use crate::backend_dialog::BackendDialog;
 use crate::camera::Orbit;
@@ -43,7 +42,7 @@ pub enum Tab {
     Graph,
     Analyses,
     Agents,
-    Diagnostics,
+    System,
 }
 
 impl Tab {
@@ -52,7 +51,7 @@ impl Tab {
         Tab::Graph,
         Tab::Analyses,
         Tab::Agents,
-        Tab::Diagnostics,
+        Tab::System,
     ];
 
     /// The `--screen` name of the tab.
@@ -62,32 +61,48 @@ impl Tab {
             Tab::Graph => "graph",
             Tab::Analyses => "analyses",
             Tab::Agents => "agents",
-            Tab::Diagnostics => "diagnostics",
+            Tab::System => "system",
         }
     }
 
+    /// `diagnostics`, the name before G6, still reaches the System tab.
     pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|t| t.name() == name)
+        match name {
+            "diagnostics" => Some(Tab::System),
+            _ => Self::ALL.into_iter().find(|t| t.name() == name),
+        }
     }
 }
 
-/// `[SCALPING]`: the user targets tensors by hand. `[ADVANCE]`: the agent audits the model,
-/// read only (docs/design/DIRECTION.md, D-07).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Scalping,
-    Advance,
-}
+pub use crate::settings::Mode;
 
 /// What the center of the Atelier shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bench {
-    /// Targeting, the ‖ΔW‖ histogram and the surgery form (or the audit in `[ADVANCE]`).
+    /// Targeting, the ‖ΔW‖ histogram and the surgery form.
     Surgery,
     /// The card canvas.
     Canvas,
     /// The patch.json editor.
     Editor,
+}
+
+/// The four sections of the System tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Machine,
+    Providers,
+    Updates,
+    Journal,
+}
+
+impl Section {
+    pub const ALL: [Section; 4] = [
+        Section::Machine,
+        Section::Providers,
+        Section::Updates,
+        Section::Journal,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,8 +162,8 @@ pub struct SurgeonApp {
     pub threshold: Option<f64>,
     /// `false` (`--no-motion`): no transition at all.
     pub motion: bool,
-    /// The section the Diagnostics view shows.
-    pub diag_section: usize,
+    /// The section the System view shows.
+    pub system_section: Section,
     ledger_cache: Option<(PathBuf, Option<SystemTime>, Vec<ledger::Entry>)>,
 }
 
@@ -162,12 +177,14 @@ impl SurgeonApp {
     ) -> Self {
         theme::apply(ctx);
         fonts::install(ctx);
-        let columns =
+        let mut columns =
             Columns::from_saved(desktop.settings.left_width, desktop.settings.right_width);
+        columns.collapsed = desktop.settings.left_collapsed;
         let tab = match input {
             Some(_) => Tab::Graph,
             None => Tab::Atelier,
         };
+        let mode = desktop.settings.mode;
         let mut app = Self {
             timeline: Timeline::default(),
             feed: None,
@@ -183,7 +200,7 @@ impl SurgeonApp {
             probe: None,
             hardware: None,
             tab,
-            mode: Mode::Scalping,
+            mode,
             bench: Bench::Surgery,
             canvas: Canvas::default(),
             editor: Editor::default(),
@@ -203,7 +220,7 @@ impl SurgeonApp {
             palette: Palette::default(),
             threshold: None,
             motion: true,
-            diag_section: 0,
+            system_section: Section::Machine,
             ledger_cache: None,
         };
         if let Some(input) = input {
@@ -220,13 +237,23 @@ impl SurgeonApp {
         ctx.all_styles_mut(|s| s.animation_time = time);
     }
 
-    /// Switches the mode; `[ADVANCE]` puts the agent of the project in read-only `Demander`.
+    /// Switches the depth of the Atelier and keeps it for the next launch. The agent's own
+    /// mode is never touched: it is chosen in Agents only.
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
-        if mode == Mode::Advance && self.agents.agent.mode != AgentMode::Ask {
-            self.agents.agent.mode = AgentMode::Ask;
-            self.agents.agent_changed();
+        // The cards and the patch editor belong to `[ADVANCE]`.
+        if mode == Mode::Scalping {
+            self.bench = Bench::Surgery;
         }
+        self.desktop.settings.mode = mode;
+        self.desktop.save_settings();
+    }
+
+    /// Folds or unfolds the left column (`Ctrl+B`, its chevron) and keeps the choice.
+    pub fn toggle_left(&mut self) {
+        self.columns.collapsed = !self.columns.collapsed;
+        self.desktop.settings.left_collapsed = self.columns.collapsed;
+        self.desktop.save_settings();
     }
 
     /// An external graph, outside any project (ephemeral): replaces the one shown.
@@ -816,5 +843,6 @@ mod tests {
             assert_eq!(Tab::from_name(tab.name()), Some(tab));
         }
         assert_eq!(Tab::from_name("home"), None);
+        assert_eq!(Tab::from_name("diagnostics"), Some(Tab::System));
     }
 }

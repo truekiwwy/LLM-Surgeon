@@ -14,6 +14,7 @@ pub enum Icon {
     Restore,
     Close,
     ChevronRight,
+    ChevronLeft,
     ChevronDown,
     Search,
     Play,
@@ -48,6 +49,7 @@ fn paths(icon: Icon) -> Vec<(Vec<[f32; 2]>, bool)> {
             open(&[[0.8, 0.2], [0.2, 0.8]]),
         ],
         Icon::ChevronRight => vec![open(&[[0.38, 0.25], [0.65, 0.5], [0.38, 0.75]])],
+        Icon::ChevronLeft => vec![open(&[[0.62, 0.25], [0.35, 0.5], [0.62, 0.75]])],
         Icon::ChevronDown => vec![open(&[[0.25, 0.38], [0.5, 0.65], [0.75, 0.38]])],
         Icon::Search => vec![
             closed(&[

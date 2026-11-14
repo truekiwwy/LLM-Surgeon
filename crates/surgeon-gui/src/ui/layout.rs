@@ -14,11 +14,12 @@ pub fn snap8(v: f32) -> f32 {
     (v / GRID).round() * GRID
 }
 
-/// Widths of the two side columns, in points.
+/// Widths of the two side columns, in points; `collapsed` folds the left one to its rail.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Columns {
     pub left: f32,
     pub right: f32,
+    pub collapsed: bool,
 }
 
 impl Default for Columns {
@@ -26,6 +27,7 @@ impl Default for Columns {
         Self {
             left: T.size.left,
             right: T.size.right,
+            collapsed: false,
         }
     }
 }
@@ -39,6 +41,7 @@ impl Columns {
         Self {
             left: hold(left, T.size.left, T.size.left_range),
             right: hold(right, T.size.right, T.size.right_range),
+            collapsed: false,
         }
     }
 }
@@ -54,6 +57,7 @@ pub struct Regions {
 
 /// The zones of `screen`. A window too narrow for the stored columns takes from the right
 /// one, then from the left one, down to their smallest widths: the center keeps its floor.
+/// A folded left column is only its rail; the center takes the rest.
 pub fn regions(screen: Rect, columns: Columns) -> Regions {
     let gap = T.size.gap;
     let titlebar = Rect::from_min_size(screen.min, Vec2::new(screen.width(), T.size.titlebar));
@@ -67,11 +71,14 @@ pub fn regions(screen: Rect, columns: Columns) -> Regions {
     );
     let room = body.width() - 2.0 * gap - T.size.center_min;
     let mut right = columns.right;
-    let mut left = columns.left;
+    let mut left = match columns.collapsed {
+        true => T.size.rail,
+        false => columns.left,
+    };
     if left + right > room {
         right = snap8((room - left).max(T.size.right_range[0]));
     }
-    if left + right > room {
+    if left + right > room && !columns.collapsed {
         left = snap8((room - right).max(T.size.left_range[0]));
     }
     let left_rect = Rect::from_min_size(body.min, Vec2::new(left, body.height()));
@@ -97,7 +104,11 @@ pub fn splitters(ui: &mut Ui, regions: &Regions, columns: &mut Columns) -> bool 
         ("split-left", regions.left.right(), true),
         ("split-right", regions.center.right(), false),
     ];
-    for (name, x, is_left) in gaps {
+    // The rail of a folded column has no width to drag.
+    for (name, x, is_left) in gaps
+        .into_iter()
+        .filter(|(_, _, left)| !(*left && columns.collapsed))
+    {
         let rect = Rect::from_min_size(
             Pos2::new(x, regions.left.top()),
             Vec2::new(T.size.gap, regions.left.height()),
@@ -225,10 +236,30 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_left_column_is_a_rail_and_the_center_takes_the_rest() {
+        let open = regions(screen(1440.0, 900.0), Columns::default());
+        let folded = Columns {
+            collapsed: true,
+            ..Columns::default()
+        };
+        let r = regions(screen(1440.0, 900.0), folded);
+        assert_eq!(r.left.width(), T.size.rail);
+        assert_eq!(r.right.width(), open.right.width());
+        assert_eq!(
+            r.center.width() - open.center.width(),
+            open.left.width() - T.size.rail
+        );
+        for v in [r.left.width(), r.center.left(), r.center.width()] {
+            assert_eq!(v % GRID, 0.0, "{v}");
+        }
+    }
+
+    #[test]
     fn a_narrow_window_takes_from_the_columns_before_the_center() {
         let wide = Columns {
             left: 400.0,
             right: 480.0,
+            collapsed: false,
         };
         let r = regions(screen(960.0, 600.0), wide);
         assert_eq!(r.right.width(), T.size.right_range[0]);

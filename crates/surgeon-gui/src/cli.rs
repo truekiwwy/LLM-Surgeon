@@ -28,7 +28,7 @@ pub struct Cli {
     /// Rend l'écran courant hors écran dans ce PNG, puis quitte.
     #[arg(long, value_name = "PNG")]
     pub screenshot: Option<PathBuf>,
-    /// L'onglet ouvert : atelier (défaut), graph, analyses, agents, diagnostics, ou wizard
+    /// L'onglet ouvert : atelier (défaut), graph, analyses, agents, system, ou wizard
     /// (l'assistant de configuration par-dessus l'Atelier).
     #[arg(long, value_name = "SCREEN", default_value = "atelier")]
     pub screen: String,

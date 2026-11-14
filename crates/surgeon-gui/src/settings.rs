@@ -47,6 +47,16 @@ impl Lang {
     }
 }
 
+/// The depth of the Atelier: `[SCALPING]` the guided surgery (required fields and a few key
+/// settings), `[ADVANCE]` every field, fine selectors and the cards and patch editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Scalping,
+    Advance,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -62,6 +72,9 @@ pub struct Settings {
     /// Widths of the left and right columns, in points (put back on the grid when read).
     pub left_width: Option<f32>,
     pub right_width: Option<f32>,
+    /// The left column folded to its rail (`Ctrl+B`).
+    pub left_collapsed: bool,
+    pub mode: Mode,
 }
 
 impl Settings {
@@ -116,6 +129,8 @@ mod tests {
         let mut s = Settings {
             language: Some(Lang::En),
             wizard_done: true,
+            left_collapsed: true,
+            mode: Mode::Advance,
             ..Default::default()
         };
         s.pins.insert("a.zip".into(), "ab".repeat(32));
@@ -126,6 +141,19 @@ mod tests {
         Settings::reset(&path).unwrap();
         Settings::reset(&path).unwrap();
         assert!(!Settings::load(&path).unwrap().wizard_done);
+    }
+
+    #[test]
+    fn a_file_written_before_g6_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            br#"{"language":"fr","wizard_done":true,"left_width":280.0}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&path).unwrap();
+        assert_eq!((s.mode, s.left_collapsed), (Mode::Scalping, false));
     }
 
     #[test]

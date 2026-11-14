@@ -194,7 +194,7 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
         "wizard" => (Tab::Atelier, true),
         name => (
             Tab::from_name(name).ok_or_else(|| {
-                format!("--screen {name} : atelier, graph, analyses, agents, diagnostics ou wizard")
+                format!("--screen {name} : atelier, graph, analyses, agents, system ou wizard")
             })?,
             false,
         ),

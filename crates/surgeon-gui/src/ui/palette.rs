@@ -121,8 +121,8 @@ fn run(ctx: &egui::Context, app: &mut SurgeonApp, command: Command) {
         Command::NewCopy => app.studio.submit_copy(),
         Command::ExportLedger => app.studio.export_ledger(true),
         Command::CheckUpdate => {
-            app.tab = Tab::Diagnostics;
-            app.diag_section = 1;
+            app.tab = Tab::System;
+            app.system_section = crate::app::Section::Updates;
             app.desktop.check_update(ctx);
         }
     }

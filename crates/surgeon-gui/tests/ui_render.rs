@@ -117,7 +117,12 @@ fn the_keyboard_reaches_tabs_palette_and_tree() {
     b.press(key(Key::Num2, Modifiers::COMMAND));
     assert_eq!(b.app.tab, Tab::Graph);
     b.press(key(Key::Num5, Modifiers::COMMAND));
-    assert_eq!(b.app.tab, Tab::Diagnostics);
+    assert_eq!(b.app.tab, Tab::System);
+    b.press(key(Key::B, Modifiers::COMMAND));
+    assert!(b.app.columns.collapsed, "Ctrl+B folds the left column");
+    assert!(b.app.desktop.settings.left_collapsed, "and keeps it");
+    b.press(key(Key::B, Modifiers::COMMAND));
+    assert!(!b.app.columns.collapsed);
 
     // Ctrl+K, a query, Enter: the first match runs.
     b.press(key(Key::K, Modifiers::COMMAND));
@@ -140,7 +145,7 @@ fn the_keyboard_reaches_tabs_palette_and_tree() {
 }
 
 #[test]
-fn advance_puts_the_agent_in_read_only_and_the_atelier_on_the_audit() {
+fn the_mode_sets_the_depth_of_the_atelier_and_leaves_the_agent_alone() {
     let mut b = bench(Lang::Fr);
     assert_eq!(
         b.app.agents.agent.mode,
@@ -152,14 +157,13 @@ fn advance_puts_the_agent_in_read_only_and_the_atelier_on_the_audit() {
         scalping.iter().any(|t| t == "CHIRURGIE · CIBLAGE"),
         "{scalping:?}"
     );
+    assert!(!scalping.iter().any(|t| t == "Cartes"), "no bench switch");
     b.app.set_mode(Mode::Advance);
-    assert_eq!(b.app.agents.agent.mode, AgentMode::Ask);
+    assert_eq!(b.app.agents.agent.mode, AgentMode::Modify, "untouched");
+    assert_eq!(b.app.desktop.settings.mode, Mode::Advance, "kept");
     let advance = b.texts(Tab::Atelier);
-    assert!(
-        advance.iter().any(|t| t == "AUDIT IA · LECTURE SEULE"),
-        "{advance:?}"
-    );
-    assert!(advance.iter().any(|t| t == "Lancer l'audit"));
+    assert!(advance.iter().any(|t| t == "Cartes"), "{advance:?}");
+    assert!(advance.iter().any(|t| t == "CHIRURGIE · CIBLAGE"));
 }
 
 #[test]

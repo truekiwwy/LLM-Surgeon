@@ -80,6 +80,7 @@ fn every_screen_can_be_captured_and_unknown_ones_are_refused() {
         "graph",
         "analyses",
         "agents",
+        "system",
         "diagnostics",
         "wizard",
     ] {

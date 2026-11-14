@@ -70,6 +70,8 @@ pub struct Sizes {
     pub window_button: [f32; 2],
     pub left: f32,
     pub left_range: [f32; 2],
+    /// The left column folded: a rail holding its chevron.
+    pub rail: f32,
     pub right: f32,
     pub right_range: [f32; 2],
     /// Smallest width the center keeps when a column is dragged.
@@ -147,6 +149,7 @@ pub const TOKENS: ThemeTokens = ThemeTokens {
         window_button: [48.0, 40.0],
         left: 280.0,
         left_range: [240.0, 400.0],
+        rail: 32.0,
         right: 320.0,
         right_range: [280.0, 480.0],
         center_min: 480.0,

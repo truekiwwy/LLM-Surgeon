@@ -1,41 +1,37 @@
-//! Atelier: the explorer; in the center the work (in `[SCALPING]` the ‖ΔW‖ histogram, its cut
-//! and the surgery form on the working copy; in `[ADVANCE]` the read-only audit by the agent;
-//! or the card canvas, or the patch editor) over the table of deltas; on the right the 3D
-//! preview, the live activity of the followed run and the approval waiting for the user.
+//! Atelier: the explorer; in the center the work (the ‖ΔW‖ histogram, its cut and the surgery
+//! form on the working copy; in `[ADVANCE]` also the card canvas or the patch editor) over the
+//! table of deltas; on the right the 3D preview, the live activity of the followed run and the
+//! approval waiting for the user. The `[SCALPING]` / `[ADVANCE]` switch sits in the header.
 
 use eframe::egui::{self, Align2, Pos2, Rect, ScrollArea, Sense, Ui, Vec2};
 use weight_surgeon::events::{LogLevel, SurgeonEvent};
 
-use super::super::components::{self as c, ButtonKind, Cell, Column, Segment, Table, Width};
+use super::super::components::{self as c, Cell, Column, Segment, Table, Width};
 use super::super::i18n::{t, tf};
 use super::super::icons::State;
 use super::super::layout::{self, Part, Regions};
 use super::super::theme::TOKENS as T;
 use super::{agents, analyses, delta_values, explorer, graph, metric, metric_label, num, Metric};
-use crate::app::{Bench, Mode, SurgeonApp, Tab};
+use crate::app::{Bench, Mode, SurgeonApp};
 use crate::canvas::view::{self as canvas_view, Status};
 use crate::viewport;
 
 pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     explorer(ui, app, regions.left);
     let center = layout::stack(regions.center, &[Part::Flex(1.5), Part::Flex(1.0)]);
-    let title = match (app.bench, app.mode) {
-        (Bench::Surgery, Mode::Scalping) => t("panel.surgery"),
-        (Bench::Surgery, Mode::Advance) => t("panel.audit"),
-        (Bench::Canvas, _) => t("panel.canvas"),
-        (Bench::Editor, _) => t("panel.editor"),
+    let title = match app.bench {
+        Bench::Surgery => t("panel.surgery"),
+        Bench::Canvas => t("panel.canvas"),
+        Bench::Editor => t("panel.editor"),
     };
     let flush = app.bench != Bench::Surgery;
     let mut panel = c::Panel::new("work").title(title);
     if flush {
         panel = panel.flush();
     }
-    panel.show_with(ui, center[0], app, bench_switch, |ui, app| {
+    panel.show_with(ui, center[0], app, work_actions, |ui, app| {
         match app.bench {
-            Bench::Surgery => match app.mode {
-                Mode::Scalping => surgery(ui, app),
-                Mode::Advance => audit(ui, app),
-            },
+            Bench::Surgery => surgery(ui, app),
             Bench::Canvas => canvas(ui, app),
             Bench::Editor => editor(ui, app),
         }
@@ -62,7 +58,33 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         .show(ui, right[2], |ui| agents::approval(ui, app, true));
 }
 
-fn bench_switch(ui: &mut Ui, app: &mut SurgeonApp) {
+/// Right to left: the mode switch, then in `[ADVANCE]` the bench switch.
+fn work_actions(ui: &mut Ui, app: &mut SurgeonApp) {
+    let mut mode = app.mode;
+    c::segmented(
+        ui,
+        &mut mode,
+        &[
+            Segment {
+                value: Mode::Scalping,
+                label: t("mode.scalping"),
+                tooltip: t("mode.scalping.tip"),
+            },
+            Segment {
+                value: Mode::Advance,
+                label: t("mode.advance"),
+                tooltip: t("mode.advance.tip"),
+            },
+        ],
+        c::font_meta(),
+    );
+    if mode != app.mode {
+        app.set_mode(mode);
+    }
+    if app.mode == Mode::Scalping {
+        return;
+    }
+    ui.add_space(T.space.m);
     c::segmented(
         ui,
         &mut app.bench,
@@ -252,45 +274,6 @@ fn histogram(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
             T.color.text_secondary,
         );
     }
-}
-
-// ------------------------------------------------------------------ advance
-
-/// The agent's audit: read only, on the project's connection.
-fn audit(ui: &mut Ui, app: &mut SurgeonApp) {
-    c::status(ui, State::Ok, t("audit.readonly"));
-    c::secondary(ui, t("audit.explain"));
-    ui.add_space(T.space.s);
-    if !app.agents.connected() {
-        c::empty(ui, t("audit.no_connection"), t("audit.no_connection.hint"));
-        ui.add_space(T.space.s);
-        if c::button(ui, t("audit.open_agents"), ButtonKind::Secondary).clicked() {
-            app.tab = Tab::Agents;
-        }
-        return;
-    }
-    let footer = 2.0 * T.size.row + T.size.cta;
-    let height = (ui.available_height() - footer).max(T.size.row * 2.0);
-    ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
-        agents::transcript(ui, app, "audit-transcript");
-    });
-    c::separator(ui);
-    if app.agents.input.is_empty() {
-        app.agents.input = t("audit.prompt").into();
-    }
-    c::field(
-        ui,
-        &mut app.agents.input,
-        t("chat.hint"),
-        ui.available_width(),
-    );
-    ui.add_space(T.space.s);
-    let busy = app.agents.busy();
-    ui.add_enabled_ui(!busy, |ui| {
-        if c::button_wide(ui, t("audit.run"), ButtonKind::Primary).clicked() {
-            app.agents.send_input();
-        }
-    });
 }
 
 // ------------------------------------------------------------------ canvas and editor

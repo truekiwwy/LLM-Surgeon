@@ -5,8 +5,8 @@
 pub mod agents;
 pub mod analyses;
 pub mod atelier;
-pub mod diagnostics;
 pub mod graph;
+pub mod system;
 
 use std::collections::BTreeMap;
 
@@ -95,13 +95,47 @@ pub fn delta_values(report: &GraphReport) -> Vec<Option<f64>> {
 
 /// The left column of the work tabs: the project and its copy, then the tensor tree.
 pub fn explorer(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
-    c::Panel::new("explorer")
-        .title(t("panel.explorer"))
-        .show(ui, rect, |ui| {
-            context(ui, app);
-            c::separator(ui);
-            tree(ui, app);
+    left_column(ui, app, rect, "explorer", t("panel.explorer"), |ui, app| {
+        context(ui, app);
+        c::separator(ui);
+        tree(ui, app);
+    });
+}
+
+/// The left column of every tab: a panel whose header folds it (`Ctrl+B` too), or, folded,
+/// a rail holding the chevron that unfolds it.
+pub fn left_column(
+    ui: &mut Ui,
+    app: &mut SurgeonApp,
+    rect: Rect,
+    name: &'static str,
+    title: &str,
+    body: impl FnOnce(&mut Ui, &mut SurgeonApp),
+) {
+    if app.columns.collapsed {
+        c::Panel::new("left-rail").flush().show(ui, rect, |ui| {
+            let top = Rect::from_min_size(rect.min, Vec2::new(rect.width(), T.size.header));
+            c::region(ui, top, "left-rail-button", |ui| {
+                ui.centered_and_justified(|ui| {
+                    if c::icon_button(ui, Icon::ChevronRight, t("left.expand")).clicked() {
+                        app.toggle_left();
+                    }
+                });
+            });
         });
+        return;
+    }
+    c::Panel::new(name).title(title).show_with(
+        ui,
+        rect,
+        app,
+        |ui, app| {
+            if c::icon_button(ui, Icon::ChevronLeft, t("left.collapse")).clicked() {
+                app.toggle_left();
+            }
+        },
+        body,
+    );
 }
 
 /// The project picker, or the creation form, and the working copy.

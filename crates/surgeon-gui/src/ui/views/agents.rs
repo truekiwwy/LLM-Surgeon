@@ -1,17 +1,17 @@
 //! Agents: the explorer; in the center the session of the open project (conversation,
-//! approval cards, question, plan, the message field); on the right the connections (keys in
-//! the vault, models, prices, CLI runtimes) and the policy (mode, budgets, local only, the
-//! "always" rules, the evidence log). The consent dialog opens before the first request.
+//! approval cards, question, plan, the message field); on the right the policy (mode,
+//! budgets, local only, the "always" rules, the evidence log). The connections live in
+//! System. The consent dialog opens before the first request.
 
 use eframe::egui::{self, Id, Order, Pos2, ScrollArea, Ui};
 
 use super::super::components::{self as c, ButtonKind, Segment};
 use super::super::i18n::{t, tf};
 use super::super::icons::{Icon, State};
-use super::super::layout::{self, Part, Regions};
+use super::super::layout::Regions;
 use super::super::theme::TOKENS as T;
 use super::explorer;
-use crate::agent::config::{AskMode, ProviderKind};
+use crate::agent::config::AskMode;
 use crate::agent::evidence::{self, Status};
 use crate::agent::policy::AgentMode;
 use crate::agent::provider::{Block, Role};
@@ -23,13 +23,9 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     c::Panel::new("session")
         .title(t("panel.session"))
         .show_with(ui, regions.center, app, session_actions, session);
-    let right = layout::stack(regions.right, &[Part::Flex(1.2), Part::Flex(1.0)]);
-    c::Panel::new("connections")
-        .title(t("panel.connections"))
-        .show(ui, right[0], |ui| connections(ui, app));
     c::Panel::new("policy")
         .title(t("panel.policy"))
-        .show(ui, right[1], |ui| policy(ui, app));
+        .show(ui, regions.right, |ui| policy(ui, app));
     consent(ui.ctx(), app);
 }
 
@@ -133,15 +129,6 @@ fn session(ui: &mut Ui, app: &mut SurgeonApp) {
     if let Some((text, error)) = app.agents.message.clone() {
         c::message(ui, &text, error);
     }
-}
-
-/// The conversation alone, for the Atelier's audit.
-pub fn transcript(ui: &mut Ui, app: &mut SurgeonApp, salt: &str) {
-    ScrollArea::vertical()
-        .id_salt(salt)
-        .auto_shrink(false)
-        .stick_to_bottom(true)
-        .show(ui, |ui| transcript_body(ui, app));
 }
 
 fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
@@ -301,195 +288,6 @@ pub fn approval(ui: &mut Ui, app: &mut SurgeonApp, compact: bool) {
             app.agents.answer_question(&mut app.studio);
         }
     }
-}
-
-// ------------------------------------------------------------------ connections
-
-fn kind_label(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Anthropic => t("provider.anthropic"),
-        ProviderKind::OpenAi => t("provider.openai"),
-        ProviderKind::Compatible => t("provider.compatible"),
-        ProviderKind::ClaudeCode => t("provider.claude_code"),
-        ProviderKind::Codex => t("provider.codex"),
-    }
-}
-
-fn connections(ui: &mut Ui, app: &mut SurgeonApp) {
-    let width = ui.available_width();
-    ScrollArea::vertical()
-        .id_salt("connections")
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            let hub = &mut app.agents;
-            if hub.cfg.connections.is_empty() {
-                c::empty(ui, t("conn.empty"), t("conn.empty.hint"));
-            }
-            let mut pick = None;
-            for conn in &hub.cfg.connections {
-                let consented = hub.cfg.consent(&conn.id).is_some();
-                let used = hub.agent.connection.as_deref() == Some(conn.id.as_str());
-                let response = c::row(
-                    ui,
-                    hub.selected.as_deref() == Some(conn.id.as_str()),
-                    &conn.label,
-                    |ui| {
-                        let (state, word) = match (consented, conn.is_local()) {
-                            (_, true) => (State::Ok, t("conn.local")),
-                            (true, false) => (State::Ok, t("conn.consented")),
-                            (false, false) => (State::Idle, t("conn.no_consent")),
-                        };
-                        c::status(ui, state, conn.label.as_str()).on_hover_text(word);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if used {
-                                c::meta(ui, t("conn.used"));
-                            }
-                        });
-                    },
-                );
-                if response.clicked() {
-                    pick = Some(conn.id.clone());
-                }
-            }
-            if let Some(id) = pick {
-                hub.selected = Some(id);
-            }
-            if let Some(id) = hub.selected.clone() {
-                if let Some(conn) = hub.cfg.connection(&id).cloned() {
-                    c::separator(ui);
-                    c::meta(ui, kind_label(conn.kind));
-                    c::mono_secondary(ui, conn.base());
-                    if conn.kind.needs_key() {
-                        let stored = hub.store.get(&id).ok().flatten().is_some();
-                        let (state, word) = match stored {
-                            true => (State::Ok, t("conn.key.stored")),
-                            false => (State::Warn, t("conn.key.missing")),
-                        };
-                        c::status(ui, state, word);
-                        ui.horizontal(|ui| {
-                            let w = ui.available_width() - 2.0 * T.size.row * 3.0;
-                            c::field_secret(
-                                ui,
-                                &mut hub.key_input,
-                                t("conn.key.hint"),
-                                w.max(T.size.row * 4.0),
-                            );
-                            if c::button(ui, t("conn.key.save"), ButtonKind::Secondary).clicked() {
-                                hub.save_key(&id);
-                            }
-                        });
-                        if stored
-                            && c::button(ui, t("conn.key.revoke"), ButtonKind::Secondary).clicked()
-                        {
-                            hub.revoke_key(&id);
-                        }
-                    }
-                    ui.add_space(T.space.s);
-                    let testing = hub.testing(&id);
-                    let label = if testing {
-                        t("conn.testing")
-                    } else {
-                        t("conn.test")
-                    };
-                    if c::button_if(
-                        ui,
-                        !testing,
-                        label,
-                        ButtonKind::Secondary,
-                        t("conn.testing"),
-                    )
-                    .clicked()
-                    {
-                        hub.test_models(&conn);
-                    }
-                    if !conn.models.is_empty() {
-                        let current = hub.agent.model.clone().unwrap_or_default();
-                        let mut picked = current.clone();
-                        let shown = if current.is_empty() {
-                            t("conn.model.pick")
-                        } else {
-                            current.as_str()
-                        };
-                        c::select(ui, "model-select", shown, width, |ui| {
-                            for m in &conn.models {
-                                c::option(ui, &mut picked, m.clone(), m);
-                            }
-                        });
-                        if picked != current {
-                            hub.agent.connection = Some(id.clone());
-                            hub.agent.model = Some(picked.clone());
-                            hub.price_model = picked;
-                            hub.agent_changed();
-                        }
-                    }
-                    if !conn.kind.is_cli() {
-                        c::section(ui, t("conn.prices"));
-                        ui.horizontal(|ui| {
-                            let w = (ui.available_width() - 2.0 * T.space.s) / 3.0;
-                            c::field_mono(ui, &mut hub.price_in, t("conn.price.in"), w);
-                            c::field_mono(ui, &mut hub.price_out, t("conn.price.out"), w);
-                            if c::button(ui, t("conn.price.save"), ButtonKind::Ghost).clicked() {
-                                hub.set_price(&id);
-                            }
-                        });
-                    }
-                    ui.horizontal(|ui| {
-                        if hub.cfg.consent(&id).is_some()
-                            && c::button(ui, t("conn.consent.withdraw"), ButtonKind::Secondary)
-                                .clicked()
-                        {
-                            hub.withdraw_consent(&id);
-                        }
-                        if c::button(ui, t("conn.delete"), ButtonKind::Ghost).clicked() {
-                            hub.delete_connection(&id);
-                        }
-                    });
-                }
-            }
-            c::separator(ui);
-            c::section(ui, t("conn.add"));
-            let mut kind = hub.new_kind;
-            c::select(ui, "new-kind", kind_label(kind), width, |ui| {
-                for k in [
-                    ProviderKind::Anthropic,
-                    ProviderKind::OpenAi,
-                    ProviderKind::Compatible,
-                    ProviderKind::ClaudeCode,
-                    ProviderKind::Codex,
-                ] {
-                    c::option(ui, &mut kind, k, kind_label(k));
-                }
-            });
-            hub.new_kind = kind;
-            ui.add_space(T.space.xs);
-            c::field(ui, &mut hub.new_label, t("conn.label.hint"), width);
-            if kind == ProviderKind::Compatible {
-                ui.add_space(T.space.xs);
-                c::field_mono(ui, &mut hub.new_url, t("conn.url.hint"), width);
-            }
-            ui.add_space(T.space.xs);
-            ui.horizontal(|ui| {
-                if c::button(ui, t("conn.add.action"), ButtonKind::Secondary).clicked() {
-                    hub.add_connection();
-                }
-                let detecting = hub.detecting();
-                if c::button_if(
-                    ui,
-                    !detecting,
-                    t("conn.detect"),
-                    ButtonKind::Ghost,
-                    t("conn.detecting"),
-                )
-                .clicked()
-                {
-                    hub.detect_runtimes();
-                }
-            });
-            for d in &hub.detected {
-                let state = if d.usable() { State::Ok } else { State::Warn };
-                c::status(ui, state, format!("{} {}", kind_label(d.kind), d.version));
-            }
-        });
 }
 
 // ------------------------------------------------------------------ policy

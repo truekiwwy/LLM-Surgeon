@@ -1,7 +1,7 @@
 //! The shell around the views: a title bar without system frame (logomark, name, five tabs,
-//! the `[SCALPING]` / `[ADVANCE]` switch, window buttons; dragged, double-clicked, resized by
-//! its four edges and four corners), the three zones of the body, a status bar and the
-//! keyboard: `Ctrl+K` the palette, `Ctrl+1` to `Ctrl+5` the tabs.
+//! window buttons; dragged, double-clicked, resized by its four edges and four corners), the
+//! three zones of the body, a status bar and the keyboard: `Ctrl+K` the palette, `Ctrl+1` to
+//! `Ctrl+5` the tabs, `Ctrl+B` folds the left column.
 
 use eframe::egui::{
     self, Align2, CursorIcon, Id, Key, Modifiers, Pos2, Rect, ResizeDirection, Sense, Ui, Vec2,
@@ -14,7 +14,7 @@ use super::icons::{Icon, State};
 use super::layout::{self, Regions};
 use super::theme::TOKENS as T;
 use super::{logo, palette, views};
-use crate::app::{Mode, SurgeonApp, Tab};
+use crate::app::{SurgeonApp, Tab};
 use crate::settings::Lang;
 
 /// Below these window widths the title bar drops the name, then the edition.
@@ -27,7 +27,7 @@ pub fn tab_label(tab: Tab) -> &'static str {
         Tab::Graph => t("tab.graph"),
         Tab::Analyses => t("tab.analyses"),
         Tab::Agents => t("tab.agents"),
-        Tab::Diagnostics => t("tab.diagnostics"),
+        Tab::System => t("tab.system"),
     }
 }
 
@@ -46,7 +46,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp) {
         Tab::Graph => views::graph::show(ui, app, &regions),
         Tab::Analyses => views::analyses::show(ui, app, &regions),
         Tab::Agents => views::agents::show(ui, app, &regions),
-        Tab::Diagnostics => views::diagnostics::show(ui, app, &regions),
+        Tab::System => views::system::show(ui, app, &regions),
     }
     splitters(ui, app, &regions);
     titlebar(ui, app, regions.titlebar);
@@ -59,6 +59,9 @@ fn keys(ctx: &egui::Context, app: &mut SurgeonApp) {
     let palette = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K));
     if palette {
         app.palette.toggle();
+    }
+    if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::B)) {
+        app.toggle_left();
     }
     let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5];
     for (tab, key) in Tab::ALL.into_iter().zip(digits) {
@@ -115,8 +118,8 @@ fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
         Vec2::splat(T.size.icon + T.space.s),
     );
     logo::paint(&painter, mark);
-    // A narrow window drops the edition, then the name: the mark, the tabs and the mode
-    // switch always fit (960 is the smallest window).
+    // A narrow window drops the edition, then the name: the mark and the tabs always fit
+    // (960 is the smallest window).
     let mut x = mark.right();
     if rect.width() >= COMPACT_NAME {
         x = painter
@@ -157,38 +160,6 @@ fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
         x += width;
     }
 
-    // Right: the mode switch, then the window buttons.
-    let buttons = 3.0 * T.size.window_button[0];
-    let controls = Rect::from_min_max(
-        Pos2::new(x + T.space.l, rect.top()),
-        Pos2::new(rect.right() - buttons - T.space.l, rect.bottom()),
-    );
-    let mut mode = app.mode;
-    c::region(ui, controls, "titlebar-mode", |ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.set_height(controls.height());
-            c::segmented(
-                ui,
-                &mut mode,
-                &[
-                    c::Segment {
-                        value: Mode::Scalping,
-                        label: t("mode.scalping"),
-                        tooltip: t("mode.scalping.tip"),
-                    },
-                    c::Segment {
-                        value: Mode::Advance,
-                        label: t("mode.advance"),
-                        tooltip: t("mode.advance.tip"),
-                    },
-                ],
-                c::font_mono(),
-            );
-        });
-    });
-    if mode != app.mode {
-        app.set_mode(mode);
-    }
     window_buttons(ui, rect, maximized);
 }
 
