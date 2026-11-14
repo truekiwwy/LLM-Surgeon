@@ -140,6 +140,11 @@ pub fn label(ui: &mut Ui, text: impl Into<String>) -> Response {
     ui.add(Label::new(rich(text, font_body(), T.color.text)).wrap())
 }
 
+/// One line of running text, cut with an ellipsis where the room ends.
+pub fn line(ui: &mut Ui, text: impl Into<String>) -> Response {
+    ui.add(Label::new(rich(text, font_body(), T.color.text)).truncate())
+}
+
 /// Secondary running text, wrapped.
 pub fn secondary(ui: &mut Ui, text: impl Into<String>) -> Response {
     ui.add(Label::new(rich(text, font_body(), T.color.text_secondary)).wrap())

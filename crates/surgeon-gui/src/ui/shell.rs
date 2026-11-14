@@ -144,8 +144,9 @@ fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
             .right();
     }
 
-    // Tabs.
+    // Tabs; Agents carries the count of what waits for the user.
     x += T.space.xl;
+    let pending = app.agents.pending();
     for tab in Tab::ALL {
         let label = tab_label(tab);
         let width = painter
@@ -156,6 +157,15 @@ fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
         let r = Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(width, rect.height()));
         if c::tab(ui, r, label, app.tab == tab).clicked() {
             app.tab = tab;
+        }
+        if tab == Tab::Agents && pending > 0 {
+            painter.text(
+                Pos2::new(r.right() - T.space.xs, r.top() + T.space.s),
+                Align2::RIGHT_TOP,
+                pending.to_string(),
+                c::font_meta(),
+                T.color.warn,
+            );
         }
         x += width;
     }
@@ -269,6 +279,17 @@ fn statusbar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = T.space.m;
             context_status(ui, app);
+            let pending = app.agents.pending();
+            if pending > 0
+                && c::link(
+                    ui,
+                    &tf("status.approvals", &[("n", &pending)]),
+                    t("status.approvals.tip"),
+                )
+                .clicked()
+            {
+                app.tab = Tab::Agents;
+            }
             job_status(ui, app);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = T.space.m;

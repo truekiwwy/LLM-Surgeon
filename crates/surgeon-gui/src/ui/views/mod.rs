@@ -42,6 +42,16 @@ pub fn duration(secs: u64) -> String {
     }
 }
 
+/// How long ago, in the largest whole unit: `now`, `5 min`, `3 h`, `2 d`.
+pub fn age(secs: u64) -> String {
+    match secs {
+        s if s < 60 => t("age.now").into(),
+        s if s < 3600 => tf("age.minutes", &[("n", &(s / 60))]),
+        s if s < 86_400 => tf("age.hours", &[("n", &(s / 3600))]),
+        s => tf("age.days", &[("n", &(s / 86_400))]),
+    }
+}
+
 // ------------------------------------------------------------------ per-tensor values
 
 /// What the histogram measures: the change against the baseline when the report carries
@@ -376,6 +386,11 @@ pub(crate) mod tests {
         assert_eq!(num(-2.5e6), "-2.500e6");
         assert_eq!(duration(42), "42 s");
         assert_eq!(duration(65), "1 min 05 s");
+        crate::ui::i18n::set_lang(crate::settings::Lang::En);
+        assert_eq!(age(59), "now");
+        assert_eq!(age(3599), "59 min");
+        assert_eq!(age(7200), "2 h");
+        assert_eq!(age(3 * 86_400 + 5), "3 d");
     }
 
     #[test]

@@ -93,6 +93,9 @@ pub struct Connection {
     /// The last list the provider's API returned.
     #[serde(default)]
     pub models: Vec<String>,
+    /// The model a project gets when it does not pick one.
+    #[serde(default)]
+    pub default_model: Option<String>,
     #[serde(default)]
     pub prices: BTreeMap<String, Prices>,
 }
@@ -103,6 +106,18 @@ impl Connection {
             "" => self.kind.default_base(),
             b => b,
         }
+    }
+
+    /// Offered to the sessions: an API connection whose model list came back, or a CLI.
+    pub fn ready(&self) -> bool {
+        self.kind.is_cli() || !self.models.is_empty()
+    }
+
+    /// The model a project inherits: the chosen default, else the first one listed.
+    pub fn inherited_model(&self) -> Option<&str> {
+        self.default_model
+            .as_deref()
+            .or(self.models.first().map(String::as_str))
     }
 
     /// Whether requests stay on this machine (CLI runtimes reach their own servers).
@@ -160,6 +175,9 @@ pub struct AgentsConfig {
     /// No request leaves the machine: loopback endpoints only, no CLI runtime.
     #[serde(default)]
     pub local_only: bool,
+    /// The connection every project uses unless it picks another.
+    #[serde(default)]
+    pub default_connection: Option<String>,
 }
 
 impl Default for AgentsConfig {
@@ -169,6 +187,7 @@ impl Default for AgentsConfig {
             connections: Vec::new(),
             consents: Vec::new(),
             local_only: false,
+            default_connection: None,
         }
     }
 }

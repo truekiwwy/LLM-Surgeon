@@ -1,60 +1,191 @@
-//! Agents: the explorer; in the center the session of the open project (conversation,
-//! approval cards, question, plan, the message field); on the right the policy (mode,
-//! budgets, local only, the "always" rules, the evidence log). The connections live in
-//! System. The consent dialog opens before the first request.
+//! Agents, the use of an agent on the open project: the project and its conversations on the
+//! left; the session in the center (the `connection · model` picker in its header, the
+//! conversation with its approval cards and question, the message field); on the right the
+//! contract (what the agent may do: mode, budgets, "always" rules) over the evidence (what it
+//! established). Connections are configured in System. The consent dialog opens before the
+//! first request to a remote connection.
 
 use eframe::egui::{self, Id, Order, Pos2, ScrollArea, Ui};
 
 use super::super::components::{self as c, ButtonKind, Segment};
 use super::super::i18n::{t, tf};
 use super::super::icons::{Icon, State};
-use super::super::layout::Regions;
+use super::super::layout::{self, Part, Regions};
 use super::super::theme::TOKENS as T;
-use super::explorer;
+use super::{age, context, left_column};
 use crate::agent::config::AskMode;
 use crate::agent::evidence::{self, Status};
 use crate::agent::policy::AgentMode;
 use crate::agent::provider::{Block, Role};
 use crate::agent::session::{Choice, Dirs};
-use crate::app::SurgeonApp;
+use crate::app::{Section, SurgeonApp, Tab};
+use crate::studio::project::now_unix;
 
 pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
-    explorer(ui, app, regions.left);
+    left_column(
+        ui,
+        app,
+        regions.left,
+        "conversations",
+        t("panel.conversations"),
+        conversations,
+    );
     c::Panel::new("session")
         .title(t("panel.session"))
-        .show_with(ui, regions.center, app, session_actions, session);
-    c::Panel::new("policy")
-        .title(t("panel.policy"))
-        .show(ui, regions.right, |ui| policy(ui, app));
+        .show_with(ui, regions.center, app, picker, session);
+    let right = layout::stack(regions.right, &[Part::Flex(1.4), Part::Flex(1.0)]);
+    c::Panel::new("contract")
+        .title(t("panel.contract"))
+        .show(ui, right[0], |ui| contract(ui, app));
+    c::Panel::new("evidence")
+        .title(t("panel.evidence"))
+        .show(ui, right[1], |ui| evidence_log(ui, app));
     consent(ui.ctx(), app);
 }
 
-fn session_actions(ui: &mut Ui, app: &mut SurgeonApp) {
-    let project = app.agents.project.clone();
-    let has_conv = app.agents.conversation().is_some();
-    if c::button_if(
-        ui,
-        has_conv && project.is_some(),
-        t("chat.export"),
-        ButtonKind::Ghost,
-        t("chat.export.why"),
-    )
-    .clicked()
-    {
-        if let Some(p) = project {
-            app.agents.export(&p);
+/// Opens System on its AI providers.
+fn configure(app: &mut SurgeonApp) {
+    app.tab = Tab::System;
+    app.system_section = Section::Providers;
+}
+
+// ------------------------------------------------------------------ conversations
+
+/// The project picker, then New and Export, then the project's conversations.
+fn conversations(ui: &mut Ui, app: &mut SurgeonApp) {
+    context(ui, app);
+    let Some(project) = app.agents.project.clone() else {
+        return;
+    };
+    c::separator(ui);
+    ui.horizontal(|ui| {
+        if c::button_if(
+            ui,
+            !app.agents.busy(),
+            t("chat.new"),
+            ButtonKind::Secondary,
+            t("chat.busy"),
+        )
+        .clicked()
+        {
+            app.agents.new_conversation();
         }
+        let has_conv = app.agents.conversation().is_some();
+        if c::button_if(
+            ui,
+            has_conv,
+            t("chat.export"),
+            ButtonKind::Ghost,
+            t("chat.export.why"),
+        )
+        .clicked()
+        {
+            app.agents.export(&project);
+        }
+    });
+    ui.add_space(T.space.s);
+    let current = app.agents.conversation().map(|c| c.id.clone());
+    let now = now_unix();
+    let lines = app.agents.conversations().to_vec();
+    if lines.is_empty() {
+        c::secondary(ui, t("chat.list.empty"));
+        return;
     }
-    if c::button_if(
-        ui,
-        !app.agents.busy(),
-        t("chat.new"),
-        ButtonKind::Ghost,
-        t("chat.busy"),
-    )
-    .clicked()
-    {
-        app.agents.new_conversation();
+    let mut open = None;
+    ScrollArea::vertical()
+        .id_salt("conversations")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (id, title, created) in &lines {
+                let selected = current.as_deref() == Some(id.as_str());
+                // Right to left: the age keeps its room, the title takes the rest.
+                let row = c::row(ui, selected, title, |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        c::meta(ui, age(now.saturating_sub(*created)));
+                        c::line(ui, title.as_str());
+                    });
+                });
+                if row.on_hover_text(id).clicked() && !selected {
+                    open = Some(id.clone());
+                }
+            }
+        });
+    if let Some(id) = open {
+        app.agents.open_conversation(&id);
+    }
+}
+
+// ------------------------------------------------------------------ session
+
+/// What the picker of the session header offers.
+#[derive(Clone, PartialEq)]
+enum Pick {
+    /// The global default (no project choice).
+    Default,
+    Use(String, Option<String>),
+    Configure,
+}
+
+/// `connection · model`: the ready connections and their models, the global default, and
+/// a way to System when what is wanted is not there.
+fn picker(ui: &mut Ui, app: &mut SurgeonApp) {
+    let hub = &app.agents;
+    if hub.project.is_none() {
+        return;
+    }
+    let shown = match (hub.connection(), hub.model()) {
+        (Some(conn), Some(model)) => format!("{} · {model}", conn.label),
+        (Some(conn), None) => conn.label.clone(),
+        (None, _) => t("picker.none").into(),
+    };
+    let current = match &hub.agent.connection {
+        Some(id) => Pick::Use(id.clone(), hub.agent.model.clone()),
+        None => Pick::Default,
+    };
+    let default = hub
+        .cfg
+        .default_connection
+        .as_deref()
+        .and_then(|id| hub.cfg.connection(id))
+        .map(|c| c.label.clone());
+    let ready: Vec<_> = hub
+        .cfg
+        .connections
+        .iter()
+        .filter(|c| c.ready())
+        .cloned()
+        .collect();
+    let width = (ui.available_width() * 0.6).max(T.size.left);
+    let mut picked = current.clone();
+    c::select(ui, "session-picker", &shown, width, |ui| {
+        if let Some(label) = &default {
+            let text = tf("picker.default", &[("connection", label)]);
+            c::option(ui, &mut picked, Pick::Default, &text);
+        }
+        for conn in &ready {
+            if conn.models.is_empty() {
+                c::option(
+                    ui,
+                    &mut picked,
+                    Pick::Use(conn.id.clone(), None),
+                    &conn.label,
+                );
+            }
+            for m in &conn.models {
+                let text = format!("{} · {m}", conn.label);
+                let value = Pick::Use(conn.id.clone(), Some(m.clone()));
+                c::option(ui, &mut picked, value, &text);
+            }
+        }
+        c::option(ui, &mut picked, Pick::Configure, t("picker.configure"));
+    });
+    if picked != current {
+        match picked {
+            Pick::Default => app.agents.pick(None),
+            Pick::Use(id, model) => app.agents.pick(Some((id, model))),
+            Pick::Configure => configure(app),
+        }
     }
 }
 
@@ -63,21 +194,14 @@ fn session(ui: &mut Ui, app: &mut SurgeonApp) {
         c::empty(ui, t("project.missing"), t("agents.project.hint"));
         return;
     }
-    let line = match app.agents.connection() {
-        Some(conn) => tf(
-            "chat.connection",
-            &[
-                ("connection", &conn.label),
-                (
-                    "model",
-                    &app.agents.agent.model.clone().unwrap_or_else(|| "-".into()),
-                ),
-            ],
-        ),
-        None => t("chat.no_connection").into(),
-    };
-    c::meta(ui, line);
-    ui.add_space(T.space.s);
+    if app.agents.connection().is_none() {
+        c::empty(ui, t("agents.none"), t("agents.none.hint"));
+        ui.add_space(T.space.s);
+        if c::button(ui, t("picker.configure"), ButtonKind::Primary).clicked() {
+            configure(app);
+        }
+        return;
+    }
     let footer = 4.0 * T.size.row + T.size.cta + T.space.l;
     let height = (ui.available_height() - footer).max(T.size.row * 3.0);
     ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
@@ -87,7 +211,7 @@ fn session(ui: &mut Ui, app: &mut SurgeonApp) {
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 transcript_body(ui, app);
-                approval(ui, app, false);
+                approval(ui, app);
             });
     });
     c::separator(ui);
@@ -218,38 +342,22 @@ fn result_line(content: &str) -> String {
     }
 }
 
-/// The approval cards and the agent's question; `compact` (the Atelier) shows the first
-/// card with its parameters cut to a few lines.
-pub fn approval(ui: &mut Ui, app: &mut SurgeonApp, compact: bool) {
+/// The approval cards and the agent's question, where the agent asks for them.
+fn approval(ui: &mut Ui, app: &mut SurgeonApp) {
     let Some(session) = app.agents.session.as_ref() else {
-        if compact {
-            c::empty(ui, t("approval.none"), t("approval.none.hint"));
-        }
         return;
     };
     let cards = session.cards.clone();
     let question = session.question.clone();
-    if cards.is_empty() && question.is_none() {
-        if compact {
-            c::empty(ui, t("approval.none"), t("approval.none.hint"));
-        }
-        return;
-    }
     let mut decision = None;
-    for card in cards.iter().take(if compact { 1 } else { usize::MAX }) {
+    for card in &cards {
         c::status(ui, State::Warn, t("approval.waiting"));
         c::strong(ui, card.title.as_str());
-        let params = match compact {
-            true => card.params.lines().take(3).collect::<Vec<_>>().join("\n"),
-            false => card.params.clone(),
-        };
-        c::mono_wrapped(ui, params, T.color.text_secondary).on_hover_text(&card.params);
-        if !compact {
-            for line in &card.consequences {
-                c::secondary(ui, format!("· {line}"));
-            }
-            c::meta(ui, card.cost.as_str());
+        c::mono_wrapped(ui, card.params.as_str(), T.color.text_secondary);
+        for line in &card.consequences {
+            c::secondary(ui, format!("· {line}"));
         }
+        c::meta(ui, card.cost.as_str());
         ui.add_space(T.space.s);
         ui.horizontal(|ui| {
             if c::button(ui, t("approval.once"), ButtonKind::Secondary).clicked() {
@@ -267,9 +375,6 @@ pub fn approval(ui: &mut Ui, app: &mut SurgeonApp, compact: bool) {
             }
         });
         ui.add_space(T.space.m);
-    }
-    if compact && cards.len() > 1 {
-        c::meta(ui, tf("approval.more", &[("n", &(cards.len() - 1))]));
     }
     if let Some((card, choice)) = decision {
         app.agents.decide(&mut app.studio, card, choice);
@@ -290,14 +395,13 @@ pub fn approval(ui: &mut Ui, app: &mut SurgeonApp, compact: bool) {
     }
 }
 
-// ------------------------------------------------------------------ policy
+// ------------------------------------------------------------------ contract and evidence
 
-fn policy(ui: &mut Ui, app: &mut SurgeonApp) {
-    let entries = app.ledger().to_vec();
-    let project = app.agents.project.clone();
+/// What the agent may do on this project: mode, questions, budgets, "always" rules.
+fn contract(ui: &mut Ui, app: &mut SurgeonApp) {
     let hub = &mut app.agents;
     ScrollArea::vertical()
-        .id_salt("policy")
+        .id_salt("contract")
         .auto_shrink(false)
         .show(ui, |ui| {
             let mut mode = hub.agent.mode;
@@ -394,7 +498,17 @@ fn policy(ui: &mut Ui, app: &mut SurgeonApp) {
             if let Some(k) = revoke {
                 hub.revoke_rule(k);
             }
-            c::section(ui, t("policy.findings"));
+        });
+}
+
+/// What the agent established: each finding with the measure it rests on, newest first.
+fn evidence_log(ui: &mut Ui, app: &mut SurgeonApp) {
+    let entries = app.ledger().to_vec();
+    let project = app.agents.project.clone();
+    ScrollArea::vertical()
+        .id_salt("evidence")
+        .auto_shrink(false)
+        .show(ui, |ui| {
             let findings = project
                 .as_ref()
                 .map(|p| evidence::read(&Dirs::of(p).findings()))

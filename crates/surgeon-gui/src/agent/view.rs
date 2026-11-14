@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use eframe::egui;
 
@@ -20,6 +21,9 @@ use crate::task::Task;
 
 /// The model list of one connection, being fetched.
 type ModelsTask = (String, Task<Result<Vec<String>, String>>);
+
+/// One line of the conversation list: id, title, creation time.
+pub type ConvLine = (String, String, u64);
 
 /// A Claude Code / Codex run in the conversation.
 struct CliChat {
@@ -55,6 +59,8 @@ pub struct Hub {
     pub consent_for: Option<String>,
     pub consent_redact: bool,
     pub message: Option<(String, bool)>,
+    /// The project's conversations, read again when the chat folder changes.
+    convs: Option<(PathBuf, Option<SystemTime>, Vec<ConvLine>)>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -94,6 +100,7 @@ impl Hub {
             consent_for: None,
             consent_redact: true,
             message,
+            convs: None,
             wake,
         }
     }
@@ -185,12 +192,76 @@ impl Hub {
         self.session.as_mut().and_then(|s| s.focus.take())
     }
 
-    /// The connection the open project uses.
+    /// The connection the open project uses: its own choice, else the global default.
     pub fn connection(&self) -> Option<&Connection> {
         self.agent
             .connection
             .as_deref()
+            .or(self.cfg.default_connection.as_deref())
             .and_then(|id| self.cfg.connection(id))
+    }
+
+    /// The model of [`Self::connection`]: the project's when it picked its connection, else
+    /// the one the connection hands down.
+    pub fn model(&self) -> Option<String> {
+        let conn = self.connection()?;
+        self.agent
+            .model
+            .clone()
+            .filter(|_| self.agent.connection.is_some())
+            .or_else(|| conn.inherited_model().map(str::to_owned))
+    }
+
+    /// Approval cards and the question waiting for the user.
+    pub fn pending(&self) -> usize {
+        self.session
+            .as_ref()
+            .map_or(0, |s| s.cards.len() + usize::from(s.question.is_some()))
+    }
+
+    /// The project uses `pick` (connection and model), or the global default with `None`.
+    pub fn pick(&mut self, pick: Option<(String, Option<String>)>) {
+        (self.agent.connection, self.agent.model) = match pick {
+            Some((id, model)) => (Some(id), model),
+            None => (None, None),
+        };
+        self.price_model = self.model().unwrap_or_default();
+        self.agent_changed();
+    }
+
+    /// The project's conversations, newest first; read from disk only when the folder changed.
+    pub fn conversations(&mut self) -> &[ConvLine] {
+        let Some(project) = &self.project else {
+            return &[];
+        };
+        let dirs = Dirs::of(project);
+        let modified = std::fs::metadata(&dirs.chat)
+            .and_then(|m| m.modified())
+            .ok();
+        let stale = self
+            .convs
+            .as_ref()
+            .is_none_or(|(p, m, _)| *p != dirs.chat || *m != modified);
+        if stale {
+            let lines = dirs
+                .conversations()
+                .into_iter()
+                .map(|c| (c.id.clone(), c.title(), c.created_unix))
+                .collect();
+            self.convs = Some((dirs.chat.clone(), modified, lines));
+        }
+        self.convs.as_ref().map_or(&[], |(_, _, l)| l)
+    }
+
+    /// Reopens a conversation of the project by its id.
+    pub fn open_conversation(&mut self, id: &str) {
+        let Some(project) = &self.project else {
+            return;
+        };
+        match Conversation::load(&Dirs::of(project).conversation(id)) {
+            Ok(conv) => self.resume(conv),
+            Err(e) => self.message = Some((e, true)),
+        }
     }
 
     /// Whether an agent can run at all: a connection is picked for the open project.
@@ -226,6 +297,7 @@ impl Hub {
             label,
             base_url: self.new_url.trim().to_owned(),
             models: Vec::new(),
+            default_model: None,
             prices: Default::default(),
         };
         self.selected = Some(conn.id.clone());
@@ -487,7 +559,7 @@ impl Hub {
         if conn.kind.is_cli() {
             return self.send_cli(&conn, text, project);
         }
-        let model = self.agent.model.clone().ok_or("choisissez un modèle")?;
+        let model = self.model().ok_or("choisissez un modèle")?;
         if self
             .session
             .as_ref()
@@ -569,16 +641,17 @@ impl Hub {
             mode: self.agent.mode,
             project,
             source_dir: source_dir.as_deref(),
-            model: self.agent.model.as_deref(),
+            model: self.model().as_deref(),
             prompt: &prompt,
             scratch: &dirs.chat.join("runtime"),
         })?;
         let run = runtime::Run::start(&launch, conn.kind, Arc::clone(&self.wake))?;
+        let model = self.model().unwrap_or_default();
         let conv = self.cli_conv.get_or_insert_with(|| Conversation {
             id: Session::new_id(&dirs),
             created_unix: now_unix(),
             connection: conn.id.clone(),
-            model: self.agent.model.clone().unwrap_or_default(),
+            model,
             ..Conversation::default()
         });
         conv.messages.push(Message::user_text(text));

@@ -172,8 +172,15 @@ fn the_demo_waits_on_an_approval_in_agents_only() {
     let texts = b.texts(Tab::Agents);
     assert!(texts.iter().any(|t| t == "Allow once"), "{texts:?}");
     assert!(texts.iter().any(|t| t == "Deny"));
+    for text in ["CONVERSATIONS", "CONTRACT", "EVIDENCE"] {
+        assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
+    }
     let atelier = b.texts(Tab::Atelier);
     assert!(!atelier.iter().any(|t| t == "Allow once"), "{atelier:?}");
+    assert!(
+        atelier.iter().any(|t| t.ends_with("approval(s) waiting")),
+        "the status bar points to Agents: {atelier:?}"
+    );
 }
 
 #[test]

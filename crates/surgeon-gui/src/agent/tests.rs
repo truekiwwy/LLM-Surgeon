@@ -527,6 +527,7 @@ fn local_only_mode_never_opens_a_remote_connection() {
         label: "A".into(),
         base_url: String::new(),
         models: vec![],
+        default_model: None,
         prices: Default::default(),
     };
     assert!(matches!(
@@ -1273,6 +1274,7 @@ fn an_api_key_never_lands_in_a_file_an_export_or_an_error() {
         label: "Anthropic test".into(),
         base_url: api.base(),
         models: vec!["m".into()],
+        default_model: None,
         prices: Default::default(),
     };
     store.set(&conn.id, &Secret::new(KEY)).unwrap();
@@ -1507,4 +1509,44 @@ fn codex_json_events_are_read() {
     );
     assert!(matches!(&e[0], runtime::Event::Tool { name, .. } if name == "surgeon_check"));
     assert!(runtime::parse_codex("pas du json").is_empty());
+}
+
+#[test]
+fn a_project_inherits_the_default_connection_until_it_picks_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = super::view::Hub::new(
+        dir.path().join("agents.json"),
+        Box::new(SessionStore::default()),
+        Arc::new(|| {}),
+    );
+    let conn = |id: &str, models: &[&str], default_model: Option<&str>| Connection {
+        id: id.into(),
+        kind: ProviderKind::Compatible,
+        label: id.into(),
+        base_url: "http://127.0.0.1:11434/v1".into(),
+        models: models.iter().map(|m| m.to_string()).collect(),
+        default_model: default_model.map(str::to_owned),
+        prices: Default::default(),
+    };
+    hub.cfg.connections = vec![
+        conn("ollama", &["a", "b"], Some("b")),
+        conn("lmstudio", &["x"], None),
+        conn("untested", &[], None),
+    ];
+    assert!(hub.connection().is_none(), "no default, no choice");
+    hub.cfg.default_connection = Some("ollama".into());
+    assert_eq!(hub.connection().unwrap().id, "ollama");
+    assert_eq!(
+        hub.model().as_deref(),
+        Some("b"),
+        "the connection's default model"
+    );
+    hub.pick(Some(("lmstudio".into(), None)));
+    assert_eq!(hub.connection().unwrap().id, "lmstudio");
+    assert_eq!(hub.model().as_deref(), Some("x"), "its first model");
+    hub.pick(Some(("ollama".into(), Some("a".into()))));
+    assert_eq!(hub.model().as_deref(), Some("a"), "the project's own model");
+    hub.pick(None);
+    assert_eq!(hub.model().as_deref(), Some("b"), "back to the default");
+    assert!(!hub.cfg.connection("untested").unwrap().ready());
 }
