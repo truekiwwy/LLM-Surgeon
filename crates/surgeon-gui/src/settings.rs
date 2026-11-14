@@ -16,14 +16,6 @@ pub enum Lang {
 }
 
 impl Lang {
-    /// The French or the English text: strings of the desktop screens live next to the UI.
-    pub fn pick<'a>(self, fr: &'a str, en: &'a str) -> &'a str {
-        match self {
-            Self::Fr => fr,
-            Self::En => en,
-        }
-    }
-
     /// `fr`, `fr_FR.UTF-8`, `fr-FR`... anything else is English.
     pub fn from_locale(locale: &str) -> Self {
         match locale.trim().to_ascii_lowercase().starts_with("fr") {

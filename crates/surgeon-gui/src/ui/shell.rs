@@ -41,15 +41,23 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp) {
     let regions = layout::regions(screen, app.columns);
     layout::record(ui, &regions);
 
-    match app.tab {
-        Tab::Atelier => views::atelier::show(ui, app, &regions),
-        Tab::Graph => views::graph::show(ui, app, &regions),
-        Tab::Analyses => views::analyses::show(ui, app, &regions),
-        Tab::Agents => views::agents::show(ui, app, &regions),
-        Tab::System => views::system::show(ui, app, &regions),
+    // The first-run wizard covers the three zones; the title bar then shows no tab.
+    let wizard = app.desktop.wizard.is_some();
+    match (wizard, app.tab) {
+        (true, _) => {
+            let body = Rect::from_min_max(regions.left.min, regions.right.max);
+            super::wizard::show(ui, app, body);
+        }
+        (false, Tab::Atelier) => views::atelier::show(ui, app, &regions),
+        (false, Tab::Graph) => views::graph::show(ui, app, &regions),
+        (false, Tab::Analyses) => views::analyses::show(ui, app, &regions),
+        (false, Tab::Agents) => views::agents::show(ui, app, &regions),
+        (false, Tab::System) => views::system::show(ui, app, &regions),
     }
-    splitters(ui, app, &regions);
-    titlebar(ui, app, regions.titlebar);
+    if !wizard {
+        splitters(ui, app, &regions);
+    }
+    titlebar(ui, app, regions.titlebar, !wizard);
     statusbar(ui, app, regions.statusbar);
     resize_edges(ui, screen);
     palette::show(&ctx, app);
@@ -89,7 +97,7 @@ fn splitters(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
 
 // ------------------------------------------------------------------ title bar
 
-fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
+fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect, tabs: bool) {
     let ctx = ui.ctx().clone();
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, T.color.window);
@@ -147,7 +155,7 @@ fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
     // Tabs; Agents carries the count of what waits for the user.
     x += T.space.xl;
     let pending = app.agents.pending();
-    for tab in Tab::ALL {
+    for tab in Tab::ALL.into_iter().filter(|_| tabs) {
         let label = tab_label(tab);
         let width = painter
             .layout_no_wrap(label.to_owned(), c::font_tab(), T.color.text)
@@ -350,8 +358,19 @@ fn context_status(ui: &mut Ui, app: &mut SurgeonApp) {
     }
 }
 
-/// The running work: card or editor step, project jobs, the last message.
+/// The running work: an install, a card or editor step, project jobs, the last message.
 fn job_status(ui: &mut Ui, app: &mut SurgeonApp) {
+    if let Some(p) = app.desktop.setup.progress().first() {
+        let pct = p
+            .fraction()
+            .map_or(String::new(), |f| format!(" {:.0} %", f * 100.0));
+        c::status(
+            ui,
+            State::Active,
+            tf("status.install", &[("label", &p.label), ("pct", &pct)]),
+        );
+        return;
+    }
     if let Some(job) = app.job.as_ref().filter(|j| !j.finished) {
         let label = job.labels.get(job.current).map_or("", String::as_str);
         c::status(

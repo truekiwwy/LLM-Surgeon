@@ -18,6 +18,7 @@ use surgeon_gui::desktop::Desktop;
 use surgeon_gui::instance::{self, Role};
 use surgeon_gui::settings::{Lang, Settings};
 use surgeon_gui::source::Input;
+use surgeon_gui::ui::wizard::Step;
 use surgeon_gui::{actions, demo, diag, logging, paths, raster, selftest, source};
 use weight_surgeon::backend::config;
 
@@ -196,15 +197,16 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
         .split_once(':')
         .unwrap_or((cli.screen.as_str(), ""));
     let (tab, wizard) = match name {
-        "wizard" => (Tab::Atelier, true),
+        "wizard" => (Tab::Atelier, Some(part.parse().unwrap_or(1))),
         name => (
             Tab::from_name(name).ok_or_else(|| {
                 format!("--screen {name} : atelier, graph, analyses, agents, system ou wizard")
             })?,
-            false,
+            None,
         ),
     };
     let section = match part {
+        _ if wizard.is_some() => None,
         "" => None,
         part => Some(Section::from_name(part).ok_or_else(|| {
             format!("--screen system:{part} : machine, providers, updates ou journal")
@@ -214,8 +216,9 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
     settings.language.get_or_insert_with(Lang::system);
     let mut desktop = Desktop::detached(None, settings, actions::Env::current());
     desktop.capture_system(diag::probe(&paths::data_dir()));
-    if wizard {
-        desktop.capture_wizard(diag::probe(&paths::data_dir()));
+    if let Some(n) = wizard {
+        let step = Step::from_number(n).ok_or("--screen wizard:<1 à 4>")?;
+        desktop.capture_wizard(diag::probe(&paths::data_dir()), step);
     }
     let input = match cli.inputs.first().map(|p| cli::classify(p)) {
         Some(Item::Graph(path)) => Some(source::open(&path)?),
@@ -232,7 +235,9 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
     app.tab = tab;
     if let Some(section) = section {
         app.system_section = section;
-        // One frame is rendered: the scan runs before it, not behind it.
+    }
+    // One frame is rendered: the scan runs before it, not behind it.
+    if section == Some(Section::Providers) || wizard == Some(2) {
         app.agents.scan = Some(surgeon_gui::agent::detect::scan());
     }
     // A capture shows the tab, not the first-run backend dialog over it.

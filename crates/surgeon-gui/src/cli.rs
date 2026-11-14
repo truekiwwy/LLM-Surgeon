@@ -11,7 +11,7 @@ use crate::canvas::EXTENSION;
 #[command(
     name = "surgeon-gui",
     version,
-    about = "Weight Surgeon : atelier de chirurgie des poids de LLM locaux (graphe 3D, analyses, agents, diagnostics)"
+    about = "Weight Surgeon : atelier de chirurgie des poids de LLM locaux (graphe 3D, analyses, agents, système)"
 )]
 pub struct Cli {
     /// graph.json, graph.ndjson (suivi en direct), `-` (NDJSON sur l'entrée standard), un
@@ -28,7 +28,8 @@ pub struct Cli {
     /// Rend l'écran courant hors écran dans ce PNG, puis quitte.
     #[arg(long, value_name = "PNG")]
     pub screenshot: Option<PathBuf>,
-    /// L'onglet ouvert : atelier (défaut), graph, analyses, agents, system, ou wizard
+    /// L'onglet ouvert : atelier (défaut), graph, analyses, agents, system (system:providers
+    /// pour une section), ou wizard:1 à wizard:4 (une étape de l'assistant)
     /// (l'assistant de configuration par-dessus l'Atelier).
     #[arg(long, value_name = "SCREEN", default_value = "atelier")]
     pub screen: String,

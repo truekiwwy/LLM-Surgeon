@@ -1,9 +1,9 @@
 //! The desktop services around the studio: paths handed over by a second launch or dropped on
-//! the window, the first-run wizard, the machine probe, the manual update check and the
-//! diagnostics export. It owns its own state and hands the app a list of [`Event`]s; the
-//! Diagnostics view (`ui::views::diagnostics`) draws it.
+//! the window, the first-run wizard's state and the installs it starts ([`setup`]), the
+//! machine probe, the manual update check and the diagnostics export. It owns its own state
+//! and hands the app a list of [`Event`]s; `ui::wizard` and the System view draw it.
 
-mod wizard;
+pub mod setup;
 
 use std::path::PathBuf;
 
@@ -18,8 +18,9 @@ use crate::settings::{Lang, Settings};
 use crate::task::Task;
 use crate::ui::components;
 use crate::ui::i18n::t;
+use crate::ui::wizard::{Step, Wizard};
 use crate::update::{self, Update};
-use wizard::{Context as WizardContext, Outcome, Step, Wizard};
+use setup::{Pick, Setup};
 
 /// What the shell asks the app to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +46,10 @@ pub struct Desktop {
     env: Env,
     pub system: Option<SystemReport>,
     system_task: Option<Task<SystemReport>>,
-    wizard: Option<Wizard>,
+    /// The first-run wizard, open over the whole body.
+    pub wizard: Option<Wizard>,
+    /// The optional components being planned or installed.
+    pub setup: Setup,
     pub update: UpdateState,
     /// The last error of an open or a hand-over, for the status line.
     pub message: Option<String>,
@@ -72,7 +76,7 @@ impl Desktop {
         if !capture {
             desktop.refresh_system(ctx);
             if !desktop.settings.wizard_done {
-                desktop.wizard = Some(Wizard::new(&desktop.settings, None));
+                desktop.open_wizard();
             }
         }
         desktop
@@ -82,6 +86,7 @@ impl Desktop {
     pub fn detached(inbox: Option<Inbox>, settings: Settings, env: Env) -> Self {
         Self {
             wizard: None,
+            setup: Setup::new(None),
             system: None,
             system_task: None,
             update: UpdateState::Idle,
@@ -121,40 +126,58 @@ impl Desktop {
         }
     }
 
-    /// Opens the wizard from the start (palette, Diagnostics).
+    pub fn env(&self) -> &Env {
+        &self.env
+    }
+
+    /// Opens the wizard from its first step (first launch, palette, System).
     pub fn open_wizard(&mut self) {
-        self.wizard = Some(Wizard::new(&self.settings, self.system.as_ref()));
+        self.wizard = Some(Wizard::new(&self.settings));
     }
 
-    /// The wizard on the step that repairs `fix`; `force` reinstalls.
+    /// The panel that repairs `fix`, alone: the components with the piece picked, or the
+    /// workspace. `force` reinstalls.
     pub fn open_fix(&mut self, fix: Fix, force: bool) {
-        let step = match fix {
-            Fix::LlamaCpp => Step::Engine,
-            Fix::SampleModel => Step::Sample,
-            Fix::Workspace => Step::Workspace,
-            Fix::None => Step::Summary,
+        let (step, pick) = match fix {
+            Fix::LlamaCpp => (
+                Step::Components,
+                Pick {
+                    engine: true,
+                    sample: false,
+                },
+            ),
+            Fix::SampleModel => (
+                Step::Components,
+                Pick {
+                    engine: false,
+                    sample: true,
+                },
+            ),
+            Fix::Workspace => (Step::Workspace, Pick::default()),
+            Fix::None => return,
         };
-        self.wizard = Some(Wizard::at(
-            &self.settings,
-            self.system.as_ref(),
-            step,
-            force,
-        ));
+        self.setup.force = force;
+        self.wizard = Some(Wizard::at(&self.settings, step, pick));
     }
 
-    pub fn wizard_open(&self) -> bool {
-        self.wizard.is_some()
+    /// The wizard ends, finished or passed: it does not open by itself again (it stays in
+    /// System and in the palette).
+    pub fn close_wizard(&mut self) {
+        let walked = self.wizard.take().is_some_and(|w| !w.single);
+        if walked {
+            self.settings.wizard_done = true;
+            self.save_settings();
+        }
+        self.setup.force = false;
     }
 
-    /// Capture helper: the wizard on a given step with a given machine report.
-    pub fn capture_wizard(&mut self, system: SystemReport) {
+    /// Capture helper: the wizard on `step` with a given machine report.
+    pub fn capture_wizard(&mut self, system: SystemReport, step: Step) {
+        self.setup = Setup::new(Some(&system));
         self.system = Some(system);
-        self.wizard = Some(Wizard::at(
-            &self.settings,
-            self.system.as_ref(),
-            Step::System,
-            false,
-        ));
+        let mut wizard = Wizard::new(&self.settings);
+        wizard.step = step;
+        self.wizard = Some(wizard);
     }
 
     pub fn capture_system(&mut self, system: SystemReport) {
@@ -251,6 +274,10 @@ impl Desktop {
 
     fn poll(&mut self) {
         if let Some(system) = self.system_task.as_ref().and_then(Task::poll) {
+            // The build the machine supports, until the user picks one or a plan is shown.
+            if self.setup.plan.is_none() && !self.setup.fetching_plan() {
+                self.setup.variant = setup::default_variant(Some(&system));
+            }
             self.system = Some(system);
             self.system_task = None;
         }
@@ -271,8 +298,8 @@ impl Desktop {
         }
     }
 
-    /// Runs the services for one frame (hand-overs, drops, the wizard window, the drop
-    /// hint) and returns what the app must do.
+    /// Runs the services for one frame (hand-overs, drops, the installs, the drop hint) and
+    /// returns what the app must do.
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Vec<Event> {
         let ctx = ui.ctx().clone();
         let mut events = Vec::new();
@@ -305,31 +332,15 @@ impl Desktop {
         if !items.is_empty() {
             events.push(Event::Open(items));
         }
-        events.extend(self.show_wizard(&ctx));
+        if self.setup.poll(&mut self.settings, &self.env) {
+            events.push(Event::BackendChanged);
+        }
+        if self.setup.installing() || self.setup.fetching_plan() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        }
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             components::drop_hint(&ctx, t("drop.hint"));
         }
         events
-    }
-
-    fn show_wizard(&mut self, ctx: &egui::Context) -> Option<Event> {
-        let wizard = self.wizard.as_mut()?;
-        let mut cx = WizardContext {
-            settings: &mut self.settings,
-            env: &self.env,
-            system: self.system.as_ref(),
-        };
-        match wizard.show(ctx, &mut cx) {
-            Outcome::Open => None,
-            Outcome::BackendChanged => Some(Event::BackendChanged),
-            Outcome::Closed(finished) => {
-                self.wizard = None;
-                // Closing it early is a choice too: it stays one command away in the palette
-                // and in Diagnostics, but it does not pop up again by itself.
-                self.settings.wizard_done = true;
-                let _ = self.settings.save(&self.env.settings);
-                finished.then_some(Event::BackendChanged)
-            }
-        }
     }
 }

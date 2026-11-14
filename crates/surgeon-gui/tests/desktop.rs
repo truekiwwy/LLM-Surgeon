@@ -81,8 +81,10 @@ fn every_screen_can_be_captured_and_unknown_ones_are_refused() {
         "analyses",
         "agents",
         "system",
+        "system:providers",
         "diagnostics",
         "wizard",
+        "wizard:4",
     ] {
         let png = dir.path().join(format!("{screen}.png"));
         let out = run(

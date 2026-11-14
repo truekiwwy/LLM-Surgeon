@@ -89,44 +89,7 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                     app.desktop.refresh_system(&ctx);
                 }
             },
-            |ui, app| {
-                let Some(s) = &app.desktop.system else {
-                    c::empty(ui, t("diag.no_probe"), t("diag.no_probe.hint"));
-                    return;
-                };
-                c::kv(ui, t("diag.os"), &format!("{} {}", s.os, s.arch));
-                match s.gpus.is_empty() {
-                    true => c::kv(ui, t("diag.gpu"), t("diag.gpu.none")),
-                    false => {
-                        for gpu in &s.gpus {
-                            let vram = gpu
-                                .vram_mib
-                                .map_or(String::new(), |v| format!(" · {v} MiB"));
-                            c::kv(ui, t("diag.gpu"), &format!("{}{vram}", gpu.name));
-                        }
-                    }
-                }
-                let vulkan = match s.vulkan {
-                    Some(true) => t("diag.yes"),
-                    Some(false) => t("diag.no"),
-                    None => t("diag.unknown"),
-                };
-                c::kv(ui, "Vulkan", vulkan);
-                c::kv(
-                    ui,
-                    t("diag.ram"),
-                    &tf(
-                        "diag.mib_free",
-                        &[("free", &s.ram_free_mib), ("total", &s.ram_total_mib)],
-                    ),
-                );
-                if let Some(d) = s.disk_free_mib {
-                    c::kv(ui, t("diag.disk"), &tf("diag.mib", &[("n", &d)]));
-                }
-                for note in &s.notes {
-                    c::status(ui, State::Warn, note.as_str());
-                }
-            },
+            |ui, app| machine_facts(ui, app),
         );
     let rows = app.desktop.rows(app.dialog.saved(), uses(app));
     let mut fix = None;
@@ -155,6 +118,46 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         });
     if let Some((what, force)) = fix {
         app.desktop.open_fix(what, force);
+    }
+}
+
+/// The machine in key / value rows: OS, GPUs, Vulkan, memory, disk, notes.
+pub(crate) fn machine_facts(ui: &mut Ui, app: &SurgeonApp) {
+    let Some(s) = &app.desktop.system else {
+        c::empty(ui, t("diag.no_probe"), t("diag.no_probe.hint"));
+        return;
+    };
+    c::kv(ui, t("diag.os"), &format!("{} {}", s.os, s.arch));
+    match s.gpus.is_empty() {
+        true => c::kv(ui, t("diag.gpu"), t("diag.gpu.none")),
+        false => {
+            for gpu in &s.gpus {
+                let vram = gpu
+                    .vram_mib
+                    .map_or(String::new(), |v| format!(" · {v} MiB"));
+                c::kv(ui, t("diag.gpu"), &format!("{}{vram}", gpu.name));
+            }
+        }
+    }
+    let vulkan = match s.vulkan {
+        Some(true) => t("diag.yes"),
+        Some(false) => t("diag.no"),
+        None => t("diag.unknown"),
+    };
+    c::kv(ui, "Vulkan", vulkan);
+    c::kv(
+        ui,
+        t("diag.ram"),
+        &tf(
+            "diag.mib_free",
+            &[("free", &s.ram_free_mib), ("total", &s.ram_total_mib)],
+        ),
+    );
+    if let Some(d) = s.disk_free_mib {
+        c::kv(ui, t("diag.disk"), &tf("diag.mib", &[("n", &d)]));
+    }
+    for note in &s.notes {
+        c::status(ui, State::Warn, note.as_str());
     }
 }
 
@@ -382,9 +385,6 @@ fn preset_label(preset: Option<Preset>) -> &'static str {
 /// What the machine offers on the left, the connection picked on the right. The first visit
 /// scans (CLIs, loopback servers, environment keys: nothing is spent).
 fn providers(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
-    if app.agents.scan.is_none() && !app.agents.scanning() {
-        app.agents.rescan();
-    }
     c::Panel::new("providers")
         .title(t("panel.providers"))
         .show_with(
@@ -408,7 +408,7 @@ fn providers(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 ScrollArea::vertical()
                     .id_salt("providers")
                     .auto_shrink(false)
-                    .show(ui, |ui| provider_list(ui, app));
+                    .show(ui, |ui| provider_list(ui, app, Show::All));
             },
         );
     c::Panel::new("provider")
@@ -465,13 +465,28 @@ fn conn_state(app: &SurgeonApp, conn: &Connection) -> (State, String) {
     }
 }
 
-fn provider_list(ui: &mut Ui, app: &mut SurgeonApp) {
-    let mut local = app.desktop.settings.local_only;
-    if c::checkbox(ui, &mut local, t("policy.local_only"))
-        .on_hover_text(t("policy.local_only.tip"))
-        .changed()
-    {
-        app.set_local_only(local);
+/// Which part of the provider list to show: all of it (System), or one tab of the wizard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Show {
+    All,
+    /// The CLI runtimes.
+    Agents,
+    /// Local servers and cloud providers, with the add form.
+    Providers,
+}
+
+pub(crate) fn provider_list(ui: &mut Ui, app: &mut SurgeonApp, show: Show) {
+    if show == Show::All {
+        let mut local = app.desktop.settings.local_only;
+        if c::checkbox(ui, &mut local, t("policy.local_only"))
+            .on_hover_text(t("policy.local_only.tip"))
+            .changed()
+        {
+            app.set_local_only(local);
+        }
+    }
+    if app.agents.scan.is_none() && !app.agents.scanning() {
+        app.agents.rescan();
     }
     let Some(scan) = app.agents.scan.clone() else {
         ui.add_space(T.space.s);
@@ -486,8 +501,11 @@ fn provider_list(ui: &mut Ui, app: &mut SurgeonApp) {
     let mut pick = None;
 
     // Agents: the CLI runtimes.
-    c::section(ui, t("prov.group.cli"));
-    for d in &scan.runtimes {
+    let agents = show != Show::Providers;
+    if agents {
+        c::section(ui, t("prov.group.cli"));
+    }
+    for d in scan.runtimes.iter().filter(|_| agents) {
         let conn = conns.iter().find(|c| c.kind == d.kind);
         let name = format!("{} {}", d.kind.name(), short_version(&d.version));
         let (state, word, action) = match (conn, d.usable()) {
@@ -520,7 +538,7 @@ fn provider_list(ui: &mut Ui, app: &mut SurgeonApp) {
     }
     for c in conns
         .iter()
-        .filter(|c| c.kind.is_cli() && !scan.runtimes.iter().any(|d| d.kind == c.kind))
+        .filter(|c| agents && c.kind.is_cli() && !scan.runtimes.iter().any(|d| d.kind == c.kind))
     {
         let (row, _) = entry(
             ui,
@@ -535,7 +553,7 @@ fn provider_list(ui: &mut Ui, app: &mut SurgeonApp) {
             pick = Some(c.id.clone());
         }
     }
-    for o in &scan.others {
+    for o in scan.others.iter().filter(|_| agents) {
         let name = format!("{} {}", o.name, short_version(&o.version));
         c::row(ui, false, &name, |ui| {
             c::status(ui, State::Idle, &name);
@@ -545,8 +563,14 @@ fn provider_list(ui: &mut Ui, app: &mut SurgeonApp) {
         })
         .on_hover_text(reason_label(o.reason));
     }
-    if scan.runtimes.is_empty() && scan.others.is_empty() {
+    if agents && scan.runtimes.is_empty() && scan.others.is_empty() {
         c::secondary(ui, t("prov.no_cli"));
+    }
+    if show == Show::Agents {
+        if let Some(id) = pick {
+            app.agents.selected = Some(id);
+        }
+        return;
     }
 
     // Local servers.
@@ -671,7 +695,7 @@ fn provider_list(ui: &mut Ui, app: &mut SurgeonApp) {
 }
 
 /// The connection picked: default, sign-in or key, models, prices, consent, removal.
-fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
+pub(crate) fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
     let ctx = ui.ctx().clone();
     let width = ui.available_width();
     let local_only = app.agents.cfg.local_only;
