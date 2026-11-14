@@ -1,8 +1,10 @@
 # Hub d'agents : fournisseurs IA, boucle d'agent, approbations, journal des preuves
 
 La page `Agents` de `surgeon-gui` pilote le moteur par un agent IA sans quitter l'application :
-connecter un fournisseur, discuter, laisser l'agent lancer des analyses et proposer des
-modifications de modèle, avec des approbations calculées par le code.
+discuter, laisser l'agent lancer des analyses et proposer des modifications de modèle, avec des
+approbations calculées par le code. Les fournisseurs se configurent dans `Système > Fournisseurs
+IA` (et à l'étape 02 de l'assistant) ; `Agents` ne garde que l'usage : conversations à gauche,
+session au centre, contrat et preuves à droite.
 
 Code : `crates/surgeon-gui/src/agent/` (`provider`, `anthropic`, `openai`, `http`, `mock`,
 `vault`, `runtime`, `tools`, `policy`, `evidence`, `session`, `config`, `view`, `selftest`).
@@ -21,7 +23,16 @@ Pré-requis : le socle Studio ([STUDIO.md](STUDIO.md)) : l'agent travaille dans 
 « Compatible OpenAI » couvre OpenRouter (`https://openrouter.ai/api/v1`), Ollama
 (`http://127.0.0.1:11434/v1`), LM Studio (`http://127.0.0.1:1234/v1`) et `llama-server`
 (`http://127.0.0.1:8080/v1`). Aucun identifiant de modèle n'est codé en dur : la liste vient du
-bouton `Tester et lister les modèles`. Le modèle se choisit par projet.
+bouton `Tester`. Une connexion désignée « par défaut » sert à tous les projets ; chaque projet
+peut choisir la sienne, et son modèle, dans l'en-tête de la session. Le sélecteur ne propose
+que les connexions prêtes : une CLI vérifiée, une API dont la liste de modèles est revenue.
+
+**Détection** (`agent/detect.rs`, à la première visite et sur « Analyser à nouveau », sans
+rien consommer) : `claude` et `codex` dans le `PATH` avec leurs options vérifiées ; `opencode`
+et `gemini` signalés « non pris en charge » avec la raison (le mode non interactif d'OpenCode
+2.2.7 n'a aucune option pour limiter ses outils au seul serveur `surgeon`) ; Ollama `:11434`,
+LM Studio `:1234` et `llama-server` `:8080` sur loopback (`/v1/models`, 300 ms, en
+parallèle) ; la présence de `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`.
 
 **Prix** : saisis par l'utilisateur, en dollars par million de tokens d'entrée et de sortie,
 par modèle. Aucun tarif n'est codé en dur ; sans prix, le coût est affiché « inconnu » et le
@@ -30,12 +41,17 @@ budget de coût ne s'applique pas.
 **Réseau** : HTTPS obligatoire, sauf vers cette machine (`localhost`, `127.0.0.1`, `::1`) où
 HTTP est accepté. Pas de redirection suivie, pas d'identifiant dans l'URL. Le mode « Local
 seulement » refuse avant toute connexion ce qui n'est pas sur cette machine, runtimes CLI
-compris.
+compris, et aucun téléchargement. Le réglage vit dans `settings.json` (lu une fois depuis
+un ancien `agents.json`) ; un badge `Local` le rappelle dans la barre d'état.
 
 ### Clés d'API
 
 - Windows : Gestionnaire d'identifiants, identifiant générique `LLM-Surgeon/agent/<id>`,
   persisté pour l'utilisateur. Rien d'autre n'est écrit.
+- Une clé saisie n'est enregistrée qu'une fois acceptée : le studio demande d'abord la liste
+  des modèles avec elle ; un refus la laisse hors du coffre. Une clé d'environnement n'est lue
+  qu'au clic sur `Utiliser`, puis suit le même chemin. La page n'en montre que la fin
+  (`••••…a1f3`).
 - Sans coffre (autres systèmes pour l'instant) : la clé vit en mémoire pour la session, ou
   vient de la variable `SURGEON_AGENT_KEY_<ID>` ; la page l'indique en orange.
 - Une clé n'est jamais dans `agents.json`, `chat/`, les journaux, les exports ni à l'écran
@@ -141,7 +157,7 @@ produit par le studio), les conséquences et l'estimation de coût, avec `Autori
 
 « Toujours pour ce projet » enregistre une règle étroite dans `chat/agent.json` : même outil,
 même ensemble d'arguments, valeurs identiques, et pour un chemin du projet le même dossier
-(`copies/c1/*`). Elle est datée et se révoque dans la colonne de droite. Elle n'est jamais
+(`copies/c1/*`). Elle est datée et se révoque dans le contrat, à droite. Elle n'est jamais
 proposée pour une action destructrice (apply en place, fusion LoRA, annulation de pipeline) ni
 pour un dépassement de budget.
 
@@ -201,7 +217,11 @@ jeton de ces outils et n'implémente aucune authentification par compte.
 
 Détection : l'exécutable dans le `PATH`, `--version`, et la présence de chaque option utilisée
 dans `--help` (Claude Code) ou `exec --help` (Codex) ; une option absente est signalée et
-l'outil n'est pas utilisé.
+l'outil n'est pas utilisé. Une CLI n'est « prête » qu'après `Tester`, qui lance sa propre
+vérification de connexion (`claude auth status`, `codex login status` : aucun quota, aucun
+identifiant lu par le studio) ; sinon la page donne la commande de connexion à copier
+(`claude auth login`, `codex login`). Le binaire `surgeon` manquant est signalé « requis par
+Claude Code » dans `Système` dès qu'une CLI est configurée.
 
 | | Claude Code | Codex |
 | --- | --- | --- |

@@ -894,8 +894,8 @@ mod tests {
         let marked: Vec<bool> = (0..report.nodes.len()).map(|i| i < 2).collect();
         let [a, b] = [&report.nodes[0], &report.nodes[1]];
         let c = centroid(&report, &marked, LayoutMode::Column).unwrap();
-        for k in 0..3 {
-            assert!((c[k] - (a.pos_column[k] + b.pos_column[k]) / 2.0).abs() < 1e-5);
+        for (k, v) in c.iter().enumerate() {
+            assert!((v - (a.pos_column[k] + b.pos_column[k]) / 2.0).abs() < 1e-5);
         }
         let none = vec![false; report.nodes.len()];
         assert_eq!(centroid(&report, &none, LayoutMode::Column), None);

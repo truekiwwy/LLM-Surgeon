@@ -69,7 +69,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                     app.tab = Tab::Analyses;
                 }
             },
-            |ui, app| activity(ui, app),
+            activity,
         );
 }
 

@@ -255,17 +255,6 @@ fn queue(ui: &mut Ui, app: &mut SurgeonApp, rect: egui::Rect) {
                 {
                     app.studio.export_ledger(false);
                 }
-                ui.add_space(T.space.s);
-                c::segmented_small(
-                    ui,
-                    &mut app.history,
-                    &[
-                        (RunKind::All, t("history.all")),
-                        (RunKind::Surgery, t("history.surgeries")),
-                        (RunKind::Analysis, t("history.analyses")),
-                    ],
-                    t("history.filter"),
-                );
             },
             |ui, app| {
                 let Some(m) = app.studio.manager.as_ref() else {
@@ -276,6 +265,20 @@ fn queue(ui: &mut Ui, app: &mut SurgeonApp, rect: egui::Rect) {
                     });
                     return;
                 };
+                // The filter sits over the table: the header has no room for it.
+                ui.horizontal(|ui| {
+                    ui.add_space(T.space.m);
+                    c::segmented_small(
+                        ui,
+                        &mut app.history,
+                        &[
+                            (RunKind::All, t("history.all")),
+                            (RunKind::Surgery, t("history.surgeries")),
+                            (RunKind::Analysis, t("history.analyses")),
+                        ],
+                        t("history.filter"),
+                    );
+                });
                 let kind = app.history;
                 let shown = |tool: &str| match kind {
                     RunKind::All => true,

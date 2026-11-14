@@ -99,17 +99,21 @@ panneau, onglets), 16 (marque, titres de dialogue).
 ## 5. Composition
 
 Une fenêtre sans bordure système. Barre de titre de 40 : logomark, `WEIGHT SURGEON`,
-`Atelier v{version}`, cinq onglets, sélecteur `[SCALPING]` / `[ADVANCE]`, boutons de
-fenêtre. Corps en trois zones séparées par 8 : colonne gauche (contexte et arbre), centre
-(travail), colonne droite (inspection et suivi). Barre d'état de 24.
+`Atelier v{version}`, cinq onglets, boutons de fenêtre (le sélecteur `[SCALPING]` /
+`[ADVANCE]` est dans l'en-tête de l'Atelier depuis G6). Corps en trois zones séparées par 8 :
+colonne gauche (selon l'onglet, repliable par `Ctrl+B`), centre (travail), colonne droite
+(inspection et suivi). Barre d'état de 24. Le premier lancement couvre les trois zones d'une
+page d'assistant en quatre étapes.
 
 | Écran | Gauche | Centre | Droite |
 | --- | --- | --- | --- |
-| Atelier | contexte, arbre de tenseurs | mode (ciblage et histogramme, ou audit), historique des deltas | aperçu 3D, activité, approbation |
-| Graphe 3D | idem | vue 3D, rejeu | inspecteur, chronologie |
-| Analyses | idem | analyse, formulaire typé, budget, lancement | historique des tâches |
-| Agents | idem | session, constats, approbation | fournisseurs et budgets, sécurité |
-| Diagnostics | contexte, sections | matériel, dépendances | journal, export |
+| Atelier | contexte, arbre de tenseurs | ciblage : histogramme et seuil, table des cibles (ou cartes, patch JSON en `[ADVANCE]`) | opération : formulaire, puis run et journal |
+| Graphe 3D | idem | vue 3D, rejeu, cadrage sur les cibles | inspecteur, chronologie |
+| Analyses | idem | analyse, formulaire typé, budget, lancement | historique de tous les runs, filtré |
+| Agents | projet, conversations | session : `connexion · modèle`, fil, approbations | contrat, preuves |
+| Système | sections, relancer l'assistant | dépendances par rôle, fournisseurs IA, mises à jour, journal | matériel, connexion choisie, rapport |
+
+Composition G6 et ses décisions (D-11 à D-29) : [G6_PLAN.md](G6_PLAN.md).
 
 **Logomark.** Les deux planches montrent deux marques différentes : une grille carrée 5×5
 à trois tons (planche Atelier) et un damier 5×3 (planche à quatre écrans). Le brief demande
@@ -138,7 +142,7 @@ un logomark carré : la grille 5×5 de la planche Atelier est retenue et tracée
 | D-04 | Le canvas de cartes et l'éditeur de patch JSON restent accessibles par la palette, dans le centre de l'Atelier | fonctions existantes conservées sans sixième onglet |
 | D-05 | Le rôle d'un nœud 3D se lit à sa forme (cercle, carré, losange), plus à sa couleur | couleur réservée aux données et à la sélection (S-005, S-026) |
 | D-06 | Copie active = dossier le plus récent de `copies/` ; « modifiée » = au moins une écriture réussie du ledger sur cette copie | calculé depuis le ledger, jamais déclaré |
-| D-07 | `[ADVANCE]` lance l'agent en mode `Demander` (lecture seule côté moteur) ; passer en écriture reste un choix explicite dans Agents, chaque écriture approuvée | politique G3 inchangée, aucune auto-approbation |
-| D-08 | Lint « aucune chaîne en dur » appliqué à `src/ui/**` ; l'assistant garde `Lang::pick` (déjà bilingue) | périmètre vérifiable ; restes listés dans le livrable |
+| D-07 | ~~`[ADVANCE]` lance l'agent en mode `Demander`~~ remplacée par D-14 (G6) : le mode ne règle que la profondeur de l'Atelier, l'agent vit dans Agents | politique G3 inchangée, aucune auto-approbation |
+| D-08 | ~~l'assistant garde `Lang::pick`~~ remplacée par D-29 (G6) : l'assistant est sous `src/ui/`, couvert par le lint, sans `Lang::pick` | périmètre vérifiable, sans exception |
 | D-09 | Police sans-serif : Barlow plutôt qu'une grotesque d'interface | caractère DIN du monde choisi |
 | D-10 | Pas de MSAA demandé au contexte GL | l'antialiasing vient du feathering d'epaint ; MSAA réduit la compatibilité sans gain mesurable |

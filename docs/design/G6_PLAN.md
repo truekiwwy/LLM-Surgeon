@@ -190,3 +190,44 @@ avant la suivante.
   `--screen diagnostics` gardent l'alias, à retirer plus tard.
 - **Test des CLI** : consomme un peu du quota de l'utilisateur, ce qui est dit dans
   l'infobulle de `Tester`.
+
+## 8. Bilan de livraison
+
+| Tranche | Commit | Contenu |
+| --- | --- | --- |
+| 1 | `45cf3b1` | onglet `Système`, colonne gauche repliable, mode dans l'en-tête de l'Atelier, plan |
+| 2 | `1f8fe28` | Atelier en trois zones, champs essentiels par outil, historique filtrable, `Voir en 3D` |
+| 3 | `43637de` | Agents : conversations, sélecteur `connexion · modèle`, contrat et preuves, compteur |
+| – | `ad8f68f` | correctif antérieur à G6 : ordre stdout / stderr de `runtime::capture` |
+| 4 | `5784b08` | dépendances par rôle et gravité selon l'usage |
+| 5 | `7f524ea` | détection : CLI, serveurs loopback, clés d'environnement |
+| 6 | `2e3933d` | `Système > Fournisseurs IA`, défaut global, `local_only` unifié |
+| 7 | `69bcd45` | assistant plein écran en quatre étapes, installations dans `Desktop` |
+| 8 | ce commit | captures, chevauchement d'en-tête d'Analyses, docs, clippy |
+
+Vérification finale : `cargo test` (lib 190, `desktop` 8, `packaging` 5, `ui_i18n` 3,
+`ui_lint` 3, `ui_render` 9), `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`.
+Captures : `screenshots/g6/` (`wizard-1` à `wizard-4`, `atelier`, `graph`, `analyses`,
+`agents`, `system`, en 1440 × 900 et 1920 × 1080).
+
+Écarts au plan, choisis en cours de route :
+
+- **Tester une CLI** lance sa propre vérification de connexion (`claude auth status`,
+  `codex login status`) au lieu d'une requête minimale au modèle : même garantie, sans quota.
+- **OpenCode** n'est pas intégré : `opencode run --help` (2.2.7) offre `--format json`, mais
+  aucune option pour limiter ses outils au seul serveur `surgeon`. Il est affiché « détecté,
+  non pris en charge » avec cette raison.
+- **Réparer depuis Système** ouvre le panneau de l'assistant seul (étape 03 ou 04, bouton
+  Fermer), sans marquer le premier lancement comme fait.
+- `--screen system:<section>` s'ajoute à `--screen wizard:N` pour les captures.
+- Le glyphe ★ manque aux polices embarquées : le défaut se dit en mots (« par défaut »).
+
+Limites connues :
+
+- Dans les captures hors écran, la ligne du haut de la barre de progression (composant
+  `progress` de G5) a des trous d'un pixel ; cause non trouvée (rastériseur hors écran).
+- Dans la colonne Opération (320 de large), les champs défilent dès qu'il y en a plus de
+  trois ou quatre ; `[ADVANCE]` y est donc moins confortable qu'Analyses.
+- Le test d'un runtime CLI ne prouve que la connexion du compte ; `surgeon.exe` absent reste
+  signalé à part (« requis par Claude Code ») et n'est découvert qu'au premier envoi s'il est
+  ignoré.
