@@ -1550,3 +1550,37 @@ fn a_project_inherits_the_default_connection_until_it_picks_its_own() {
     assert_eq!(hub.model().as_deref(), Some("b"), "back to the default");
     assert!(!hub.cfg.connection("untested").unwrap().ready());
 }
+
+#[test]
+fn the_scan_offers_checked_runtimes_and_reports_the_other_clis_with_a_reason() {
+    use super::detect::{self, Reason};
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::env::join_paths([dir.path()]).unwrap();
+    let help = "-p, --print\n--output-format stream-json\n--mcp-config\n--strict-mcp-config\n--allowedTools\n--permission-prompts\n--tools";
+    fake_cli(dir.path(), "claude", help, &[]);
+    fake_cli(dir.path(), "opencode", "run --format json", &[]);
+    fake_cli(dir.path(), "gemini", "--prompt", &[]);
+    let (runtimes, others) = detect::clis(Some(&path));
+    assert_eq!(runtimes.len(), 1);
+    assert_eq!(runtimes[0].kind, ProviderKind::ClaudeCode);
+    let reasons: Vec<_> = others.iter().map(|o| (o.name, o.reason)).collect();
+    assert_eq!(
+        reasons,
+        [
+            ("opencode", Reason::NoToolBarrier),
+            ("gemini", Reason::NotSupported)
+        ]
+    );
+    assert!(others[0].version.starts_with("9.9.9"), "{:?}", others[0]);
+}
+
+#[test]
+fn a_loopback_server_is_probed_for_its_models() {
+    let api = FakeApi::serve(vec![json_reply(
+        200,
+        json!({"object": "list", "data": [{"id": "qwen2.5:7b"}, {"id": "llama3.1:8b"}]}),
+    )]);
+    let models = super::detect::probe(&format!("{}/v1", api.base())).unwrap();
+    assert_eq!(models, ["llama3.1:8b", "qwen2.5:7b"]);
+    assert!(api.seen()[0].head.starts_with("GET /v1/models"));
+}

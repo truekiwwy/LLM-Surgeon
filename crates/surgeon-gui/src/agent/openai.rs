@@ -116,15 +116,7 @@ struct Call {
 impl LlmProvider for OpenAi {
     fn list_models(&self) -> Result<Vec<String>, ProviderError> {
         let page = read_json(self.endpoint.get("/models", &self.headers())?)?;
-        let data = page["data"]
-            .as_array()
-            .ok_or_else(|| ProviderError::Protocol("/models sans data".into()))?;
-        let mut ids: Vec<String> = data
-            .iter()
-            .filter_map(|m| m["id"].as_str().map(String::from))
-            .collect();
-        ids.sort();
-        Ok(ids)
+        model_ids(&page).ok_or_else(|| ProviderError::Protocol("/models sans data".into()))
     }
 
     fn stream(
@@ -231,4 +223,14 @@ pub fn parse_stream(
         usage,
         stop,
     })
+}
+/// The sorted model ids of a `/models` page (OpenAI, Ollama, LM Studio, llama-server).
+pub fn model_ids(page: &serde_json::Value) -> Option<Vec<String>> {
+    let mut ids: Vec<String> = page["data"]
+        .as_array()?
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(String::from))
+        .collect();
+    ids.sort();
+    Some(ids)
 }

@@ -12,6 +12,7 @@ use super::super::layout::Regions;
 use super::super::theme::TOKENS as T;
 use super::left_column;
 use crate::agent::config::ProviderKind;
+use crate::agent::detect::Reason;
 use crate::app::{Section, SurgeonApp};
 use crate::desktop::UpdateState;
 use crate::diag::{actions_needed, Fix, Group, Row, Severity, Status, Uses};
@@ -344,6 +345,13 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
 
 // ------------------------------------------------------------------ connections
 
+fn reason_label(reason: Reason) -> &'static str {
+    match reason {
+        Reason::NoToolBarrier => t("scan.reason.barrier"),
+        Reason::NotSupported => t("scan.reason.unsupported"),
+    }
+}
+
 fn kind_label(kind: ProviderKind) -> &'static str {
     match kind {
         ProviderKind::Anthropic => t("provider.anthropic"),
@@ -511,7 +519,7 @@ fn connections(ui: &mut Ui, app: &mut SurgeonApp) {
                 if c::button(ui, t("conn.add.action"), ButtonKind::Secondary).clicked() {
                     hub.add_connection();
                 }
-                let detecting = hub.detecting();
+                let detecting = hub.scanning();
                 if c::button_if(
                     ui,
                     !detecting,
@@ -521,12 +529,29 @@ fn connections(ui: &mut Ui, app: &mut SurgeonApp) {
                 )
                 .clicked()
                 {
-                    hub.detect_runtimes();
+                    hub.rescan();
                 }
             });
-            for d in &hub.detected {
-                let state = if d.usable() { State::Ok } else { State::Warn };
-                c::status(ui, state, format!("{} {}", kind_label(d.kind), d.version));
+            if let Some(scan) = &hub.scan {
+                for d in &scan.runtimes {
+                    let state = if d.usable() { State::Ok } else { State::Warn };
+                    c::status(ui, state, format!("{} {}", kind_label(d.kind), d.version));
+                }
+                for o in &scan.others {
+                    c::status(ui, State::Idle, format!("{} {}", o.name, o.version))
+                        .on_hover_text(reason_label(o.reason));
+                }
+                for s in &scan.servers {
+                    let n = s.models.len();
+                    c::status(
+                        ui,
+                        State::Ok,
+                        tf("scan.server", &[("name", &s.name), ("n", &n)]),
+                    );
+                }
+                for k in &scan.keys {
+                    c::status(ui, State::Idle, tf("scan.key", &[("var", &k.var)]));
+                }
             }
         });
 }

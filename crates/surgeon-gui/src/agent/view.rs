@@ -10,8 +10,9 @@ use std::time::SystemTime;
 use eframe::egui;
 
 use super::config::{AgentsConfig, Connection, Consent, Prices, ProjectAgent, ProviderKind};
+use super::detect::{self, Scan};
 use super::provider::{Block, Message, Role};
-use super::runtime::{self, Detected};
+use super::runtime;
 use super::session::{Choice, Conversation, Dirs, Session, Settings};
 use super::vault::{self, Secret, SecretStore};
 use crate::studio::jobs::Ended;
@@ -44,8 +45,9 @@ pub struct Hub {
     pub price_in: String,
     pub price_out: String,
     models: Option<ModelsTask>,
-    detecting: Option<Task<Vec<Detected>>>,
-    pub detected: Vec<Detected>,
+    scanning: Option<Task<Scan>>,
+    /// What the last scan found; `None` before the first one.
+    pub scan: Option<Scan>,
     /// The open project this page follows, and its settings.
     pub project: Option<PathBuf>,
     pub agent: ProjectAgent,
@@ -87,8 +89,8 @@ impl Hub {
             price_in: String::new(),
             price_out: String::new(),
             models: None,
-            detecting: None,
-            detected: Vec::new(),
+            scanning: None,
+            scan: None,
             project: None,
             agent: ProjectAgent::default(),
             session: None,
@@ -159,11 +161,9 @@ impl Hub {
             }
         }
         self.tick_cli();
-        if let Some(task) = &self.detecting {
-            if let Some(found) = task.poll() {
-                self.detected = found;
-                self.detecting = None;
-            }
+        if let Some(found) = self.scanning.as_ref().and_then(Task::poll) {
+            self.scan = Some(found);
+            self.scanning = None;
         }
         if let Some((id, task)) = &self.models {
             if let Some(result) = task.poll() {
@@ -386,26 +386,17 @@ impl Hub {
         self.save_cfg();
     }
 
-    pub fn detecting(&self) -> bool {
-        self.detecting.is_some()
+    pub fn scanning(&self) -> bool {
+        self.scanning.is_some()
     }
 
-    /// Looks for Claude Code and Codex in the `PATH`, off the UI thread.
-    pub fn detect_runtimes(&mut self) {
-        if self.detecting.is_some() {
+    /// Looks again for CLIs, loopback servers and environment keys, off the UI thread.
+    pub fn rescan(&mut self) {
+        if self.scanning.is_some() {
             return;
         }
         let wake = Arc::clone(&self.wake);
-        self.detecting = Some(Task::spawn(
-            move || wake(),
-            |_| {
-                let path = std::env::var_os("PATH");
-                [ProviderKind::ClaudeCode, ProviderKind::Codex]
-                    .into_iter()
-                    .filter_map(|k| runtime::detect(k, path.as_deref()))
-                    .collect()
-            },
-        ));
+        self.scanning = Some(Task::spawn(move || wake(), |_| detect::scan()));
     }
 
     // ------------------------------------------------------------------ project settings

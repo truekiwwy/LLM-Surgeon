@@ -87,12 +87,22 @@ pub fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// The first line `bin --version` prints, empty when it prints nothing in time.
+pub fn version(bin: &Path) -> String {
+    capture(bin, &["--version"], Duration::from_secs(15))
+        .and_then(|v| {
+            v.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+}
+
 /// Finds the CLI, reads its version, and checks that its help lists every option used.
 pub fn detect(kind: ProviderKind, path: Option<&OsStr>) -> Option<Detected> {
     let bin = find_on_path(binary_name(kind), path)?;
-    let version = capture(&bin, &["--version"], Duration::from_secs(15))
-        .map(|v| v.lines().next().unwrap_or("").trim().to_owned())
-        .unwrap_or_default();
+    let version = version(&bin);
     let (help_args, needed): (&[&str], &[&'static str]) = match kind {
         ProviderKind::ClaudeCode => (&["--help"], &CLAUDE_OPTIONS),
         _ => (&["exec", "--help"], &CODEX_OPTIONS),
