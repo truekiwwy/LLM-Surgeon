@@ -356,7 +356,7 @@ pub fn tree(ui: &mut Ui, app: &mut SurgeonApp) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use weight_surgeon::graph::stream::GraphPatch;
 

@@ -37,7 +37,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         .title(t("panel.graph"))
         .canvas()
         .show_with(ui, parts[0], app, view_controls, |ui, app| {
-            viewport(ui, app, false)
+            viewport(ui, app)
         });
     if has_bar {
         c::Panel::new("graph-bar")
@@ -105,8 +105,8 @@ fn view_controls(ui: &mut Ui, app: &mut SurgeonApp) {
     );
 }
 
-/// The 3D canvas; `preview`: the Atelier's small one, with its own camera.
-pub fn viewport(ui: &mut Ui, app: &mut SurgeonApp, preview: bool) {
+/// The 3D canvas.
+fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
     let target = match app.layout {
         LayoutMode::Column => 0.0,
         LayoutMode::Constellation => 1.0,
@@ -152,11 +152,7 @@ pub fn viewport(ui: &mut Ui, app: &mut SurgeonApp, preview: bool) {
         targets: &targets,
         layer: run.is_some().then_some(&app.layer),
     };
-    let (camera, buffers) = match preview {
-        true => (&mut app.preview_camera, &mut app.preview_buffers),
-        false => (&mut app.camera, &mut app.buffers),
-    };
-    if let Some(click) = viewport::show(ui, &view, camera, buffers) {
+    if let Some(click) = viewport::show(ui, &view, &mut app.camera, &mut app.buffers) {
         app.selected = click.map(|i| step.report.nodes[i].id.clone());
     }
 }

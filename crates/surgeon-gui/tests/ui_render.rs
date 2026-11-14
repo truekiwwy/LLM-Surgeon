@@ -167,16 +167,28 @@ fn the_mode_sets_the_depth_of_the_atelier_and_leaves_the_agent_alone() {
 }
 
 #[test]
-fn the_demo_waits_on_an_approval_in_the_atelier_and_in_agents() {
+fn the_demo_waits_on_an_approval_in_agents_only() {
     let mut b = bench(Lang::En);
-    for tab in [Tab::Atelier, Tab::Agents] {
-        let texts = b.texts(tab);
-        assert!(
-            texts.iter().any(|t| t == "Allow once"),
-            "{tab:?}: {texts:?}"
-        );
-        assert!(texts.iter().any(|t| t == "Deny"), "{tab:?}");
+    let texts = b.texts(Tab::Agents);
+    assert!(texts.iter().any(|t| t == "Allow once"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "Deny"));
+    let atelier = b.texts(Tab::Atelier);
+    assert!(!atelier.iter().any(|t| t == "Allow once"), "{atelier:?}");
+}
+
+#[test]
+fn the_atelier_targets_in_the_center_and_operates_on_the_right() {
+    let mut b = bench(Lang::En);
+    let scalping = b.texts(Tab::Atelier);
+    for text in ["TARGETS", "OPERATION", "View in 3D", "History"] {
+        assert!(scalping.iter().any(|t| t == text), "{text}: {scalping:?}");
     }
+    b.app.set_mode(Mode::Advance);
+    let advance = b.texts(Tab::Atelier);
+    assert!(
+        advance.len() > scalping.len(),
+        "[ADVANCE] shows every field of the form"
+    );
 }
 
 #[test]
@@ -288,7 +300,7 @@ fn no_screen_spends_more_than_three_percent_of_its_pixels_on_the_accent() {
         let frame = raster::render(&b.ctx, SIZE, 1.0, |ui| app.draw(ui));
         let data: Vec<Rect> = components::take_dump(&b.ctx)
             .into_iter()
-            .filter(|(name, _)| ["preview", "graph-view", "histogram"].contains(&name.as_str()))
+            .filter(|(name, _)| ["graph-view", "histogram"].contains(&name.as_str()))
             .map(|(_, r)| r)
             .collect();
         let share = accent_share(&frame.image, &data);

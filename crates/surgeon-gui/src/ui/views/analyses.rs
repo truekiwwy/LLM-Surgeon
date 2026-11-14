@@ -1,6 +1,7 @@
 //! Analyses: an engine tool, its typed form (generated from the tool's schema), the budget
 //! and the estimate of these exact arguments, the launch; on the right, the queue and the
-//! history of the project's runs. The surgery form of the Atelier reuses the same pieces.
+//! history of every run of the project, surgeries included, filtered by kind. The Operation
+//! column of the Atelier reuses the same form.
 
 use eframe::egui::{self, ScrollArea, Ui};
 
@@ -10,7 +11,7 @@ use super::super::icons::State;
 use super::super::layout::Regions;
 use super::super::theme::TOKENS as T;
 use super::{duration, explorer};
-use crate::app::SurgeonApp;
+use crate::app::{RunKind, SurgeonApp};
 use crate::studio::estimate;
 use crate::studio::forms::FieldKind;
 use crate::studio::jobs::RunStatus;
@@ -30,30 +31,37 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
             }
             // A form keeps a reading measure; a wide window does not stretch its action.
             ui.set_max_width(FORM_WIDTH);
-            c::section(ui, t("analysis.step.tool"));
-            tool_picker(ui, app, false);
-            c::section(ui, t("analysis.step.params"));
-            // The fields take the rows they need, up to what leaves room for the budget.
-            let footer = 8.0 * T.size.row;
-            let room = (ui.available_height() - footer).max(T.size.row * 3.0);
-            let count = app
-                .studio
-                .forms
-                .get(app.studio.analysis.tool)
-                .map_or(1, |f| f.fields.len().max(1));
-            let need = count as f32 * (T.size.control + T.space.xs);
-            ui.allocate_ui(egui::vec2(ui.available_width(), need.min(room)), |ui| {
-                fields(ui, app, false);
-            });
-            c::separator(ui);
-            c::section(ui, t("analysis.step.budget"));
-            launch(ui, app, false, t("analysis.launch"));
+            form(ui, app, false, true, t("analysis.launch"));
         });
     queue(ui, app, regions.right);
 }
 
+/// Tool, fields, budget and launch of one form; `all`: every field, else the essential ones.
+pub fn form(ui: &mut Ui, app: &mut SurgeonApp, surgery: bool, all: bool, action: &str) {
+    c::section(ui, t("analysis.step.tool"));
+    tool_picker(ui, app, surgery);
+    c::section(ui, t("analysis.step.params"));
+    // The fields take the rows they need, up to what leaves room for the budget.
+    let footer = 8.0 * T.size.row;
+    let room = (ui.available_height() - footer).max(T.size.row * 3.0);
+    let count = app
+        .studio
+        .forms
+        .get(app.studio.launch(surgery).tool)
+        .map_or(1, |f| {
+            f.fields.iter().filter(|x| all || f.essential(x)).count()
+        });
+    let need = count.max(1) as f32 * (T.size.control + T.space.xs);
+    ui.allocate_ui(egui::vec2(ui.available_width(), need.min(room)), |ui| {
+        fields(ui, app, surgery, all);
+    });
+    c::separator(ui);
+    c::section(ui, t("analysis.step.budget"));
+    launch(ui, app, surgery, action);
+}
+
 /// The tools of one form kind, and the description of the picked one.
-pub fn tool_picker(ui: &mut Ui, app: &mut SurgeonApp, surgery: bool) {
+fn tool_picker(ui: &mut Ui, app: &mut SurgeonApp, surgery: bool) {
     let current = app.studio.launch(surgery).tool;
     let title = app
         .studio
@@ -84,8 +92,9 @@ pub fn tool_picker(ui: &mut Ui, app: &mut SurgeonApp, surgery: bool) {
     }
 }
 
-/// One row per field of the tool's schema: name on the left, a control of its type.
-pub fn fields(ui: &mut Ui, app: &mut SurgeonApp, surgery: bool) {
+/// One row per field of the tool's schema (`all`, else the essential ones): name on the left,
+/// a control of its type.
+fn fields(ui: &mut Ui, app: &mut SurgeonApp, surgery: bool, all: bool) {
     let tool = app.studio.launch(surgery).tool;
     let Some(form) = app.studio.forms.get(tool).cloned() else {
         return;
@@ -96,7 +105,7 @@ pub fn fields(ui: &mut Ui, app: &mut SurgeonApp, surgery: bool) {
         .auto_shrink([false, true])
         .show(ui, |ui| {
             let label_width = (ui.available_width() * 0.4).floor();
-            for field in &form.fields {
+            for field in form.fields.iter().filter(|f| all || form.essential(f)) {
                 ui.horizontal(|ui| {
                     ui.allocate_ui(egui::vec2(label_width, T.size.control), |ui| {
                         ui.set_width(label_width);
@@ -147,7 +156,7 @@ pub fn fields(ui: &mut Ui, app: &mut SurgeonApp, surgery: bool) {
 }
 
 /// Budget, estimate and the primary action of the form.
-pub fn launch(ui: &mut Ui, app: &mut SurgeonApp, surgery: bool, action: &str) {
+fn launch(ui: &mut Ui, app: &mut SurgeonApp, surgery: bool, action: &str) {
     let launch = app.studio.launch(surgery);
     let Some(form) = app.studio.forms.get(launch.tool) else {
         return;
@@ -246,6 +255,17 @@ fn queue(ui: &mut Ui, app: &mut SurgeonApp, rect: egui::Rect) {
                 {
                     app.studio.export_ledger(false);
                 }
+                ui.add_space(T.space.s);
+                c::segmented_small(
+                    ui,
+                    &mut app.history,
+                    &[
+                        (RunKind::All, t("history.all")),
+                        (RunKind::Surgery, t("history.surgeries")),
+                        (RunKind::Analysis, t("history.analyses")),
+                    ],
+                    t("history.filter"),
+                );
             },
             |ui, app| {
                 let Some(m) = app.studio.manager.as_ref() else {
@@ -256,8 +276,14 @@ fn queue(ui: &mut Ui, app: &mut SurgeonApp, rect: egui::Rect) {
                     });
                     return;
                 };
+                let kind = app.history;
+                let shown = |tool: &str| match kind {
+                    RunKind::All => true,
+                    RunKind::Surgery => is_surgery(tool),
+                    RunKind::Analysis => !is_surgery(tool),
+                };
                 let mut rows: Vec<(String, String, State, String, String)> = Vec::new();
-                for r in &m.running {
+                for r in m.running.iter().filter(|r| shown(&r.spec.tool)) {
                     rows.push((
                         r.id.clone(),
                         r.spec.label.clone(),
@@ -266,7 +292,7 @@ fn queue(ui: &mut Ui, app: &mut SurgeonApp, rect: egui::Rect) {
                         duration(r.started.elapsed().as_secs()),
                     ));
                 }
-                for q in &m.queue {
+                for q in m.queue.iter().filter(|q| shown(&q.spec.tool)) {
                     rows.push((
                         q.id.clone(),
                         q.spec.label.clone(),
@@ -277,7 +303,12 @@ fn queue(ui: &mut Ui, app: &mut SurgeonApp, rect: egui::Rect) {
                 }
                 // shortcut: the history is read from runs/ every frame; cache it past a few
                 // hundred runs.
-                for r in m.history().into_iter().rev() {
+                for r in m
+                    .history()
+                    .into_iter()
+                    .rev()
+                    .filter(|r| shown(&r.spec.tool))
+                {
                     let (state, word) = match r.status.status {
                         RunStatus::Finished => (State::Ok, t("run.finished")),
                         RunStatus::Failed => (State::Error, t("run.failed")),

@@ -87,6 +87,14 @@ pub enum Bench {
     Editor,
 }
 
+/// The runs the history lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunKind {
+    All,
+    Surgery,
+    Analysis,
+}
+
 /// The four sections of the System tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -154,8 +162,6 @@ pub struct SurgeonApp {
     /// The run on the 3D view mapped onto the current graph, refilled every frame.
     pub layer: Layer,
     pub buffers: viewport::Buffers,
-    pub preview_buffers: viewport::Buffers,
-    pub preview_camera: Orbit,
     pub columns: Columns,
     pub palette: Palette,
     /// The cut of the ‖ΔW‖ histogram: tensors at or above it are the targets.
@@ -164,6 +170,8 @@ pub struct SurgeonApp {
     pub motion: bool,
     /// The section the System view shows.
     pub system_section: Section,
+    /// Which runs the history of Analyses lists.
+    pub history: RunKind,
     ledger_cache: Option<(PathBuf, Option<SystemTime>, Vec<ledger::Entry>)>,
 }
 
@@ -214,13 +222,12 @@ impl SurgeonApp {
             replay: None,
             layer: Layer::default(),
             buffers: viewport::Buffers::default(),
-            preview_buffers: viewport::Buffers::default(),
-            preview_camera: Orbit::default(),
             columns,
             palette: Palette::default(),
             threshold: None,
             motion: true,
             system_section: Section::Machine,
+            history: RunKind::All,
             ledger_cache: None,
         };
         if let Some(input) = input {
@@ -487,15 +494,12 @@ impl SurgeonApp {
             .flat_map(|d| &d.nodes)
             .filter(|n| n.changed)
             .collect();
-        let points: Vec<[f32; 3]> = report
+        let marked: Vec<bool> = report
             .nodes
             .iter()
-            .filter(|n| changed.iter().any(|d| d.id == n.id))
-            .map(|n| match self.layout {
-                LayoutMode::Column => n.pos_column,
-                LayoutMode::Constellation => n.pos_constellation,
-            })
+            .map(|n| changed.iter().any(|d| d.id == n.id))
             .collect();
+        let center = centroid(&report, &marked, self.layout);
         let top = report
             .baseline_diff
             .as_ref()
@@ -505,13 +509,23 @@ impl SurgeonApp {
         self.timeline.seek(usize::MAX);
         self.diff = true;
         self.selected = top;
-        if !points.is_empty() {
-            let n = points.len() as f32;
-            let mean = |k: usize| points.iter().map(|p| p[k]).sum::<f32>() / n;
-            self.camera.target = [mean(0), mean(1), mean(2)];
+        if let Some(center) = center {
+            self.camera.target = center;
         }
         self.tab = Tab::Graph;
         Ok(())
+    }
+
+    /// `Voir en 3D` of the Atelier: the 3D graph framed on the targets, which it highlights.
+    pub fn show_targets(&mut self) {
+        let center = self.timeline.current().and_then(|step| {
+            let targets = self.targets(&step.report);
+            centroid(&step.report, &targets, self.layout)
+        });
+        if let Some(center) = center {
+            self.camera.target = center;
+        }
+        self.tab = Tab::Graph;
     }
 
     /// The 3D nodes the patch being edited would touch (the editor's selectors in the
@@ -769,6 +783,23 @@ pub fn outcome_line(run: &Finished) -> String {
     }
 }
 
+/// The mean position of the `marked` nodes in `layout`; `None` when none is marked.
+pub fn centroid(report: &GraphReport, marked: &[bool], layout: LayoutMode) -> Option<[f32; 3]> {
+    let points: Vec<[f32; 3]> = report
+        .nodes
+        .iter()
+        .zip(marked)
+        .filter(|(_, m)| **m)
+        .map(|(n, _)| match layout {
+            LayoutMode::Column => n.pos_column,
+            LayoutMode::Constellation => n.pos_constellation,
+        })
+        .collect();
+    let n = points.len() as f32;
+    let mean = |k: usize| points.iter().map(|p| p[k]).sum::<f32>() / n;
+    (!points.is_empty()).then(|| [mean(0), mean(1), mean(2)])
+}
+
 /// The node `delta` places after `current` in the list as shown, held at both ends. With no
 /// selection, or one the filters hide, Down starts at the top and Up at the bottom.
 pub fn step_selection(order: &[usize], current: Option<usize>, delta: isize) -> Option<usize> {
@@ -835,6 +866,19 @@ mod tests {
             outcome_line(&run(2, failed)),
             "échec (code 2) : patch invalide :"
         );
+    }
+
+    #[test]
+    fn the_centroid_is_the_mean_of_the_marked_nodes_only() {
+        let report = crate::ui::views::tests::report();
+        let marked: Vec<bool> = (0..report.nodes.len()).map(|i| i < 2).collect();
+        let [a, b] = [&report.nodes[0], &report.nodes[1]];
+        let c = centroid(&report, &marked, LayoutMode::Column).unwrap();
+        for k in 0..3 {
+            assert!((c[k] - (a.pos_column[k] + b.pos_column[k]) / 2.0).abs() < 1e-5);
+        }
+        let none = vec![false; report.nodes.len()];
+        assert_eq!(centroid(&report, &none, LayoutMode::Column), None);
     }
 
     #[test]

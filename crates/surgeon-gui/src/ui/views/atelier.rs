@@ -1,61 +1,76 @@
-//! Atelier: the explorer; in the center the work (the ‖ΔW‖ histogram, its cut and the surgery
-//! form on the working copy; in `[ADVANCE]` also the card canvas or the patch editor) over the
-//! table of deltas; on the right the 3D preview, the live activity of the followed run and the
-//! approval waiting for the user. The `[SCALPING]` / `[ADVANCE]` switch sits in the header.
+//! Atelier, three zones: the explorer; Targeting in the center (the ‖ΔW‖ histogram and its
+//! cut over the table of targets, or in `[ADVANCE]` the card canvas or the patch editor);
+//! Operation on the right (the surgery form, then the run it started and its log). The
+//! `[SCALPING]` / `[ADVANCE]` switch sits in the center's header and sets the form's depth.
 
 use eframe::egui::{self, Align2, Pos2, Rect, ScrollArea, Sense, Ui, Vec2};
 use weight_surgeon::events::{LogLevel, SurgeonEvent};
 
-use super::super::components::{self as c, Cell, Column, Segment, Table, Width};
+use super::super::components::{self as c, ButtonKind, Cell, Column, Segment, Table, Width};
 use super::super::i18n::{t, tf};
 use super::super::icons::State;
 use super::super::layout::{self, Part, Regions};
 use super::super::theme::TOKENS as T;
-use super::{agents, analyses, delta_values, explorer, graph, metric, metric_label, num, Metric};
-use crate::app::{Bench, Mode, SurgeonApp};
+use super::{analyses, delta_values, explorer, metric, metric_label, num, Metric};
+use crate::app::{Bench, Mode, SurgeonApp, Tab};
 use crate::canvas::view::{self as canvas_view, Status};
 use crate::viewport;
 
 pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     explorer(ui, app, regions.left);
-    let center = layout::stack(regions.center, &[Part::Flex(1.5), Part::Flex(1.0)]);
-    let title = match app.bench {
-        Bench::Surgery => t("panel.surgery"),
-        Bench::Canvas => t("panel.canvas"),
-        Bench::Editor => t("panel.editor"),
-    };
-    let flush = app.bench != Bench::Surgery;
-    let mut panel = c::Panel::new("work").title(title);
-    if flush {
-        panel = panel.flush();
-    }
-    panel.show_with(ui, center[0], app, work_actions, |ui, app| {
-        match app.bench {
-            Bench::Surgery => surgery(ui, app),
-            Bench::Canvas => canvas(ui, app),
-            Bench::Editor => editor(ui, app),
+    match app.bench {
+        Bench::Surgery => {
+            let center = layout::stack(regions.center, &[Part::Flex(1.0), Part::Flex(1.2)]);
+            c::Panel::new("targeting")
+                .title(t("panel.surgery"))
+                .show_with(ui, center[0], app, work_actions, |ui, app| {
+                    let rect = ui.max_rect();
+                    histogram(ui, app, rect);
+                });
+            deltas(ui, app, center[1]);
         }
-    });
-    deltas(ui, app, center[1]);
+        Bench::Canvas | Bench::Editor => {
+            let title = match app.bench {
+                Bench::Canvas => t("panel.canvas"),
+                _ => t("panel.editor"),
+            };
+            c::Panel::new("work").title(title).flush().show_with(
+                ui,
+                regions.center,
+                app,
+                work_actions,
+                |ui, app| match app.bench {
+                    Bench::Canvas => canvas(ui, app),
+                    _ => editor(ui, app),
+                },
+            );
+        }
+    }
 
-    let right = layout::stack(
-        regions.right,
-        &[
-            Part::Flex(1.25),
-            Part::Flex(1.0),
-            Part::Fixed(8.0 * T.size.row + T.size.header),
-        ],
-    );
-    c::Panel::new("preview")
-        .title(t("panel.preview"))
-        .canvas()
-        .show(ui, right[0], |ui| graph::viewport(ui, app, true));
+    let right = layout::stack(regions.right, &[Part::Flex(1.6), Part::Flex(1.0)]);
+    c::Panel::new("operation")
+        .title(t("panel.operation"))
+        .show(ui, right[0], |ui| {
+            if app.studio.manager.is_none() {
+                c::empty(ui, t("project.missing"), t("project.missing.hint"));
+                return;
+            }
+            let all = app.mode == Mode::Advance;
+            analyses::form(ui, app, true, all, t("surgery.apply"));
+        });
     c::Panel::new("activity")
         .title(t("panel.activity"))
-        .show(ui, right[1], |ui| activity(ui, app));
-    c::Panel::new("approval")
-        .title(t("panel.approval"))
-        .show(ui, right[2], |ui| agents::approval(ui, app, true));
+        .show_with(
+            ui,
+            right[1],
+            app,
+            |ui, app| {
+                if c::button(ui, t("activity.history"), ButtonKind::Ghost).clicked() {
+                    app.tab = Tab::Analyses;
+                }
+            },
+            |ui, app| activity(ui, app),
+        );
 }
 
 /// Right to left: the mode switch, then in `[ADVANCE]` the bench switch.
@@ -109,31 +124,7 @@ fn work_actions(ui: &mut Ui, app: &mut SurgeonApp) {
     );
 }
 
-// ------------------------------------------------------------------ scalping
-
-fn surgery(ui: &mut Ui, app: &mut SurgeonApp) {
-    let height = ui.available_height();
-    let plot = (height * 0.45).max(T.size.row * 5.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), plot), Sense::hover());
-    histogram(ui, app, rect);
-    c::separator(ui);
-    if app.studio.manager.is_none() {
-        c::empty(ui, t("project.missing"), t("project.missing.hint"));
-        return;
-    }
-    let rest = ui.available_rect_before_wrap();
-    let half = ((rest.width() - T.space.l) / 2.0).floor();
-    let left = Rect::from_min_size(rest.min, Vec2::new(half, rest.height()));
-    let right = Rect::from_min_max(Pos2::new(left.right() + T.space.l, rest.top()), rest.max);
-    c::region(ui, left, "surgery-fields", |ui| {
-        analyses::tool_picker(ui, app, true);
-        ui.add_space(T.space.s);
-        analyses::fields(ui, app, true);
-    });
-    c::region(ui, right, "surgery-launch", |ui| {
-        analyses::launch(ui, app, true, t("surgery.apply"));
-    });
-}
+// ------------------------------------------------------------------ targeting
 
 /// The histogram of the metric over the visible tensors, as a stepped wire; a click or a
 /// drag places the cut, the tensors at or above it become the targets.
@@ -331,10 +322,28 @@ fn deltas(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
         Some(Metric::Norm) => t("panel.norms"),
         _ => t("panel.deltas"),
     };
-    c::Panel::new("deltas")
-        .title(title)
-        .flush()
-        .show(ui, rect, |ui| {
+    let targeted = app
+        .timeline
+        .current()
+        .is_some_and(|s| app.targets(&s.report).contains(&true));
+    c::Panel::new("deltas").title(title).flush().show_with(
+        ui,
+        rect,
+        app,
+        |ui, app| {
+            if c::button_if(
+                ui,
+                targeted,
+                t("targets.show3d"),
+                ButtonKind::Ghost,
+                t("targets.none"),
+            )
+            .clicked()
+            {
+                app.show_targets();
+            }
+        },
+        |ui, app| {
             let Some(step) = app.timeline.current() else {
                 ui.add_space(T.space.s);
                 ui.horizontal(|ui| {
@@ -513,7 +522,8 @@ fn deltas(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
             if let Some(id) = pick {
                 app.selected = Some(id);
             }
-        });
+        },
+    );
 }
 
 // ------------------------------------------------------------------ activity
