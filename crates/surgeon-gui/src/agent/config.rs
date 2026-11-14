@@ -107,6 +107,9 @@ pub struct Connection {
     /// The model a project gets when it does not pick one.
     #[serde(default)]
     pub default_model: Option<String>,
+    /// A CLI runtime whose sign-in check passed (Tester).
+    #[serde(default)]
+    pub verified: bool,
     #[serde(default)]
     pub prices: BTreeMap<String, Prices>,
 }
@@ -119,9 +122,13 @@ impl Connection {
         }
     }
 
-    /// Offered to the sessions: an API connection whose model list came back, or a CLI.
+    /// Offered to the sessions: a CLI whose sign-in check passed, an API connection whose
+    /// model list came back.
     pub fn ready(&self) -> bool {
-        self.kind.is_cli() || !self.models.is_empty()
+        match self.kind.is_cli() {
+            true => self.verified,
+            false => !self.models.is_empty(),
+        }
     }
 
     /// The model a project inherits: the chosen default, else the first one listed.
@@ -183,8 +190,9 @@ pub struct AgentsConfig {
     pub connections: Vec<Connection>,
     #[serde(default)]
     pub consents: Vec<Consent>,
-    /// No request leaves the machine: loopback endpoints only, no CLI runtime.
-    #[serde(default)]
+    /// No request leaves the machine: loopback endpoints only, no CLI runtime. The setting
+    /// lives in `settings.json` since G6; an older file is read once for it, never written.
+    #[serde(default, skip_serializing)]
     pub local_only: bool,
     /// The connection every project uses unless it picks another.
     #[serde(default)]
@@ -222,6 +230,15 @@ impl AgentsConfig {
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         write_atomic(path, &bytes)
+    }
+
+    /// Hands an older file's `local_only` to `setting` (true wins), then follows it. `true`
+    /// when the setting changed and must be saved.
+    pub fn adopt_local_only(&mut self, setting: &mut bool) -> bool {
+        let migrated = self.local_only && !*setting;
+        *setting |= self.local_only;
+        self.local_only = *setting;
+        migrated
     }
 
     pub fn connection(&self, id: &str) -> Option<&Connection> {
@@ -318,5 +335,38 @@ impl ProjectAgent {
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         write_atomic(path, &bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_only_moves_to_the_settings_once_and_is_no_longer_written_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agents.json");
+        std::fs::write(&path, r#"{"schema_version":1,"local_only":true}"#).unwrap();
+        let mut cfg = AgentsConfig::load(&path).unwrap();
+        let mut setting = false;
+        assert!(
+            cfg.adopt_local_only(&mut setting),
+            "migrated: save the settings"
+        );
+        assert!(setting && cfg.local_only);
+        cfg.save(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("local_only"));
+        let mut cfg = AgentsConfig::load(&path).unwrap();
+        assert!(
+            !cfg.adopt_local_only(&mut setting),
+            "nothing more to migrate"
+        );
+        assert!(cfg.local_only, "follows the setting");
+        setting = false;
+        let mut cfg = AgentsConfig::load(&path).unwrap();
+        cfg.adopt_local_only(&mut setting);
+        assert!(!cfg.local_only, "the setting decides once migrated");
     }
 }

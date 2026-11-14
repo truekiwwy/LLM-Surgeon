@@ -294,6 +294,10 @@ fn statusbar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = T.space.m;
                 c::meta(ui, format!("v{}", env!("CARGO_PKG_VERSION")));
+                if app.desktop.settings.local_only {
+                    c::status(ui, State::Idle, t("status.local"))
+                        .on_hover_text(t("policy.local_only.tip"));
+                }
                 let mut lang = app.desktop.lang();
                 let picked = c::segmented_small(
                     ui,

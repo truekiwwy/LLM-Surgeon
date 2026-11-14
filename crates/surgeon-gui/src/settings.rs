@@ -75,6 +75,8 @@ pub struct Settings {
     /// The left column folded to its rail (`Ctrl+B`).
     pub left_collapsed: bool,
     pub mode: Mode,
+    /// No request leaves the machine: no remote AI, no CLI runtime, no download.
+    pub local_only: bool,
 }
 
 impl Settings {

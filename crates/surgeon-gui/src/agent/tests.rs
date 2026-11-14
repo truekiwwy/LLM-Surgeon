@@ -528,6 +528,7 @@ fn local_only_mode_never_opens_a_remote_connection() {
         base_url: String::new(),
         models: vec![],
         default_model: None,
+        verified: false,
         prices: Default::default(),
     };
     assert!(matches!(
@@ -1275,6 +1276,7 @@ fn an_api_key_never_lands_in_a_file_an_export_or_an_error() {
         base_url: api.base(),
         models: vec!["m".into()],
         default_model: None,
+        verified: false,
         prices: Default::default(),
     };
     store.set(&conn.id, &Secret::new(KEY)).unwrap();
@@ -1526,6 +1528,7 @@ fn a_project_inherits_the_default_connection_until_it_picks_its_own() {
         base_url: "http://127.0.0.1:11434/v1".into(),
         models: models.iter().map(|m| m.to_string()).collect(),
         default_model: default_model.map(str::to_owned),
+        verified: false,
         prices: Default::default(),
     };
     hub.cfg.connections = vec![
@@ -1583,4 +1586,59 @@ fn a_loopback_server_is_probed_for_its_models() {
     let models = super::detect::probe(&format!("{}/v1", api.base())).unwrap();
     assert_eq!(models, ["llama3.1:8b", "qwen2.5:7b"]);
     assert!(api.seen()[0].head.starts_with("GET /v1/models"));
+}
+
+#[test]
+fn a_refused_key_is_never_stored_and_an_accepted_one_is() {
+    let api = FakeApi::serve(vec![
+        json_reply(401, json!({"error": {"message": "invalid key"}})),
+        json_reply(200, json!({"data": [{"id": "m-1"}]})),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let mut studio = crate::studio::view::Studio::new(dir.path().join("projects"));
+    let mut hub = super::view::Hub::new(
+        dir.path().join("agents.json"),
+        Box::new(SessionStore::default()),
+        Arc::new(|| {}),
+    );
+    hub.new_preset = None;
+    hub.new_url = format!("{}/v1", api.base());
+    hub.add_connection();
+    let id = hub.selected.clone().unwrap();
+    let mut attempt = |hub: &mut super::view::Hub, key: &str| {
+        hub.key_input = key.into();
+        hub.try_typed_key(&id);
+        assert!(hub.key_input.is_empty(), "the field never keeps the key");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while hub.trying_key(&id) && Instant::now() < deadline {
+            hub.tick(&mut studio, &[]);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    attempt(&mut hub, "sk-refused");
+    assert!(hub.store.get(&id).unwrap().is_none(), "refused: not stored");
+    assert!(hub.message.as_ref().is_some_and(|(_, error)| *error));
+    attempt(&mut hub, "sk-accepted");
+    assert_eq!(
+        hub.store.get(&id).unwrap().map(|s| s.expose().to_owned()),
+        Some("sk-accepted".into())
+    );
+    assert_eq!(hub.cfg.connection(&id).unwrap().models, ["m-1"]);
+    assert_eq!(hub.key_tail(&id).as_deref(), Some("••••…pted"));
+}
+
+#[test]
+fn a_signed_in_cli_passes_its_own_status_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::env::join_paths([dir.path()]).unwrap();
+    assert!(
+        runtime::signed_in(ProviderKind::Codex, Some(&path)).is_err(),
+        "absent"
+    );
+    fake_cli(dir.path(), "codex", "--json", &[]);
+    assert_eq!(runtime::signed_in(ProviderKind::Codex, Some(&path)), Ok(()));
+    assert_eq!(
+        runtime::login_command(ProviderKind::ClaudeCode),
+        "claude auth login"
+    );
 }

@@ -131,8 +131,46 @@ fn command(program: &Path) -> Command {
     c
 }
 
+/// The CLI's own sign-in check: it spends nothing and the studio never reads the
+/// credentials itself.
+fn status_args(kind: ProviderKind) -> &'static [&'static str] {
+    match kind {
+        ProviderKind::ClaudeCode => &["auth", "status"],
+        _ => &["login", "status"],
+    }
+}
+
+/// What the user types to sign the CLI in.
+pub fn login_command(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::ClaudeCode => "claude auth login",
+        _ => "codex login",
+    }
+}
+
+/// Whether the CLI found on `path` reports a signed-in account; the error says what failed.
+pub fn signed_in(kind: ProviderKind, path: Option<&OsStr>) -> Result<(), String> {
+    let bin = find_on_path(binary_name(kind), path)
+        .ok_or_else(|| format!("{} introuvable dans le PATH", kind.name()))?;
+    match run_short(&bin, status_args(kind), Duration::from_secs(20)) {
+        Some((true, _)) => Ok(()),
+        Some((false, text)) => Err(crate::logging::mask_secrets(
+            text.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or(""),
+        )),
+        None => Err(format!("{} ne répond pas", kind.name())),
+    }
+}
+
 /// stdout (then stderr) of a short command, or None past `timeout`.
 fn capture(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
+    run_short(program, args, timeout).map(|(_, text)| text)
+}
+
+/// Whether a short command succeeded, with its stdout then stderr; None past `timeout`.
+fn run_short(program: &Path, args: &[&str], timeout: Duration) -> Option<(bool, String)> {
     let mut child = command(program)
         .args(args)
         .stdin(Stdio::null())
@@ -164,9 +202,9 @@ fn capture(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
     }
     drop(tx);
     let deadline = Instant::now() + timeout;
-    loop {
+    let success = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status.success(),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             _ => {
                 let _ = child.kill();
@@ -174,12 +212,12 @@ fn capture(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
                 return None;
             }
         }
-    }
+    };
     // The two readers end in any order: stdout first, whichever came back first.
     let mut parts: Vec<(usize, String)> = rx.iter().collect();
     parts.sort_by_key(|(k, _)| *k);
     let texts: Vec<String> = parts.into_iter().map(|(_, text)| text).collect();
-    Some(texts.join("\n"))
+    Some((success, texts.join("\n")))
 }
 
 /// The `surgeon` engine binary the runtime launches as its MCP server: next to this app,

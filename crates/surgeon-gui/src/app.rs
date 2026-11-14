@@ -111,6 +111,12 @@ impl Section {
         Section::Updates,
         Section::Journal,
     ];
+
+    /// The `--screen system:<name>` part.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let names = ["machine", "providers", "updates", "journal"];
+        names.iter().position(|n| *n == name).map(|k| Self::ALL[k])
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,11 +236,25 @@ impl SurgeonApp {
             history: RunKind::All,
             ledger_cache: None,
         };
+        if app
+            .agents
+            .cfg
+            .adopt_local_only(&mut app.desktop.settings.local_only)
+        {
+            app.desktop.save_settings();
+        }
         if let Some(input) = input {
             app.set_input(ctx, input);
         }
         app.spawn_probe(ctx);
         app
+    }
+
+    /// Local only: no request leaves the machine (remote AI, CLI runtimes, downloads).
+    pub fn set_local_only(&mut self, on: bool) {
+        self.desktop.settings.local_only = on;
+        self.desktop.save_settings();
+        self.agents.cfg.local_only = on;
     }
 
     /// No transition at all (`--no-motion`, captures).

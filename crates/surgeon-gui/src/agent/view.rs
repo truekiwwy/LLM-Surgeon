@@ -10,11 +10,11 @@ use std::time::SystemTime;
 use eframe::egui;
 
 use super::config::{AgentsConfig, Connection, Consent, Prices, ProjectAgent, ProviderKind};
-use super::detect::{self, Scan};
+use super::detect::{self, EnvKey, Preset, Scan, Server};
 use super::provider::{Block, Message, Role};
 use super::runtime;
 use super::session::{Choice, Conversation, Dirs, Session, Settings};
-use super::vault::{self, Secret, SecretStore};
+use super::vault::{self, Secret, SecretStore, SessionStore};
 use crate::studio::jobs::Ended;
 use crate::studio::project::now_unix;
 use crate::studio::view::Studio;
@@ -22,6 +22,12 @@ use crate::task::Task;
 
 /// The model list of one connection, being fetched.
 type ModelsTask = (String, Task<Result<Vec<String>, String>>);
+
+/// A key being tried on its connection: stored only once the model list comes back.
+type KeyTask = (String, Secret, Task<Result<Vec<String>, String>>);
+
+/// The sign-in check of a CLI connection.
+type CliTask = (String, Task<Result<(), String>>);
 
 /// One line of the conversation list: id, title, creation time.
 pub type ConvLine = (String, String, u64);
@@ -37,7 +43,8 @@ pub struct Hub {
     pub cfg: AgentsConfig,
     pub store: Box<dyn SecretStore>,
     pub selected: Option<String>,
-    pub new_kind: ProviderKind,
+    /// The provider the add form creates: a preset, or a custom endpoint (`None`).
+    pub new_preset: Option<Preset>,
     pub new_label: String,
     pub new_url: String,
     pub key_input: String,
@@ -45,6 +52,10 @@ pub struct Hub {
     pub price_in: String,
     pub price_out: String,
     models: Option<ModelsTask>,
+    keying: Option<KeyTask>,
+    checking: Option<CliTask>,
+    /// The connection whose CLI is not signed in, and the command that signs it in.
+    pub login: Option<(String, &'static str)>,
     scanning: Option<Task<Scan>>,
     /// What the last scan found; `None` before the first one.
     pub scan: Option<Scan>,
@@ -81,7 +92,7 @@ impl Hub {
             cfg,
             store,
             selected: None,
-            new_kind: ProviderKind::Anthropic,
+            new_preset: Some(Preset::Anthropic),
             new_label: String::new(),
             new_url: String::new(),
             key_input: String::new(),
@@ -89,6 +100,9 @@ impl Hub {
             price_in: String::new(),
             price_out: String::new(),
             models: None,
+            keying: None,
+            checking: None,
+            login: None,
             scanning: None,
             scan: None,
             project: None,
@@ -161,6 +175,7 @@ impl Hub {
             }
         }
         self.tick_cli();
+        self.tick_checks();
         if let Some(found) = self.scanning.as_ref().and_then(Task::poll) {
             self.scan = Some(found);
             self.scanning = None;
@@ -279,45 +294,198 @@ impl Hub {
 
     // ------------------------------------------------------------------ connections
 
-    pub fn add_connection(&mut self) {
-        let label = match self.new_label.trim() {
-            "" => self.new_kind.label().to_owned(),
-            l => l.to_owned(),
+    /// Adds a connection and selects it; returns its id.
+    fn push(&mut self, kind: ProviderKind, label: &str, base: &str, models: Vec<String>) -> String {
+        let conn = Connection {
+            id: self.cfg.new_id(label),
+            kind,
+            label: label.to_owned(),
+            base_url: base.to_owned(),
+            models,
+            default_model: None,
+            verified: false,
+            prices: Default::default(),
         };
-        if self.new_kind == ProviderKind::Compatible && self.new_url.trim().is_empty() {
+        let id = conn.id.clone();
+        self.cfg.connections.push(conn);
+        self.selected = Some(id.clone());
+        self.save_cfg();
+        id
+    }
+
+    /// The add form: a preset (Anthropic, OpenAI, OpenRouter) or a custom endpoint.
+    pub fn add_connection(&mut self) {
+        let (kind, base, name) = match self.new_preset {
+            Some(p) => (p.kind(), p.base().to_owned(), p.name()),
+            None => (ProviderKind::Compatible, self.new_url.trim().to_owned(), ""),
+        };
+        if self.new_preset.is_none() && base.is_empty() {
             self.message = Some((
                 "URL de base requise pour un endpoint compatible".into(),
                 true,
             ));
             return;
         }
-        let conn = Connection {
-            id: self.cfg.new_id(&label),
-            kind: self.new_kind,
-            label,
-            base_url: self.new_url.trim().to_owned(),
-            models: Vec::new(),
-            default_model: None,
-            prices: Default::default(),
+        let label = match (self.new_label.trim(), name) {
+            ("", "") => base.clone(),
+            ("", n) => n.to_owned(),
+            (l, _) => l.to_owned(),
         };
-        self.selected = Some(conn.id.clone());
-        self.cfg.connections.push(conn);
+        self.push(kind, &label, &base, Vec::new());
         self.new_label.clear();
         self.new_url.clear();
+    }
+
+    /// A CLI found by the scan becomes a connection, to check with [`Self::check_cli`].
+    pub fn connect_cli(&mut self, kind: ProviderKind) {
+        self.push(kind, kind.name(), "", Vec::new());
+    }
+
+    /// A loopback server found by the scan: no key, no consent, its models already listed.
+    pub fn connect_server(&mut self, server: &Server) {
+        self.push(
+            ProviderKind::Compatible,
+            server.name,
+            server.base,
+            server.models.clone(),
+        );
+    }
+
+    /// An environment key: its provider becomes a connection, the key is tried, then stored
+    /// in the vault if the provider accepts it. The value is read here, on this click only.
+    pub fn use_env_key(&mut self, key: &EnvKey) {
+        let Some(preset) = key.preset else {
+            return;
+        };
+        let Some(value) = std::env::var(key.var).ok().filter(|v| !v.trim().is_empty()) else {
+            self.message = Some((format!("{} est vide", key.var), true));
+            return;
+        };
+        let id = self.push(preset.kind(), preset.name(), preset.base(), Vec::new());
+        self.try_key(&id, Secret::new(value.trim()));
+    }
+
+    /// The typed key of `id`, tried before it is stored; the field is emptied either way.
+    pub fn try_typed_key(&mut self, id: &str) {
+        let typed = std::mem::take(&mut self.key_input);
+        if !typed.trim().is_empty() {
+            self.try_key(id, Secret::new(typed.trim()));
+        }
+    }
+
+    /// Asks the provider for its models with `secret`; [`Self::tick_checks`] stores the key
+    /// only when they come back.
+    fn try_key(&mut self, id: &str, secret: Secret) {
+        let Some(conn) = self.cfg.connection(id).cloned() else {
+            return;
+        };
+        if self.keying.is_some() {
+            return;
+        }
+        let trial = SessionStore::default();
+        if let Err(e) = trial.set(id, &secret) {
+            self.message = Some((e, true));
+            return;
+        }
+        match conn.provider(&trial, self.cfg.local_only) {
+            Ok(p) => {
+                let wake = Arc::clone(&self.wake);
+                let task = Task::spawn(
+                    move || wake(),
+                    move |_| p.list_models().map_err(|e| e.to_string()),
+                );
+                self.keying = Some((id.to_owned(), secret, task));
+            }
+            Err(e) => self.message = Some((e.to_string(), true)),
+        }
+    }
+
+    pub fn trying_key(&self, id: &str) -> bool {
+        self.keying.as_ref().is_some_and(|(k, _, _)| k == id)
+    }
+
+    /// The stored key of `id` as `••••…a1f3`; `None` without one.
+    pub fn key_tail(&self, id: &str) -> Option<String> {
+        let key = self.store.get(id).ok().flatten()?;
+        let tail: String = key.expose().chars().rev().take(4).collect();
+        Some(format!("••••…{}", tail.chars().rev().collect::<String>()))
+    }
+
+    /// Runs the CLI's own sign-in check: nothing is spent, no credential is read here.
+    pub fn check_cli(&mut self, id: &str) {
+        let Some(kind) = self.cfg.connection(id).map(|c| c.kind) else {
+            return;
+        };
+        if self.checking.is_some() || !kind.is_cli() {
+            return;
+        }
+        let wake = Arc::clone(&self.wake);
+        let task = Task::spawn(
+            move || wake(),
+            move |_| runtime::signed_in(kind, std::env::var_os("PATH").as_deref()),
+        );
+        self.checking = Some((id.to_owned(), task));
+    }
+
+    pub fn checking_cli(&self, id: &str) -> bool {
+        self.checking.as_ref().is_some_and(|(k, _)| k == id)
+    }
+
+    /// The connection every project uses unless it picks another.
+    pub fn set_default(&mut self, id: &str) {
+        self.cfg.default_connection = Some(id.to_owned());
         self.save_cfg();
     }
 
-    /// Stores the typed key in the vault and empties the field.
-    pub fn save_key(&mut self, id: &str) {
-        if self.key_input.trim().is_empty() {
-            return;
+    pub fn set_default_model(&mut self, id: &str, model: &str) {
+        if let Some(c) = self.cfg.connections.iter_mut().find(|c| c.id == id) {
+            c.default_model = Some(model.to_owned());
         }
-        let secret = Secret::new(self.key_input.trim());
-        self.key_input.clear();
-        self.message = Some(match self.store.set(id, &secret) {
-            Ok(()) => ("clé enregistrée".into(), false),
-            Err(e) => (e, true),
-        });
+        self.save_cfg();
+    }
+
+    /// The key trial and the CLI check, when they end.
+    fn tick_checks(&mut self) {
+        if let Some(result) = self.keying.as_ref().and_then(|(_, _, t)| t.poll()) {
+            let Some((id, secret, _)) = self.keying.take() else {
+                return;
+            };
+            self.message = Some(match result {
+                Ok(models) => match self.store.set(&id, &secret) {
+                    Ok(()) => {
+                        let n = models.len();
+                        if let Some(c) = self.cfg.connections.iter_mut().find(|c| c.id == id) {
+                            c.models = models;
+                        }
+                        self.save_cfg();
+                        (
+                            format!("{id} : clé vérifiée et enregistrée, {n} modèle(s)"),
+                            false,
+                        )
+                    }
+                    Err(e) => (e, true),
+                },
+                Err(e) => (format!("{id} : clé non enregistrée : {e}"), true),
+            });
+        }
+        if let Some(result) = self.checking.as_ref().and_then(|(_, t)| t.poll()) {
+            let Some((id, _)) = self.checking.take() else {
+                return;
+            };
+            let kind = self.cfg.connection(&id).map(|c| c.kind);
+            if let Some(c) = self.cfg.connections.iter_mut().find(|c| c.id == id) {
+                c.verified = result.is_ok();
+            }
+            self.save_cfg();
+            self.login = match (&result, kind) {
+                (Err(_), Some(k)) => Some((id.clone(), runtime::login_command(k))),
+                _ => None,
+            };
+            self.message = Some(match result {
+                Ok(()) => (format!("{id} : connecté, prêt"), false),
+                Err(e) => (format!("{id} : non connecté : {e}"), true),
+            });
+        }
     }
 
     pub fn revoke_key(&mut self, id: &str) {

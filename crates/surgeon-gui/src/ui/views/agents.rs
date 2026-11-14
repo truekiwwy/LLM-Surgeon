@@ -446,14 +446,6 @@ fn contract(ui: &mut Ui, app: &mut SurgeonApp) {
                 hub.agent.ask = ask;
                 hub.agent_changed();
             }
-            let mut local = hub.cfg.local_only;
-            if c::checkbox(ui, &mut local, t("policy.local_only"))
-                .on_hover_text(t("policy.local_only.tip"))
-                .changed()
-            {
-                hub.cfg.local_only = local;
-                hub.save_cfg();
-            }
             c::section(ui, t("policy.budgets"));
             let names = [
                 t("budget.tokens"),

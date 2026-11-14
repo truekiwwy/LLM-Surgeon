@@ -11,8 +11,8 @@ use super::super::icons::State;
 use super::super::layout::Regions;
 use super::super::theme::TOKENS as T;
 use super::left_column;
-use crate::agent::config::ProviderKind;
-use crate::agent::detect::Reason;
+use crate::agent::config::Connection;
+use crate::agent::detect::{Preset, Reason};
 use crate::app::{Section, SurgeonApp};
 use crate::desktop::UpdateState;
 use crate::diag::{actions_needed, Fix, Group, Row, Severity, Status, Uses};
@@ -58,9 +58,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     let wide = Rect::from_min_max(regions.center.min, regions.right.max);
     match app.system_section {
         Section::Machine => machine(ui, app, regions),
-        Section::Providers => c::Panel::new("connections")
-            .title(t("panel.connections"))
-            .show(ui, wide, |ui| connections(ui, app)),
+        Section::Providers => providers(ui, app, regions),
         Section::Updates => {
             c::Panel::new("updates")
                 .title(t("panel.updates"))
@@ -239,7 +237,16 @@ fn updates(ui: &mut Ui, app: &mut SurgeonApp) {
                 _ => {}
             }
             ui.add_space(T.space.s);
-            if c::button(ui, t("update.check"), ButtonKind::Secondary).clicked() {
+            let local = app.desktop.settings.local_only;
+            if c::button_if(
+                ui,
+                !local,
+                t("update.check"),
+                ButtonKind::Secondary,
+                t("update.local_only"),
+            )
+            .clicked()
+            {
                 app.desktop.check_update(&ctx);
             }
         }
@@ -343,7 +350,7 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         });
 }
 
-// ------------------------------------------------------------------ connections
+// ------------------------------------------------------------------ AI providers
 
 fn reason_label(reason: Reason) -> &'static str {
     match reason {
@@ -352,212 +359,491 @@ fn reason_label(reason: Reason) -> &'static str {
     }
 }
 
-fn kind_label(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Anthropic => t("provider.anthropic"),
-        ProviderKind::OpenAi => t("provider.openai"),
-        ProviderKind::Compatible => t("provider.compatible"),
-        ProviderKind::ClaudeCode => t("provider.claude_code"),
-        ProviderKind::Codex => t("provider.codex"),
+/// `2.1.3 (Claude Code)`, `codex-cli 0.166.0`, `opencode v2.2.7`: the number alone.
+fn short_version(version: &str) -> &str {
+    version
+        .split_whitespace()
+        .find(|w| {
+            w.trim_start_matches('v')
+                .starts_with(|c: char| c.is_ascii_digit())
+        })
+        .unwrap_or(version)
+}
+
+fn preset_label(preset: Option<Preset>) -> &'static str {
+    match preset {
+        Some(Preset::Anthropic) => "Anthropic",
+        Some(Preset::OpenAi) => "OpenAI",
+        Some(Preset::OpenRouter) => "OpenRouter",
+        None => t("prov.custom"),
     }
 }
 
-fn connections(ui: &mut Ui, app: &mut SurgeonApp) {
-    let width = ui.available_width();
-    ScrollArea::vertical()
-        .id_salt("connections")
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            let hub = &mut app.agents;
-            if hub.cfg.connections.is_empty() {
-                c::empty(ui, t("conn.empty"), t("conn.empty.hint"));
-            }
-            let mut pick = None;
-            for conn in &hub.cfg.connections {
-                let consented = hub.cfg.consent(&conn.id).is_some();
-                let used = hub.agent.connection.as_deref() == Some(conn.id.as_str());
-                let response = c::row(
-                    ui,
-                    hub.selected.as_deref() == Some(conn.id.as_str()),
-                    &conn.label,
-                    |ui| {
-                        let (state, word) = match (consented, conn.is_local()) {
-                            (_, true) => (State::Ok, t("conn.local")),
-                            (true, false) => (State::Ok, t("conn.consented")),
-                            (false, false) => (State::Idle, t("conn.no_consent")),
-                        };
-                        c::status(ui, state, conn.label.as_str()).on_hover_text(word);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if used {
-                                c::meta(ui, t("conn.used"));
-                            }
-                        });
-                    },
-                );
-                if response.clicked() {
-                    pick = Some(conn.id.clone());
-                }
-            }
-            if let Some(id) = pick {
-                hub.selected = Some(id);
-            }
-            if let Some(id) = hub.selected.clone() {
-                if let Some(conn) = hub.cfg.connection(&id).cloned() {
-                    c::separator(ui);
-                    c::meta(ui, kind_label(conn.kind));
-                    c::mono_secondary(ui, conn.base());
-                    if conn.kind.needs_key() {
-                        let stored = hub.store.get(&id).ok().flatten().is_some();
-                        let (state, word) = match stored {
-                            true => (State::Ok, t("conn.key.stored")),
-                            false => (State::Warn, t("conn.key.missing")),
-                        };
-                        c::status(ui, state, word);
-                        ui.horizontal(|ui| {
-                            let w = ui.available_width() - 2.0 * T.size.row * 3.0;
-                            c::field_secret(
-                                ui,
-                                &mut hub.key_input,
-                                t("conn.key.hint"),
-                                w.max(T.size.row * 4.0),
-                            );
-                            if c::button(ui, t("conn.key.save"), ButtonKind::Secondary).clicked() {
-                                hub.save_key(&id);
-                            }
-                        });
-                        if stored
-                            && c::button(ui, t("conn.key.revoke"), ButtonKind::Secondary).clicked()
-                        {
-                            hub.revoke_key(&id);
-                        }
-                    }
-                    ui.add_space(T.space.s);
-                    let testing = hub.testing(&id);
-                    let label = if testing {
-                        t("conn.testing")
-                    } else {
-                        t("conn.test")
-                    };
-                    if c::button_if(
-                        ui,
-                        !testing,
-                        label,
-                        ButtonKind::Secondary,
-                        t("conn.testing"),
-                    )
+/// What the machine offers on the left, the connection picked on the right. The first visit
+/// scans (CLIs, loopback servers, environment keys: nothing is spent).
+fn providers(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
+    if app.agents.scan.is_none() && !app.agents.scanning() {
+        app.agents.rescan();
+    }
+    c::Panel::new("providers")
+        .title(t("panel.providers"))
+        .show_with(
+            ui,
+            regions.center,
+            app,
+            |ui, app| {
+                let scanning = app.agents.scanning();
+                let label = if scanning {
+                    t("scan.running")
+                } else {
+                    t("scan.again")
+                };
+                if c::button_if(ui, !scanning, label, ButtonKind::Ghost, t("scan.running"))
                     .clicked()
-                    {
-                        hub.test_models(&conn);
-                    }
-                    if !conn.models.is_empty() {
-                        let current = hub.agent.model.clone().unwrap_or_default();
-                        let mut picked = current.clone();
-                        let shown = if current.is_empty() {
-                            t("conn.model.pick")
-                        } else {
-                            current.as_str()
-                        };
-                        c::select(ui, "model-select", shown, width, |ui| {
-                            for m in &conn.models {
-                                c::option(ui, &mut picked, m.clone(), m);
-                            }
-                        });
-                        if picked != current {
-                            hub.agent.connection = Some(id.clone());
-                            hub.agent.model = Some(picked.clone());
-                            hub.price_model = picked;
-                            hub.agent_changed();
-                        }
-                    }
-                    if !conn.kind.is_cli() {
-                        c::section(ui, t("conn.prices"));
-                        ui.horizontal(|ui| {
-                            let w = (ui.available_width() - 2.0 * T.space.s) / 3.0;
-                            c::field_mono(ui, &mut hub.price_in, t("conn.price.in"), w);
-                            c::field_mono(ui, &mut hub.price_out, t("conn.price.out"), w);
-                            if c::button(ui, t("conn.price.save"), ButtonKind::Ghost).clicked() {
-                                hub.set_price(&id);
-                            }
-                        });
-                    }
-                    ui.horizontal(|ui| {
-                        if hub.cfg.consent(&id).is_some()
-                            && c::button(ui, t("conn.consent.withdraw"), ButtonKind::Secondary)
-                                .clicked()
-                        {
-                            hub.withdraw_consent(&id);
-                        }
-                        if c::button(ui, t("conn.delete"), ButtonKind::Ghost).clicked() {
-                            hub.delete_connection(&id);
-                        }
-                    });
-                }
-            }
-            c::separator(ui);
-            c::section(ui, t("conn.add"));
-            let mut kind = hub.new_kind;
-            c::select(ui, "new-kind", kind_label(kind), width, |ui| {
-                for k in [
-                    ProviderKind::Anthropic,
-                    ProviderKind::OpenAi,
-                    ProviderKind::Compatible,
-                    ProviderKind::ClaudeCode,
-                    ProviderKind::Codex,
-                ] {
-                    c::option(ui, &mut kind, k, kind_label(k));
-                }
-            });
-            hub.new_kind = kind;
-            ui.add_space(T.space.xs);
-            c::field(ui, &mut hub.new_label, t("conn.label.hint"), width);
-            if kind == ProviderKind::Compatible {
-                ui.add_space(T.space.xs);
-                c::field_mono(ui, &mut hub.new_url, t("conn.url.hint"), width);
-            }
-            ui.add_space(T.space.xs);
-            ui.horizontal(|ui| {
-                if c::button(ui, t("conn.add.action"), ButtonKind::Secondary).clicked() {
-                    hub.add_connection();
-                }
-                let detecting = hub.scanning();
-                if c::button_if(
-                    ui,
-                    !detecting,
-                    t("conn.detect"),
-                    ButtonKind::Ghost,
-                    t("conn.detecting"),
-                )
-                .clicked()
                 {
-                    hub.rescan();
+                    app.agents.rescan();
                 }
-            });
-            if let Some(scan) = &hub.scan {
-                for d in &scan.runtimes {
-                    let state = if d.usable() { State::Ok } else { State::Warn };
-                    c::status(ui, state, format!("{} {}", kind_label(d.kind), d.version));
-                }
-                for o in &scan.others {
-                    c::status(ui, State::Idle, format!("{} {}", o.name, o.version))
-                        .on_hover_text(reason_label(o.reason));
-                }
-                for s in &scan.servers {
-                    let n = s.models.len();
-                    c::status(
-                        ui,
-                        State::Ok,
-                        tf("scan.server", &[("name", &s.name), ("n", &n)]),
-                    );
-                }
-                for k in &scan.keys {
-                    c::status(ui, State::Idle, tf("scan.key", &[("var", &k.var)]));
-                }
+            },
+            |ui, app| {
+                ScrollArea::vertical()
+                    .id_salt("providers")
+                    .auto_shrink(false)
+                    .show(ui, |ui| provider_list(ui, app));
+            },
+        );
+    c::Panel::new("provider")
+        .title(t("panel.provider"))
+        .show(ui, regions.right, |ui| {
+            ScrollArea::vertical()
+                .id_salt("provider")
+                .auto_shrink(false)
+                .show(ui, |ui| provider_detail(ui, app));
+        });
+}
+
+/// One line of the list: state and name, then what it is, a star for the default, an
+/// action. `(row clicked, action clicked)`.
+fn entry(
+    ui: &mut Ui,
+    selected: bool,
+    state: State,
+    name: &str,
+    word: &str,
+    star: bool,
+    action: Option<&str>,
+) -> (bool, bool) {
+    let mut acted = false;
+    let row = c::row(ui, selected, name, |ui| {
+        c::status(ui, state, name);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(text) = action {
+                acted = c::button(ui, text, ButtonKind::Secondary).clicked();
+            }
+            c::meta(ui, word);
+            if star {
+                c::meta(ui, t("prov.star"));
             }
         });
+    });
+    (row.clicked() && !acted, acted)
+}
+
+/// The state of a connection in words.
+fn conn_state(app: &SurgeonApp, conn: &Connection) -> (State, String) {
+    let hub = &app.agents;
+    if hub.cfg.local_only && !conn.is_local() {
+        return (State::Idle, t("prov.blocked").into());
+    }
+    match (conn.ready(), conn.kind.is_cli()) {
+        (true, true) => (State::Ok, t("prov.ready").into()),
+        (true, false) => (State::Ok, tf("prov.models", &[("n", &conn.models.len())])),
+        (false, true) => (State::Idle, t("prov.to_test").into()),
+        (false, false) if conn.kind.needs_key() && hub.key_tail(&conn.id).is_none() => {
+            (State::Warn, t("prov.key.missing").into())
+        }
+        (false, false) => (State::Idle, t("prov.to_test").into()),
+    }
+}
+
+fn provider_list(ui: &mut Ui, app: &mut SurgeonApp) {
+    let mut local = app.desktop.settings.local_only;
+    if c::checkbox(ui, &mut local, t("policy.local_only"))
+        .on_hover_text(t("policy.local_only.tip"))
+        .changed()
+    {
+        app.set_local_only(local);
+    }
+    let Some(scan) = app.agents.scan.clone() else {
+        ui.add_space(T.space.s);
+        c::secondary(ui, t("scan.running"));
+        return;
+    };
+    let default = app.agents.cfg.default_connection.clone();
+    let selected = app.agents.selected.clone();
+    let conns = app.agents.cfg.connections.clone();
+    let is_selected = |c: &Connection| selected.as_deref() == Some(c.id.as_str());
+    let is_default = |c: &Connection| default.as_deref() == Some(c.id.as_str());
+    let mut pick = None;
+
+    // Agents: the CLI runtimes.
+    c::section(ui, t("prov.group.cli"));
+    for d in &scan.runtimes {
+        let conn = conns.iter().find(|c| c.kind == d.kind);
+        let name = format!("{} {}", d.kind.name(), short_version(&d.version));
+        let (state, word, action) = match (conn, d.usable()) {
+            (_, false) => (
+                State::Warn,
+                tf(
+                    "prov.missing_options",
+                    &[("options", &d.missing.join(", "))],
+                ),
+                None,
+            ),
+            (Some(c), true) => {
+                let (state, word) = conn_state(app, c);
+                let test = (!c.verified && !app.agents.cfg.local_only).then(|| t("prov.test"));
+                (state, word, test)
+            }
+            (None, true) => (State::Idle, t("prov.found").into(), Some(t("prov.connect"))),
+        };
+        let star = conn.is_some_and(is_default);
+        let sel = conn.is_some_and(is_selected);
+        let (row, acted) = entry(ui, sel, state, &name, &word, star, action);
+        match (conn, acted) {
+            (Some(c), true) => app.agents.check_cli(&c.id),
+            (None, true) => app.agents.connect_cli(d.kind),
+            _ => {}
+        }
+        if row {
+            pick = conn.map(|c| c.id.clone());
+        }
+    }
+    for c in conns
+        .iter()
+        .filter(|c| c.kind.is_cli() && !scan.runtimes.iter().any(|d| d.kind == c.kind))
+    {
+        let (row, _) = entry(
+            ui,
+            is_selected(c),
+            State::Warn,
+            &c.label,
+            t("prov.cli_gone"),
+            is_default(c),
+            None,
+        );
+        if row {
+            pick = Some(c.id.clone());
+        }
+    }
+    for o in &scan.others {
+        let name = format!("{} {}", o.name, short_version(&o.version));
+        c::row(ui, false, &name, |ui| {
+            c::status(ui, State::Idle, &name);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                c::meta(ui, t("prov.unsupported"));
+            });
+        })
+        .on_hover_text(reason_label(o.reason));
+    }
+    if scan.runtimes.is_empty() && scan.others.is_empty() {
+        c::secondary(ui, t("prov.no_cli"));
+    }
+
+    // Local servers.
+    c::section(ui, t("prov.group.local"));
+    for s in &scan.servers {
+        let conn = conns.iter().find(|c| c.base() == s.base);
+        let word = tf("prov.models", &[("n", &s.models.len())]);
+        let action = conn.is_none().then(|| t("prov.connect"));
+        let (row, acted) = entry(
+            ui,
+            conn.is_some_and(is_selected),
+            State::Ok,
+            s.name,
+            &word,
+            conn.is_some_and(is_default),
+            action,
+        );
+        if acted {
+            app.agents.connect_server(s);
+        }
+        if row {
+            pick = conn.map(|c| c.id.clone());
+        }
+    }
+    for c in conns.iter().filter(|c| {
+        !c.kind.is_cli() && c.is_local() && !scan.servers.iter().any(|s| s.base == c.base())
+    }) {
+        let (row, _) = entry(
+            ui,
+            is_selected(c),
+            State::Idle,
+            &c.label,
+            t("prov.stopped"),
+            is_default(c),
+            None,
+        );
+        if row {
+            pick = Some(c.id.clone());
+        }
+    }
+    if scan.servers.is_empty() {
+        c::secondary(ui, t("prov.no_server"));
+    }
+
+    // Cloud: the API connections, then the environment keys not used yet.
+    c::section(ui, t("prov.group.cloud"));
+    for c in conns.iter().filter(|c| !c.kind.is_cli() && !c.is_local()) {
+        let (state, word) = conn_state(app, c);
+        let (row, _) = entry(
+            ui,
+            is_selected(c),
+            state,
+            &c.label,
+            &word,
+            is_default(c),
+            None,
+        );
+        if row {
+            pick = Some(c.id.clone());
+        }
+    }
+    for key in &scan.keys {
+        let used = key.preset.is_some_and(|p| {
+            conns
+                .iter()
+                .any(|c| c.kind == p.kind() && c.base_url == p.base())
+        });
+        if used {
+            continue;
+        }
+        let name = preset_label(key.preset);
+        let found = tf("scan.key", &[("var", &key.var)]);
+        match key.preset {
+            Some(_) => {
+                let blocked = app.agents.cfg.local_only;
+                let action = (!blocked).then(|| t("prov.use"));
+                let (_, acted) = entry(ui, false, State::Idle, name, &found, false, action);
+                if acted {
+                    app.agents.use_env_key(key);
+                }
+            }
+            None => {
+                c::row(ui, false, key.var, |ui| {
+                    c::status(ui, State::Idle, key.var);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        c::meta(ui, t("prov.custom_only"));
+                    });
+                });
+            }
+        }
+    }
+    if let Some(id) = pick {
+        app.agents.selected = Some(id);
+        app.agents.key_input.clear();
+    }
+
+    c::section(ui, t("prov.add"));
+    let width = ui.available_width();
+    let hub = &mut app.agents;
+    let mut preset = hub.new_preset;
+    c::select(ui, "new-preset", preset_label(preset), width, |ui| {
+        for p in [
+            Some(Preset::Anthropic),
+            Some(Preset::OpenAi),
+            Some(Preset::OpenRouter),
+            None,
+        ] {
+            c::option(ui, &mut preset, p, preset_label(p));
+        }
+    });
+    hub.new_preset = preset;
+    ui.add_space(T.space.xs);
+    c::field(ui, &mut hub.new_label, t("conn.label.hint"), width);
+    if preset.is_none() {
+        ui.add_space(T.space.xs);
+        c::field_mono(ui, &mut hub.new_url, t("conn.url.hint"), width);
+    }
+    ui.add_space(T.space.xs);
+    if c::button(ui, t("conn.add.action"), ButtonKind::Secondary).clicked() {
+        hub.add_connection();
+    }
+}
+
+/// The connection picked: default, sign-in or key, models, prices, consent, removal.
+fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
+    let ctx = ui.ctx().clone();
+    let width = ui.available_width();
+    let local_only = app.agents.cfg.local_only;
+    let hub = &mut app.agents;
+    let Some(conn) = hub
+        .selected
+        .clone()
+        .and_then(|id| hub.cfg.connection(&id).cloned())
+    else {
+        c::empty(ui, t("prov.pick"), t("prov.pick.hint"));
+        message(ui, hub);
+        return;
+    };
+    let id = conn.id.clone();
+    c::strong(ui, conn.label.as_str());
+    c::meta(ui, conn.kind.name());
+    if !conn.kind.is_cli() {
+        c::mono_secondary(ui, conn.base());
+    }
+    ui.add_space(T.space.s);
+    if hub.cfg.default_connection.as_deref() == Some(id.as_str()) {
+        c::status(ui, State::Ok, t("prov.is_default"));
+    } else if c::button_if(
+        ui,
+        conn.ready(),
+        t("prov.make_default"),
+        ButtonKind::Secondary,
+        t("prov.make_default.why"),
+    )
+    .clicked()
+    {
+        hub.set_default(&id);
+    }
+
+    if conn.kind.is_cli() {
+        c::section(ui, t("prov.signin"));
+        let (state, word) = match conn.verified {
+            true => (State::Ok, t("prov.ready")),
+            false => (State::Idle, t("prov.to_test")),
+        };
+        c::status(ui, state, word);
+        let checking = hub.checking_cli(&id);
+        if c::button_if(
+            ui,
+            !checking && !local_only,
+            if checking {
+                t("conn.testing")
+            } else {
+                t("prov.test")
+            },
+            ButtonKind::Secondary,
+            t("prov.test.why"),
+        )
+        .on_hover_text(t("prov.test.cli_tip"))
+        .clicked()
+        {
+            hub.check_cli(&id);
+        }
+        if let Some((_, command)) = hub.login.clone().filter(|(k, _)| *k == id) {
+            ui.add_space(T.space.s);
+            c::secondary(ui, t("prov.login"));
+            ui.horizontal(|ui| {
+                c::mono(ui, command);
+                if c::button(ui, t("prov.copy"), ButtonKind::Ghost).clicked() {
+                    ctx.copy_text(command.to_owned());
+                }
+            });
+        }
+    } else {
+        if !conn.is_local() {
+            c::section(ui, t("prov.key"));
+            match hub.key_tail(&id) {
+                Some(tail) => {
+                    c::status(ui, State::Ok, tf("prov.key.stored", &[("tail", &tail)]));
+                    if c::button(ui, t("conn.key.revoke"), ButtonKind::Ghost).clicked() {
+                        hub.revoke_key(&id);
+                    }
+                }
+                None => {
+                    c::status(ui, State::Warn, t("prov.key.missing"));
+                }
+            }
+            c::field_secret(ui, &mut hub.key_input, t("conn.key.hint"), width);
+            ui.add_space(T.space.xs);
+            let trying = hub.trying_key(&id);
+            if c::button_if(
+                ui,
+                !trying && !hub.key_input.trim().is_empty(),
+                if trying {
+                    t("conn.testing")
+                } else {
+                    t("prov.key.try")
+                },
+                ButtonKind::Secondary,
+                t("prov.key.try.why"),
+            )
+            .clicked()
+            {
+                hub.try_typed_key(&id);
+            }
+        }
+        c::section(ui, t("prov.models.title"));
+        let testing = hub.testing(&id);
+        if c::button_if(
+            ui,
+            !testing,
+            if testing {
+                t("conn.testing")
+            } else {
+                t("prov.test")
+            },
+            ButtonKind::Secondary,
+            t("conn.testing"),
+        )
+        .clicked()
+        {
+            hub.test_models(&conn);
+        }
+        if !conn.models.is_empty() {
+            ui.add_space(T.space.xs);
+            let current = conn.inherited_model().unwrap_or_default().to_owned();
+            let mut picked = current.clone();
+            c::select(ui, "default-model", &current, width, |ui| {
+                for m in &conn.models {
+                    c::option(ui, &mut picked, m.clone(), m);
+                }
+            });
+            if picked != current {
+                hub.set_default_model(&id, &picked);
+            }
+        }
+        c::section(ui, t("conn.prices"));
+        hub.price_model = conn.inherited_model().unwrap_or_default().to_owned();
+        ui.horizontal(|ui| {
+            let w = (ui.available_width() - 2.0 * T.space.s) / 3.0;
+            c::field_mono(ui, &mut hub.price_in, t("conn.price.in"), w);
+            c::field_mono(ui, &mut hub.price_out, t("conn.price.out"), w);
+            if c::button(ui, t("conn.price.save"), ButtonKind::Ghost).clicked() {
+                hub.set_price(&id);
+            }
+        });
+    }
+    ui.add_space(T.space.m);
+    if hub.cfg.consent(&id).is_some() {
+        c::status(ui, State::Ok, t("conn.consented"));
+        if c::button(ui, t("conn.consent.withdraw"), ButtonKind::Ghost).clicked() {
+            hub.withdraw_consent(&id);
+        }
+    }
+    if c::button(ui, t("conn.delete"), ButtonKind::Ghost).clicked() {
+        hub.delete_connection(&id);
+    }
+    message(ui, hub);
+}
+
+fn message(ui: &mut Ui, hub: &crate::agent::view::Hub) {
+    if let Some((text, error)) = &hub.message {
+        ui.add_space(T.space.s);
+        c::message(ui, text, *error);
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_cli_version_keeps_its_number() {
+        assert_eq!(super::short_version("2.1.3 (Claude Code)"), "2.1.3");
+        assert_eq!(super::short_version("codex-cli 0.166.0"), "0.166.0");
+        assert_eq!(super::short_version("opencode v2.2.7"), "v2.2.7");
+        assert_eq!(super::short_version("weird"), "weird");
+    }
+
     #[test]
     fn log_stamps_read_as_a_utc_clock() {
         assert_eq!(super::clock("86399 INFO x"), "23:59:59 INFO x");

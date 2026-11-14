@@ -207,6 +207,10 @@ impl Desktop {
 
     /// One HTTPS request to the releases API; nothing is downloaded.
     pub fn check_update(&mut self, ctx: &egui::Context) {
+        if self.settings.local_only {
+            self.update = UpdateState::Failed(t("update.local_only").into());
+            return;
+        }
         if matches!(
             self.update,
             UpdateState::Checking(_) | UpdateState::Downloading(..)

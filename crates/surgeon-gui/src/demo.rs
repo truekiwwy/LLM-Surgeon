@@ -142,6 +142,7 @@ fn agents(root: &Path, project: &Path) -> Result<Hub, String> {
             base_url: "http://127.0.0.1:11434/v1".into(),
             models: vec!["qwen2.5:7b".into(), "llama3.1:8b".into()],
             default_model: None,
+            verified: false,
             prices: Default::default(),
         },
         Connection {
@@ -151,6 +152,7 @@ fn agents(root: &Path, project: &Path) -> Result<Hub, String> {
             base_url: String::new(),
             models: Vec::new(),
             default_model: None,
+            verified: false,
             prices: Default::default(),
         },
     ];

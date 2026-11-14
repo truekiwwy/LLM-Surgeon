@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use eframe::egui;
-use surgeon_gui::app::{SurgeonApp, Tab};
+use surgeon_gui::app::{Section, SurgeonApp, Tab};
 use surgeon_gui::cli::{self, Cli, Item};
 use surgeon_gui::desktop::Desktop;
 use surgeon_gui::instance::{self, Role};
@@ -190,7 +190,12 @@ fn absolute(paths: &[PathBuf]) -> Vec<PathBuf> {
 /// GPU at `--size` pixels and `--scale` pixels per point.
 fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
     let ctx = egui::Context::default();
-    let (tab, wizard) = match cli.screen.as_str() {
+    // `system:providers`: a tab and one of its parts.
+    let (name, part) = cli
+        .screen
+        .split_once(':')
+        .unwrap_or((cli.screen.as_str(), ""));
+    let (tab, wizard) = match name {
         "wizard" => (Tab::Atelier, true),
         name => (
             Tab::from_name(name).ok_or_else(|| {
@@ -198,6 +203,12 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
             })?,
             false,
         ),
+    };
+    let section = match part {
+        "" => None,
+        part => Some(Section::from_name(part).ok_or_else(|| {
+            format!("--screen system:{part} : machine, providers, updates ou journal")
+        })?),
     };
     let mut settings = Settings::load(&paths::settings_path()).unwrap_or_default();
     settings.language.get_or_insert_with(Lang::system);
@@ -219,6 +230,11 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
         demo::install(&ctx, &mut app)?;
     }
     app.tab = tab;
+    if let Some(section) = section {
+        app.system_section = section;
+        // One frame is rendered: the scan runs before it, not behind it.
+        app.agents.scan = Some(surgeon_gui::agent::detect::scan());
+    }
     // A capture shows the tab, not the first-run backend dialog over it.
     app.dialog.open = false;
     app.set_motion(&ctx, !cli.no_motion);
