@@ -9,14 +9,14 @@ use weight_surgeon::backend::config;
 
 use crate::install::{self, InstallError, Installed, Stage};
 use crate::net::{Fetcher, Policy};
-use crate::releases::{Plan, Target, Variant};
+use crate::releases::{Plan, Target};
 use crate::settings::Settings;
 
 /// The folders an action writes to; tests point them at a temp dir.
 #[derive(Debug, Clone)]
 pub struct Env {
     pub components: PathBuf,
-    /// The engine's user `config.toml` (where the trusted llama.cpp is recorded), `None` when
+    /// The engine's user `config.toml` (where mistral.rs is recorded), `None` when
     /// the environment disables it.
     pub config: Option<PathBuf>,
     pub settings: PathBuf,
@@ -42,12 +42,8 @@ pub struct EngineOutcome {
 }
 
 /// The release the wizard would download, for the consent screen. Network: one API call.
-pub fn plan_engine(
-    fetcher: &Fetcher,
-    api_url: &str,
-    variant: Variant,
-) -> Result<Plan, InstallError> {
-    install::fetch_plan(fetcher, api_url, variant, Target::current())
+pub fn plan_engine(fetcher: &Fetcher, api_url: &str) -> Result<Plan, InstallError> {
+    install::fetch_plan(fetcher, api_url, Target::current())
 }
 
 /// Installs `plan` (or finds it already installed and healthy), pins its hash when the
@@ -149,14 +145,13 @@ mod tests {
     fn the_engine_flow_is_idempotent_and_records_the_trust() {
         let dir = tempfile::tempdir().unwrap();
         let env = env(dir.path());
-        let name = "llama-b7-bin-win-vulkan-x64.zip";
-        let fake = FakeReleases::serve(name, archive(&[("llama-server.exe", b"MZ")]), true);
+        let name = "mistralrs-cpu-x86_64-pc-windows-msvc.zip";
+        let fake = FakeReleases::serve(name, archive(&[("mistralrs.exe", b"MZ")]), true);
         let fetcher = Fetcher::new(Policy::loopback());
         let target = Target {
-            os: "win",
-            arch: "x64",
+            triple: "x86_64-pc-windows-msvc",
         };
-        let plan = install::fetch_plan(&fetcher, &fake.api_url(), Variant::Vulkan, target).unwrap();
+        let plan = install::fetch_plan(&fetcher, &fake.api_url(), target).unwrap();
         let ok = |_: &Path| -> Result<String, String> { Ok("version: b7".into()) };
         let cancel = AtomicBool::new(false);
 
@@ -164,8 +159,8 @@ mod tests {
         assert!(!first.already_there && first.register_error.is_none());
         let saved = config::load_from(env.config.as_ref().unwrap()).unwrap();
         assert_eq!(
-            saved.llama_cpp_dir.as_deref(),
-            Some(first.installed.dir.as_path())
+            saved.mistralrs_bin.as_deref(),
+            Some(first.installed.server.as_path())
         );
         let before = (fake.archive_hits(), std::fs::read(&env.settings).unwrap());
 
@@ -185,14 +180,13 @@ mod tests {
     fn a_broken_install_is_repaired_by_the_same_call() {
         let dir = tempfile::tempdir().unwrap();
         let env = env(dir.path());
-        let name = "llama-b7-bin-win-cpu-x64.zip";
-        let fake = FakeReleases::serve(name, archive(&[("llama-server.exe", b"MZ")]), true);
+        let name = "mistralrs-cpu-x86_64-pc-windows-msvc.zip";
+        let fake = FakeReleases::serve(name, archive(&[("mistralrs.exe", b"MZ")]), true);
         let fetcher = Fetcher::new(Policy::loopback());
         let target = Target {
-            os: "win",
-            arch: "x64",
+            triple: "x86_64-pc-windows-msvc",
         };
-        let plan = install::fetch_plan(&fetcher, &fake.api_url(), Variant::Cpu, target).unwrap();
+        let plan = install::fetch_plan(&fetcher, &fake.api_url(), target).unwrap();
         let cancel = AtomicBool::new(false);
         let good = |_: &Path| -> Result<String, String> { Ok("version: b7".into()) };
         let first = ensure_engine(&fetcher, &plan, &env, &cancel, &good, |_| {}).unwrap();

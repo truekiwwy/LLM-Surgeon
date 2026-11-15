@@ -1,11 +1,13 @@
 //! The components every view is built from, and the only entry points of style: a view
-//! never names a color, a margin, a radius or a frame (`tests/ui_lint.rs`). Borders are one
-//! physical pixel on rectangles snapped to the pixel grid, at any `pixels_per_point`.
+//! never names a color, a margin, a radius or a frame (`tests/ui_lint.rs`). Outlines are one
+//! physical pixel on rectangles snapped to the pixel grid, at any `pixels_per_point`; controls
+//! are rounded by `radius`, cards and dialogs by `radius_card`.
 
 use eframe::egui::emath::GuiRounding as _;
 use eframe::egui::{
     self, Align, Align2, Color32, FontFamily, FontId, Id, Label, Layout, Painter, Pos2, Rangef,
-    Rect, Response, RichText, Sense, TextEdit, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType,
+    Rect, Response, RichText, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, Vec2, WidgetInfo,
+    WidgetType,
 };
 
 use super::icons::{self, Icon, State};
@@ -93,9 +95,19 @@ pub fn vline(painter: &Painter, x: f32, y: impl Into<Rangef>, color: Color32) {
     painter.rect_filled(r, 0.0, color);
 }
 
+/// A one-pixel rounded outline inside `rect`.
+pub fn outline(painter: &Painter, rect: Rect, radius: u8, color: Color32) {
+    painter.rect_stroke(
+        snap(painter, rect),
+        radius,
+        Stroke::new(px(painter), color),
+        StrokeKind::Inside,
+    );
+}
+
 /// The keyboard focus ring: one pixel of accent inside `rect`.
 pub fn focus_ring(painter: &Painter, rect: Rect) {
-    border(painter, rect, T.color.accent);
+    outline(painter, rect, T.radius, T.color.accent);
 }
 
 // ------------------------------------------------------------------ text
@@ -117,9 +129,19 @@ pub fn font_strong() -> FontId {
     FontId::new(T.text.body, theme::medium())
 }
 
-/// Panel titles: the cartouche of a drawing.
+/// Panel titles.
 pub fn font_title() -> FontId {
     FontId::new(T.text.title, theme::medium())
+}
+
+/// The question that opens a page.
+pub fn font_heading() -> FontId {
+    FontId::new(T.text.heading, theme::bold())
+}
+
+/// The lead under a heading.
+pub fn font_lead() -> FontId {
+    FontId::new(T.text.title, FontFamily::Proportional)
 }
 
 /// Tabs of the title bar.
@@ -172,6 +194,13 @@ pub fn mono_secondary(ui: &mut Ui, text: impl Into<String>) -> Response {
 /// Tabular text over several lines (logs, JSON parameters).
 pub fn mono_wrapped(ui: &mut Ui, text: impl Into<String>, color: Color32) -> Response {
     ui.add(Label::new(rich(text, font_mono(), color)).wrap())
+}
+
+/// The question that opens a page, then the sentence that says what to do.
+pub fn heading(ui: &mut Ui, title: &str, lead: &str) {
+    ui.add(Label::new(rich(title, font_heading(), T.color.text)).wrap());
+    ui.add_space(T.space.s);
+    ui.add(Label::new(rich(lead, font_lead(), T.color.text_secondary)).wrap());
 }
 
 /// A sub-heading inside a panel: closer to its own content than to what is above.
@@ -261,12 +290,14 @@ pub fn region<R>(ui: &mut Ui, rect: Rect, salt: &str, body: impl FnOnce(&mut Ui)
     body(&mut child)
 }
 
-/// A panel: one surface, one border, an optional header. Panels are never nested.
+/// A zone of the window: one fill, an optional header. The shell draws the lines between
+/// zones; panels are never nested.
 pub struct Panel<'a> {
     name: &'static str,
     title: Option<&'a str>,
     flush: bool,
-    fill: Color32,
+    fill: Option<Color32>,
+    divided: bool,
 }
 
 impl<'a> Panel<'a> {
@@ -276,7 +307,8 @@ impl<'a> Panel<'a> {
             name,
             title: None,
             flush: false,
-            fill: T.color.surface,
+            fill: Some(T.color.window),
+            divided: false,
         }
     }
 
@@ -291,10 +323,28 @@ impl<'a> Panel<'a> {
         self
     }
 
-    /// The darker canvas ground, for 3D and plots.
+    /// The ground of the center of the window.
+    pub fn center(mut self) -> Self {
+        self.fill = Some(T.color.canvas);
+        self
+    }
+
+    /// The 3D ground, content to the edges.
     pub fn canvas(mut self) -> Self {
-        self.fill = T.color.canvas;
+        self.fill = Some(T.color.canvas);
         self.flush = true;
+        self
+    }
+
+    /// No fill of its own: a zone inside a dialog.
+    pub fn bare(mut self) -> Self {
+        self.fill = None;
+        self
+    }
+
+    /// A line on its top edge: a panel stacked under another.
+    pub fn divided(mut self) -> Self {
+        self.divided = true;
         self
     }
 
@@ -313,27 +363,24 @@ impl<'a> Panel<'a> {
     ) -> R {
         let painter = ui.painter_at(rect);
         let rect = snap(&painter, rect);
-        painter.rect_filled(rect, 0.0, self.fill);
-        border(&painter, rect, T.color.border);
+        if let Some(fill) = self.fill {
+            painter.rect_filled(rect, 0.0, fill);
+        }
+        if self.divided {
+            hline(&painter, rect.x_range(), rect.top(), T.color.separator);
+        }
         record(ui.ctx(), self.name, rect);
-        let mut inner = rect.shrink(px(&painter));
+        let mut inner = rect;
         if let Some(title) = self.title {
             let header = Rect::from_min_size(inner.min, Vec2::new(inner.width(), T.size.header));
-            painter.rect_filled(header, 0.0, T.color.surface);
             painter.text(
-                Pos2::new(header.left() + T.space.m, header.center().y),
+                Pos2::new(header.left() + T.space.l, header.center().y),
                 Align2::LEFT_CENTER,
-                title.to_uppercase(),
+                title,
                 font_title(),
                 T.color.text,
             );
-            hline(
-                &painter,
-                header.x_range(),
-                header.bottom(),
-                T.color.separator,
-            );
-            let bar = header.shrink2(Vec2::new(T.space.s, 0.0));
+            let bar = header.shrink2(Vec2::new(T.space.m, 0.0));
             let mut child = ui.new_child(
                 UiBuilder::new()
                     .max_rect(bar)
@@ -341,11 +388,17 @@ impl<'a> Panel<'a> {
                     .id_salt((self.name, "header")),
             );
             actions(&mut child, state);
-            inner.min.y = header.bottom() + px(&painter);
+            inner.min.y = header.bottom();
         }
-        let content = match self.flush {
-            true => inner,
-            false => inner.shrink(T.space.m),
+        let content = match (self.flush, self.title.is_some()) {
+            (true, _) => inner,
+            // Under a header, the content starts right below it.
+            (false, true) => {
+                let mut r = inner.shrink(T.space.l);
+                r.min.y = inner.min.y;
+                r
+            }
+            (false, false) => inner.shrink(T.space.l),
         };
         let mut child = ui.new_child(
             UiBuilder::new()
@@ -373,19 +426,28 @@ pub fn drop_hint(ctx: &egui::Context, text: &str) {
     );
 }
 
-/// The frame of floating surfaces (palette, menus): surface, one border, no shadow.
+/// The frame of floating surfaces (palette, menus, dialogs): surface, one border, no shadow.
 pub fn popup_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(T.color.surface)
         .stroke(egui::Stroke::new(1.0, T.color.border))
-        .corner_radius(T.radius)
+        .corner_radius(T.radius_card)
         .inner_margin(T.space.s)
 }
 
-/// A sunken block inside a panel (the wizard's cards): canvas ground, one border.
+/// A card: a raised block of a page (the new-session form, a wizard step).
+pub fn card_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(T.color.surface)
+        .stroke(egui::Stroke::new(1.0, T.color.border))
+        .corner_radius(T.radius_card)
+        .inner_margin(T.space.xl)
+}
+
+/// A block inside a card or the thread (an approval, a tool result): one step lighter.
 pub fn inset_frame() -> egui::Frame {
     egui::Frame::new()
-        .fill(T.color.canvas)
+        .fill(T.color.surface_hover)
         .stroke(egui::Stroke::new(1.0, T.color.border))
         .corner_radius(T.radius)
         .inner_margin(T.space.m)
@@ -402,13 +464,7 @@ pub fn row_background(ui: &Ui, rect: Rect, response: &Response, selected: bool) 
         (false, false) => None,
     };
     if let Some(fill) = fill {
-        painter.rect_filled(snap(painter, rect), 0.0, fill);
-    }
-    if selected {
-        // The one accent mark of the list.
-        let w = 2.0 * px(painter);
-        let mark = Rect::from_min_size(rect.min, Vec2::new(w, rect.height()));
-        painter.rect_filled(snap(painter, mark), 0.0, T.color.accent);
+        painter.rect_filled(snap(painter, rect), T.radius, fill);
     }
     if response.has_focus() {
         focus_ring(painter, rect);
@@ -491,7 +547,7 @@ fn button_at(ui: &mut Ui, text: &str, kind: ButtonKind, width: Option<f32>) -> R
     let rect = snap(painter, rect);
     let (hover, down) = (response.hovered(), response.is_pointer_button_down_on());
     let c = &T.color;
-    let (fill, outline, ink) = match (kind, enabled) {
+    let (fill, edge, ink) = match (kind, enabled) {
         (_, false) => (
             (kind != ButtonKind::Ghost).then_some(c.surface_hover),
             None,
@@ -524,8 +580,8 @@ fn button_at(ui: &mut Ui, text: &str, kind: ButtonKind, width: Option<f32>) -> R
     if let Some(fill) = fill {
         painter.rect_filled(rect, T.radius, fill);
     }
-    if let Some(outline) = outline {
-        border(painter, rect, outline);
+    if let Some(edge) = edge {
+        outline(painter, rect, T.radius, edge);
     }
     if response.has_focus() {
         focus_ring(painter, rect);
@@ -591,107 +647,125 @@ fn reading_order(ui: &Ui, n: usize) -> Vec<usize> {
     }
 }
 
-/// A segmented control: the active segment carries the accent underline.
+/// The rounded track of a segmented control holding options of `widths` and `height`;
+/// returns the rectangle of each option, left to right.
+fn track(ui: &mut Ui, widths: &[f32], height: f32) -> Vec<Rect> {
+    let pad = T.space.xs - 1.0;
+    let size = Vec2::new(widths.iter().sum::<f32>() + 2.0 * pad, height);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(snap(painter, rect), T.radius + 2, T.color.surface_hover);
+    let mut x = rect.left() + pad;
+    widths
+        .iter()
+        .map(|w| {
+            let r = Rect::from_min_size(
+                Pos2::new(x, rect.top() + pad),
+                Vec2::new(*w, height - 2.0 * pad),
+            );
+            x += w;
+            r
+        })
+        .collect()
+}
+
+/// One option of a track: the active one is raised, the others read secondary.
+fn track_option(
+    ui: &mut Ui,
+    rect: Rect,
+    text: &str,
+    font: FontId,
+    active: bool,
+    tooltip: &str,
+) -> Response {
+    let response = ui.interact(rect, ui.id().with(("segment", text)), Sense::click());
+    response.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, active, text));
+    let painter = ui.painter();
+    let rect = snap(painter, rect);
+    if active {
+        painter.rect_filled(rect, T.radius, T.color.surface);
+        outline(painter, rect, T.radius, T.color.border);
+    }
+    if response.has_focus() {
+        focus_ring(painter, rect);
+    }
+    let ink = match (active, response.hovered()) {
+        (true, _) | (false, true) => T.color.text,
+        (false, false) => T.color.text_secondary,
+    };
+    painter.text(rect.center(), Align2::CENTER_CENTER, text, font, ink);
+    response.on_hover_text(tooltip)
+}
+
+/// Options laid out on a track; `true` when one was just picked.
+fn choice<V: PartialEq + Copy>(
+    ui: &mut Ui,
+    value: &mut V,
+    options: &[(V, &str, &str)],
+    font: FontId,
+    pad: f32,
+    height: f32,
+) -> bool {
+    let widths: Vec<f32> = options
+        .iter()
+        .map(|(_, text, _)| {
+            let galley =
+                ui.painter()
+                    .layout_no_wrap((*text).to_owned(), font.clone(), T.color.text);
+            galley.size().x + 2.0 * pad
+        })
+        .collect();
+    let mut changed = false;
+    for ((option, text, tooltip), rect) in options.iter().zip(track(ui, &widths, height)) {
+        let active = *value == *option;
+        if track_option(ui, rect, text, font.clone(), active, tooltip).clicked() && !active {
+            *value = *option;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// A segmented control: a rounded track whose active option is raised.
 pub fn segmented<V: PartialEq + Copy>(
     ui: &mut Ui,
     value: &mut V,
     segments: &[Segment<'_, V>],
     font: FontId,
 ) -> bool {
-    let mut changed = false;
-    let order = reading_order(ui, segments.len());
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        for segment in order.into_iter().map(|k| &segments[k]) {
-            let active = *value == segment.value;
-            let galley =
-                ui.painter()
-                    .layout_no_wrap(segment.label.to_owned(), font.clone(), T.color.text);
-            let size = Vec2::new(galley.size().x + 2.0 * T.space.m, T.size.control);
-            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-            response.widget_info(|| {
-                WidgetInfo::selected(WidgetType::RadioButton, true, active, segment.label)
-            });
-            let painter = ui.painter();
-            let rect = snap(painter, rect);
-            let fill = match (active, response.hovered()) {
-                (true, _) => T.color.selection,
-                (false, true) => T.color.surface_hover,
-                (false, false) => T.color.surface,
-            };
-            painter.rect_filled(rect, 0.0, fill);
-            border(painter, rect, T.color.border);
-            if active {
-                let h = 2.0 * px(painter);
-                let line = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - h), rect.max);
-                painter.rect_filled(line, 0.0, T.color.accent);
-            }
-            if response.has_focus() {
-                focus_ring(painter, rect);
-            }
-            let ink = if active {
-                T.color.text
-            } else {
-                T.color.text_secondary
-            };
-            let pos = rect.center() - galley.size() / 2.0;
-            painter.galley_with_override_text_color(pos, galley, ink);
-            if response.on_hover_text(segment.tooltip).clicked() && !active {
-                *value = segment.value;
-                changed = true;
-            }
-        }
-    });
-    changed
+    let options: Vec<(V, &str, &str)> = reading_order(ui, segments.len())
+        .into_iter()
+        .map(|k| (segments[k].value, segments[k].label, segments[k].tooltip))
+        .collect();
+    choice(
+        ui,
+        value,
+        &options,
+        font,
+        T.space.l,
+        T.size.control + T.space.xs,
+    )
 }
 
-/// A small segmented choice of short labels (the language of the status bar).
+/// A small segmented choice of short labels (a language).
 pub fn segmented_small<V: PartialEq + Copy>(
     ui: &mut Ui,
     value: &mut V,
     options: &[(V, &str)],
     tooltip: &str,
 ) -> bool {
-    let mut changed = false;
-    let order = reading_order(ui, options.len());
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        for (option, text) in order.into_iter().map(|k| &options[k]) {
-            let active = *value == *option;
-            let galley = ui
-                .painter()
-                .layout_no_wrap((*text).to_owned(), font_meta(), T.color.text);
-            let size = Vec2::new(galley.size().x + 2.0 * T.space.s, T.size.row - T.space.s);
-            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-            response
-                .widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, active, *text));
-            let painter = ui.painter();
-            let rect = snap(painter, rect);
-            if active {
-                painter.rect_filled(rect, 0.0, T.color.selection);
-            } else if response.hovered() {
-                painter.rect_filled(rect, 0.0, T.color.surface_hover);
-            }
-            if response.has_focus() {
-                focus_ring(painter, rect);
-            }
-            let ink = if active {
-                T.color.text
-            } else {
-                T.color.text_secondary
-            };
-            painter.galley_with_override_text_color(
-                rect.center() - galley.size() / 2.0,
-                galley,
-                ink,
-            );
-            if response.on_hover_text(tooltip).clicked() && !active {
-                *value = *option;
-                changed = true;
-            }
-        }
-    });
-    changed
+    let options: Vec<(V, &str, &str)> = reading_order(ui, options.len())
+        .into_iter()
+        .map(|k| (options[k].0, options[k].1, tooltip))
+        .collect();
+    choice(
+        ui,
+        value,
+        &options,
+        font_meta(),
+        T.space.s,
+        T.size.row - T.space.xs,
+    )
 }
 
 /// Small secondary text that acts (opens a dialog): underlined on hover.
@@ -774,6 +848,14 @@ pub fn select<R>(
         .selected_text(rich(current, font_body(), T.color.text))
         .width(width)
         .truncate()
+        .icon(|ui, rect, _, _| {
+            icons::paint(
+                ui.painter(),
+                rect,
+                Icon::ChevronDown,
+                T.color.text_secondary,
+            )
+        })
         .show_ui(ui, body)
         .inner
 }
@@ -794,13 +876,13 @@ fn field_frame(ui: &mut Ui, size: Vec2) -> Rect {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter();
     let rect = snap(painter, rect);
-    painter.rect_filled(rect, T.radius, T.color.canvas);
-    border(painter, rect, T.color.border);
+    painter.rect_filled(rect, T.radius, T.color.surface);
+    outline(painter, rect, T.radius, T.color.border);
     rect
 }
 
 fn edit(ui: &mut Ui, rect: Rect, edit: TextEdit<'_>) -> Response {
-    let inner = rect.shrink2(Vec2::new(T.space.s, 0.0));
+    let inner = rect.shrink2(Vec2::new(T.space.m, 0.0));
     let response = ui.place(
         inner,
         edit.frame(egui::Frame::NONE)
@@ -860,21 +942,44 @@ pub fn field_secret(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> R
 pub fn field_multiline(ui: &mut Ui, text: &mut String, hint: &str, rows: usize) -> Response {
     let height = rows as f32 * T.size.row;
     let rect = field_frame(ui, Vec2::new(ui.available_width(), height));
-    let inner = rect.shrink2(Vec2::new(T.space.s, T.space.xs));
-    let response = ui.place(
-        inner,
-        TextEdit::multiline(text)
-            .font(font_body())
-            .hint_text(rich(hint, font_body(), T.color.text_disabled))
-            .frame(egui::Frame::NONE)
-            .margin(egui::Margin::ZERO)
-            .desired_width(inner.width())
-            .desired_rows(rows),
-    );
+    record(ui.ctx(), "multiline", rect);
+    let inner = rect.shrink2(Vec2::new(T.space.m, T.space.s));
+    let edit = TextEdit::multiline(text)
+        .font(font_body())
+        .hint_text(rich(hint, font_body(), T.color.text_disabled))
+        .frame(egui::Frame::NONE)
+        .margin(egui::Margin::ZERO)
+        .desired_rows(rows);
+    let response = scrolled(ui, inner, ("multiline", hint), edit);
     if response.has_focus() {
         focus_ring(ui.painter(), rect);
     }
     response
+}
+
+/// A multi-line edit held in `rect`: past its height the text scrolls inside it, and never
+/// draws over what comes below.
+fn scrolled(
+    ui: &mut Ui,
+    rect: Rect,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    edit: TextEdit<'_>,
+) -> Response {
+    // A child that allocates nothing: the frame already holds the space in the parent.
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    egui::ScrollArea::vertical()
+        .id_salt(salt)
+        .max_height(rect.height())
+        .auto_shrink(false)
+        .show(&mut child, |ui| {
+            let width = ui.available_width();
+            ui.add(edit.desired_width(width))
+        })
+        .inner
 }
 
 /// The search field of a list: an icon, the query, full width.
@@ -914,11 +1019,11 @@ pub fn progress(ui: &mut Ui, fraction: f32, over: bool) {
         painter,
         Rect::from_center_size(rect.center(), Vec2::new(rect.width(), T.space.xs)),
     );
-    painter.rect_filled(track, 0.0, T.color.separator);
+    painter.rect_filled(track, T.radius, T.color.surface_hover);
     let mut fill = track;
     fill.set_width(track.width() * fraction.clamp(0.0, 1.0));
     let color = if over { T.color.error } else { T.color.data[4] };
-    painter.rect_filled(snap(painter, fill), 0.0, color);
+    painter.rect_filled(snap(painter, fill), T.radius, color);
 }
 
 /// A cursor over `0..=last` on a one-pixel track (replay, stream states). Arrow keys move
@@ -1139,4 +1244,289 @@ impl Table<'_> {
         }
         response
     }
+}
+
+// ------------------------------------------------------------------ page parts
+
+/// A choice of a page drawn as a tile: an icon and its label. The picked one is filled with
+/// the selection, outlined with the accent and checked.
+pub fn tile(ui: &mut Ui, icon: Icon, text: &str, selected: bool, width: f32) -> Response {
+    let size = Vec2::new(width, T.size.cta + T.space.l);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    response.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, selected, text));
+    let painter = ui.painter();
+    let rect = snap(painter, rect);
+    let (fill, edge, ink) = match (selected, response.hovered()) {
+        (true, _) => (T.color.selection, T.color.accent, T.color.accent),
+        (false, true) => (T.color.surface_hover, T.color.border, T.color.text),
+        (false, false) => (T.color.surface, T.color.border, T.color.text_secondary),
+    };
+    painter.rect_filled(rect, T.radius, fill);
+    outline(painter, rect, T.radius, edge);
+    let glyph = Rect::from_center_size(
+        Pos2::new(rect.left() + T.space.l + T.size.icon / 2.0, rect.center().y),
+        Vec2::splat(T.size.icon),
+    );
+    icons::paint(painter, glyph, icon, ink);
+    let check = (T.size.icon + T.space.s) * f32::from(u8::from(selected));
+    let left = glyph.right() + T.space.m;
+    let wrap = (rect.right() - T.space.l - check - left).max(T.size.icon);
+    let galley = painter.layout(text.to_owned(), font_strong(), T.color.text, wrap);
+    let pos = Pos2::new(left, rect.center().y - galley.size().y / 2.0);
+    painter.galley(pos, galley, T.color.text);
+    if selected {
+        let mark = Rect::from_center_size(
+            Pos2::new(
+                rect.right() - T.space.l - T.size.icon / 2.0,
+                rect.center().y,
+            ),
+            Vec2::splat(T.size.icon),
+        );
+        icons::paint(painter, mark, Icon::Check, T.color.accent);
+    }
+    if response.has_focus() {
+        focus_ring(painter, rect.expand(2.0));
+    }
+    response
+}
+
+/// A suggestion the user can take: a small outlined label.
+pub fn chip(ui: &mut Ui, text: &str) -> Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font_body(), T.color.text);
+    let size = Vec2::new(galley.size().x + 2.0 * T.space.m, T.size.control);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, text));
+    let painter = ui.painter();
+    let rect = snap(painter, rect);
+    let (fill, ink) = match response.hovered() {
+        true => (T.color.surface_hover, T.color.text),
+        false => (T.color.surface, T.color.text_secondary),
+    };
+    painter.rect_filled(rect, T.radius, fill);
+    outline(painter, rect, T.radius, T.color.border);
+    if response.has_focus() {
+        focus_ring(painter, rect);
+    }
+    painter.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, ink);
+    response
+}
+
+/// A numbered step of a form: the number in a ring, then its title.
+pub fn step(ui: &mut Ui, number: usize, title: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = T.space.m;
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(T.size.control), Sense::hover());
+        let painter = ui.painter();
+        let radius = T.size.control / 2.0 - 2.0;
+        painter.circle_filled(rect.center(), radius, T.color.surface_hover);
+        painter.circle_stroke(
+            rect.center(),
+            radius,
+            Stroke::new(px(painter), T.color.border),
+        );
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            number.to_string(),
+            font_body(),
+            T.color.text,
+        );
+        ui.add(Label::new(rich(title, font_brand(), T.color.text)).truncate());
+    });
+}
+
+/// A labeled on/off switch in an outlined pill; `true` when it was just flipped.
+pub fn switch(ui: &mut Ui, icon: Icon, text: &str, on: &mut bool, tooltip: &str) -> bool {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font_body(), T.color.text);
+    let knob = Vec2::new(T.size.control - T.space.xs, T.space.l);
+    let pad = T.space.m;
+    let width = pad + T.size.icon + T.space.s + galley.size().x + T.space.m + knob.x + pad;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, T.size.control), Sense::click());
+    response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, *on, text));
+    let flipped = response.clicked();
+    if flipped {
+        *on = !*on;
+    }
+    let painter = ui.painter();
+    let rect = snap(painter, rect);
+    if response.hovered() {
+        painter.rect_filled(rect, T.radius, T.color.surface_hover);
+    }
+    outline(painter, rect, T.radius, T.color.border);
+    let glyph = Rect::from_min_size(
+        Pos2::new(rect.left() + pad, rect.center().y - T.size.icon / 2.0),
+        Vec2::splat(T.size.icon),
+    );
+    let mark = if *on {
+        T.color.ok
+    } else {
+        T.color.text_secondary
+    };
+    icons::paint(painter, glyph, icon, mark);
+    let text_pos = Pos2::new(
+        glyph.right() + T.space.s,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    painter.galley(text_pos, galley, T.color.text);
+    let track = Rect::from_min_size(
+        Pos2::new(rect.right() - pad - knob.x, rect.center().y - knob.y / 2.0),
+        knob,
+    );
+    let radius = knob.y / 2.0;
+    if *on {
+        painter.rect_filled(track, radius, T.color.accent);
+    } else {
+        painter.rect_filled(track, radius, T.color.surface_hover);
+        outline(painter, track, radius as u8, T.color.border);
+    }
+    let x = match *on {
+        true => track.right() - radius,
+        false => track.left() + radius,
+    };
+    painter.circle_filled(Pos2::new(x, track.center().y), radius - 3.0, T.color.text);
+    if response.has_focus() {
+        focus_ring(painter, rect);
+    }
+    response.on_hover_text(tooltip);
+    flipped
+}
+
+/// An entry of the activity bar in `rect`; `badge` counts what waits there.
+pub fn activity(
+    ui: &mut Ui,
+    rect: Rect,
+    icon: Icon,
+    active: bool,
+    tooltip: &str,
+    badge: usize,
+) -> Response {
+    let response = ui.interact(rect, ui.id().with(("activity", tooltip)), Sense::click());
+    response.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, active, tooltip));
+    let painter = ui.painter();
+    let cell = snap(
+        painter,
+        Rect::from_center_size(rect.center(), Vec2::splat(T.size.cta)),
+    );
+    let ink = match (active, response.hovered()) {
+        (true, _) => {
+            painter.rect_filled(cell, T.radius, T.color.selection);
+            T.color.accent
+        }
+        (false, true) => {
+            painter.rect_filled(cell, T.radius, T.color.surface_hover);
+            T.color.text
+        }
+        (false, false) => T.color.text_secondary,
+    };
+    icons::paint(painter, cell, icon, ink);
+    if badge > 0 {
+        let center = Pos2::new(cell.right() - T.space.s, cell.top() + T.space.s);
+        painter.circle_filled(center, T.space.s, T.color.warn);
+        painter.text(
+            center,
+            Align2::CENTER_CENTER,
+            badge.min(9).to_string(),
+            font_meta(),
+            T.color.on_action,
+        );
+    }
+    if response.has_focus() {
+        focus_ring(painter, cell);
+    }
+    response.on_hover_text(tooltip)
+}
+
+/// The agent's message field: a rounded card with the text, the keys hint and the send
+/// button. `true` when the user sends while `ready` (Enter or the button; Shift+Enter is a
+/// new line).
+pub fn composer(
+    ui: &mut Ui,
+    text: &mut String,
+    hint: &str,
+    keys: &str,
+    ready: bool,
+    send_tip: &str,
+) -> bool {
+    let rows = 3;
+    let height = rows as f32 * T.size.row + T.size.control + T.space.m;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    let painter = ui.painter();
+    let rect = snap(painter, rect);
+    painter.rect_filled(rect, T.radius_card, T.color.surface);
+    let id = ui.id().with("composer");
+    let focused = ui.memory(|m| m.has_focus(id));
+    let edge = if focused {
+        T.color.accent
+    } else {
+        T.color.border
+    };
+    outline(painter, rect, T.radius_card, edge);
+    // Taken before the field sees it: Enter sends, Shift+Enter stays a new line.
+    let enter = focused
+        && ui.input_mut(|i| {
+            !i.modifiers.shift && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+        });
+    let inner = rect.shrink2(Vec2::new(T.space.l, T.space.m));
+    let field = Rect::from_min_max(
+        inner.min,
+        Pos2::new(inner.right(), inner.bottom() - T.size.control),
+    );
+    let edit = TextEdit::multiline(text)
+        .id(id)
+        .font(font_body())
+        .hint_text(rich(hint, font_body(), T.color.text_disabled))
+        .frame(egui::Frame::NONE)
+        .margin(egui::Margin::ZERO)
+        .desired_rows(rows);
+    scrolled(ui, field, id.with("scroll"), edit);
+    let bar = Rect::from_min_max(Pos2::new(inner.left(), field.bottom()), inner.max);
+    ui.painter().text(
+        Pos2::new(bar.left(), bar.center().y),
+        Align2::LEFT_CENTER,
+        keys,
+        font_meta(),
+        T.color.text_disabled,
+    );
+    let send = Rect::from_min_size(
+        Pos2::new(bar.right() - T.size.control, bar.top()),
+        Vec2::splat(T.size.control),
+    );
+    let clicked = ui
+        .scope_builder(UiBuilder::new().max_rect(send), |ui| {
+            ui.add_enabled_ui(ready, |ui| {
+                let response = ui.interact(send, id.with("send"), Sense::click());
+                response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ready, send_tip));
+                let painter = ui.painter();
+                let (fill, ink) = match (ready, response.hovered()) {
+                    (true, true) => (T.color.action_hover, T.color.on_action),
+                    (true, false) => (T.color.action, T.color.on_action),
+                    (false, _) => (T.color.surface_hover, T.color.text_disabled),
+                };
+                painter.rect_filled(snap(painter, send), T.radius, fill);
+                icons::paint(painter, send, Icon::Send, ink);
+                response.on_hover_text(send_tip).clicked()
+            })
+            .inner
+        })
+        .inner;
+    ready && (clicked || enter)
+}
+
+/// A message of the user in the thread: right-aligned, on a raised bubble.
+pub fn bubble(ui: &mut Ui, text: &str) {
+    let max = (ui.available_width() * 0.8).max(T.size.left);
+    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+        egui::Frame::new()
+            .fill(T.color.surface_hover)
+            .corner_radius(T.radius_card)
+            .inner_margin(egui::Margin::symmetric(T.space.l as i8, T.space.m as i8))
+            .show(ui, |ui| {
+                ui.set_max_width(max);
+                ui.add(Label::new(rich(text, font_body(), T.color.text)).wrap());
+            });
+    });
 }

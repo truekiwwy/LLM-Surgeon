@@ -86,7 +86,7 @@ impl Desktop {
     pub fn detached(inbox: Option<Inbox>, settings: Settings, env: Env) -> Self {
         Self {
             wizard: None,
-            setup: Setup::new(None),
+            setup: Setup::default(),
             system: None,
             system_task: None,
             update: UpdateState::Idle,
@@ -139,13 +139,14 @@ impl Desktop {
     /// workspace. `force` reinstalls.
     pub fn open_fix(&mut self, fix: Fix, force: bool) {
         let (step, pick) = match fix {
-            Fix::LlamaCpp => (
+            Fix::MistralRs => (
                 Step::Components,
                 Pick {
                     engine: true,
                     sample: false,
                 },
             ),
+            Fix::Hipfire => (Step::Components, Pick::default()),
             Fix::SampleModel => (
                 Step::Components,
                 Pick {
@@ -173,7 +174,7 @@ impl Desktop {
 
     /// Capture helper: the wizard on `step` with a given machine report.
     pub fn capture_wizard(&mut self, system: SystemReport, step: Step) {
-        self.setup = Setup::new(Some(&system));
+        self.setup = Setup::default();
         self.system = Some(system);
         let mut wizard = Wizard::new(&self.settings);
         wizard.step = step;
@@ -209,7 +210,6 @@ impl Desktop {
             &self.env.components,
             backend,
             self.settings.workspace.as_deref(),
-            self.system.as_ref(),
             latest,
             uses,
             self.lang(),
@@ -274,10 +274,6 @@ impl Desktop {
 
     fn poll(&mut self) {
         if let Some(system) = self.system_task.as_ref().and_then(Task::poll) {
-            // The build the machine supports, until the user picks one or a plan is shown.
-            if self.setup.plan.is_none() && !self.setup.fetching_plan() {
-                self.setup.variant = setup::default_variant(Some(&system));
-            }
             self.system = Some(system);
             self.system_task = None;
         }

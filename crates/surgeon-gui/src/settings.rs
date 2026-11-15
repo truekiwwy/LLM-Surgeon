@@ -39,8 +39,9 @@ impl Lang {
     }
 }
 
-/// The depth of the Atelier: `[SCALPING]` the guided surgery (required fields and a few key
-/// settings), `[ADVANCE]` every field, fine selectors and the cards and patch editor.
+/// The two kinds of agent session: `Scalping`, the user names a precise problem and the agent
+/// goes straight to it; `Advance`, the agent scans the whole model and finds the problems.
+/// Kept as the kind the new-session form offers first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
@@ -69,6 +70,8 @@ pub struct Settings {
     pub mode: Mode,
     /// No request leaves the machine: no remote AI, no CLI runtime, no download.
     pub local_only: bool,
+    /// The inference backend follows the hardware (`backend_choice`) until one is saved by hand.
+    pub backend_auto: bool,
 }
 
 impl Settings {

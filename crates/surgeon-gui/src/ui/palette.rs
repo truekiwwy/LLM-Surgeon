@@ -7,7 +7,7 @@ use super::components as c;
 use super::i18n::{t, tf};
 use super::shell::tab_label;
 use super::theme::TOKENS as T;
-use crate::app::{Bench, Mode, SurgeonApp, Tab};
+use crate::app::{Mode, Section, SurgeonApp, Tab};
 use crate::settings::Lang;
 
 /// On the 8-point grid, like every layout dimension.
@@ -33,9 +33,10 @@ impl Palette {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Tab(Tab),
-    Mode(Mode),
-    Bench(Bench),
+    /// A new session of this kind.
+    Session(Mode),
     Open(String),
+    Settings,
     Backend,
     Wizard,
     Language(Lang),
@@ -48,12 +49,10 @@ pub enum Command {
 fn label(command: &Command) -> String {
     match command {
         Command::Tab(tab) => tf("cmd.tab", &[("tab", &tab_label(*tab))]),
-        Command::Mode(Mode::Scalping) => t("cmd.mode.scalping").into(),
-        Command::Mode(Mode::Advance) => t("cmd.mode.advance").into(),
-        Command::Bench(Bench::Surgery) => t("cmd.bench.surgery").into(),
-        Command::Bench(Bench::Canvas) => t("cmd.bench.canvas").into(),
-        Command::Bench(Bench::Editor) => t("cmd.bench.editor").into(),
+        Command::Session(Mode::Advance) => t("cmd.session.advance").into(),
+        Command::Session(Mode::Scalping) => t("cmd.session.scalping").into(),
         Command::Open(path) => tf("cmd.open", &[("path", path)]),
+        Command::Settings => t("cmd.settings").into(),
         Command::Backend => t("cmd.backend").into(),
         Command::Wizard => t("cmd.wizard").into(),
         Command::Language(Lang::Fr) => t("cmd.lang.fr").into(),
@@ -69,14 +68,12 @@ fn label(command: &Command) -> String {
 pub fn commands(query: &str) -> Vec<(Command, String)> {
     let mut all: Vec<Command> = Tab::ALL.into_iter().map(Command::Tab).collect();
     all.extend([
-        Command::Mode(Mode::Scalping),
-        Command::Mode(Mode::Advance),
-        Command::Bench(Bench::Surgery),
-        Command::Bench(Bench::Canvas),
-        Command::Bench(Bench::Editor),
+        Command::Session(Mode::Advance),
+        Command::Session(Mode::Scalping),
         Command::NewCopy,
         Command::ExportLedger,
         Command::ResetCamera,
+        Command::Settings,
         Command::Backend,
         Command::Wizard,
         Command::CheckUpdate,
@@ -105,11 +102,12 @@ pub fn commands(query: &str) -> Vec<(Command, String)> {
 fn run(ctx: &egui::Context, app: &mut SurgeonApp, command: Command) {
     match command {
         Command::Tab(tab) => app.tab = tab,
-        Command::Mode(mode) => app.set_mode(mode),
-        Command::Bench(bench) => {
-            app.tab = Tab::Atelier;
-            app.bench = bench;
+        Command::Session(mode) => {
+            app.set_mode(mode);
+            app.agents.new_conversation();
+            app.tab = Tab::Agent;
         }
+        Command::Settings => app.settings = Some(Section::General),
         Command::Open(path) => app
             .desktop
             .pending
@@ -118,11 +116,10 @@ fn run(ctx: &egui::Context, app: &mut SurgeonApp, command: Command) {
         Command::Wizard => app.desktop.open_wizard(),
         Command::Language(lang) => app.desktop.set_lang(lang),
         Command::ResetCamera => app.camera = crate::camera::Orbit::default(),
-        Command::NewCopy => app.studio.submit_copy(),
+        Command::NewCopy => drop(app.studio.submit_copy()),
         Command::ExportLedger => app.studio.export_ledger(true),
         Command::CheckUpdate => {
-            app.tab = Tab::System;
-            app.system_section = crate::app::Section::Updates;
+            app.settings = Some(Section::Updates);
             app.desktop.check_update(ctx);
         }
     }
@@ -164,7 +161,7 @@ pub fn show(ctx: &egui::Context, app: &mut SurgeonApp) {
     let rect = Rect::from_min_size(
         Pos2::new(
             screen.center().x - width / 2.0,
-            screen.top() + 10.0 * T.size.gap,
+            screen.top() + 2.0 * T.size.titlebar,
         ),
         Vec2::new(width, height),
     );
@@ -228,7 +225,7 @@ mod tests {
     fn the_query_filters_and_a_path_is_offered_first() {
         i18n::set_lang(Lang::En);
         let all = commands("");
-        assert!(all.len() >= 15, "{}", all.len());
+        assert!(all.len() >= 12, "{}", all.len());
         let graph = commands("graph");
         assert!(graph.iter().any(|(c, _)| *c == Command::Tab(Tab::Graph)));
         assert!(graph.len() < all.len());

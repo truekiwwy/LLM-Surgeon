@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use eframe::egui;
-use surgeon_gui::app::{Section, SurgeonApp, Tab};
+use surgeon_gui::app::{Mode, Section, SurgeonApp, Tab};
 use surgeon_gui::cli::{self, Cli, Item};
 use surgeon_gui::desktop::Desktop;
 use surgeon_gui::instance::{self, Role};
@@ -52,6 +52,12 @@ fn window_icon() -> Option<egui::IconData> {
 }
 
 fn main() -> ExitCode {
+    // `surgeon-gui mcp …`: the engine's MCP server for the CLI runtimes. Before the console
+    // attach and anything else: stdin and stdout are the runtime's pipes and carry only MCP.
+    if std::env::args_os().nth(1).is_some_and(|a| a == "mcp") {
+        let code = surgeon_gui::runner::serve_mcp(std::env::args_os());
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     attach_parent_console();
     let cli = Cli::parse();
     // Portable: the engine's trusted-toolchain record stays in data/ too, not in %APPDATA%.
@@ -187,29 +193,30 @@ fn absolute(paths: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// `--screenshot`: one tab (or the wizard over the Atelier), rendered without a window or a
-/// GPU at `--size` pixels and `--scale` pixels per point.
+/// `--screenshot`: one view (or the settings dialog, or the wizard), rendered without a window
+/// or a GPU at `--size` pixels and `--scale` pixels per point.
 fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
     let ctx = egui::Context::default();
-    // `system:providers`: a tab and one of its parts.
+    // `settings:providers`: the dialog on one of its sections.
     let (name, part) = cli
         .screen
         .split_once(':')
         .unwrap_or((cli.screen.as_str(), ""));
-    let (tab, wizard) = match name {
-        "wizard" => (Tab::Atelier, Some(part.parse().unwrap_or(1))),
+    let (tab, wizard, settings_screen) = match name {
+        "wizard" => (Tab::Agent, Some(part.parse().unwrap_or(1)), false),
+        "settings" | "system" | "diagnostics" => (Tab::Agent, None, true),
         name => (
-            Tab::from_name(name).ok_or_else(|| {
-                format!("--screen {name} : atelier, graph, analyses, agents, system ou wizard")
-            })?,
+            Tab::from_name(name)
+                .ok_or_else(|| format!("--screen {name} : agent, graph, settings ou wizard"))?,
             None,
+            false,
         ),
     };
-    let section = match part {
-        _ if wizard.is_some() => None,
-        "" => None,
-        part => Some(Section::from_name(part).ok_or_else(|| {
-            format!("--screen system:{part} : machine, providers, updates ou journal")
+    let section = match (settings_screen, part) {
+        (false, _) => None,
+        (true, "") => Some(Section::General),
+        (true, part) => Some(Section::from_name(part).ok_or_else(|| {
+            format!("--screen settings:{part} : general, providers, engine, updates ou journal")
         })?),
     };
     let mut settings = Settings::load(&paths::settings_path()).unwrap_or_default();
@@ -232,16 +239,26 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
     if cli.demo_data {
         demo::install(&ctx, &mut app)?;
     }
-    app.tab = tab;
-    if let Some(section) = section {
-        app.system_section = section;
+    // `agent:advance`, `agent:scalping`: the new-session form, even over the demo's session.
+    let form = match (name, part) {
+        ("agent", "advance") => Some(Mode::Advance),
+        ("agent", "scalping") => Some(Mode::Scalping),
+        _ => None,
+    };
+    if let Some(mode) = form {
+        app.mode = mode;
+        app.agents.session = None;
+        app.agents.cli_conv = None;
     }
+    app.tab = tab;
+    app.settings = section;
     // One frame is rendered: the scan runs before it, not behind it.
     if section == Some(Section::Providers) || wizard == Some(2) {
         app.agents.scan = Some(surgeon_gui::agent::detect::scan());
     }
-    // A capture shows the tab, not the first-run backend dialog over it.
+    // A capture shows the view, not the backend dialog, and never writes the user's config.
     app.dialog.open = false;
+    app.dialog.read_only();
     app.set_motion(&ctx, !cli.no_motion);
     if let Some(replay) = &cli.replay {
         app.open_replay(replay)?;

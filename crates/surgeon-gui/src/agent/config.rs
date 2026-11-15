@@ -29,15 +29,21 @@ pub enum ProviderKind {
     ClaudeCode,
     /// The Codex CLI, signed in by the user.
     Codex,
+    /// The OpenCode CLI, with its own tools kept (the source model is held by the kernel lock).
+    OpenCode,
+    /// The Antigravity CLI (`agy`), in an isolated profile, its own tools kept.
+    Antigravity,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Anthropic,
         Self::OpenAi,
         Self::Compatible,
         Self::ClaudeCode,
         Self::Codex,
+        Self::OpenCode,
+        Self::Antigravity,
     ];
 
     pub fn label(self) -> &'static str {
@@ -47,6 +53,8 @@ impl ProviderKind {
             Self::Compatible => "Compatible OpenAI (URL)",
             Self::ClaudeCode => "Claude Code (CLI installée)",
             Self::Codex => "Codex CLI (installée)",
+            Self::OpenCode => "OpenCode CLI (installée)",
+            Self::Antigravity => "Antigravity CLI (installée)",
         }
     }
 
@@ -58,11 +66,16 @@ impl ProviderKind {
             Self::Compatible => "OpenAI-compatible",
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
+            Self::OpenCode => "OpenCode",
+            Self::Antigravity => "Antigravity",
         }
     }
 
     pub fn is_cli(self) -> bool {
-        matches!(self, Self::ClaudeCode | Self::Codex)
+        matches!(
+            self,
+            Self::ClaudeCode | Self::Codex | Self::OpenCode | Self::Antigravity
+        )
     }
 
     pub fn needs_key(self) -> bool {
@@ -166,7 +179,10 @@ impl Connection {
                 reach,
             )?),
             ProviderKind::Compatible => Arc::new(OpenAi::new(self.base(), key, reach)?),
-            ProviderKind::ClaudeCode | ProviderKind::Codex => {
+            ProviderKind::ClaudeCode
+            | ProviderKind::Codex
+            | ProviderKind::OpenCode
+            | ProviderKind::Antigravity => {
                 return Err(ProviderError::Blocked(
                     "un runtime CLI n'est pas un fournisseur par API".into(),
                 ))

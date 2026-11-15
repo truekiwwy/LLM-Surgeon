@@ -42,6 +42,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     if has_bar {
         c::Panel::new("graph-bar")
             .flush()
+            .divided()
             .show(ui, parts[1], |ui| match app.replay.is_some() {
                 true => replay_bar(ui, app),
                 false => timeline_bar(ui, app),
@@ -54,6 +55,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     c::Panel::new("chronology")
         .title(t("panel.chronology"))
         .flush()
+        .divided()
         .show(ui, right[1], |ui| chronology(ui, app));
 }
 
@@ -132,7 +134,8 @@ fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
         return;
     };
     let visible = app.visible(&step.report);
-    let targets = app.targets(&step.report);
+    // No target set: the agent points at a tensor by selecting it (show_in_3d).
+    let targets = vec![false; step.report.nodes.len()];
     let selected = app.selected_index();
     // Field by field, not run_view(): the layer is refilled while the run is borrowed.
     let run = match &app.replay {

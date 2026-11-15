@@ -1,7 +1,7 @@
 //! The window state and what the views ask it to do. Drawing lives in `ui`: the shell (title
-//! bar, five tabs, status bar, palette) and one view per tab. Here: the graph on screen and
-//! its stream, the selection, the camera, the card canvas and the patch editor with their
-//! job runner, the studio (projects, jobs, ledger), the agent hub and the desktop services.
+//! bar, activity bar, palette, settings dialog) and the two views. Here: the graph on screen
+//! and its stream, the selection, the camera, the studio (projects, jobs, ledger), the agent
+//! hub and the desktop services.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -11,20 +11,19 @@ use std::time::{Duration, SystemTime};
 use eframe::egui::{self, Key};
 use weight_surgeon::backend::{self, config::BackendConfig, detect::BackendReport};
 use weight_surgeon::bench::score::Backend;
-use weight_surgeon::graph::diff::NodeDiff;
 use weight_surgeon::graph::output::GraphReport;
 use weight_surgeon::graph::stream::GraphPatch;
 use weight_surgeon::graph::GraphRole;
 
+use crate::agent::mission::Mission;
+use crate::agent::paths::ProjectPaths;
 use crate::agent::view::Hub;
+use crate::backend_choice;
 use crate::backend_dialog::BackendDialog;
 use crate::camera::Orbit;
-use crate::canvas::view::{Action, Canvas};
-use crate::canvas::{self, CardKind};
 use crate::cli::Item;
 use crate::desktop::{Desktop, Event};
-use crate::editor::{self, Editor};
-use crate::runner::{self, Finished, Job, Task};
+use crate::platform::Picker;
 use crate::source::{self, Input, Timeline};
 use crate::studio::bus::RunView;
 use crate::studio::ledger;
@@ -35,40 +34,28 @@ use crate::ui::palette::Palette;
 use crate::ui::{fonts, i18n, shell, theme};
 use crate::viewport;
 
-/// The five tabs of the title bar.
+/// The two views of the activity bar: the agent (where the work happens) and the 3D graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    Atelier,
+    Agent,
     Graph,
-    Analyses,
-    Agents,
-    System,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
-        Tab::Atelier,
-        Tab::Graph,
-        Tab::Analyses,
-        Tab::Agents,
-        Tab::System,
-    ];
+    pub const ALL: [Tab; 2] = [Tab::Agent, Tab::Graph];
 
-    /// The `--screen` name of the tab.
+    /// The `--screen` name of the view.
     pub fn name(self) -> &'static str {
         match self {
-            Tab::Atelier => "atelier",
+            Tab::Agent => "agent",
             Tab::Graph => "graph",
-            Tab::Analyses => "analyses",
-            Tab::Agents => "agents",
-            Tab::System => "system",
         }
     }
 
-    /// `diagnostics`, the name before G6, still reaches the System tab.
+    /// `agents`, the name before G7, still reaches the agent.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
-            "diagnostics" => Some(Tab::System),
+            "agents" => Some(Tab::Agent),
             _ => Self::ALL.into_iter().find(|t| t.name() == name),
         }
     }
@@ -76,46 +63,32 @@ impl Tab {
 
 pub use crate::settings::Mode;
 
-/// What the center of the Atelier shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bench {
-    /// Targeting, the ‖ΔW‖ histogram and the surgery form.
-    Surgery,
-    /// The card canvas.
-    Canvas,
-    /// The patch.json editor.
-    Editor,
-}
-
-/// The runs the history lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunKind {
-    All,
-    Surgery,
-    Analysis,
-}
-
-/// The four sections of the System tab.
+/// The sections of the settings dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
-    Machine,
+    General,
     Providers,
+    Engine,
     Updates,
     Journal,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
-        Section::Machine,
+    pub const ALL: [Section; 5] = [
+        Section::General,
         Section::Providers,
+        Section::Engine,
         Section::Updates,
         Section::Journal,
     ];
 
-    /// The `--screen system:<name>` part.
+    /// The `--screen settings:<name>` part; `machine` (before G7) is the engine.
     pub fn from_name(name: &str) -> Option<Self> {
-        let names = ["machine", "providers", "updates", "journal"];
-        names.iter().position(|n| *n == name).map(|k| Self::ALL[k])
+        let names = ["general", "providers", "engine", "updates", "journal"];
+        match name {
+            "machine" => Some(Section::Engine),
+            _ => names.iter().position(|n| *n == name).map(|k| Self::ALL[k]),
+        }
     }
 }
 
@@ -146,22 +119,17 @@ pub struct SurgeonApp {
     /// Layers of the tensor tree the user opened (`None`: embeddings and head).
     pub open_layers: BTreeSet<Option<usize>>,
     pub dialog: BackendDialog,
-    probe: Option<Receiver<BackendReport>>,
+    probe: Option<Receiver<(BackendReport, bool)>>,
     pub hardware: Option<BackendReport>,
+    /// The hipfire daemon answered at the last probe.
+    pub hipfire_up: bool,
     pub tab: Tab,
+    /// The kind of session the new-session form offers first, kept between launches.
     pub mode: Mode,
-    pub bench: Bench,
-    pub canvas: Canvas,
-    pub editor: Editor,
-    pub job: Option<Job>,
-    /// The step that finished last.
-    pub last_run: Option<Finished>,
-    /// Backups of the last apply: what Rollback restores.
-    pub backups: Vec<PathBuf>,
-    /// Where card patches are written before `apply` reads them.
-    scratch: PathBuf,
     pub studio: Studio,
     pub agents: Hub,
+    /// A session that starts once its working copy (this run) is made.
+    pub pending_start: Option<(Mission, String)>,
     pub desktop: Desktop,
     /// A recorded run on the 3D view, with its time cursor.
     pub replay: Option<Replay>,
@@ -170,14 +138,12 @@ pub struct SurgeonApp {
     pub buffers: viewport::Buffers,
     pub columns: Columns,
     pub palette: Palette,
-    /// The cut of the ‖ΔW‖ histogram: tensors at or above it are the targets.
-    pub threshold: Option<f64>,
     /// `false` (`--no-motion`): no transition at all.
     pub motion: bool,
-    /// The section the System view shows.
-    pub system_section: Section,
-    /// Which runs the history of Analyses lists.
-    pub history: RunKind,
+    /// The settings dialog, open on this section.
+    pub settings: Option<Section>,
+    /// The system picker of the workspace folder (wizard, settings).
+    pub workspace_picker: Picker,
     ledger_cache: Option<(PathBuf, Option<SystemTime>, Vec<ledger::Entry>)>,
 }
 
@@ -196,7 +162,7 @@ impl SurgeonApp {
         columns.collapsed = desktop.settings.left_collapsed;
         let tab = match input {
             Some(_) => Tab::Graph,
-            None => Tab::Atelier,
+            None => Tab::Agent,
         };
         let mode = desktop.settings.mode;
         let mut app = Self {
@@ -213,27 +179,21 @@ impl SurgeonApp {
             dialog: BackendDialog::load(),
             probe: None,
             hardware: None,
+            hipfire_up: false,
             tab,
             mode,
-            bench: Bench::Surgery,
-            canvas: Canvas::default(),
-            editor: Editor::default(),
-            job: None,
-            last_run: None,
-            backups: Vec::new(),
-            scratch: std::env::temp_dir().join(format!("surgeon-studio-{}", std::process::id())),
             studio: Studio::new(workspace),
             agents: Hub::system(ctx),
+            pending_start: None,
             desktop,
             replay: None,
             layer: Layer::default(),
             buffers: viewport::Buffers::default(),
             columns,
             palette: Palette::default(),
-            threshold: None,
             motion: true,
-            system_section: Section::Machine,
-            history: RunKind::All,
+            settings: None,
+            workspace_picker: Picker::default(),
             ledger_cache: None,
         };
         if app
@@ -264,16 +224,46 @@ impl SurgeonApp {
         ctx.all_styles_mut(|s| s.animation_time = time);
     }
 
-    /// Switches the depth of the Atelier and keeps it for the next launch. The agent's own
-    /// mode is never touched: it is chosen in Agents only.
+    /// The kind of session the form offers, kept for the next launch. What the agent may do
+    /// (its contract) is not touched.
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
-        // The cards and the patch editor belong to `[ADVANCE]`.
-        if mode == Mode::Scalping {
-            self.bench = Bench::Surgery;
-        }
         self.desktop.settings.mode = mode;
         self.desktop.save_settings();
+    }
+
+    /// Makes `dir` the projects folder (created, checked writable) and opens it.
+    pub fn use_workspace(&mut self, dir: PathBuf) -> Result<(), String> {
+        self.desktop.use_workspace(&dir)?;
+        self.studio = Studio::new(dir);
+        Ok(())
+    }
+
+    /// Opens the system picker of the workspace folder; the folder picked is used at once.
+    pub fn pick_workspace(&mut self, ctx: &egui::Context, title: &str) {
+        let wake = ctx.clone();
+        self.workspace_picker
+            .open(true, title, move || wake.request_repaint());
+    }
+
+    /// The folder the picker gave: used, and the wizard shows it with what went wrong.
+    fn picked_workspace(&mut self) {
+        let Some(dir) = self.workspace_picker.poll() else {
+            return;
+        };
+        let shown = dir.display().to_string();
+        let result = self.use_workspace(dir);
+        match self.desktop.wizard.as_mut() {
+            Some(w) => {
+                w.workspace = shown;
+                w.workspace_error = result.err();
+            }
+            None => {
+                if let Err(e) = result {
+                    self.desktop.notify(e);
+                }
+            }
+        }
     }
 
     /// Folds or unfolds the left column (`Ctrl+B`, its chevron) and keeps the choice.
@@ -356,19 +346,95 @@ impl SurgeonApp {
         };
         self.stream_error = None;
         self.selected = None;
-        self.threshold = None;
     }
 
-    /// `llama-server --list-devices` can take seconds: probe off the UI thread.
+    /// The backends (mistral.rs found, the hipfire daemon answering) can take seconds: probe
+    /// off the UI thread. An unset daemon address is tried at hipfire's default.
     fn spawn_probe(&mut self, ctx: &egui::Context) {
         let (tx, probe) = std::sync::mpsc::channel();
-        let user = self.dialog.saved().clone();
+        let mut user = self.dialog.saved().clone();
+        user.hipfire_url
+            .get_or_insert_with(backend_choice::hipfire_url);
         let wake = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(backend::detect::detect_hardware_and_backends(&user));
+            let report = backend::detect::detect_hardware_and_backends(&user);
+            let up = report.hipfire.up;
+            let _ = tx.send((report, up));
             wake.request_repaint();
         });
         self.probe = Some(probe);
+    }
+
+    /// Starts the agent on `mission`. A project with a source model and no working copy gets
+    /// one first, and the session starts when it is made: the agent never has to ask for it.
+    pub fn start_session(&mut self, mission: Mission) {
+        let paths = self.agents.project.as_deref().map(ProjectPaths::of);
+        if !paths.is_some_and(|p| p.copy.is_none() && p.origin.is_some()) {
+            self.agents.begin(mission);
+            return;
+        }
+        match self.studio.submit_copy() {
+            Some(run) => self.pending_start = Some((mission, run)),
+            None => self.agents.message = self.studio.message.take(),
+        }
+    }
+
+    fn start_after_copy(&mut self, ended: &[crate::studio::jobs::Ended]) {
+        let Some((mission, run)) = self.pending_start.take() else {
+            return;
+        };
+        if self.studio.manager.is_none() {
+            return;
+        }
+        match ended.iter().find(|e| e.id == run) {
+            Some(e) if e.verdict == ledger::Verdict::Ok => self.agents.begin(mission),
+            Some(e) => {
+                let error = e.envelope["error"]["message"]
+                    .as_str()
+                    .map_or_else(|| format!("{:?}", e.verdict), str::to_owned);
+                self.agents.message =
+                    Some((i18n::tf("form.copy.failed", &[("error", &error)]), true));
+            }
+            None => self.pending_start = Some((mission, run)),
+        }
+    }
+
+    /// Looks at the backends again (the hipfire daemon started, mistral.rs installed).
+    pub fn reprobe(&mut self, ctx: &egui::Context) {
+        if self.probe.is_none() {
+            self.spawn_probe(ctx);
+        }
+    }
+
+    /// The first launch, and every probe while the choice is automatic: the backend the
+    /// hardware calls for among the Rust engines (`backend_choice`), written to the user
+    /// `config.toml`. A backend saved by hand in the dialog ends the automatic choice.
+    fn auto_backend(&mut self) {
+        let (Some(report), Some(system)) = (&self.hardware, &self.desktop.system) else {
+            return;
+        };
+        let saved = self.dialog.saved();
+        // A disabled user file (WEIGHT_SURGEON_NO_USER_CONFIG) cannot hold the choice.
+        let automatic =
+            backend_choice::automatic(saved.backend, self.desktop.settings.backend_auto);
+        if !automatic || !self.dialog.writable() {
+            return;
+        }
+        let vendor = backend_choice::main_vendor(system.gpus.iter().map(|g| g.name.as_str()));
+        let mistral = report.mistralrs.as_ref().map(|m| m.binary.clone());
+        let target = backend_choice::target(vendor);
+        let backend = backend_choice::effective(target, self.hipfire_up, mistral.is_some());
+        let cfg = backend_choice::config(saved, backend, vendor, mistral);
+        if cfg != *saved {
+            if let Err(e) = self.dialog.save_config(cfg) {
+                self.desktop.notify(e);
+                return;
+            }
+        }
+        if !self.desktop.settings.backend_auto {
+            self.desktop.settings.backend_auto = true;
+            self.desktop.save_settings();
+        }
     }
 
     /// Opens what the command line carried besides the first graph.
@@ -403,13 +469,6 @@ impl SurgeonApp {
                 self.set_input(ctx, input);
                 self.tab = Tab::Graph;
             }
-            Item::Studio(path) => {
-                self.canvas.ws = canvas::Workspace::load(&path)?;
-                self.canvas.file = path.display().to_string();
-                self.canvas.results.clear();
-                self.tab = Tab::Atelier;
-                self.bench = Bench::Canvas;
-            }
             Item::Folder(dir) => {
                 self.desktop.use_workspace(&dir)?;
                 self.studio = Studio::new(dir);
@@ -419,161 +478,6 @@ impl SurgeonApp {
             }
         }
         Ok(())
-    }
-
-    pub fn busy(&self) -> bool {
-        self.job.as_ref().is_some_and(|j| !j.finished)
-    }
-
-    fn start(&mut self, ctx: &egui::Context, steps: Vec<runner::Step>) {
-        if self.busy() || steps.is_empty() {
-            return;
-        }
-        for id in steps.iter().filter_map(|s| s.card) {
-            self.canvas.results.remove(&id);
-        }
-        let wake = ctx.clone();
-        self.job = Some(Job::spawn(steps, move || wake.request_repaint()));
-    }
-
-    pub fn rollback(&mut self, ctx: &egui::Context) {
-        let step = runner::Step {
-            card: None,
-            label: "rollback".into(),
-            task: Task::Restore(self.backups.clone()),
-        };
-        self.start(ctx, vec![step]);
-    }
-
-    /// Records a finished step on its card, the editor and the rollback state.
-    fn finish(&mut self, done: Finished) {
-        let data = &done.envelope["data"];
-        if done.code == 0 && data["report"]["dry_run"] == false {
-            self.backups = canvas::backups_of(&done);
-        }
-        if done.code == 0 && data["restored"].is_array() {
-            self.backups.clear();
-        }
-        match done.card {
-            Some(id) => {
-                self.canvas.results.insert(id, done.clone());
-            }
-            None => self.editor.message = Some((outcome_line(&done), done.code != 0)),
-        }
-        self.last_run = Some(done);
-    }
-
-    pub fn canvas_action(&mut self, ctx: &egui::Context, action: Action) {
-        match action {
-            Action::Run(id) => match self.canvas.ws.plan(id, &self.scratch) {
-                Ok(steps) => self.start(ctx, steps),
-                Err(e) => self.canvas.message = Some(e),
-            },
-            Action::OpenInEditor(id) => match self.canvas.ws.patch_json(id) {
-                Ok(text) => {
-                    let file = self.scratch.join(format!("card-{id}.patch.json"));
-                    self.editor.file = file.display().to_string();
-                    self.editor.model = self.canvas.ws.model_of(id).unwrap_or_default().into();
-                    self.editor.set_text(text);
-                    self.bench = Bench::Editor;
-                }
-                Err(e) => self.canvas.message = Some(e),
-            },
-            Action::ShowGraph(id) => {
-                if let Err(e) = self.show_graph(id) {
-                    self.canvas.message = Some(e);
-                }
-            }
-            Action::Rollback => self.rollback(ctx),
-        }
-    }
-
-    /// What the patch editor asked for.
-    pub fn editor_request(&mut self, ctx: &egui::Context, request: crate::editor::view::Request) {
-        match request {
-            crate::editor::view::Request::Run(run) => match self.editor.step(run) {
-                Ok(step) => self.start(ctx, vec![step]),
-                Err(e) => self.editor.message = Some((e, true)),
-            },
-            crate::editor::view::Request::Rollback => self.rollback(ctx),
-        }
-    }
-
-    /// Loads the `graph.json` of a Graph Diff card as a new state and frames its changes.
-    fn show_graph(&mut self, id: u32) -> Result<(), String> {
-        let Some(CardKind::GraphDiff(card)) = self.canvas.ws.card(id).map(|c| &c.kind) else {
-            return Ok(());
-        };
-        let path = PathBuf::from(card.out_dir.trim()).join("graph.json");
-        let Input::Report(report) = source::open(&path)? else {
-            return Err(i18n::tf("open.not_graph", &[("path", &path.display())]));
-        };
-        let changed: Vec<&NodeDiff> = report
-            .baseline_diff
-            .iter()
-            .flat_map(|d| &d.nodes)
-            .filter(|n| n.changed)
-            .collect();
-        let marked: Vec<bool> = report
-            .nodes
-            .iter()
-            .map(|n| changed.iter().any(|d| d.id == n.id))
-            .collect();
-        let center = centroid(&report, &marked, self.layout);
-        let top = report
-            .baseline_diff
-            .as_ref()
-            .and_then(|d| d.top_changed_layers.first())
-            .map(|l| l.top_node.clone());
-        self.timeline.push(&GraphPatch::snapshot(&report))?;
-        self.timeline.seek(usize::MAX);
-        self.diff = true;
-        self.selected = top;
-        if let Some(center) = center {
-            self.camera.target = center;
-        }
-        self.tab = Tab::Graph;
-        Ok(())
-    }
-
-    /// `Voir en 3D` of the Atelier: the 3D graph framed on the targets, which it highlights.
-    pub fn show_targets(&mut self) {
-        let center = self.timeline.current().and_then(|step| {
-            let targets = self.targets(&step.report);
-            centroid(&step.report, &targets, self.layout)
-        });
-        if let Some(center) = center {
-            self.camera.target = center;
-        }
-        self.tab = Tab::Graph;
-    }
-
-    /// The 3D nodes the patch being edited would touch (the editor's selectors in the
-    /// editor, else those of the selected Patch card), and in `[SCALPING]` the tensors at or
-    /// above the histogram cut.
-    pub fn targets(&self, report: &GraphReport) -> Vec<bool> {
-        let from_editor = self.bench == Bench::Editor && !self.editor.checked.selections.is_empty();
-        let selections = match from_editor {
-            true => self.editor.checked.selections.clone(),
-            false => self
-                .canvas
-                .selected
-                .and_then(|id| self.canvas.ws.card(id))
-                .and_then(|c| match &c.kind {
-                    CardKind::Patch(p) => p.selection(),
-                    _ => None,
-                })
-                .into_iter()
-                .collect(),
-        };
-        let mut targets = editor::targets(&selections, report);
-        if let (Some(cut), Mode::Scalping) = (self.threshold, self.mode) {
-            let values = crate::ui::views::delta_values(report);
-            for (t, v) in targets.iter_mut().zip(values) {
-                *t |= v.is_some_and(|v| v >= cut);
-            }
-        }
-        targets
     }
 
     /// The project's ledger, read again only when the file changed.
@@ -608,13 +512,22 @@ impl SurgeonApp {
                 }
             }
         }
-        if let Some(report) = self.probe.as_ref().and_then(|rx| rx.try_recv().ok()) {
+        if let Some((report, up)) = self.probe.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.dialog.prefill(&report);
             self.hardware = Some(report);
+            self.hipfire_up = up;
             self.probe = None;
         }
+        self.auto_backend();
+        if self.dialog.take_saved() {
+            // Saved by hand: the user's choice from now on.
+            self.desktop.settings.backend_auto = false;
+            self.desktop.save_settings();
+        }
+        self.picked_workspace();
         let ended = self.studio.tick(ctx);
         self.agents.tick(&mut self.studio, &ended);
+        self.start_after_copy(&ended);
         if let Some(target) = self.agents.take_focus() {
             self.selected = Some(target);
         }
@@ -624,16 +537,6 @@ impl SurgeonApp {
         if let Some(replay) = self.replay.as_mut().filter(|r| r.playing) {
             replay.advance(Duration::from_secs_f32(ctx.input(|i| i.stable_dt)));
             ctx.request_repaint();
-        }
-        let finished = self.job.as_mut().map(Job::poll).unwrap_or_default();
-        for done in finished {
-            self.finish(done);
-        }
-        if self.busy() {
-            ctx.request_repaint_after(Duration::from_millis(250));
-        }
-        if let Some(wait) = self.editor.tick() {
-            ctx.request_repaint_after(wait);
         }
     }
 
@@ -665,30 +568,12 @@ impl SurgeonApp {
             .copied()
     }
 
-    /// `None` while the probe runs; the first GPU, else the CPU.
-    pub fn hardware_label(&self) -> Option<String> {
-        let r = self.hardware.as_ref()?;
-        Some(match r.llama.as_ref().and_then(|l| l.devices.first()) {
-            Some(gpu) => format!("{} · {}", gpu.name, gpu.api()),
-            None => "CPU".into(),
-        })
-    }
-
     pub fn backend_label(&self) -> String {
         let saved: &BackendConfig = self.dialog.saved();
         let kind = saved.backend.unwrap_or(Backend::Native);
-        let api = match kind {
-            Backend::LlamaServer => self
-                .hardware
-                .as_ref()
-                .and_then(|r| r.llama.as_ref())
-                .and_then(|l| l.devices.first())
-                .map(|d| d.api()),
-            _ => None,
-        };
         backend::describe(
             kind.label(),
-            api,
+            None,
             saved.gpu_layers,
             saved.batch_size.unwrap_or(1),
         )
@@ -767,59 +652,6 @@ impl eframe::App for SurgeonApp {
     }
 }
 
-/// One line about a finished step: what an apply touched, what a rollback restored, or the
-/// first line of the error.
-pub fn outcome_line(run: &Finished) -> String {
-    let data = &run.envelope["data"];
-    if run.code != 0 {
-        let message = run.envelope["error"]["message"].as_str().unwrap_or("");
-        return i18n::tf(
-            "outcome.failed",
-            &[
-                ("code", &run.code),
-                ("message", &message.lines().next().unwrap_or("")),
-            ],
-        );
-    }
-    if let Some(files) = data["restored"].as_array() {
-        return i18n::tf("outcome.restored", &[("n", &files.len())]);
-    }
-    let tensors: usize = data["report"]["operations"].as_array().map_or(0, |ops| {
-        ops.iter()
-            .filter_map(|o| o["tensors"].as_array())
-            .map(Vec::len)
-            .sum()
-    });
-    match data["report"]["dry_run"].as_bool() {
-        Some(true) => i18n::tf("outcome.dry_run", &[("n", &tensors)]),
-        Some(false) => i18n::tf(
-            "outcome.applied",
-            &[
-                ("n", &tensors),
-                ("backups", &data["backups"].as_array().map_or(0, Vec::len)),
-            ],
-        ),
-        None => i18n::tf("outcome.ok", &[("s", &format!("{:.1}", run.seconds))]),
-    }
-}
-
-/// The mean position of the `marked` nodes in `layout`; `None` when none is marked.
-pub fn centroid(report: &GraphReport, marked: &[bool], layout: LayoutMode) -> Option<[f32; 3]> {
-    let points: Vec<[f32; 3]> = report
-        .nodes
-        .iter()
-        .zip(marked)
-        .filter(|(_, m)| **m)
-        .map(|(n, _)| match layout {
-            LayoutMode::Column => n.pos_column,
-            LayoutMode::Constellation => n.pos_constellation,
-        })
-        .collect();
-    let n = points.len() as f32;
-    let mean = |k: usize| points.iter().map(|p| p[k]).sum::<f32>() / n;
-    (!points.is_empty()).then(|| [mean(0), mean(1), mean(2)])
-}
-
 /// The node `delta` places after `current` in the list as shown, held at both ends. With no
 /// selection, or one the filters hide, Down starts at the top and Up at the bottom.
 pub fn step_selection(order: &[usize], current: Option<usize>, delta: isize) -> Option<usize> {
@@ -837,7 +669,6 @@ pub fn step_selection(order: &[usize], current: Option<usize>, delta: isize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::Lang;
 
     #[test]
     fn arrow_keys_walk_the_shown_list_and_stop_at_its_ends() {
@@ -864,49 +695,69 @@ mod tests {
     }
 
     #[test]
-    fn outcome_lines_describe_apply_rollback_and_errors() {
-        i18n::set_lang(Lang::Fr);
-        let run = |code: i32, envelope: serde_json::Value| Finished {
-            card: None,
-            label: String::new(),
-            code,
-            envelope,
-            seconds: 0.5,
-        };
-        let report = serde_json::json!({"data": {"report": {"dry_run": false,
-            "operations": [{"tensors": [{}, {}]}]}, "backups": ["a.bak-1"]}});
-        assert_eq!(
-            outcome_line(&run(0, report)),
-            "appliqué : 2 tenseur(s), 1 sauvegarde(s)"
-        );
-        let restored = serde_json::json!({"data": {"restored": ["a", "b"]}});
-        assert_eq!(outcome_line(&run(0, restored)), "2 fichier(s) restauré(s)");
-        let failed = serde_json::json!({"error": {"message": "patch invalide :\n  - x"}});
-        assert_eq!(
-            outcome_line(&run(2, failed)),
-            "échec (code 2) : patch invalide :"
-        );
-    }
-
-    #[test]
-    fn the_centroid_is_the_mean_of_the_marked_nodes_only() {
-        let report = crate::ui::views::tests::report();
-        let marked: Vec<bool> = (0..report.nodes.len()).map(|i| i < 2).collect();
-        let [a, b] = [&report.nodes[0], &report.nodes[1]];
-        let c = centroid(&report, &marked, LayoutMode::Column).unwrap();
-        for (k, v) in c.iter().enumerate() {
-            assert!((v - (a.pos_column[k] + b.pos_column[k]) / 2.0).abs() < 1e-5);
-        }
-        let none = vec![false; report.nodes.len()];
-        assert_eq!(centroid(&report, &none, LayoutMode::Column), None);
-    }
-
-    #[test]
     fn tabs_round_trip_through_their_screen_names() {
         for tab in Tab::ALL {
             assert_eq!(Tab::from_name(tab.name()), Some(tab));
         }
         assert_eq!(Tab::from_name("home"), None);
-        assert_eq!(Tab::from_name("diagnostics"), Some(Tab::System));
+        assert_eq!(Tab::from_name("agents"), Some(Tab::Agent));
+        for section in Section::ALL {
+            let name = format!("{section:?}").to_lowercase();
+            assert_eq!(Section::from_name(&name), Some(section));
+        }
+        assert_eq!(Section::from_name("machine"), Some(Section::Engine));
+    }
+
+    #[test]
+    fn starting_without_a_working_copy_makes_one_then_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("model");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("model.safetensors"), b"weights").unwrap();
+        let workspace = dir.path().join("projects");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let project =
+            crate::studio::project::Project::create(&workspace, "p", Some(&source)).unwrap();
+        let env = crate::actions::Env {
+            components: dir.path().join("components"),
+            config: None,
+            settings: dir.path().join("settings.json"),
+        };
+        let desktop = Desktop::detached(None, Default::default(), env);
+        let ctx = egui::Context::default();
+        let mut app = SurgeonApp::with_shell(&ctx, None, desktop, workspace);
+        app.dialog.read_only();
+        // Never the user's connections: a hub on a file of its own, with none.
+        app.agents = Hub::new(
+            dir.path().join("agents.json"),
+            Box::new(crate::agent::vault::SessionStore::default()),
+            std::sync::Arc::new(|| {}),
+        );
+        app.studio.open_project(&ctx, &project.dir);
+        app.poll(&ctx);
+        assert_eq!(app.agents.project.as_deref(), Some(project.dir.as_path()));
+        app.agents.input = "go".into();
+
+        app.start_session(Mission::Advance);
+        assert!(app.pending_start.is_some(), "the copy comes first");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while app.pending_start.is_some() && std::time::Instant::now() < deadline {
+            app.poll(&ctx);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(app.pending_start.is_none(), "the copy ended");
+        let paths = ProjectPaths::of(&project.dir);
+        assert!(paths
+            .copy
+            .as_ref()
+            .is_some_and(|c| c.join("model.safetensors").is_file()));
+        // The session was started: with no connection it says so and keeps the text.
+        assert_eq!(app.agents.mission, Some(Mission::Advance));
+        assert_eq!(app.agents.input, "go");
+        assert!(app.agents.message.as_ref().is_some_and(|(_, error)| *error));
+
+        // A copy exists now: the next start does not make another.
+        app.start_session(Mission::Advance);
+        assert!(app.pending_start.is_none());
     }
 }

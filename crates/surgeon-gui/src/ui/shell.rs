@@ -1,33 +1,37 @@
-//! The shell around the views: a title bar without system frame (logomark, name, five tabs,
-//! window buttons; dragged, double-clicked, resized by its four edges and four corners), the
-//! three zones of the body, a status bar and the keyboard: `Ctrl+K` the palette, `Ctrl+1` to
-//! `Ctrl+5` the tabs, `Ctrl+B` folds the left column.
+//! The shell around the views, laid out like an IDE without its editor: a title bar without
+//! system frame (logomark and name; the running work, local only, the agent's connection,
+//! the settings, the window buttons; dragged, double-clicked, resized by its four edges and
+//! four corners), the activity bar (the agent, the 3D graph, the commands), the views, and
+//! the keyboard: `Ctrl+K` the palette, `Ctrl+1` / `Ctrl+2` the views, `Ctrl+B` folds the
+//! left column, `Ctrl+,` the settings.
 
 use eframe::egui::{
-    self, Align2, CursorIcon, Id, Key, Modifiers, Pos2, Rect, ResizeDirection, Sense, Ui, Vec2,
-    ViewportCommand,
+    self, Align, Align2, CursorIcon, Id, Key, Layout, Modifiers, Pos2, Rect, ResizeDirection,
+    Sense, Ui, Vec2, ViewportCommand,
 };
 
-use super::components::{self as c, ButtonKind};
+use super::components as c;
 use super::i18n::{t, tf};
 use super::icons::{Icon, State};
 use super::layout::{self, Regions};
 use super::theme::TOKENS as T;
 use super::{logo, palette, views};
-use crate::app::{SurgeonApp, Tab};
-use crate::settings::Lang;
+use crate::app::{Section, SurgeonApp, Tab};
 
-/// Below these window widths the title bar drops the name, then the edition.
+/// Below this window width the title bar drops the name.
 const COMPACT_NAME: f32 = 1104.0;
-const COMPACT_EDITION: f32 = 1280.0;
 
 pub fn tab_label(tab: Tab) -> &'static str {
     match tab {
-        Tab::Atelier => t("tab.atelier"),
+        Tab::Agent => t("tab.agent"),
         Tab::Graph => t("tab.graph"),
-        Tab::Analyses => t("tab.analyses"),
-        Tab::Agents => t("tab.agents"),
-        Tab::System => t("tab.system"),
+    }
+}
+
+fn tab_icon(tab: Tab) -> Icon {
+    match tab {
+        Tab::Agent => Icon::Chat,
+        Tab::Graph => Icon::Cube,
     }
 }
 
@@ -41,45 +45,44 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp) {
     let regions = layout::regions(screen, app.columns);
     layout::record(ui, &regions);
 
-    // The first-run wizard covers the three zones; the title bar then shows no tab.
+    // The first-run wizard covers the body; the title bar then shows only the brand.
     let wizard = app.desktop.wizard.is_some();
-    match (wizard, app.tab) {
-        (true, _) => {
-            let body = Rect::from_min_max(regions.left.min, regions.right.max);
-            super::wizard::show(ui, app, body);
+    if wizard {
+        let body = Rect::from_min_max(regions.activity.min, regions.right.max);
+        super::wizard::show(ui, app, body);
+    } else {
+        match app.tab {
+            Tab::Agent => views::agents::show(ui, app, &regions),
+            Tab::Graph => views::graph::show(ui, app, &regions),
         }
-        (false, Tab::Atelier) => views::atelier::show(ui, app, &regions),
-        (false, Tab::Graph) => views::graph::show(ui, app, &regions),
-        (false, Tab::Analyses) => views::analyses::show(ui, app, &regions),
-        (false, Tab::Agents) => views::agents::show(ui, app, &regions),
-        (false, Tab::System) => views::system::show(ui, app, &regions),
-    }
-    if !wizard {
+        layout::separators(ui, &regions);
         splitters(ui, app, &regions);
+        activity_bar(ui, app, regions.activity);
     }
     titlebar(ui, app, regions.titlebar, !wizard);
-    statusbar(ui, app, regions.statusbar);
     resize_edges(ui, screen);
+    views::system::dialog(&ctx, app);
     palette::show(&ctx, app);
 }
 
 fn keys(ctx: &egui::Context, app: &mut SurgeonApp) {
-    let palette = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K));
-    if palette {
+    if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
         app.palette.toggle();
     }
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::B)) {
         app.toggle_left();
     }
-    let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5];
-    for (tab, key) in Tab::ALL.into_iter().zip(digits) {
+    if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma)) {
+        app.settings = Some(app.settings.unwrap_or(Section::General));
+    }
+    for (tab, key) in Tab::ALL.into_iter().zip([Key::Num1, Key::Num2]) {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key)) {
             app.tab = tab;
         }
     }
 }
 
-/// Column widths follow the gaps; they are saved once the pointer is released.
+/// Column widths follow the lines; they are saved once the pointer is released.
 fn splitters(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     let dirty = Id::new("columns-dirty");
     if layout::splitters(ui, regions, &mut app.columns) {
@@ -95,9 +98,46 @@ fn splitters(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     }
 }
 
+// ------------------------------------------------------------------ activity bar
+
+/// The views on top (the active one again folds the left column), the commands at the
+/// bottom. The agent carries the count of what waits for the user.
+fn activity_bar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
+    let side = T.size.activity;
+    let cell = |k: f32| Rect::from_min_size(rect.min + Vec2::new(0.0, k * side), Vec2::splat(side));
+    let pending = app.agents.pending();
+    for (k, tab) in Tab::ALL.into_iter().enumerate() {
+        let badge = if tab == Tab::Agent { pending } else { 0 };
+        let tip = tab_label(tab);
+        if c::activity(
+            ui,
+            cell(k as f32),
+            tab_icon(tab),
+            app.tab == tab,
+            tip,
+            badge,
+        )
+        .clicked()
+        {
+            match app.tab == tab {
+                true => app.toggle_left(),
+                false => app.tab = tab,
+            }
+        }
+    }
+    let bottom = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.bottom() - side),
+        Vec2::splat(side),
+    );
+    let tip = tf("activity.commands", &[("key", &t("status.palette.key"))]);
+    if c::activity(ui, bottom, Icon::Search, app.palette.open, &tip, 0).clicked() {
+        app.palette.toggle();
+    }
+}
+
 // ------------------------------------------------------------------ title bar
 
-fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect, tabs: bool) {
+fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect, controls: bool) {
     let ctx = ui.ctx().clone();
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, T.color.window);
@@ -105,7 +145,7 @@ fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect, tabs: bool) {
         &painter,
         rect.x_range(),
         rect.bottom() - c::px(&painter),
-        T.color.border,
+        T.color.separator,
     );
 
     // The empty bar moves the window; registered first, so every control sits above it.
@@ -117,68 +157,57 @@ fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect, tabs: bool) {
         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
     }
 
-    // Brand: the mark, the name, the edition.
-    let mark = Rect::from_min_size(
-        Pos2::new(
-            rect.left() + T.space.l,
-            rect.center().y - T.space.l / 2.0 - T.space.xs,
-        ),
+    // Brand: the mark over the activity bar, then the name.
+    let mark = Rect::from_center_size(
+        Pos2::new(rect.left() + T.size.activity / 2.0, rect.center().y),
         Vec2::splat(T.size.icon + T.space.s),
     );
     logo::paint(&painter, mark);
-    // A narrow window drops the edition, then the name: the mark and the tabs always fit
-    // (960 is the smallest window).
-    let mut x = mark.right();
+    let mut left = mark.right() + T.space.m;
     if rect.width() >= COMPACT_NAME {
-        x = painter
+        left = painter
             .text(
-                Pos2::new(x + T.space.m, rect.center().y),
+                Pos2::new(left, rect.center().y),
                 Align2::LEFT_CENTER,
                 t("app.name"),
                 c::font_brand(),
                 T.color.text,
             )
-            .right();
-    }
-    if rect.width() >= COMPACT_EDITION {
-        x = painter
-            .text(
-                Pos2::new(x + T.space.s, rect.center().y + 1.0),
-                Align2::LEFT_CENTER,
-                tf("app.edition", &[("version", &env!("CARGO_PKG_VERSION"))]),
-                c::font_meta(),
-                T.color.text_secondary,
-            )
-            .right();
-    }
-
-    // Tabs; Agents carries the count of what waits for the user.
-    x += T.space.xl;
-    let pending = app.agents.pending();
-    for tab in Tab::ALL.into_iter().filter(|_| tabs) {
-        let label = tab_label(tab);
-        let width = painter
-            .layout_no_wrap(label.to_owned(), c::font_tab(), T.color.text)
-            .size()
-            .x
-            + 2.0 * T.space.l;
-        let r = Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(width, rect.height()));
-        if c::tab(ui, r, label, app.tab == tab).clicked() {
-            app.tab = tab;
-        }
-        if tab == Tab::Agents && pending > 0 {
-            painter.text(
-                Pos2::new(r.right() - T.space.xs, r.top() + T.space.s),
-                Align2::RIGHT_TOP,
-                pending.to_string(),
-                c::font_meta(),
-                T.color.warn,
-            );
-        }
-        x += width;
+            .right()
+            + T.space.l;
     }
 
     window_buttons(ui, rect, maximized);
+    if !controls {
+        return;
+    }
+    let [w, _] = T.size.window_button;
+    let area = Rect::from_min_max(
+        Pos2::new(left, rect.top()),
+        Pos2::new(rect.right() - 3.0 * w - T.space.s, rect.bottom()),
+    );
+    c::region(ui, area, "titlebar-controls", |ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = T.space.s;
+            if c::icon_button(ui, Icon::Gear, t("settings.open")).clicked() {
+                app.settings = Some(app.settings.unwrap_or(Section::General));
+            }
+            if app.agents.project.is_some() {
+                views::agents::picker(ui, app, T.size.left);
+            }
+            let mut local = app.desktop.settings.local_only;
+            if c::switch(
+                ui,
+                Icon::Shield,
+                t("status.local"),
+                &mut local,
+                t("policy.local_only.tip"),
+            ) {
+                app.set_local_only(local);
+            }
+            work_status(ui, app);
+        });
+    });
 }
 
 fn window_buttons(ui: &mut Ui, bar: Rect, maximized: bool) {
@@ -276,90 +305,9 @@ fn resize_edges(ui: &mut Ui, screen: Rect) {
     }
 }
 
-// ------------------------------------------------------------------ status bar
-
-fn statusbar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, T.color.window);
-    c::hline(&painter, rect.x_range(), rect.top(), T.color.border);
-    let inner = rect.shrink2(Vec2::new(T.space.l, 0.0));
-    c::region(ui, inner, "statusbar", |ui| {
-        ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = T.space.m;
-            context_status(ui, app);
-            let pending = app.agents.pending();
-            if pending > 0
-                && c::link(
-                    ui,
-                    &tf("status.approvals", &[("n", &pending)]),
-                    t("status.approvals.tip"),
-                )
-                .clicked()
-            {
-                app.tab = Tab::Agents;
-            }
-            job_status(ui, app);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = T.space.m;
-                c::meta(ui, format!("v{}", env!("CARGO_PKG_VERSION")));
-                if app.desktop.settings.local_only {
-                    c::status(ui, State::Idle, t("status.local"))
-                        .on_hover_text(t("policy.local_only.tip"));
-                }
-                let mut lang = app.desktop.lang();
-                let picked = c::segmented_small(
-                    ui,
-                    &mut lang,
-                    &[(Lang::En, "EN"), (Lang::Fr, "FR")],
-                    t("status.language"),
-                );
-                if picked {
-                    app.desktop.set_lang(lang);
-                }
-                if c::link(ui, &app.backend_label(), t("status.backend.tip")).clicked() {
-                    app.dialog.open = true;
-                }
-                match app.hardware_label() {
-                    Some(hw) => c::meta(ui, hw),
-                    None => c::meta(ui, t("status.probing")),
-                };
-                c::keycap(ui, t("status.palette.key"));
-                c::meta(ui, t("status.palette"));
-            });
-        });
-    });
-}
-
-/// The project and its working copy, or what to do without one.
-fn context_status(ui: &mut Ui, app: &mut SurgeonApp) {
-    let project = app
-        .studio
-        .manager
-        .as_ref()
-        .map(|m| m.project.manifest.name.clone());
-    let Some(project) = project else {
-        c::status(ui, State::Idle, t("status.no_project"));
-        return;
-    };
-    let entries = app.ledger().to_vec();
-    match app.studio.active_copy(&entries) {
-        Some(copy) => {
-            let (state, word) = match copy.writes {
-                0 => (State::Ok, t("copy.intact")),
-                _ => (State::Warn, t("copy.modified")),
-            };
-            c::status(ui, state, word);
-            c::mono_secondary(ui, format!("{project}:{}", copy.path));
-        }
-        None => {
-            c::status(ui, State::Idle, t("copy.none"));
-            c::mono_secondary(ui, project);
-        }
-    }
-}
-
-/// The running work: an install, a card or editor step, project jobs, the last message.
-fn job_status(ui: &mut Ui, app: &mut SurgeonApp) {
+/// The work running in the background, in the title bar: an install, the project's jobs,
+/// else the last message. Nothing when all is quiet.
+fn work_status(ui: &mut Ui, app: &mut SurgeonApp) {
     if let Some(p) = app.desktop.setup.progress().first() {
         let pct = p
             .fraction()
@@ -369,34 +317,6 @@ fn job_status(ui: &mut Ui, app: &mut SurgeonApp) {
             State::Active,
             tf("status.install", &[("label", &p.label), ("pct", &pct)]),
         );
-        return;
-    }
-    if let Some(job) = app.job.as_ref().filter(|j| !j.finished) {
-        let label = job.labels.get(job.current).map_or("", String::as_str);
-        c::status(
-            ui,
-            State::Active,
-            tf(
-                "status.step",
-                &[
-                    ("i", &(job.current + 1)),
-                    ("n", &job.labels.len()),
-                    ("label", &label),
-                    ("s", &format!("{:.1}", job.started.elapsed().as_secs_f64())),
-                ],
-            ),
-        );
-        if c::button_if(
-            ui,
-            !job.cancelled(),
-            t("action.cancel"),
-            ButtonKind::Ghost,
-            t("status.cancelling"),
-        )
-        .clicked()
-        {
-            job.cancel();
-        }
         return;
     }
     let running = app.studio.manager.as_ref().map_or(0, |m| m.running.len());

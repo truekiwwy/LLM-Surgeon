@@ -41,6 +41,9 @@ weight-surgeon = { path = "../.." }
 [target.'cfg(windows)'.dependencies]
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
 windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Foundation", "Win32_Security_Credentials"] }
+# The system picker of the source model (a weights file or a folder). Windows only: elsewhere
+# rfd needs GTK or a desktop portal, and the path field stays.
+rfd = { version = "0.18", default-features = false }
 
 [target.'cfg(not(windows))'.dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls"] }

@@ -10,6 +10,7 @@
 //! - [`forms`]: launch forms generated from the engine's tool schemas.
 //! - [`estimate`]: cost and time before launch, and the budget check.
 //! - [`live`]: the 3D layer of a run, live or replayed with a time cursor.
+//! - [`lock`]: the kernel lock that keeps the source model read-only while its project is open.
 //! - [`selftest`]: `surgeon-gui --self-test`, all of the above without a window.
 //! - [`view`]: the Projects workspace of the window.
 
@@ -21,6 +22,7 @@ pub mod forms;
 pub mod jobs;
 pub mod ledger;
 pub mod live;
+pub mod lock;
 pub mod project;
 pub mod selftest;
 pub mod view;

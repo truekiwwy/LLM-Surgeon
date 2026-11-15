@@ -76,12 +76,13 @@ fn legacy_graph_arguments_still_open() {
 fn every_screen_can_be_captured_and_unknown_ones_are_refused() {
     let dir = tempfile::tempdir().unwrap();
     for screen in [
-        "atelier",
+        "agent",
         "graph",
-        "analyses",
         "agents",
+        "settings",
+        "settings:providers",
+        "settings:engine",
         "system",
-        "system:providers",
         "diagnostics",
         "wizard",
         "wizard:4",
@@ -108,11 +109,11 @@ fn every_screen_can_be_captured_and_unknown_ones_are_refused() {
 }
 
 #[test]
-fn the_demo_workspace_renders_every_tab_at_both_sizes_and_scales() {
+fn the_demo_workspace_renders_every_view_at_both_sizes_and_scales() {
     let dir = tempfile::tempdir().unwrap();
     for (screen, size, scale) in [
-        ("atelier", "1440x900", "1.0"),
-        ("agents", "1920x1080", "1.0"),
+        ("agent", "1440x900", "1.0"),
+        ("settings:general", "1920x1080", "1.0"),
         ("graph", "1440x900", "1.5"),
     ] {
         let png = dir.path().join(format!("{screen}.png"));

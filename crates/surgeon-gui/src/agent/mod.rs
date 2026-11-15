@@ -12,6 +12,7 @@
 //! - [`tools`]: the engine's `tools/list` plus the interface tools; untrusted-data frames.
 //! - [`policy`]: Safe / Approval / Forbidden, and the dated "always" rules.
 //! - [`evidence`]: findings and their Measured / Inferred / Unknown status.
+//! - [`mission`]: what a session is for (`Advance` full scan, `Scalping` one symptom).
 //! - [`session`]: the loop, budgets, pause and stop, persistence in `chat/`.
 //! - [`config`]: connections, consents, per-project settings (no secret).
 //! - [`view`]: the Agents page; [`selftest`]: the `--self-test` dialogue.
@@ -21,8 +22,10 @@ pub mod config;
 pub mod detect;
 pub mod evidence;
 pub mod http;
+pub mod mission;
 pub mod mock;
 pub mod openai;
+pub mod paths;
 pub mod policy;
 pub mod provider;
 pub mod runtime;

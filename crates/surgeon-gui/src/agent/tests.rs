@@ -1439,6 +1439,7 @@ fn cli_runtimes_are_detected_from_their_real_help_and_run_with_the_mcp_barrier()
         model: None,
         prompt: "inspecte",
         scratch: &dir.path().join("scratch"),
+        agy: None,
     };
     let l = runtime::launch(&input).unwrap();
     let args: Vec<String> = l
@@ -1498,6 +1499,138 @@ fn cli_runtimes_are_detected_from_their_real_help_and_run_with_the_mcp_barrier()
         cost_usd: Some(0.0123),
         summary: "success".into()
     }));
+}
+
+#[test]
+fn opencode_and_antigravity_keep_their_tools_and_meet_surgeon_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let detected = |kind| runtime::Detected {
+        kind,
+        path: dir.path().join("cli.exe"),
+        version: "1".into(),
+        missing: Vec::new(),
+    };
+    let (opencode, agy) = (
+        detected(ProviderKind::OpenCode),
+        detected(ProviderKind::Antigravity),
+    );
+    let home = runtime::AgyHome {
+        profile: dir.path().join("profiles").join("agy"),
+        user: dir.path().join("user"),
+    };
+    let input = runtime::LaunchInput {
+        detected: &opencode,
+        surgeon: &dir.path().join("surgeon.exe"),
+        mode: AgentMode::Modify,
+        project: &project,
+        source_dir: Some(&dir.path().join("model")),
+        model: Some("ollama/qwen"),
+        prompt: "scanne",
+        scratch: &dir.path().join("scratch"),
+        agy: Some(&home),
+    };
+
+    // OpenCode: a private server, its inline configuration adds surgeon and keeps its own
+    // tools inside the project.
+    let l = runtime::launch(&input).unwrap();
+    let args: Vec<String> = l.args.iter().map(|a| a.to_string_lossy().into()).collect();
+    assert_eq!(&args[..2], ["run", "--standalone"]);
+    assert!(args.contains(&"--auto".into()) && !args.iter().any(|a| a.contains("scanne")));
+    let config = l
+        .env
+        .iter()
+        .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+        .unwrap();
+    let config: Value = serde_json::from_str(&config.1.to_string_lossy()).unwrap();
+    assert_eq!(config["permission"]["external_directory"], "deny");
+    let command = config["mcp"]["surgeon"]["command"].as_array().unwrap();
+    assert!(!command.iter().any(|a| a == "--read-only"), "Modify");
+    assert_eq!(l.stdin, "scanne");
+
+    // Antigravity: not signed in, a clear refusal and nothing left behind.
+    let refused = runtime::launch(&runtime::LaunchInput {
+        detected: &agy,
+        ..input
+    });
+    assert!(refused.unwrap_err().contains("agy"));
+    // Signed in: the profile holds the sign-in and surgeon as the only MCP server.
+    std::fs::create_dir_all(home.user.join(".gemini")).unwrap();
+    for name in ["oauth_creds.json", "google_accounts.json"] {
+        std::fs::write(home.user.join(".gemini").join(name), b"{}").unwrap();
+    }
+    std::fs::write(home.user.join(".gemini").join("settings.json"), b"global").unwrap();
+    let l = runtime::launch(&runtime::LaunchInput {
+        detected: &agy,
+        ..input
+    })
+    .unwrap();
+    let gemini = home.profile.join(".gemini");
+    assert!(gemini.join("oauth_creds.json").is_file());
+    assert!(
+        !gemini.join("settings.json").exists(),
+        "nothing else is taken from the user"
+    );
+    let mcp: Value = serde_json::from_str(
+        &std::fs::read_to_string(gemini.join("config").join("mcp_config.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(mcp["mcpServers"].as_object().unwrap().len(), 1);
+    assert!(mcp["mcpServers"]["surgeon"]["args"].is_array());
+    let profile = home.profile.clone().into_os_string();
+    assert!(l.env.contains(&("USERPROFILE".into(), profile.clone())));
+    assert!(l.env.contains(&("HOME".into(), profile)));
+    let message: Value = serde_json::from_str(l.stdin.trim()).unwrap();
+    assert_eq!(
+        (
+            message["event"].as_str(),
+            message["message"]["content"].as_str()
+        ),
+        (Some("user"), Some("scanne"))
+    );
+    home.clear();
+    assert!(
+        !home.profile.exists(),
+        "the copied sign-in goes with the profile"
+    );
+}
+
+#[test]
+fn opencode_and_antigravity_streams_are_read() {
+    // Lines of real runs (opencode 2.2.7, agy 1.4.4), shortened.
+    let e = runtime::parse_opencode(
+        r#"{"type":"tool_use","part":{"type":"tool","tool":"execute","state":{"status":"completed","input":{"code":"await tools.surgeon.surgeon_check()"},"output":"ok"}}}"#,
+    );
+    assert!(matches!(&e[0], runtime::Event::Tool { name, .. } if name == "execute"));
+    assert_eq!(e[1], runtime::Event::ToolResult("ok".into()));
+    let e = runtime::parse_opencode(r#"{"type":"text","part":{"type":"text","text":"OK"}}"#);
+    assert_eq!(e, vec![runtime::Event::Text("OK".into())]);
+    let tools =
+        r#"{"type":"step_finish","part":{"type":"step-finish","reason":"tool-calls","cost":0}}"#;
+    assert!(
+        runtime::parse_opencode(tools).is_empty(),
+        "a turn goes on after tool calls"
+    );
+    let stop = r#"{"type":"step_finish","part":{"type":"step-finish","reason":"stop","cost":0}}"#;
+    assert!(matches!(
+        runtime::parse_opencode(stop)[0],
+        runtime::Event::Done { .. }
+    ));
+
+    let init = r#"{"event":"init","conversation_id":"c","init":{"tools":["run_command"],"permission_mode":"always-proceed"}}"#;
+    assert!(runtime::parse_agy(init).is_empty());
+    let input = r#"{"event":"step_update","step_update":{"step_index":0,"state":"DONE","step_type":"user_input"}}"#;
+    assert!(runtime::parse_agy(input).is_empty());
+    let quota = r#"{"event":"result","result":{"status":"ERROR","response":"","error":"Individual quota reached.","finished_reason":"error"}}"#;
+    assert_eq!(
+        runtime::parse_agy(quota),
+        vec![runtime::Event::Error("Individual quota reached.".into())]
+    );
+    let done = r#"{"event":"result","result":{"status":"SUCCESS","response":"OK","finished_reason":"end_turn"}}"#;
+    let e = runtime::parse_agy(done);
+    assert_eq!(e[0], runtime::Event::Text("OK".into()));
+    assert!(matches!(&e[1], runtime::Event::Done { summary, .. } if summary == "end_turn"));
 }
 
 #[test]
@@ -1561,19 +1694,37 @@ fn the_scan_offers_checked_runtimes_and_reports_the_other_clis_with_a_reason() {
     let path = std::env::join_paths([dir.path()]).unwrap();
     let help = "-p, --print\n--output-format stream-json\n--mcp-config\n--strict-mcp-config\n--allowedTools\n--permission-prompts\n--tools";
     fake_cli(dir.path(), "claude", help, &[]);
-    fake_cli(dir.path(), "opencode", "run --format json", &[]);
+    fake_cli(
+        dir.path(),
+        "opencode",
+        "--format json
+--auto
+--archived
+--standalone",
+        &[],
+    );
+    fake_cli(
+        dir.path(),
+        "agy",
+        "--print
+--output-format
+--input-format
+--model",
+        &[],
+    );
     fake_cli(dir.path(), "gemini", "--prompt", &[]);
     let (runtimes, others) = detect::clis(Some(&path));
-    assert_eq!(runtimes.len(), 1);
-    assert_eq!(runtimes[0].kind, ProviderKind::ClaudeCode);
-    let reasons: Vec<_> = others.iter().map(|o| (o.name, o.reason)).collect();
+    let found: Vec<_> = runtimes.iter().map(|r| (r.kind, r.usable())).collect();
     assert_eq!(
-        reasons,
+        found,
         [
-            ("opencode", Reason::NoToolBarrier),
-            ("gemini", Reason::NotSupported)
+            (ProviderKind::ClaudeCode, true),
+            (ProviderKind::OpenCode, true),
+            (ProviderKind::Antigravity, true)
         ]
     );
+    let reasons: Vec<_> = others.iter().map(|o| (o.name, o.reason)).collect();
+    assert_eq!(reasons, [("gemini", Reason::NotSupported)]);
     assert!(others[0].version.starts_with("9.9.9"), "{:?}", others[0]);
 }
 
@@ -1640,5 +1791,40 @@ fn a_signed_in_cli_passes_its_own_status_check() {
     assert_eq!(
         runtime::login_command(ProviderKind::ClaudeCode),
         "claude auth login"
+    );
+}
+
+#[test]
+fn the_mission_briefs_the_agent_and_stays_with_the_conversation() {
+    use super::mission::{Mission, Symptom};
+    let mut e = env(vec![mock::say("Je regarde o_proj.")], AgentMode::Ask);
+    let mission = Mission::Scalping(Symptom::Refusals);
+    e.s.conv.mission = Some(mission);
+    e.s.send("Il refuse tout ce qui parle de serrures").unwrap();
+    e.settle();
+    let system = &e.mock.requests()[0].system;
+    assert!(system.contains(&mission.brief()), "{system}");
+    let path = Dirs::of(&e.m.project.dir).conversation(&e.s.conv.id);
+    let saved = Conversation::load(&path).unwrap();
+    assert_eq!(saved.mission, Some(mission));
+}
+
+#[test]
+fn a_cli_write_of_focus_or_plan_is_taken_once_and_only_when_newer_than_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("focus.json");
+    std::fs::write(&path, r#"{"target":"L3.down"}"#).unwrap();
+    let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+    // Written before the run started: not this run's.
+    let mut seen = written;
+    assert_eq!(super::view::read_if_newer(&path, &mut seen), None);
+    let mut seen = written - Duration::from_secs(1);
+    let focus = super::view::read_if_newer(&path, &mut seen).unwrap();
+    assert_eq!(focus["target"], "L3.down");
+    assert_eq!(seen, written);
+    assert_eq!(super::view::read_if_newer(&path, &mut seen), None, "once");
+    assert_eq!(
+        super::view::read_if_newer(&dir.path().join("plan.json"), &mut seen),
+        None
     );
 }

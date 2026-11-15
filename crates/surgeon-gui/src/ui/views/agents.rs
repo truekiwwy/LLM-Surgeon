@@ -1,24 +1,24 @@
-//! Agents, the use of an agent on the open project: the project and its conversations on the
-//! left; the session in the center (the `connection · model` picker in its header, the
-//! conversation with its approval cards and question, the message field); on the right the
-//! contract (what the agent may do: mode, budgets, "always" rules) over the evidence (what it
-//! established). Connections are configured in System. The consent dialog opens before the
-//! first request to a remote connection.
+//! The agent, the main view: the project and its sessions on the left; in the center either
+//! the new-session form (`Advance`, a full scan where the agent finds the problems itself, or
+//! `Scalping`, a precise symptom the user describes) or the session itself (the thread with
+//! its approval cards and question, the message field); on the right the evidence (what the
+//! agent established). What the agent may do is chosen in the form; connections are
+//! configured in the settings. The consent dialog opens before the first request to a remote connection.
 
-use eframe::egui::{self, Id, Order, Pos2, ScrollArea, Ui};
+use eframe::egui::{self, Id, Order, Pos2, Rect, ScrollArea, Ui, Vec2};
 
 use super::super::components::{self as c, ButtonKind, Segment};
 use super::super::i18n::{t, tf};
 use super::super::icons::{Icon, State};
-use super::super::layout::{self, Part, Regions};
+use super::super::layout::Regions;
 use super::super::theme::TOKENS as T;
-use super::{age, context, left_column};
-use crate::agent::config::AskMode;
+use super::{age, context, left_column, project_select};
 use crate::agent::evidence::{self, Status};
+use crate::agent::mission::{Mission, Symptom};
 use crate::agent::policy::AgentMode;
 use crate::agent::provider::{Block, Role};
 use crate::agent::session::{Choice, Dirs};
-use crate::app::{Section, SurgeonApp, Tab};
+use crate::app::{Mode, Section, SurgeonApp};
 use crate::studio::project::now_unix;
 
 pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
@@ -26,64 +26,105 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         ui,
         app,
         regions.left,
-        "conversations",
-        t("panel.conversations"),
-        conversations,
+        "sessions",
+        t("panel.sessions"),
+        sessions,
     );
-    c::Panel::new("session")
-        .title(t("panel.session"))
-        .show_with(ui, regions.center, app, picker, session);
-    let right = layout::stack(regions.right, &[Part::Flex(1.4), Part::Flex(1.0)]);
-    c::Panel::new("contract")
-        .title(t("panel.contract"))
-        .show(ui, right[0], |ui| contract(ui, app));
+    c::Panel::new("session").center().flush().show_with(
+        ui,
+        regions.center,
+        app,
+        |_, _| {},
+        |ui, app| {
+            let rect = ui.max_rect();
+            match (
+                app.agents.project.is_some(),
+                app.agents.conversation().is_some(),
+            ) {
+                (false, _) => no_project(ui, app, rect),
+                (true, false) => form(ui, app, rect),
+                (true, true) => thread(ui, app, rect),
+            }
+        },
+    );
     c::Panel::new("evidence")
         .title(t("panel.evidence"))
-        .show(ui, right[1], |ui| evidence_log(ui, app));
+        .show(ui, regions.right, |ui| evidence_log(ui, app));
     consent(ui.ctx(), app);
 }
 
-/// Opens System on its AI providers.
+/// Opens the settings on the AI providers.
 fn configure(app: &mut SurgeonApp) {
-    app.tab = Tab::System;
-    app.system_section = Section::Providers;
+    app.settings = Some(Section::Providers);
 }
 
-// ------------------------------------------------------------------ conversations
+/// The centered reading column of the center zone.
+fn column(rect: Rect) -> Rect {
+    let width = (rect.width() - 2.0 * T.space.xl).min(T.size.reading);
+    Rect::from_center_size(rect.center(), Vec2::new(width, rect.height()))
+}
 
-/// The project picker, then New and Export, then the project's conversations.
-fn conversations(ui: &mut Ui, app: &mut SurgeonApp) {
-    context(ui, app);
-    let Some(project) = app.agents.project.clone() else {
+fn symptom_label(symptom: Symptom) -> &'static str {
+    match symptom {
+        Symptom::Refusals => t("symptom.refusals"),
+        Symptom::Repetition => t("symptom.repetition"),
+        Symptom::Hallucination => t("symptom.hallucination"),
+        Symptom::Language => t("symptom.language"),
+        Symptom::Reasoning => t("symptom.reasoning"),
+        Symptom::Other => t("symptom.other"),
+    }
+}
+
+fn symptom_icon(symptom: Symptom) -> Icon {
+    match symptom {
+        Symptom::Refusals => Icon::Shield,
+        Symptom::Repetition => Icon::List,
+        Symptom::Hallucination => Icon::Sparkle,
+        Symptom::Language => Icon::Chat,
+        Symptom::Reasoning => Icon::Chip,
+        Symptom::Other => Icon::Plus,
+    }
+}
+
+/// An example of what the user may write for `symptom`.
+fn symptom_idea(symptom: Symptom) -> &'static str {
+    match symptom {
+        Symptom::Refusals => t("idea.refusals"),
+        Symptom::Repetition => t("idea.repetition"),
+        Symptom::Hallucination => t("idea.hallucination"),
+        Symptom::Language => t("idea.language"),
+        Symptom::Reasoning => t("idea.reasoning"),
+        Symptom::Other => t("idea.other"),
+    }
+}
+
+fn mission_label(mission: Option<Mission>) -> String {
+    match mission {
+        Some(Mission::Advance) => t("mode.advance").into(),
+        Some(Mission::Scalping(s)) => format!("{} · {}", t("mode.scalping"), symptom_label(s)),
+        None => t("panel.session").into(),
+    }
+}
+
+// ------------------------------------------------------------------ left column
+
+/// New session, the project and its copy, then the project's sessions.
+fn sessions(ui: &mut Ui, app: &mut SurgeonApp) {
+    // Without a project the center holds the form that creates one.
+    if app.agents.project.is_none() {
+        c::secondary(ui, t("project.none"));
         return;
-    };
-    c::separator(ui);
-    ui.horizontal(|ui| {
-        if c::button_if(
-            ui,
-            !app.agents.busy(),
-            t("chat.new"),
-            ButtonKind::Secondary,
-            t("chat.busy"),
-        )
-        .clicked()
-        {
-            app.agents.new_conversation();
-        }
-        let has_conv = app.agents.conversation().is_some();
-        if c::button_if(
-            ui,
-            has_conv,
-            t("chat.export"),
-            ButtonKind::Ghost,
-            t("chat.export.why"),
-        )
-        .clicked()
-        {
-            app.agents.export(&project);
-        }
+    }
+    let busy = app.agents.busy();
+    let new = ui.add_enabled_ui(!busy, |ui| {
+        c::button_wide(ui, t("chat.new"), ButtonKind::Secondary)
     });
-    ui.add_space(T.space.s);
+    if new.inner.on_disabled_hover_text(t("chat.busy")).clicked() {
+        app.agents.new_conversation();
+    }
+    c::section(ui, t("panel.project"));
+    context(ui, app);
+    c::section(ui, t("panel.sessions"));
     let current = app.agents.conversation().map(|c| c.id.clone());
     let now = now_unix();
     let lines = app.agents.conversations().to_vec();
@@ -93,10 +134,10 @@ fn conversations(ui: &mut Ui, app: &mut SurgeonApp) {
     }
     let mut open = None;
     ScrollArea::vertical()
-        .id_salt("conversations")
+        .id_salt("sessions")
         .auto_shrink(false)
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.spacing_mut().item_spacing.y = T.space.xs / 2.0;
             for (id, title, created) in &lines {
                 let selected = current.as_deref() == Some(id.as_str());
                 // Right to left: the age keeps its room, the title takes the rest.
@@ -116,24 +157,226 @@ fn conversations(ui: &mut Ui, app: &mut SurgeonApp) {
     }
 }
 
-// ------------------------------------------------------------------ session
+// ------------------------------------------------------------------ center
 
-/// What the picker of the session header offers.
-#[derive(Clone, PartialEq)]
-enum Pick {
-    /// The global default (no project choice).
-    Default,
-    Use(String, Option<String>),
-    Configure,
+/// Without a project: what to do first, and the form that creates one.
+fn no_project(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
+    let col = column(rect).shrink2(Vec2::new(0.0, T.space.xl * 2.0));
+    c::region(ui, col, "no-project", |ui| {
+        c::heading(ui, t("start.title"), t("start.lead"));
+        ui.add_space(T.space.xl);
+        c::card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            context(ui, app);
+        });
+    });
+}
+
+/// The form of a new session: the kind, the model, the symptom (`Scalping`), the words of
+/// the user, the connection and what the agent may do, then Start.
+fn form(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
+    let col = column(rect).shrink2(Vec2::new(0.0, T.space.xl));
+    c::region(ui, col, "session-form", |ui| {
+        ScrollArea::vertical()
+            .id_salt("session-form")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                let mut mode = app.mode;
+                let kinds = [
+                    Segment {
+                        value: Mode::Advance,
+                        label: t("mode.advance"),
+                        tooltip: t("mode.advance.tip"),
+                    },
+                    Segment {
+                        value: Mode::Scalping,
+                        label: t("mode.scalping"),
+                        tooltip: t("mode.scalping.tip"),
+                    },
+                ];
+                if c::segmented(ui, &mut mode, &kinds, c::font_body()) {
+                    app.set_mode(mode);
+                }
+                ui.add_space(T.space.xl);
+                match mode {
+                    Mode::Advance => {
+                        c::heading(ui, t("form.advance.title"), t("form.advance.lead"))
+                    }
+                    Mode::Scalping => {
+                        c::heading(ui, t("form.scalping.title"), t("form.scalping.lead"))
+                    }
+                }
+                ui.add_space(T.space.xl);
+                c::card_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    form_steps(ui, app, mode);
+                });
+            });
+    });
+}
+
+fn form_steps(ui: &mut Ui, app: &mut SurgeonApp, mode: Mode) {
+    c::step(ui, 1, t("form.model"));
+    ui.add_space(T.space.m);
+    project_select(ui, app, ui.available_width());
+    ui.add_space(T.space.s);
+    copy_line(ui, app);
+    ui.add_space(T.space.xl);
+
+    let mut n = 2;
+    if mode == Mode::Scalping {
+        c::step(ui, n, t("form.symptom"));
+        ui.add_space(T.space.m);
+        let width = ((ui.available_width() - 2.0 * T.space.s) / 3.0).floor();
+        for row in Symptom::ALL.chunks(3) {
+            ui.horizontal(|ui| {
+                for &symptom in row {
+                    let picked = app.agents.symptom == symptom;
+                    let label = symptom_label(symptom);
+                    if c::tile(ui, symptom_icon(symptom), label, picked, width).clicked() {
+                        app.agents.symptom = symptom;
+                    }
+                }
+            });
+            ui.add_space(T.space.s);
+        }
+        ui.add_space(T.space.l);
+        n += 1;
+    }
+
+    let (title, hint) = match mode {
+        Mode::Advance => (t("form.notes"), t("form.notes.hint")),
+        Mode::Scalping => (t("form.describe"), t("form.describe.hint")),
+    };
+    c::step(ui, n, title);
+    ui.add_space(T.space.m);
+    c::field_multiline(ui, &mut app.agents.input, hint, 4);
+    ui.add_space(T.space.s);
+    let ideas: Vec<&str> = match mode {
+        Mode::Advance => vec![t("idea.advance.layers"), t("idea.advance.origin")],
+        Mode::Scalping => vec![symptom_idea(app.agents.symptom)],
+    };
+    ui.horizontal_wrapped(|ui| {
+        c::secondary(ui, t("form.ideas"));
+        for idea in ideas {
+            if c::chip(ui, idea).clicked() {
+                app.agents.input = idea.to_owned();
+            }
+        }
+    });
+    ui.add_space(T.space.xl);
+
+    ui.horizontal(|ui| {
+        c::secondary(ui, t("form.allow"));
+        let mut mode = app.agents.agent.mode;
+        let options = [
+            Segment {
+                value: AgentMode::Ask,
+                label: t("policy.ask"),
+                tooltip: t("policy.ask.tip"),
+            },
+            Segment {
+                value: AgentMode::Modify,
+                label: t("policy.modify"),
+                tooltip: t("policy.modify.tip"),
+            },
+        ];
+        if c::segmented(ui, &mut mode, &options, c::font_body()) {
+            app.agents.agent.mode = mode;
+            app.agents.agent_changed();
+        }
+    });
+    ui.add_space(T.space.m);
+    ui.horizontal(|ui| {
+        c::secondary(ui, t("form.by"));
+        if app.agents.connection().is_some() {
+            picker(ui, app, T.size.left);
+        } else if c::button(ui, t("picker.configure"), ButtonKind::Secondary).clicked() {
+            configure(app);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            start(ui, app, mode);
+        });
+    });
+    if let Some((text, error)) = app.agents.message.clone() {
+        ui.add_space(T.space.s);
+        c::message(ui, &text, error);
+    }
+}
+
+/// The working copy the agent works on, or the button that makes one.
+fn copy_line(ui: &mut Ui, app: &mut SurgeonApp) {
+    let entries = app.ledger().to_vec();
+    let copy = app.studio.active_copy(&entries);
+    ui.horizontal(|ui| match &copy {
+        Some(copy) => {
+            let (state, word) = match copy.writes {
+                0 => (State::Ok, t("copy.intact")),
+                _ => (State::Warn, t("copy.modified")),
+            };
+            c::status(ui, state, word);
+            c::mono_secondary(ui, copy.path.as_str());
+        }
+        None => {
+            c::status(ui, State::Idle, t("copy.none"));
+            if c::button(ui, t("copy.new"), ButtonKind::Secondary)
+                .on_hover_text(t("copy.new.tip"))
+                .clicked()
+            {
+                let _ = app.studio.submit_copy();
+            }
+        }
+    });
+}
+
+/// Start: the one primary action of the form.
+fn start(ui: &mut Ui, app: &mut SurgeonApp, mode: Mode) {
+    let hub = &app.agents;
+    let described = mode == Mode::Advance || !hub.input.trim().is_empty();
+    let copying = app.pending_start.is_some();
+    let why = match (hub.connection().is_some(), hub.busy() || copying, described) {
+        (false, _, _) => Some(t("agents.none")),
+        (_, true, _) if copying => Some(t("form.copying")),
+        (_, true, _) => Some(t("chat.busy")),
+        (_, _, false) => Some(t("form.describe.why")),
+        _ => None,
+    };
+    if copying {
+        c::status(ui, State::Active, t("form.copying"));
+    }
+    let clicked = c::button_if(
+        ui,
+        why.is_none(),
+        t("form.start"),
+        ButtonKind::Primary,
+        why.unwrap_or_default(),
+    )
+    .clicked();
+    if !clicked {
+        return;
+    }
+    let mission = match mode {
+        Mode::Advance => Mission::Advance,
+        Mode::Scalping => Mission::Scalping(app.agents.symptom),
+    };
+    if app.agents.input.trim().is_empty() {
+        app.agents.input = t("form.advance.default").to_owned();
+    }
+    app.start_session(mission);
+    ui.ctx().request_repaint();
 }
 
 /// `connection · model`: the ready connections and their models, the global default, and
-/// a way to System when what is wanted is not there.
-fn picker(ui: &mut Ui, app: &mut SurgeonApp) {
-    let hub = &app.agents;
-    if hub.project.is_none() {
-        return;
+/// a way to the settings when what is wanted is not there.
+pub fn picker(ui: &mut Ui, app: &mut SurgeonApp, width: f32) {
+    #[derive(Clone, PartialEq)]
+    enum Pick {
+        /// The global default (no project choice).
+        Default,
+        Use(String, Option<String>),
+        Configure,
     }
+    let hub = &app.agents;
     let shown = match (hub.connection(), hub.model()) {
         (Some(conn), Some(model)) => format!("{} · {model}", conn.label),
         (Some(conn), None) => conn.label.clone(),
@@ -156,7 +399,6 @@ fn picker(ui: &mut Ui, app: &mut SurgeonApp) {
         .filter(|c| c.ready())
         .cloned()
         .collect();
-    let width = (ui.available_width() * 0.6).max(T.size.left);
     let mut picked = current.clone();
     c::select(ui, "session-picker", &shown, width, |ui| {
         if let Some(label) = &default {
@@ -189,22 +431,25 @@ fn picker(ui: &mut Ui, app: &mut SurgeonApp) {
     }
 }
 
-fn session(ui: &mut Ui, app: &mut SurgeonApp) {
-    if app.agents.project.is_none() {
-        c::empty(ui, t("project.missing"), t("agents.project.hint"));
-        return;
-    }
-    if app.agents.connection().is_none() {
-        c::empty(ui, t("agents.none"), t("agents.none.hint"));
-        ui.add_space(T.space.s);
-        if c::button(ui, t("picker.configure"), ButtonKind::Primary).clicked() {
-            configure(app);
-        }
-        return;
-    }
-    let footer = 4.0 * T.size.row + T.size.cta + T.space.l;
-    let height = (ui.available_height() - footer).max(T.size.row * 3.0);
-    ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
+/// The session: its header, the thread, the message field.
+fn thread(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
+    let col = column(rect);
+    let header = Rect::from_min_size(col.min, Vec2::new(col.width(), T.size.header + T.space.s));
+    let field_height = 3.0 * T.size.row + T.size.control + T.space.m;
+    let note = match app.agents.message.is_some() {
+        true => T.size.row,
+        false => 0.0,
+    };
+    let field = Rect::from_min_max(
+        Pos2::new(col.left(), col.bottom() - T.space.l - note - field_height),
+        Pos2::new(col.right(), col.bottom() - T.space.l),
+    );
+    let body = Rect::from_min_max(
+        Pos2::new(col.left(), header.bottom()),
+        Pos2::new(col.right(), field.top() - T.space.s),
+    );
+    c::region(ui, header, "session-header", |ui| session_header(ui, app));
+    c::region(ui, body, "session-thread", |ui| {
         ScrollArea::vertical()
             .id_salt("session")
             .auto_shrink(false)
@@ -214,91 +459,124 @@ fn session(ui: &mut Ui, app: &mut SurgeonApp) {
                 approval(ui, app);
             });
     });
-    c::separator(ui);
-    c::field_multiline(ui, &mut app.agents.input, t("chat.hint"), 3);
-    ui.add_space(T.space.s);
-    let ctx = ui.ctx().clone();
-    ui.horizontal(|ui| {
-        let busy = app.agents.busy();
-        let paused = app.agents.session.as_ref().is_some_and(|s| s.paused);
-        if paused {
-            if c::button(ui, t("chat.resume"), ButtonKind::Secondary).clicked() {
-                app.agents.resume_run(&mut app.studio);
-            }
-        } else if c::button_if(
+    c::region(ui, field, "session-field", |ui| {
+        let hub = &app.agents;
+        let ready = !hub.busy() && !hub.input.trim().is_empty() && hub.connected();
+        let keys = t("chat.keys");
+        if c::composer(
             ui,
-            busy,
-            t("chat.pause"),
-            ButtonKind::Secondary,
-            t("chat.idle"),
-        )
-        .clicked()
-        {
-            app.agents.pause();
-        }
-        if c::button_if(ui, busy, t("chat.stop"), ButtonKind::Ghost, t("chat.idle")).clicked() {
-            app.agents.stop(&mut app.studio);
-        }
-        let ready = !busy && !app.agents.input.trim().is_empty() && app.agents.connected();
-        let send = ui.add_enabled_ui(ready, |ui| {
-            ui.set_width(ui.available_width());
-            c::button_wide(ui, t("chat.send"), ButtonKind::Primary)
-        });
-        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
-        if ready && (send.inner.clicked() || enter) {
+            &mut app.agents.input,
+            t("chat.hint"),
+            keys,
+            ready,
+            t("chat.send"),
+        ) {
             app.agents.send_input();
-            ctx.request_repaint();
+            ui.ctx().request_repaint();
+        }
+        if let Some((text, error)) = app.agents.message.clone() {
+            c::message(ui, &text, error);
         }
     });
-    if let Some((text, error)) = app.agents.message.clone() {
-        c::message(ui, &text, error);
-    }
+}
+
+/// The kind of session and its connection on the left; export, pause and stop on the right.
+fn session_header(ui: &mut Ui, app: &mut SurgeonApp) {
+    let mission = app.agents.conversation().and_then(|c| c.mission);
+    let model = app
+        .agents
+        .conversation()
+        .map(|c| format!("{} · {}", c.connection, c.model))
+        .unwrap_or_default();
+    ui.horizontal_centered(|ui| {
+        let icon = match mission {
+            Some(Mission::Scalping(_)) => Icon::Target,
+            _ => Icon::Sparkle,
+        };
+        let (glyph, _) = ui.allocate_exact_size(Vec2::splat(T.size.icon), egui::Sense::hover());
+        super::super::icons::paint(ui.painter(), glyph, icon, T.color.text_secondary);
+        c::strong(ui, mission_label(mission));
+        c::meta(ui, model);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let busy = app.agents.busy();
+            let paused = app.agents.session.as_ref().is_some_and(|s| s.paused);
+            if busy || paused {
+                if c::icon_button(ui, Icon::Stop, t("chat.stop")).clicked() {
+                    app.agents.stop(&mut app.studio);
+                }
+                match paused {
+                    true => {
+                        if c::icon_button(ui, Icon::Play, t("chat.resume")).clicked() {
+                            app.agents.resume_run(&mut app.studio);
+                        }
+                    }
+                    false => {
+                        if c::icon_button(ui, Icon::Pause, t("chat.pause")).clicked() {
+                            app.agents.pause();
+                        }
+                    }
+                }
+            }
+            if let Some(project) = app.agents.project.clone() {
+                if c::button(ui, t("chat.export"), ButtonKind::Ghost).clicked() {
+                    app.agents.export(&project);
+                }
+            }
+        });
+    });
 }
 
 fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
     let Some(conv) = app.agents.conversation() else {
-        c::empty(ui, t("chat.empty"), t("chat.empty.hint"));
         return;
     };
     for message in &conv.messages {
-        let who = match message.role {
-            Role::User => t("chat.you"),
-            Role::Assistant => t("chat.agent"),
-        };
         for block in &message.blocks {
-            match block {
-                Block::Text { text } => {
-                    c::meta(ui, who);
-                    c::label(ui, text.as_str());
-                    ui.add_space(T.space.s);
+            match (block, message.role) {
+                (Block::Text { text }, Role::User) => {
+                    c::bubble(ui, text);
+                    ui.add_space(T.space.m);
                 }
-                Block::ToolUse { name, input, .. } => {
+                (Block::Text { text }, Role::Assistant) => {
+                    c::meta(ui, t("chat.agent"));
+                    c::label(ui, text.as_str());
+                    ui.add_space(T.space.m);
+                }
+                (Block::ToolUse { name, input, .. }, _) => {
                     let line = tf("chat.tool_call", &[("name", name), ("input", &input)]);
                     c::icon_line(ui, Icon::StepForward, line).on_hover_text(input.to_string());
                 }
-                Block::ToolResult {
-                    content, is_error, ..
-                } => {
+                (
+                    Block::ToolResult {
+                        content, is_error, ..
+                    },
+                    _,
+                ) => {
                     let first = result_line(content);
                     match is_error {
                         true => c::status(ui, State::Error, first),
                         false => c::icon_line(ui, Icon::StepBack, first),
                     };
                 }
-                Block::Opaque { .. } => {}
+                (Block::Opaque { .. }, _) => {}
             }
+        }
+    }
+    let plan = app
+        .agents
+        .conversation()
+        .map(|c| c.plan.as_slice())
+        .unwrap_or_default();
+    if !plan.is_empty() {
+        c::section(ui, t("chat.plan"));
+        for (k, step) in plan.iter().enumerate() {
+            c::label(ui, format!("{}. {step}", k + 1));
         }
     }
     if let Some(s) = &app.agents.session {
         if !s.streaming.is_empty() {
             c::meta(ui, t("chat.agent"));
             c::label(ui, s.streaming.as_str());
-        }
-        if !s.conv.plan.is_empty() {
-            c::section(ui, t("chat.plan"));
-            for (k, step) in s.conv.plan.iter().enumerate() {
-                c::label(ui, format!("{}. {step}", k + 1));
-            }
         }
         if let Some(e) = &s.error {
             c::message(ui, e, true);
@@ -351,152 +629,60 @@ fn approval(ui: &mut Ui, app: &mut SurgeonApp) {
     let question = session.question.clone();
     let mut decision = None;
     for card in &cards {
-        c::status(ui, State::Warn, t("approval.waiting"));
-        c::strong(ui, card.title.as_str());
-        c::mono_wrapped(ui, card.params.as_str(), T.color.text_secondary);
-        for line in &card.consequences {
-            c::secondary(ui, format!("· {line}"));
-        }
-        c::meta(ui, card.cost.as_str());
         ui.add_space(T.space.s);
-        ui.horizontal(|ui| {
-            if c::button(ui, t("approval.once"), ButtonKind::Secondary).clicked() {
-                decision = Some((card.id, Choice::Once));
+        c::inset_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            c::status(ui, State::Warn, t("approval.waiting"));
+            c::strong(ui, card.title.as_str());
+            c::mono_wrapped(ui, card.params.as_str(), T.color.text_secondary);
+            for line in &card.consequences {
+                c::secondary(ui, format!("· {line}"));
             }
-            if card.allow_always
-                && c::button(ui, t("approval.always"), ButtonKind::Ghost)
-                    .on_hover_text(t("approval.always.tip"))
-                    .clicked()
-            {
-                decision = Some((card.id, Choice::Always));
-            }
-            if c::button(ui, t("approval.deny"), ButtonKind::Ghost).clicked() {
-                decision = Some((card.id, Choice::Deny));
-            }
+            c::meta(ui, card.cost.as_str());
+            ui.add_space(T.space.s);
+            ui.horizontal(|ui| {
+                if c::button(ui, t("approval.once"), ButtonKind::Primary).clicked() {
+                    decision = Some((card.id, Choice::Once));
+                }
+                if c::button(ui, t("approval.deny"), ButtonKind::Ghost).clicked() {
+                    decision = Some((card.id, Choice::Deny));
+                }
+            });
         });
-        ui.add_space(T.space.m);
     }
     if let Some((card, choice)) = decision {
         app.agents.decide(&mut app.studio, card, choice);
     }
     if let Some((_, q)) = question {
-        c::status(ui, State::Active, t("approval.question"));
-        c::label(ui, q);
-        c::field(
-            ui,
-            &mut app.agents.answer,
-            t("approval.answer.hint"),
-            ui.available_width(),
-        );
-        ui.add_space(T.space.xs);
-        if c::button(ui, t("approval.answer"), ButtonKind::Secondary).clicked() {
-            app.agents.answer_question(&mut app.studio);
-        }
+        ui.add_space(T.space.s);
+        c::inset_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            c::status(ui, State::Active, t("approval.question"));
+            c::label(ui, q);
+            ui.add_space(T.space.s);
+            c::field(
+                ui,
+                &mut app.agents.answer,
+                t("approval.answer.hint"),
+                ui.available_width(),
+            );
+            ui.add_space(T.space.s);
+            if c::button(ui, t("approval.answer"), ButtonKind::Secondary).clicked() {
+                app.agents.answer_question(&mut app.studio);
+            }
+        });
     }
 }
 
-// ------------------------------------------------------------------ contract and evidence
-
-/// What the agent may do on this project: mode, questions, budgets, "always" rules.
-fn contract(ui: &mut Ui, app: &mut SurgeonApp) {
-    let hub = &mut app.agents;
-    ScrollArea::vertical()
-        .id_salt("contract")
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            let mut mode = hub.agent.mode;
-            c::segmented(
-                ui,
-                &mut mode,
-                &[
-                    Segment {
-                        value: AgentMode::Ask,
-                        label: t("policy.ask"),
-                        tooltip: t("policy.ask.tip"),
-                    },
-                    Segment {
-                        value: AgentMode::Modify,
-                        label: t("policy.modify"),
-                        tooltip: t("policy.modify.tip"),
-                    },
-                ],
-                c::font_body(),
-            );
-            ui.add_space(T.space.xs);
-            let mut ask = hub.agent.ask;
-            c::segmented(
-                ui,
-                &mut ask,
-                &[
-                    Segment {
-                        value: AskMode::AskMe,
-                        label: t("policy.ask_me"),
-                        tooltip: t("policy.ask_me.tip"),
-                    },
-                    Segment {
-                        value: AskMode::DecideAlone,
-                        label: t("policy.decide"),
-                        tooltip: t("policy.decide.tip"),
-                    },
-                ],
-                c::font_body(),
-            );
-            if mode != hub.agent.mode || ask != hub.agent.ask {
-                hub.agent.mode = mode;
-                hub.agent.ask = ask;
-                hub.agent_changed();
-            }
-            c::section(ui, t("policy.budgets"));
-            let names = [
-                t("budget.tokens"),
-                t("budget.cost"),
-                t("budget.secs"),
-                t("budget.calls"),
-            ];
-            for (k, name) in names.into_iter().enumerate() {
-                ui.horizontal(|ui| {
-                    let label_width = (ui.available_width() * 0.5).floor();
-                    ui.allocate_ui(egui::vec2(label_width, T.size.control), |ui| {
-                        ui.set_width(label_width);
-                        c::secondary(ui, name);
-                    });
-                    c::field_mono(
-                        ui,
-                        &mut hub.budget_text[k],
-                        t("budget.none"),
-                        ui.available_width(),
-                    );
-                });
-                ui.add_space(T.space.xs);
-            }
-            if c::button(ui, t("policy.apply"), ButtonKind::Secondary).clicked() {
-                hub.apply_budgets();
-            }
-            c::section(ui, t("policy.rules"));
-            if hub.agent.rules.is_empty() {
-                c::secondary(ui, t("policy.rules.none"));
-            }
-            let mut revoke = None;
-            for (k, rule) in hub.agent.rules.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    c::mono(ui, rule.tool.as_str());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if c::button(ui, t("policy.revoke"), ButtonKind::Ghost).clicked() {
-                            revoke = Some(k);
-                        }
-                    });
-                });
-            }
-            if let Some(k) = revoke {
-                hub.revoke_rule(k);
-            }
-        });
-}
+// ------------------------------------------------------------------ right column
 
 /// What the agent established: each finding with the measure it rests on, newest first.
 fn evidence_log(ui: &mut Ui, app: &mut SurgeonApp) {
-    let entries = app.ledger().to_vec();
+    let mut entries = app.ledger().to_vec();
     let project = app.agents.project.clone();
+    if let Some(p) = &project {
+        entries.extend(evidence::mcp_runs(&Dirs::of(p).mcp_runs()));
+    }
     ScrollArea::vertical()
         .id_salt("evidence")
         .auto_shrink(false)
@@ -506,7 +692,7 @@ fn evidence_log(ui: &mut Ui, app: &mut SurgeonApp) {
                 .map(|p| evidence::read(&Dirs::of(p).findings()))
                 .unwrap_or_default();
             if findings.is_empty() {
-                c::secondary(ui, t("policy.findings.none"));
+                c::empty(ui, t("finding.none"), t("policy.findings.none"));
             }
             for f in findings.iter().rev() {
                 let (state, word) = match f.status(&entries) {
@@ -516,7 +702,7 @@ fn evidence_log(ui: &mut Ui, app: &mut SurgeonApp) {
                 };
                 c::status(ui, state, word);
                 c::label(ui, f.text.as_str());
-                ui.add_space(T.space.xs);
+                ui.add_space(T.space.s);
             }
         });
 }
@@ -537,18 +723,18 @@ fn consent(ctx: &egui::Context, app: &mut SurgeonApp) {
     let scrim = egui::LayerId::new(Order::Foreground, Id::new("consent-scrim"));
     ctx.layer_painter(scrim)
         .rect_filled(screen, 0.0, T.color.scrim);
-    let width = 60.0 * T.size.gap;
+    let width = T.size.reading * 0.6;
     let pos = Pos2::new(
         screen.center().x - width / 2.0,
-        screen.top() + 12.0 * T.size.gap,
+        screen.top() + 12.0 * T.space.s,
     );
     let mut answer = None;
     egui::Area::new(Id::new("consent"))
         .order(Order::Tooltip)
         .fixed_pos(pos)
         .show(ctx, |ui| {
-            c::popup_frame().inner_margin(T.space.l).show(ui, |ui| {
-                ui.set_width(width - 2.0 * T.space.l);
+            c::popup_frame().inner_margin(T.space.xl).show(ui, |ui| {
+                ui.set_width(width - 2.0 * T.space.xl);
                 c::strong(ui, tf("consent.title", &[("connection", &label)]));
                 ui.add_space(T.space.s);
                 let lines = [
@@ -562,13 +748,13 @@ fn consent(ctx: &egui::Context, app: &mut SurgeonApp) {
                 }
                 ui.add_space(T.space.s);
                 c::checkbox(ui, &mut app.agents.consent_redact, t("consent.redact"));
-                ui.add_space(T.space.m);
+                ui.add_space(T.space.l);
                 ui.horizontal(|ui| {
-                    if c::button(ui, t("action.cancel"), ButtonKind::Ghost).clicked() {
-                        answer = Some(false);
-                    }
                     if c::button(ui, t("consent.accept"), ButtonKind::Primary).clicked() {
                         answer = Some(true);
+                    }
+                    if c::button(ui, t("action.cancel"), ButtonKind::Ghost).clicked() {
+                        answer = Some(false);
                     }
                 });
             });

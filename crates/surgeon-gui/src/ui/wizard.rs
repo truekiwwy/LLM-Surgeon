@@ -1,8 +1,10 @@
 //! The first-run wizard, a page over the whole body of the window in four steps: welcome
-//! (language, the Atelier's mode, local only), AI providers and agents (what the scan found),
+//! (language, the kind of the first agent session, local only), AI providers and agents (what
+//! the scan found),
 //! workspace (the one thing the work needs) and optional components (llama.cpp, the sample
 //! model). Every confirmed choice is saved at once; closing the app midway reopens it at the
-//! first step with those choices. Opened from System on one step, it is that panel alone.
+//! first step with those choices. Opened from the settings on one step, it is that panel
+//! alone.
 
 use eframe::egui::{self, Pos2, Rect, ScrollArea, Ui};
 
@@ -12,9 +14,9 @@ use super::icons::State;
 use super::theme::TOKENS as T;
 use super::views::system::{machine_facts, provider_detail, provider_list, Show};
 use crate::app::{Mode, SurgeonApp, Tab};
+use crate::backend_choice::{self, MistralInstall, Vendor};
 use crate::desktop::setup::Pick;
 use crate::install;
-use crate::releases::{Target, Variant};
 use crate::sample_model::QWEN;
 use crate::settings::{Lang, Settings};
 use crate::studio::view::Studio;
@@ -67,6 +69,10 @@ pub struct Wizard {
     pub workspace_error: Option<String>,
     pub pick: Pick,
     pub consent: bool,
+    /// The hipfire install in WSL2 is allowed (downloads and installs in the distro).
+    pub hipfire_consent: bool,
+    /// Launched for a GPU ROCm does not list under WSL, knowingly.
+    pub hipfire_anyway: bool,
 }
 
 impl Wizard {
@@ -84,6 +90,8 @@ impl Wizard {
             workspace_error: None,
             pick: Pick::default(),
             consent: false,
+            hipfire_consent: false,
+            hipfire_anyway: false,
         }
     }
 
@@ -177,12 +185,12 @@ fn close(app: &mut SurgeonApp) {
     let walked = app.desktop.wizard.as_ref().is_some_and(|w| !w.single);
     app.desktop.close_wizard();
     if walked {
-        app.tab = Tab::Atelier;
+        app.tab = Tab::Agent;
     }
 }
 
-/// `Passer la configuration`: the `default` workspace when there is none, the guided mode,
-/// and straight to the Atelier.
+/// `Passer la configuration`: the `default` workspace when there is none, and straight to
+/// the agent.
 fn skip(app: &mut SurgeonApp, default: &std::path::Path) {
     if app.desktop.settings.workspace.is_none() {
         match app.desktop.use_workspace(default) {
@@ -190,7 +198,6 @@ fn skip(app: &mut SurgeonApp, default: &std::path::Path) {
             Err(e) => app.desktop.notify(e),
         }
     }
-    app.set_mode(Mode::Scalping);
     close(app);
 }
 
@@ -269,24 +276,24 @@ fn welcome(ui: &mut Ui, app: &mut SurgeonApp) {
         &mut mode,
         &[
             Segment {
-                value: Mode::Scalping,
-                label: t("mode.scalping"),
-                tooltip: t("mode.scalping.tip"),
-            },
-            Segment {
                 value: Mode::Advance,
                 label: t("mode.advance"),
                 tooltip: t("mode.advance.tip"),
             },
+            Segment {
+                value: Mode::Scalping,
+                label: t("mode.scalping"),
+                tooltip: t("mode.scalping.tip"),
+            },
         ],
-        c::font_mono(),
+        c::font_body(),
     );
     if mode != app.mode {
         app.set_mode(mode);
     }
     ui.add_space(T.space.xs);
-    c::secondary(ui, t("wiz.mode.scalping"));
     c::secondary(ui, t("wiz.mode.advance"));
+    c::secondary(ui, t("wiz.mode.scalping"));
     c::section(ui, t("wiz.network"));
     let mut local = app.desktop.settings.local_only;
     if c::checkbox(ui, &mut local, t("policy.local_only")).changed() {
@@ -360,18 +367,37 @@ fn workspace(ui: &mut Ui, app: &mut SurgeonApp, w: &mut Wizard) {
     c::label(ui, t("wiz.workspace.explain"));
     ui.add_space(T.space.s);
     let width = ui.available_width();
-    c::field_mono(ui, &mut w.workspace, t("wiz.workspace.hint"), width);
-    ui.add_space(T.space.s);
-    if c::button(ui, t("wiz.workspace.use"), ButtonKind::Secondary).clicked() {
-        let dir = std::path::PathBuf::from(w.workspace.trim());
-        w.workspace_error = match app.desktop.use_workspace(&dir) {
-            Ok(()) => {
-                app.studio = Studio::new(dir);
-                None
-            }
-            Err(e) => Some(e),
-        };
+    // On Windows the folder comes from the system picker; elsewhere it is typed.
+    match cfg!(windows) {
+        true => {
+            c::mono_wrapped(ui, w.workspace.as_str(), T.color.text);
+        }
+        false => {
+            c::field_mono(ui, &mut w.workspace, t("wiz.workspace.hint"), width);
+        }
     }
+    ui.add_space(T.space.s);
+    let ctx = ui.ctx().clone();
+    ui.horizontal(|ui| {
+        if c::button(ui, t("wiz.workspace.use"), ButtonKind::Secondary).clicked() {
+            let dir = std::path::PathBuf::from(w.workspace.trim());
+            w.workspace_error = app.use_workspace(dir).err();
+        }
+        let free = !app.workspace_picker.busy();
+        let why = t("project.source.picking");
+        if cfg!(windows)
+            && c::button_if(
+                ui,
+                free,
+                t("wiz.workspace.pick"),
+                ButtonKind::Secondary,
+                why,
+            )
+            .clicked()
+        {
+            app.pick_workspace(&ctx, t("wiz.workspace.hint"));
+        }
+    });
     match (&w.workspace_error, &app.desktop.settings.workspace) {
         (Some(e), _) => c::message(ui, e, true),
         (None, Some(dir)) => {
@@ -426,6 +452,24 @@ fn components(ui: &mut Ui, app: &mut SurgeonApp, w: &mut Wizard) {
                 {
                     setup.install(&ctx, &env, &workspace, w.pick, w.consent, local);
                 }
+                let cuda = w.pick.engine
+                    && mistral_install(app_vendor(&app.desktop)) == MistralInstall::CudaBuild;
+                let setup = &mut app.desktop.setup;
+                if cuda && crate::desktop::setup::cuda_toolchain().is_ok() {
+                    let allowed = setup.download_allowed(w.pick, w.consent, local);
+                    if c::button_if(
+                        ui,
+                        allowed,
+                        t("wiz.cuda.build"),
+                        ButtonKind::Secondary,
+                        t("wiz.install.why"),
+                    )
+                    .on_hover_text(t("wiz.cuda.build.tip"))
+                    .clicked()
+                    {
+                        setup.build_cuda(&ctx, &env, w.consent, local);
+                    }
+                }
             }
             let setup = &app.desktop.setup;
             for p in setup.progress() {
@@ -443,52 +487,54 @@ fn components(ui: &mut Ui, app: &mut SurgeonApp, w: &mut Wizard) {
         });
 }
 
+/// The GPU maker that picks the backend, from the machine report.
+fn app_vendor(desktop: &crate::desktop::Desktop) -> Vendor {
+    let gpus = desktop.system.iter().flat_map(|s| s.gpus.iter());
+    backend_choice::main_vendor(gpus.map(|g| g.name.as_str()))
+}
+
+fn mistral_install(vendor: Vendor) -> MistralInstall {
+    backend_choice::mistral_install(std::env::consts::OS, std::env::consts::ARCH, vendor)
+}
+
+/// The Rust inference backend this machine gets, then mistral.rs to install.
 fn engine(ui: &mut Ui, app: &mut SurgeonApp, w: &mut Wizard, ctx: &egui::Context) {
-    c::section(ui, "llama.cpp");
+    let vendor = app_vendor(&app.desktop);
+    c::section(ui, t("wiz.backend"));
+    c::secondary(
+        ui,
+        match vendor {
+            Vendor::Amd => t("wiz.backend.amd"),
+            Vendor::Nvidia => t("wiz.backend.nvidia"),
+            Vendor::Other => t("wiz.backend.other"),
+        },
+    );
+    if vendor == Vendor::Amd {
+        hipfire_guide(ui, app, w, ctx);
+    }
+    c::section(ui, "mistral.rs");
     c::checkbox(ui, &mut w.pick.engine, t("wiz.engine"));
     c::secondary(ui, t("wiz.engine.explain"));
     if !w.pick.engine {
         return;
     }
-    let setup = &mut app.desktop.setup;
-    if !Target::current().supported() {
-        c::message(ui, t("wiz.engine.unsupported"), true);
-        return;
+    match mistral_install(vendor) {
+        MistralInstall::Manual(asset) => {
+            c::message(ui, &tf("wiz.engine.manual", &[("asset", &asset)]), false);
+            return;
+        }
+        MistralInstall::CudaBuild => match crate::desktop::setup::cuda_toolchain() {
+            Ok(()) => {
+                c::status(ui, State::Ok, t("wiz.cuda.ready"));
+            }
+            Err(e) => {
+                c::status(ui, State::Warn, e);
+                c::secondary(ui, t("wiz.cuda.missing"));
+            }
+        },
+        MistralInstall::Download => {}
     }
-    let mut variant = setup.variant;
-    ui.add_space(T.space.xs);
-    c::segmented(
-        ui,
-        &mut variant,
-        &[
-            Segment {
-                value: Variant::Vulkan,
-                label: t("wiz.variant.vulkan"),
-                tooltip: t("wiz.variant.vulkan.tip"),
-            },
-            Segment {
-                value: Variant::Cpu,
-                label: t("wiz.variant.cpu"),
-                tooltip: t("wiz.variant.cpu.tip"),
-            },
-            Segment {
-                value: Variant::Hip,
-                label: t("wiz.variant.hip"),
-                tooltip: t("wiz.variant.hip.tip"),
-            },
-        ],
-        c::font_body(),
-    );
-    setup.set_variant(variant);
-    let no_vulkan = app
-        .desktop
-        .system
-        .as_ref()
-        .is_some_and(|s| s.vulkan == Some(false));
     let setup = &mut app.desktop.setup;
-    if no_vulkan && setup.variant == Variant::Vulkan {
-        c::status(ui, State::Warn, t("wiz.variant.no_vulkan"));
-    }
     // Ticking the box asks the releases API once: the plan carries URL, size and hash.
     if setup.plan.is_none() && !setup.fetching_plan() {
         setup.fetch_plan(ctx, false);
@@ -503,7 +549,7 @@ fn engine(ui: &mut Ui, app: &mut SurgeonApp, w: &mut Wizard, ctx: &egui::Context
         Some(Ok(plan)) => {
             let pinned = desktop.settings.pins.get(&plan.name);
             c::inset_frame().show(ui, |ui| {
-                c::strong(ui, format!("llama.cpp {} · {}", plan.tag, plan.variant));
+                c::strong(ui, format!("mistral.rs {} · {}", plan.tag, plan.variant));
                 c::mono_wrapped(ui, plan.url.as_str(), T.color.text_secondary);
                 let mib = plan.size as f64 / (1 << 20) as f64;
                 c::kv(ui, t("wiz.size"), &format!("{mib:.1} MiB"));
@@ -523,6 +569,69 @@ fn engine(ui: &mut Ui, app: &mut SurgeonApp, w: &mut Wizard, ctx: &egui::Context
                 c::status(ui, State::Warn, t("wiz.engine.force"));
             }
         }
+    }
+}
+
+/// AMD: whether the hipfire daemon answers; when it does not, the button that installs and
+/// starts it in WSL2, after a check of the GPU against what ROCm runs under WSL.
+fn hipfire_guide(ui: &mut Ui, app: &mut SurgeonApp, w: &mut Wizard, ctx: &egui::Context) {
+    let url = backend_choice::hipfire_url();
+    if app.hipfire_up {
+        c::status(ui, State::Ok, tf("wiz.hipfire.up", &[("url", &url)]));
+        return;
+    }
+    c::status(ui, State::Warn, tf("wiz.hipfire.down", &[("url", &url)]));
+    if !cfg!(windows) {
+        c::secondary(ui, t("wiz.hipfire.linux"));
+        c::mono_wrapped(ui, backend_choice::HIPFIRE_DOCS, T.color.text_secondary);
+        return;
+    }
+    c::secondary(ui, t("wiz.hipfire.steps"));
+    let gpu = app
+        .desktop
+        .system
+        .iter()
+        .flat_map(|s| s.gpus.iter())
+        .map(|g| g.name.clone())
+        .find(|n| backend_choice::vendor(n) == Vendor::Amd)
+        .unwrap_or_default();
+    let supported = crate::hipfire_setup::wsl_supported(&gpu);
+    if !supported {
+        c::message(ui, &tf("wiz.hipfire.unsupported", &[("gpu", &gpu)]), true);
+        c::checkbox(ui, &mut w.hipfire_anyway, t("wiz.hipfire.anyway"));
+    }
+    c::checkbox(ui, &mut w.hipfire_consent, t("wiz.hipfire.consent"));
+    let local = app.desktop.settings.local_only;
+    let allowed = w.hipfire_consent
+        && (supported || w.hipfire_anyway)
+        && !local
+        && !app.desktop.setup.installing();
+    let (install, check) = ui
+        .horizontal(|ui| {
+            let install = c::button_if(
+                ui,
+                allowed,
+                t("wiz.hipfire.install"),
+                ButtonKind::Secondary,
+                t("wiz.hipfire.install.why"),
+            )
+            .clicked();
+            (
+                install,
+                c::button(ui, t("wiz.hipfire.check"), ButtonKind::Ghost).clicked(),
+            )
+        })
+        .inner;
+    if install {
+        app.desktop
+            .setup
+            .install_hipfire(ctx, w.hipfire_consent, local);
+    }
+    if check {
+        app.reprobe(ctx);
+    }
+    if let Some(Err(e)) = &app.desktop.setup.hipfire {
+        c::message(ui, e, true);
     }
 }
 
@@ -559,9 +668,9 @@ fn sample(ui: &mut Ui, w: &mut Wizard, workspace: &std::path::Path) {
 /// Local only: what to download by hand, and where to put it.
 fn manual(ui: &mut Ui, app: &SurgeonApp, workspace: &std::path::Path) {
     c::status(ui, State::Idle, t("wiz.manual"));
-    c::section(ui, "llama.cpp");
+    c::section(ui, "mistral.rs");
     c::secondary(ui, t("wiz.manual.engine"));
-    let root = install::llama_root(&app.desktop.env().components);
+    let root = install::mistral_root(&app.desktop.env().components);
     c::mono_wrapped(ui, root.display().to_string(), T.color.text);
     c::section(ui, t("wiz.sample.title"));
     c::secondary(ui, t("wiz.manual.sample"));
@@ -628,7 +737,7 @@ mod tests {
         let mut app = app(dir.path());
         app.desktop.open_wizard();
         app.set_mode(Mode::Advance);
-        app.tab = Tab::System;
+        app.tab = Tab::Graph;
         let ws = dir.path().join("ws");
         skip(&mut app, &ws);
         assert!(ws.is_dir());
@@ -637,7 +746,11 @@ mod tests {
             Some(ws.as_path())
         );
         assert!(app.desktop.wizard.is_none());
-        assert_eq!((app.mode, app.tab), (Mode::Scalping, Tab::Atelier));
+        assert_eq!(
+            (app.mode, app.tab),
+            (Mode::Advance, Tab::Agent),
+            "the choice is kept"
+        );
         let saved = Settings::load(&dir.path().join("data").join("settings.json")).unwrap();
         assert!(saved.wizard_done, "it does not open by itself again");
     }
@@ -649,10 +762,10 @@ mod tests {
         app.desktop.open_fix(crate::diag::Fix::SampleModel, true);
         let w = app.desktop.wizard.as_ref().unwrap();
         assert!(w.single && w.pick.sample && app.desktop.setup.force);
-        app.tab = Tab::System;
+        app.tab = Tab::Graph;
         close(&mut app);
         assert!(!app.desktop.settings.wizard_done);
-        assert_eq!(app.tab, Tab::System, "back where the repair started");
+        assert_eq!(app.tab, Tab::Graph, "back where the repair started");
         assert!(!app.desktop.setup.force);
     }
 

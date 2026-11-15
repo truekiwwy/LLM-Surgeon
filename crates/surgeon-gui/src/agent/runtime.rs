@@ -1,13 +1,22 @@
 //! The official CLI runtimes, used as installed and signed in by the user (the way to use a
-//! subscription account): Claude Code (`claude -p`) and Codex (`codex exec`). The studio
-//! never reads, copies or stores their credentials; it starts them non-interactively with
-//! `surgeon mcp` as their only tool server. Their own loop and approvals are theirs, not the
-//! studio's: the barrier is the MCP server (`--read-only` in "Ask" mode, the project folder
-//! as the only allowed folder in "Modify" mode, so the source model is out of reach) and an
-//! explicit tool allow-list.
+//! subscription account): Claude Code (`claude -p`), Codex (`codex exec`), OpenCode
+//! (`opencode run`) and Antigravity (`agy -p`), started non-interactively with `surgeon mcp`
+//! as their engine server. Their own loop and approvals are theirs, not the studio's.
 //!
-//! Options checked against `claude --help` (2.1.x) and `codex exec --help` (0.166): a binary
-//! whose help lacks one is reported and not used.
+//! - Claude Code and Codex get `surgeon` as their only tool server and an explicit allow-list.
+//! - OpenCode and Antigravity keep their own tools (terminal, files) so as not to limit the
+//!   model: OpenCode inside the project folder (`external_directory` denied), Antigravity in an
+//!   isolated profile that only knows `surgeon` (the user's global configuration is never read
+//!   nor written). For both, the source model is held by the kernel lock of
+//!   [`crate::studio::lock`], and the engine server never reaches it in "Modify" mode.
+//!
+//! The studio reads no credential, except for Antigravity: its sign-in files
+//! (`~/.gemini/oauth_creds.json`, `google_accounts.json`) are copied into the isolated
+//! profile for the run and removed with it, on the user's explicit request.
+//!
+//! Options checked against `claude --help` (2.1.x), `codex exec --help` (0.166),
+//! `opencode run --help` (2.2.7) and `agy --help` (1.4.4): a binary whose help lacks one is
+//! reported and not used.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -40,6 +49,10 @@ const CODEX_OPTIONS: [&str; 6] = [
     "--skip-git-repo-check",
     "--ephemeral",
 ];
+const OPENCODE_OPTIONS: [&str; 4] = ["--format", "--auto", "--archived", "--standalone"];
+const AGY_OPTIONS: [&str; 4] = ["--print", "--output-format", "--input-format", "--model"];
+/// The sign-in files of Antigravity, in `~/.gemini`, copied into its isolated profile.
+const AGY_SIGN_IN: [&str; 2] = ["oauth_creds.json", "google_accounts.json"];
 /// The engine tools an "Ask" runtime may call (its server also runs `--read-only`).
 const READ_TOOLS: [&str; 5] = [
     "surgeon_check",
@@ -67,7 +80,10 @@ impl Detected {
 fn binary_name(kind: ProviderKind) -> &'static str {
     match kind {
         ProviderKind::ClaudeCode => "claude",
-        _ => "codex",
+        ProviderKind::Codex => "codex",
+        ProviderKind::OpenCode => "opencode",
+        ProviderKind::Antigravity => "agy",
+        ProviderKind::Anthropic | ProviderKind::OpenAi | ProviderKind::Compatible => "",
     }
 }
 
@@ -89,7 +105,7 @@ pub fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
 
 /// The first line `bin --version` prints, empty when it prints nothing in time.
 pub fn version(bin: &Path) -> String {
-    capture(bin, &["--version"], Duration::from_secs(15))
+    capture(bin, &["--version"], &[], Duration::from_secs(15))
         .and_then(|v| {
             v.lines()
                 .map(str::trim)
@@ -105,9 +121,11 @@ pub fn detect(kind: ProviderKind, path: Option<&OsStr>) -> Option<Detected> {
     let version = version(&bin);
     let (help_args, needed): (&[&str], &[&'static str]) = match kind {
         ProviderKind::ClaudeCode => (&["--help"], &CLAUDE_OPTIONS),
+        ProviderKind::OpenCode => (&["run", "--help"], &OPENCODE_OPTIONS),
+        ProviderKind::Antigravity => (&["--help"], &AGY_OPTIONS),
         _ => (&["exec", "--help"], &CODEX_OPTIONS),
     };
-    let help = capture(&bin, help_args, Duration::from_secs(15)).unwrap_or_default();
+    let help = capture(&bin, help_args, &[], Duration::from_secs(15)).unwrap_or_default();
     Some(Detected {
         kind,
         path: bin,
@@ -131,11 +149,13 @@ fn command(program: &Path) -> Command {
     c
 }
 
-/// The CLI's own sign-in check: it spends nothing and the studio never reads the
-/// credentials itself.
+/// The CLI's own sign-in check: it spends nothing (a status, or the model list) and the
+/// studio never reads the credentials itself.
 fn status_args(kind: ProviderKind) -> &'static [&'static str] {
     match kind {
         ProviderKind::ClaudeCode => &["auth", "status"],
+        ProviderKind::OpenCode => &["models", "--standalone"],
+        ProviderKind::Antigravity => &["models"],
         _ => &["login", "status"],
     }
 }
@@ -144,15 +164,32 @@ fn status_args(kind: ProviderKind) -> &'static [&'static str] {
 pub fn login_command(kind: ProviderKind) -> &'static str {
     match kind {
         ProviderKind::ClaudeCode => "claude auth login",
+        ProviderKind::OpenCode => "opencode auth login",
+        ProviderKind::Antigravity => "agy",
         _ => "codex login",
     }
 }
 
 /// Whether the CLI found on `path` reports a signed-in account; the error says what failed.
+/// Antigravity is checked inside its isolated profile, which is removed afterwards.
 pub fn signed_in(kind: ProviderKind, path: Option<&OsStr>) -> Result<(), String> {
     let bin = find_on_path(binary_name(kind), path)
         .ok_or_else(|| format!("{} introuvable dans le PATH", kind.name()))?;
-    match run_short(&bin, status_args(kind), Duration::from_secs(20)) {
+    let agy = match kind {
+        ProviderKind::Antigravity => {
+            Some(AgyHome::system().ok_or("dossier personnel introuvable")?)
+        }
+        _ => None,
+    };
+    let env = match &agy {
+        Some(home) => home.prepare(None, None)?,
+        None => Vec::new(),
+    };
+    let checked = run_short(&bin, status_args(kind), &env, Duration::from_secs(60));
+    if let Some(home) = &agy {
+        home.clear();
+    }
+    match checked {
         Some((true, _)) => Ok(()),
         Some((false, text)) => Err(crate::logging::mask_secrets(
             text.lines()
@@ -164,15 +201,28 @@ pub fn signed_in(kind: ProviderKind, path: Option<&OsStr>) -> Result<(), String>
     }
 }
 
+type Env = Vec<(OsString, OsString)>;
+
 /// stdout (then stderr) of a short command, or None past `timeout`.
-fn capture(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
-    run_short(program, args, timeout).map(|(_, text)| text)
+fn capture(
+    program: &Path,
+    args: &[&str],
+    env: &[(OsString, OsString)],
+    timeout: Duration,
+) -> Option<String> {
+    run_short(program, args, env, timeout).map(|(_, text)| text)
 }
 
 /// Whether a short command succeeded, with its stdout then stderr; None past `timeout`.
-fn run_short(program: &Path, args: &[&str], timeout: Duration) -> Option<(bool, String)> {
+fn run_short(
+    program: &Path,
+    args: &[&str],
+    env: &[(OsString, OsString)],
+    timeout: Duration,
+) -> Option<(bool, String)> {
     let mut child = command(program)
         .args(args)
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -220,15 +270,10 @@ fn run_short(program: &Path, args: &[&str], timeout: Duration) -> Option<(bool, 
     Some((success, texts.join("\n")))
 }
 
-/// The `surgeon` engine binary the runtime launches as its MCP server: next to this app,
-/// else on `PATH`.
-pub fn surgeon_exe(path: Option<&OsStr>) -> Option<PathBuf> {
-    let name = format!("surgeon{}", std::env::consts::EXE_SUFFIX);
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|d| d.join(&name)))
-        .filter(|p| p.is_file())
-        .or_else(|| find_on_path("surgeon", path))
+/// The program a runtime launches as its engine MCP server: this app, which serves
+/// `mcp …` itself (`runner::serve_mcp`), so the engine is always the window's own version.
+pub fn engine_server() -> Result<PathBuf, String> {
+    std::env::current_exe().map_err(|e| format!("chemin de l'application introuvable : {e}"))
 }
 
 /// Everything a run needs, built by the code from the mode (never by the agent).
@@ -239,6 +284,76 @@ pub struct Launch {
     pub cwd: PathBuf,
     /// The prompt goes on stdin: no free text on a command line.
     pub stdin: String,
+    /// Set for this run only (OpenCode's inline configuration, Antigravity's profile).
+    pub env: Env,
+}
+
+/// The isolated profile Antigravity runs in: its own `~/.gemini` that knows `surgeon` as
+/// its only MCP server, with the user's sign-in copied in. The user's own configuration
+/// (global MCP servers, plugins, permission grants) is never read nor written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgyHome {
+    /// `%LOCALAPPDATA%\weight-surgeon\profiles\agy`, the `USERPROFILE` of the run.
+    pub profile: PathBuf,
+    /// The user's home, where `.gemini` holds the sign-in.
+    pub user: PathBuf,
+}
+
+impl AgyHome {
+    pub fn system() -> Option<Self> {
+        Some(Self {
+            profile: crate::paths::data_dir().join("profiles").join("agy"),
+            user: crate::paths::home_dir()?,
+        })
+    }
+
+    /// Recreates the profile from scratch: the sign-in files, `server` as the only MCP
+    /// server, the tools allowed without asking on `project`. The environment of the run.
+    pub fn prepare(&self, server: Option<&Value>, project: Option<&Path>) -> Result<Env, String> {
+        let fail = |p: &Path, e: std::io::Error| format!("{} : {e}", p.display());
+        let gemini = self.profile.join(".gemini");
+        self.clear();
+        for dir in [gemini.join("config"), gemini.join("antigravity-cli")] {
+            std::fs::create_dir_all(&dir).map_err(|e| fail(&dir, e))?;
+        }
+        for name in AGY_SIGN_IN {
+            let from = self.user.join(".gemini").join(name);
+            if !from.is_file() {
+                return Err(format!(
+                    "Antigravity n'est pas connecté ({} absent) : lancez « agy » une fois",
+                    from.display()
+                ));
+            }
+            std::fs::copy(&from, gemini.join(name)).map_err(|e| fail(&from, e))?;
+        }
+        let servers = server.map_or(json!({}), |s| json!({ "surgeon": s }));
+        let settings = json!({
+            "toolPermission": "always-proceed",
+            "trustedWorkspaces": project.map(|p| vec![p.display().to_string()]).unwrap_or_default(),
+        });
+        for (file, value) in [
+            (
+                gemini.join("config").join("mcp_config.json"),
+                json!({ "mcpServers": servers }),
+            ),
+            (
+                gemini.join("antigravity-cli").join("settings.json"),
+                settings,
+            ),
+        ] {
+            std::fs::write(&file, value.to_string()).map_err(|e| fail(&file, e))?;
+        }
+        let home = self.profile.clone().into_os_string();
+        Ok(vec![
+            ("USERPROFILE".into(), home.clone()),
+            ("HOME".into(), home),
+        ])
+    }
+
+    /// Removes the profile, and the copy of the sign-in with it.
+    pub fn clear(&self) {
+        let _ = std::fs::remove_dir_all(&self.profile);
+    }
 }
 
 /// The `surgeon mcp` arguments for a mode.
@@ -261,13 +376,18 @@ pub fn mcp_args(mode: AgentMode, project: &Path, source_dir: Option<&Path>) -> V
     args
 }
 
-/// The tools the runtime may call without asking.
+/// The tools the runtime may call without asking: the whole MCP list, interface tools
+/// (`record_finding`...) included since they only write under `chat/`.
 pub fn allowed_tools(mode: AgentMode) -> Vec<String> {
-    let all = super::tools::engine_definitions();
-    all.into_iter()
-        .map(|t| t.name)
+    let all = weight_surgeon::mcp::tool_definitions();
+    all.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["name"].as_str().map(str::to_owned))
         .filter(|n| match mode {
-            AgentMode::Ask => READ_TOOLS.contains(&n.as_str()),
+            AgentMode::Ask => {
+                READ_TOOLS.contains(&n.as_str()) || super::tools::UI_TOOLS.contains(&n.as_str())
+            }
             // Pipelines can promote a result: human only, never through a runtime.
             AgentMode::Modify => n != "surgeon_pipeline",
         })
@@ -284,6 +404,8 @@ pub struct LaunchInput<'a> {
     pub prompt: &'a str,
     /// Where the MCP configuration file of a Claude Code run is written.
     pub scratch: &'a Path,
+    /// The isolated profile of an Antigravity run.
+    pub agy: Option<&'a AgyHome>,
 }
 
 pub fn launch(input: &LaunchInput) -> Result<Launch, String> {
@@ -293,7 +415,58 @@ pub fn launch(input: &LaunchInput) -> Result<Launch, String> {
     });
     let tools = allowed_tools(input.mode);
     let mut args: Vec<OsString> = Vec::new();
+    let mut env = Env::new();
+    let mut stdin = input.prompt.to_owned();
     match input.detected.kind {
+        ProviderKind::OpenCode => {
+            let mut command = vec![input.surgeon.display().to_string()];
+            command.extend(mcp_args(input.mode, input.project, input.source_dir));
+            let config = json!({
+                "mcp": { "surgeon": { "type": "local", "command": command, "enabled": true } },
+                // Its own tools stay, inside the project folder only.
+                "permission": { "external_directory": "deny" },
+            });
+            // A private server: the background service would not read this configuration.
+            for a in [
+                "run",
+                "--standalone",
+                "--auto",
+                "--format",
+                "json",
+                "--archived",
+            ] {
+                args.push(a.into());
+            }
+            if let Some(m) = input.model {
+                args.extend(["--model".into(), m.into()]);
+            }
+            env = vec![
+                ("OPENCODE_CONFIG_CONTENT".into(), config.to_string().into()),
+                ("OPENCODE_DISABLE_PROJECT_CONFIG".into(), "1".into()),
+                ("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into()),
+            ];
+        }
+        ProviderKind::Antigravity => {
+            let home = input.agy.ok_or("profil Antigravity absent")?;
+            env = home.prepare(Some(&server), Some(input.project))?;
+            for a in [
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+            ] {
+                args.push(a.into());
+            }
+            if let Some(m) = input.model {
+                args.extend(["--model".into(), m.into()]);
+            }
+            // The prompt is one stream message on stdin; `-p` takes a value, left empty.
+            args.push("-p=".into());
+            stdin = format!(
+                "{}\n",
+                json!({"event": "user", "message": {"role": "user", "content": input.prompt}})
+            );
+        }
         ProviderKind::ClaudeCode => {
             let cfg = input.scratch.join("claude-mcp.json");
             std::fs::create_dir_all(input.scratch).map_err(|e| e.to_string())?;
@@ -359,7 +532,8 @@ pub fn launch(input: &LaunchInput) -> Result<Launch, String> {
         program: input.detected.path.clone(),
         args,
         cwd: input.project.to_path_buf(),
-        stdin: input.prompt.to_owned(),
+        stdin,
+        env,
     })
 }
 
@@ -449,6 +623,84 @@ pub fn parse_codex(line: &str) -> Vec<Event> {
     }
 }
 
+/// One line of `opencode run --format json` (2.2.7): `text` parts, `tool_use` parts (its
+/// MCP tools are called from its `execute` tool), a `step_finish` with reason `stop` at the
+/// end of the turn.
+pub fn parse_opencode(line: &str) -> Vec<Event> {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return Vec::new();
+    };
+    let part = &v["part"];
+    match v["type"].as_str() {
+        Some("text") => part["text"]
+            .as_str()
+            .map(|t| Event::Text(t.into()))
+            .into_iter()
+            .collect(),
+        Some("tool_use") => {
+            let state = &part["state"];
+            let mut events = vec![Event::Tool {
+                name: part["tool"].as_str().unwrap_or("").into(),
+                input: state["input"].clone(),
+            }];
+            match state["status"].as_str() {
+                Some("completed") => events.push(Event::ToolResult(short(&state["output"]))),
+                Some("error") => events.push(Event::Error(short(&state["error"]))),
+                _ => {}
+            }
+            events
+        }
+        Some("step_finish") if part["reason"] == "stop" => vec![Event::Done {
+            cost_usd: None,
+            summary: "stop".into(),
+        }],
+        Some("error") => vec![Event::Error(short(&v["error"]))],
+        _ => Vec::new(),
+    }
+}
+
+/// One line of `agy --output-format stream-json` (1.4.4): `step_update` events name the
+/// steps, `result` carries the whole answer, its status and why the turn ended.
+pub fn parse_agy(line: &str) -> Vec<Event> {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return Vec::new();
+    };
+    match v["event"].as_str() {
+        Some("step_update") => {
+            let step = &v["step_update"];
+            // shortcut: only the step's type is shown (its arguments are not in the observed
+            // events); read them once a quota-free run shows a tool step's fields.
+            let kind = step["step_type"].as_str().unwrap_or("");
+            match (step["state"].as_str(), kind) {
+                (_, "user_input" | "planner_response" | "error_message" | "") => Vec::new(),
+                (Some("DONE"), tool) => vec![Event::Tool {
+                    name: tool.into(),
+                    input: Value::Null,
+                }],
+                _ => Vec::new(),
+            }
+        }
+        Some("result") => {
+            let result = &v["result"];
+            let mut events = Vec::new();
+            if let Some(text) = result["response"].as_str().filter(|t| !t.is_empty()) {
+                events.push(Event::Text(text.into()));
+            }
+            match result["status"].as_str() {
+                Some("ERROR") => events.push(Event::Error(
+                    result["error"].as_str().unwrap_or("erreur").into(),
+                )),
+                _ => events.push(Event::Done {
+                    cost_usd: None,
+                    summary: result["finished_reason"].as_str().unwrap_or("").into(),
+                }),
+            }
+            events
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn short(v: &Value) -> String {
     let text = match v {
         Value::String(s) => s.clone(),
@@ -471,6 +723,7 @@ impl Run {
     ) -> Result<Self, String> {
         let mut child = command(&l.program)
             .args(&l.args)
+            .envs(l.env.iter().map(|(k, v)| (k, v)))
             .current_dir(&l.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -494,6 +747,8 @@ impl Run {
                     let Ok(line) = line else { break };
                     let events = match kind {
                         ProviderKind::ClaudeCode => parse_claude(&line),
+                        ProviderKind::OpenCode => parse_opencode(&line),
+                        ProviderKind::Antigravity => parse_agy(&line),
                         _ => parse_codex(&line),
                     };
                     for e in events {

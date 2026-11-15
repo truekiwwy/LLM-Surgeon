@@ -17,7 +17,9 @@ use super::exec::EngineExecutor;
 use super::forms::{self, Form};
 use super::jobs::{Budgets, Ended, JobSpec, Manager, COPY_TOOL, OUT};
 use super::ledger;
+use super::lock;
 use super::project::{Manifest, Project};
+use crate::platform::Picker;
 
 /// What the window does for this workspace.
 pub enum Action {
@@ -53,6 +55,19 @@ pub const SURGERY_TOOLS: [&str; 5] = [
 
 pub fn is_surgery(tool: &str) -> bool {
     SURGERY_TOOLS.contains(&tool)
+}
+
+/// A project name for a source model: a folder's name, a file's name without its extension,
+/// or the folder of a file named only `model` (`Qwen2.5-0.5B/model.safetensors`).
+pub fn project_name(source: &Path) -> String {
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
+    let stem = source.file_stem().map(|s| s.to_string_lossy().into_owned());
+    let named = match (source.is_dir(), stem.as_deref()) {
+        (true, _) => name(source),
+        (false, Some("model")) => source.parent().and_then(name),
+        (false, _) => stem,
+    };
+    named.unwrap_or_default()
 }
 
 /// One launch form: the tool picked, what was typed, and the estimate of those arguments.
@@ -123,7 +138,11 @@ pub struct Studio {
     pub new_name: String,
     pub new_source: String,
     creating: Option<Receiver<Result<Project, String>>>,
+    /// The system picker of the source model.
+    picker: Picker,
     pub manager: Option<Manager>,
+    /// The open project's source model held read-only (`None`: no project, or no source).
+    pub source_lock: Option<Result<lock::SourceLock, String>>,
     pub forms: Vec<Form>,
     pub analysis: Launch,
     pub surgery: Launch,
@@ -149,7 +168,9 @@ impl Studio {
             new_name: String::new(),
             new_source: String::new(),
             creating: None,
+            picker: Picker::default(),
             manager: None,
+            source_lock: None,
             analysis: Launch {
                 tool: first(false),
                 ..Default::default()
@@ -177,9 +198,32 @@ impl Studio {
         self.creating.is_some()
     }
 
+    pub fn picking(&self) -> bool {
+        self.picker.busy()
+    }
+
+    /// Opens the system picker of the source model (a file, or with `folder` a folder); the
+    /// answer fills the creation form.
+    pub fn pick_source(&mut self, ctx: &egui::Context, folder: bool, title: &str) {
+        let wake = ctx.clone();
+        self.picker
+            .open(folder, title, move || wake.request_repaint());
+    }
+
+    /// The picked model goes in the form, and names the project when no name was typed.
+    fn take_source(&mut self, path: &Path) {
+        self.new_source = path.display().to_string();
+        if self.new_name.trim().is_empty() {
+            self.new_name = project_name(path);
+        }
+    }
+
     /// Advances the jobs; keeps the window repainting at 60 Hz while one runs. Returns the
     /// runs that just ended (the agent hub waits for its own).
     pub fn tick(&mut self, ctx: &egui::Context) -> Vec<Ended> {
+        if let Some(path) = self.picker.poll() {
+            self.take_source(&path);
+        }
         if let Some(rx) = &self.creating {
             if let Ok(result) = rx.try_recv() {
                 self.creating = None;
@@ -248,6 +292,13 @@ impl Studio {
             Arc::new(move || wake.request_repaint()),
         ) {
             Ok(m) => {
+                // The previous project's lock goes with it; this one's holds until the next.
+                self.source_lock = m
+                    .project
+                    .manifest
+                    .source
+                    .as_ref()
+                    .map(|s| lock::lock(&s.path));
                 self.manager = Some(m);
                 self.followed = None;
                 self.replayed = None;
@@ -315,10 +366,9 @@ impl Studio {
     }
 
     /// A working copy of the source model, as a job (`copies/<id>/`).
-    pub fn submit_copy(&mut self) {
-        let Some(m) = &mut self.manager else {
-            return;
-        };
+    /// Queues a working copy; its run id, or `None` with the reason in `message`.
+    pub fn submit_copy(&mut self) -> Option<String> {
+        let m = self.manager.as_mut()?;
         let spec = JobSpec {
             tool: COPY_TOOL.into(),
             label: "copie de travail".into(),
@@ -328,9 +378,9 @@ impl Studio {
             resumed_from: None,
             read_only: false,
         };
-        if let Err(e) = m.submit(spec) {
-            self.message = Some((e, true));
-        }
+        m.submit(spec)
+            .map_err(|e| self.message = Some((e, true)))
+            .ok()
     }
 
     /// Runs the tool's own preview mode (estimate, dry_run, plan): nothing is written.
@@ -459,14 +509,19 @@ pub fn is_write_on(entry: &ledger::Entry, path: &str) -> bool {
 
 /// `copies/<id>` of the newest finished working copy.
 pub fn newest_copy(project: &Project) -> Option<String> {
-    std::fs::read_dir(project.copies_dir())
+    newest_copy_in(&project.copies_dir()).map(|id| format!("copies/{id}"))
+}
+
+/// The `<id>` of the newest finished copy in a project's `copies` folder.
+pub fn newest_copy_in(copies: &Path) -> Option<String> {
+    std::fs::read_dir(copies)
         .ok()
         .into_iter()
         .flatten()
         .flatten()
         .filter(|e| e.path().is_dir() && !e.file_name().to_string_lossy().ends_with(".partial"))
         .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
-        .map(|e| format!("copies/{}", e.file_name().to_string_lossy()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
 }
 
 /// Prefilled values of a form: outputs in the run folder, the model on the newest working
@@ -506,6 +561,19 @@ pub fn default_values(form: &Form, project: &Project) -> BTreeMap<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picked_model_names_its_project() {
+        let ws = tempfile::tempdir().unwrap();
+        let dir = ws.path().join("Qwen2.5-0.5B");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(project_name(&dir), "Qwen2.5-0.5B");
+        assert_eq!(project_name(&dir.join("model.safetensors")), "Qwen2.5-0.5B");
+        assert_eq!(
+            project_name(&dir.join("llama-3-8b.Q4_K_M.gguf")),
+            "llama-3-8b.Q4_K_M"
+        );
+    }
 
     #[test]
     fn outputs_default_to_the_run_folder_and_the_model_to_the_newest_copy() {

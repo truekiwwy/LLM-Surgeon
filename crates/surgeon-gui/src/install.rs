@@ -1,15 +1,12 @@
-//! Installing llama.cpp for the operator: pick the archive from the releases API, download it
-//! (resumable), verify its SHA-256, extract it safely, smoke-test it and record it as the
-//! trusted toolchain.
+//! Installing mistral.rs for the operator: pick the official archive from the releases API,
+//! download it (resumable), verify its SHA-256, extract it safely, smoke-test it and record it
+//! in the user's `config.toml` (`mistralrs_bin`, what `--mistralrs-bin` sets). It is written
+//! here, by the operator's click, and never by an agent: the MCP server only reads it.
 //!
-//! The trust record is the one the CLI already has: `llama_cpp_dir` in the user's
-//! `config.toml` (what `--llama-cpp-dir` / `$LLAMA_CPP_DIR` set). It is written here, by the
-//! operator's click, and never by an agent: the MCP server only reads it.
-//!
-//! Layout: `components/llama.cpp/<tag>-<variant>/` (binaries at its root) plus a
+//! Layout: `components/mistral.rs/<tag>-<variant>/` (the binary at its root) plus a
 //! `manifest.json`. A new version never replaces a folder in use: on Windows a running
-//! `llama-server.exe` cannot be deleted or its folder renamed, so a locked folder is left
-//! alone and the install lands in `<name>-2`, `<name>-3`... Leftovers are collected later.
+//! `mistralrs.exe` cannot be deleted or its folder renamed, so a locked folder is left alone
+//! and the install lands in `<name>-2`, `<name>-3`... Leftovers are collected later.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -20,17 +17,16 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use weight_surgeon::backend::config::{self, BackendConfig};
-use weight_surgeon::bench::score::Backend;
 
 use crate::extract::{self, ExtractError};
 use crate::net::{Fetcher, NetError, MAX_API_BYTES};
 use crate::platform;
-use crate::releases::{self, Plan, Target, Variant};
+use crate::releases::{self, Plan, Target};
 use crate::settings::Lang;
 
 /// The release list the wizard reads (newest first).
 pub const RELEASES_URL: &str =
-    "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=30";
+    "https://api.github.com/repos/EricLBuehler/mistral.rs/releases?per_page=10";
 
 /// Windows `ERROR_VIRUS_INFECTED` / `ERROR_VIRUS_DELETED`: what an antivirus leaves behind.
 const VIRUS_ERRORS: [i32; 2] = [225, 226];
@@ -62,7 +58,7 @@ impl std::fmt::Display for InstallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Net(e) => e.fmt(f),
-            Self::NoAsset => f.write_str("aucune archive llama.cpp ne correspond à cette machine dans les releases récentes"),
+            Self::NoAsset => f.write_str("aucune archive mistral.rs ne correspond à cette machine dans les releases récentes"),
             Self::HashMismatch { expected, actual } => write!(
                 f,
                 "SHA-256 incorrect, archive supprimée : attendu {expected}, reçu {actual}"
@@ -74,9 +70,9 @@ impl std::fmt::Display for InstallError {
             Self::Extract(e) => e.fmt(f),
             Self::Quarantined(path) => write!(
                 f,
-                "fichier bloqué ou supprimé, probablement par l'antivirus : {path}. Ajoutez une exclusion pour le dossier des composants ou installez llama.cpp à la main"
+                "fichier bloqué ou supprimé, probablement par l'antivirus : {path}. Ajoutez une exclusion pour le dossier des composants ou installez mistral.rs à la main"
             ),
-            Self::NoServer => f.write_str("llama-server est absent de l'archive"),
+            Self::NoServer => f.write_str("mistralrs est absent de l'archive"),
             Self::Smoke(e) => write!(f, "test de fumée en échec : {e}"),
             Self::Io(e) => f.write_str(e),
             Self::Cancelled => f.write_str("installation annulée"),
@@ -102,7 +98,7 @@ impl InstallError {
                 format!("connection dropped after {n} bytes (the download can resume)")
             }
             (Lang::En, Self::NoAsset) => {
-                "no llama.cpp archive matches this machine in the recent releases".into()
+                "no mistral.rs archive matches this machine in the recent releases".into()
             }
             (Lang::En, Self::HashMismatch { expected, actual }) => {
                 format!("wrong SHA-256, archive deleted: expected {expected}, got {actual}")
@@ -111,9 +107,9 @@ impl InstallError {
                 "this archive changed since the first download (pinned {pinned}, got {actual}): refused"
             ),
             (Lang::En, Self::Quarantined(path)) => format!(
-                "file blocked or deleted, most likely by antivirus software: {path}. Add an exclusion for the components folder or install llama.cpp by hand"
+                "file blocked or deleted, most likely by antivirus software: {path}. Add an exclusion for the components folder or install mistral.rs by hand"
             ),
-            (Lang::En, Self::NoServer) => "llama-server is missing from the archive".into(),
+            (Lang::En, Self::NoServer) => "mistralrs is missing from the archive".into(),
             (Lang::En, Self::Smoke(e)) => format!("smoke test failed: {e}"),
             (Lang::En, Self::Cancelled) => "installation cancelled".into(),
             (Lang::En, Self::Extract(_) | Self::Io(_) | Self::Net(_)) => self.to_string(),
@@ -176,25 +172,20 @@ pub enum Stage {
 
 pub fn server_name() -> &'static str {
     match cfg!(windows) {
-        true => "llama-server.exe",
-        false => "llama-server",
+        true => "mistralrs.exe",
+        false => "mistralrs",
     }
 }
 
-pub fn llama_root(components: &Path) -> PathBuf {
-    components.join("llama.cpp")
+pub fn mistral_root(components: &Path) -> PathBuf {
+    components.join("mistral.rs")
 }
 
-/// The newest release carrying the archive for `variant` on `target`.
-pub fn fetch_plan(
-    fetcher: &Fetcher,
-    api_url: &str,
-    variant: Variant,
-    target: Target,
-) -> Result<Plan, InstallError> {
+/// The newest release carrying the archive for `target`.
+pub fn fetch_plan(fetcher: &Fetcher, api_url: &str, target: Target) -> Result<Plan, InstallError> {
     let json = fetcher.get_bytes(api_url, MAX_API_BYTES)?;
     let releases = releases::parse_releases(&json).map_err(InstallError::Io)?;
-    releases::select(&releases, variant, target).ok_or(InstallError::NoAsset)
+    releases::select(&releases, target).ok_or(InstallError::NoAsset)
 }
 
 fn read_manifest(dir: &Path) -> Option<Manifest> {
@@ -203,7 +194,7 @@ fn read_manifest(dir: &Path) -> Option<Manifest> {
 
 /// Every installed build, newest folder name last.
 pub fn list_installed(components: &Path) -> Vec<Installed> {
-    let mut found: Vec<Installed> = fs::read_dir(llama_root(components))
+    let mut found: Vec<Installed> = fs::read_dir(mistral_root(components))
         .into_iter()
         .flatten()
         .flatten()
@@ -235,7 +226,7 @@ pub fn forget(installed: &Installed) {
     let _ = fs::remove_file(installed.dir.join("manifest.json"));
 }
 
-/// `llama-server --version`: proves the binary starts (DLLs found) and says which build.
+/// `mistralrs --version`: proves the binary starts (DLLs found) and says which build.
 pub fn smoke_test(server: &Path) -> Result<String, String> {
     let mut cmd = platform::command(server);
     cmd.arg("--version");
@@ -243,7 +234,7 @@ pub fn smoke_test(server: &Path) -> Result<String, String> {
         .map_err(|e| format!("{} : {e}", server.display()))?;
     let version = text
         .lines()
-        .find(|l| l.trim_start().to_ascii_lowercase().starts_with("version"))
+        .find(|l| l.trim_start().starts_with("mistralrs"))
         .map(|l| l.trim().to_owned());
     match (code, version) {
         (Some(0), Some(v)) => Ok(v),
@@ -261,32 +252,6 @@ fn first_line(text: &str) -> &str {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("")
         .trim()
-}
-
-/// `load_tensors: offloaded 25/25 layers to GPU` -> (25, 25).
-pub fn parse_offload(log: &str) -> Option<(u32, u32)> {
-    let rest = log.split("offloaded ").nth(1)?;
-    let (ratio, _) = rest.split_once(" layers")?;
-    let (done, total) = ratio.split_once('/')?;
-    Some((done.trim().parse().ok()?, total.trim().parse().ok()?))
-}
-
-/// With a tiny GGUF at hand: does `llama-cli` really put its layers on the GPU?
-pub fn check_gpu_offload(dir: &Path, gguf: &Path) -> Result<Option<(u32, u32)>, String> {
-    let cli = dir.join(match cfg!(windows) {
-        true => "llama-cli.exe",
-        false => "llama-cli",
-    });
-    if !cli.is_file() {
-        return Ok(None);
-    }
-    let mut cmd = platform::command(cli);
-    cmd.args(["-m"])
-        .arg(gguf)
-        .args(["-ngl", "99", "-n", "1", "-p", "hi", "--no-warmup"]);
-    let (_, log) =
-        platform::run_capture(cmd, Duration::from_secs(90)).map_err(|e| e.to_string())?;
-    Ok(parse_offload(&log))
 }
 
 fn find_server_root(staging: &Path) -> Option<PathBuf> {
@@ -326,7 +291,7 @@ fn free_dir(root: &Path, name: &str) -> PathBuf {
     if fs::rename(&first, &aside).is_ok() {
         return first;
     }
-    // Locked (a running llama-server.exe): never touch it, install next to it.
+    // Locked (a running mistralrs.exe): never touch it, install next to it.
     (2..)
         .map(|n| root.join(format!("{name}-{n}")))
         .find(|p| !p.exists())
@@ -336,7 +301,7 @@ fn free_dir(root: &Path, name: &str) -> PathBuf {
 /// Removes the staging folders and the moved-aside builds, best effort (a locked one stays
 /// for the next start).
 pub fn collect_garbage(components: &Path) {
-    for dir in [components.to_path_buf(), llama_root(components)] {
+    for dir in [components.to_path_buf(), mistral_root(components)] {
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with(".staging-") || name.contains(".old-") {
@@ -439,9 +404,9 @@ fn install_extracted(
         other => other.into(),
     })?;
     let root = find_server_root(staging).ok_or(InstallError::NoServer)?;
-    let llama = llama_root(components);
-    fs::create_dir_all(&llama).map_err(|e| io_message(&llama, &e))?;
-    let dir = free_dir(&llama, &format!("{}-{}", plan.tag, plan.variant));
+    let root_dir = mistral_root(components);
+    fs::create_dir_all(&root_dir).map_err(|e| io_message(&root_dir, &e))?;
+    let dir = free_dir(&root_dir, &format!("{}-{}", plan.tag, plan.variant));
     fs::rename(&root, &dir).map_err(|e| io_message(&dir, &e))?;
 
     let manifest = Manifest {
@@ -467,15 +432,12 @@ fn install_extracted(
     })
 }
 
-/// Records `installed` as the operator's trusted llama.cpp: `llama_cpp_dir` in `config_path`
-/// (the file `--llama-cpp-dir` would otherwise set), and the `llama-server` backend for a
-/// GPU build when none was chosen. Other keys of the file are kept.
+/// Records `installed` as the operator's mistral.rs: `mistralrs_bin` in `config_path` (the
+/// file `--mistralrs-bin` would otherwise set). The backend is the automatic choice's to
+/// pick; other keys of the file are kept.
 pub fn register_trusted(config_path: &Path, installed: &Installed) -> Result<(), String> {
     let mut cfg: BackendConfig = config::load_from(config_path)?;
-    cfg.llama_cpp_dir = Some(installed.dir.clone());
-    if cfg.backend.is_none() && installed.manifest.variant != Variant::Cpu.label() {
-        cfg.backend = Some(Backend::LlamaServer);
-    }
+    cfg.mistralrs_bin = Some(installed.server.clone());
     config::save_to(config_path, &cfg)
 }
 
@@ -489,10 +451,9 @@ mod tests {
     use crate::testkit::{archive, FakeReleases};
 
     const WIN: Target = Target {
-        os: "win",
-        arch: "x64",
+        triple: "x86_64-pc-windows-msvc",
     };
-    const NAME: &str = "llama-b7-bin-win-cpu-x64.zip";
+    const NAME: &str = "mistralrs-cpu-x86_64-pc-windows-msvc.zip";
 
     fn ok_smoke(_: &Path) -> Result<String, String> {
         Ok("version: b7".into())
@@ -505,7 +466,7 @@ mod tests {
         cancel: &AtomicBool,
     ) -> Result<Installed, InstallError> {
         let fetcher = Fetcher::new(Policy::loopback());
-        let plan = fetch_plan(&fetcher, &fake.api_url(), Variant::Cpu, WIN)?;
+        let plan = fetch_plan(&fetcher, &fake.api_url(), WIN)?;
         install(&fetcher, &plan, components, pins, cancel, &ok_smoke, |_| {})
     }
 
@@ -514,7 +475,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fake = FakeReleases::serve(
             NAME,
-            archive(&[("llama-server.exe", b"MZ"), ("ggml.dll", b"d")]),
+            archive(&[("mistralrs.exe", b"MZ"), ("ggml.dll", b"d")]),
             true,
         );
         let mut pins = BTreeMap::new();
@@ -537,7 +498,7 @@ mod tests {
     #[test]
     fn a_wrong_digest_is_refused_and_leaves_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let fake = FakeReleases::serve(NAME, archive(&[("llama-server.exe", b"MZ")]), true);
+        let fake = FakeReleases::serve(NAME, archive(&[("mistralrs.exe", b"MZ")]), true);
         fake.corrupt_digest();
         let err = run(
             &fake,
@@ -559,7 +520,7 @@ mod tests {
     fn a_dropped_connection_resumes_instead_of_restarting() {
         let dir = tempfile::tempdir().unwrap();
         let payload = vec![7u8; 200_000];
-        let fake = FakeReleases::serve(NAME, archive(&[("llama-server.exe", &payload)]), true);
+        let fake = FakeReleases::serve(NAME, archive(&[("mistralrs.exe", &payload)]), true);
         fake.cut_first_transfer_after(50_000);
         let mut pins = BTreeMap::new();
         let cancel = AtomicBool::new(false);
@@ -584,9 +545,9 @@ mod tests {
     fn cancelling_keeps_the_part_for_a_later_resume() {
         let dir = tempfile::tempdir().unwrap();
         let payload = vec![1u8; 400_000];
-        let fake = FakeReleases::serve(NAME, archive(&[("llama-server.exe", &payload)]), true);
+        let fake = FakeReleases::serve(NAME, archive(&[("mistralrs.exe", &payload)]), true);
         let fetcher = Fetcher::new(Policy::loopback());
-        let plan = fetch_plan(&fetcher, &fake.api_url(), Variant::Cpu, WIN).unwrap();
+        let plan = fetch_plan(&fetcher, &fake.api_url(), WIN).unwrap();
         let cancel = AtomicBool::new(false);
         let err = install(
             &fetcher,
@@ -614,13 +575,8 @@ mod tests {
             l.local_addr().unwrap().port()
         };
         let fetcher = Fetcher::new(Policy::loopback());
-        let err = fetch_plan(
-            &fetcher,
-            &format!("http://127.0.0.1:{port}/releases"),
-            Variant::Cpu,
-            WIN,
-        )
-        .unwrap_err();
+        let err =
+            fetch_plan(&fetcher, &format!("http://127.0.0.1:{port}/releases"), WIN).unwrap_err();
         assert!(
             matches!(err, InstallError::Net(NetError::Unreachable(_))),
             "{err}"
@@ -631,13 +587,13 @@ mod tests {
     #[test]
     fn without_a_digest_the_hash_is_pinned_then_enforced() {
         let dir = tempfile::tempdir().unwrap();
-        let fake = FakeReleases::serve(NAME, archive(&[("llama-server.exe", b"A")]), false);
+        let fake = FakeReleases::serve(NAME, archive(&[("mistralrs.exe", b"A")]), false);
         let mut pins = BTreeMap::new();
         let first = run(&fake, dir.path(), &mut pins, &AtomicBool::new(false)).unwrap();
         assert_eq!(first.manifest.hash_source, HashSource::Pinned);
         assert_eq!(pins.get(NAME), Some(&first.manifest.sha256));
         // Same name, other bytes, on a clean machine that kept the pin.
-        let other = FakeReleases::serve(NAME, archive(&[("llama-server.exe", b"B")]), false);
+        let other = FakeReleases::serve(NAME, archive(&[("mistralrs.exe", b"B")]), false);
         let clean = tempfile::tempdir().unwrap();
         let err = run(&other, clean.path(), &mut pins, &AtomicBool::new(false)).unwrap_err();
         assert!(matches!(err, InstallError::PinMismatch { .. }), "{err}");
@@ -648,7 +604,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fake = FakeReleases::serve(
             NAME,
-            archive(&[("llama-server.exe", b"MZ"), ("../../pwn.txt", b"x")]),
+            archive(&[("mistralrs.exe", b"MZ"), ("../../pwn.txt", b"x")]),
             true,
         );
         let err = run(
@@ -669,9 +625,9 @@ mod tests {
     #[test]
     fn a_build_that_does_not_start_is_not_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let fake = FakeReleases::serve(NAME, archive(&[("llama-server.exe", b"MZ")]), true);
+        let fake = FakeReleases::serve(NAME, archive(&[("mistralrs.exe", b"MZ")]), true);
         let fetcher = Fetcher::new(Policy::loopback());
-        let plan = fetch_plan(&fetcher, &fake.api_url(), Variant::Cpu, WIN).unwrap();
+        let plan = fetch_plan(&fetcher, &fake.api_url(), WIN).unwrap();
         let bad = |_: &Path| -> Result<String, String> { Err("DLL manquante".into()) };
         let err = install(
             &fetcher,
@@ -710,30 +666,27 @@ mod tests {
         )
         .unwrap();
         let installed = Installed {
-            dir: dir.path().join("llama.cpp").join("b7-vulkan"),
-            server: PathBuf::new(),
+            dir: dir.path().join("mistral.rs").join("v0.9.5-cpu"),
+            server: dir
+                .path()
+                .join("mistral.rs")
+                .join("v0.9.5-cpu")
+                .join("mistralrs.exe"),
             manifest: Manifest {
-                tag: "b7".into(),
+                tag: "v0.9.5".into(),
                 asset: "x".into(),
-                variant: "vulkan".into(),
+                variant: "cpu".into(),
                 sha256: "0".repeat(64),
                 hash_source: HashSource::Published,
             },
         };
         register_trusted(&cfg, &installed).unwrap();
         let saved = config::load_from(&cfg).unwrap();
-        assert_eq!(saved.llama_cpp_dir, Some(installed.dir));
-        assert_eq!(saved.backend, Some(Backend::LlamaServer));
-        assert_eq!(saved.gpu_layers, Some(33));
-    }
-
-    #[test]
-    fn offload_lines_are_parsed() {
+        assert_eq!(saved.mistralrs_bin, Some(installed.server));
         assert_eq!(
-            parse_offload("load_tensors: offloaded 25/25 layers to GPU\n"),
-            Some((25, 25))
+            saved.backend, None,
+            "the automatic choice picks the backend"
         );
-        assert_eq!(parse_offload("offloaded 0/25 layers to GPU"), Some((0, 25)));
-        assert_eq!(parse_offload("nothing"), None);
+        assert_eq!(saved.gpu_layers, Some(33));
     }
 }

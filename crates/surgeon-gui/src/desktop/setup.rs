@@ -1,16 +1,16 @@
-//! The optional components the wizard and System install: the llama.cpp release plan, the
-//! engine and the sample model. Owned by the desktop, so an install goes on after the wizard
+//! The optional components the wizard and the settings install: mistral.rs (its official CPU
+//! build, or on Windows with an NVIDIA GPU a CUDA build from source), hipfire in WSL2 for an
+//! AMD GPU, and the sample model. Owned by the desktop, so an install goes on after the wizard
 //! closes (its progress shows in the status bar). Nothing is downloaded without the user's
 //! consent next to the URL, size and hash, and nothing at all in local-only mode.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
 use crate::actions::{self, Env};
-use crate::diag::SystemReport;
 use crate::install::{self, InstallError, Stage};
-use crate::releases::{Plan, Variant};
+use crate::releases::Plan;
 use crate::sample_model::{self, QWEN};
 use crate::settings::{Lang, Settings};
 use crate::task::{Progress, Task};
@@ -37,8 +37,8 @@ pub struct Pick {
     pub sample: bool,
 }
 
+#[derive(Default)]
 pub struct Setup {
-    pub variant: Variant,
     /// Replace the installed build (System > Reinstall) instead of keeping it.
     pub force: bool,
     plan_task: Option<Task<PlanResult>>,
@@ -47,36 +47,17 @@ pub struct Setup {
     pub engine: Option<EngineResult>,
     sample_task: Option<Task<Result<(), String>>>,
     pub sample: Option<Result<(), String>>,
-}
-
-/// Vulkan when the machine has a GPU and the loader, else the CPU build.
-pub fn default_variant(system: Option<&SystemReport>) -> Variant {
-    match system.is_some_and(|s| s.vulkan == Some(true) && !s.gpus.is_empty()) {
-        true => Variant::Vulkan,
-        false => Variant::Cpu,
-    }
+    hipfire_task: Option<Task<Result<(), String>>>,
+    pub hipfire: Option<Result<(), String>>,
 }
 
 impl Setup {
-    pub fn new(system: Option<&SystemReport>) -> Self {
-        Self {
-            variant: default_variant(system),
-            force: false,
-            plan_task: None,
-            plan: None,
-            engine_task: None,
-            engine: None,
-            sample_task: None,
-            sample: None,
-        }
-    }
-
     pub fn fetching_plan(&self) -> bool {
         self.plan_task.is_some()
     }
 
     pub fn installing(&self) -> bool {
-        self.engine_task.is_some() || self.sample_task.is_some()
+        self.engine_task.is_some() || self.sample_task.is_some() || self.hipfire_task.is_some()
     }
 
     /// The progress of the running installs, engine first.
@@ -85,6 +66,7 @@ impl Setup {
             .iter()
             .map(Task::progress)
             .chain(self.sample_task.iter().map(Task::progress))
+            .chain(self.hipfire_task.iter().map(Task::progress))
             .collect()
     }
 
@@ -92,17 +74,26 @@ impl Setup {
         for task in self.engine_task.iter() {
             task.cancel();
         }
-        for task in self.sample_task.iter() {
+        for task in self.sample_task.iter().chain(self.hipfire_task.iter()) {
             task.cancel();
         }
     }
 
-    /// Another build: the plan on screen no longer applies.
-    pub fn set_variant(&mut self, variant: Variant) {
-        if variant != self.variant && self.plan_task.is_none() {
-            self.variant = variant;
-            self.plan = None;
+    /// Installs and starts hipfire in WSL2 (`hipfire_setup`), with the user's consent and
+    /// outside local-only mode, one install at a time.
+    pub fn install_hipfire(&mut self, ctx: &egui::Context, consent: bool, local_only: bool) {
+        if !consent || local_only || self.installing() {
+            return;
         }
+        let (lang, wake) = (i18n::lang(), ctx.clone());
+        self.hipfire = None;
+        self.hipfire_task = Some(Task::spawn(
+            move || wake.request_repaint(),
+            move |handle| {
+                i18n::set_lang(lang);
+                crate::hipfire_setup::run(handle)
+            },
+        ));
     }
 
     /// A download may start only with the consent box ticked, outside local-only mode, with
@@ -115,22 +106,18 @@ impl Setup {
             && !self.installing()
     }
 
-    /// One read-only HTTPS request to the llama.cpp releases API.
+    /// One read-only HTTPS request to the mistral.rs releases API.
     pub fn fetch_plan(&mut self, ctx: &egui::Context, local_only: bool) {
         if local_only || self.plan_task.is_some() {
             return;
         }
-        let (variant, lang, wake) = (self.variant, i18n::lang(), ctx.clone());
+        let (lang, wake) = (i18n::lang(), ctx.clone());
         self.plan = None;
         self.plan_task = Some(Task::spawn(
             move || wake.request_repaint(),
             move |_| {
-                actions::plan_engine(
-                    &actions::production_fetcher(),
-                    install::RELEASES_URL,
-                    variant,
-                )
-                .map_err(|e| e.message(lang))
+                actions::plan_engine(&actions::production_fetcher(), install::RELEASES_URL)
+                    .map_err(|e| e.message(lang))
             },
         ));
     }
@@ -182,8 +169,29 @@ impl Setup {
         }
     }
 
-    /// Collects what ended. `true` when the engine was installed: the trusted toolchain
-    /// changed and the backend dialog must be reloaded.
+    /// Builds mistral.rs with CUDA from the tag of the plan on screen (`cargo install`), with
+    /// the same consent as a download (the sources come from the network).
+    pub fn build_cuda(&mut self, ctx: &egui::Context, env: &Env, consent: bool, local_only: bool) {
+        let engine = Pick {
+            engine: true,
+            sample: false,
+        };
+        let Some(Ok(plan)) = self.plan.clone() else {
+            return;
+        };
+        if !self.download_allowed(engine, consent, local_only) {
+            return;
+        }
+        let (env, lang, wake) = (env.clone(), i18n::lang(), ctx.clone());
+        self.engine = None;
+        self.engine_task = Some(Task::spawn(
+            move || wake.request_repaint(),
+            move |handle| run_cuda_build(&plan.tag, &env, lang, handle),
+        ));
+    }
+
+    /// Collects what ended. `true` when mistral.rs was installed or hipfire answers: the
+    /// backends changed and must be probed again.
     pub fn poll(&mut self, settings: &mut Settings, env: &Env) -> bool {
         if let Some(done) = self.plan_task.as_ref().and_then(Task::poll) {
             self.plan = Some(done);
@@ -203,7 +211,14 @@ impl Setup {
             self.sample = Some(done);
             self.sample_task = None;
         }
-        engine_done
+        // The daemon answers: the next probe sees it and the automatic choice takes it.
+        let mut hipfire_up = false;
+        if let Some(done) = self.hipfire_task.as_ref().and_then(Task::poll) {
+            hipfire_up = done.is_ok();
+            self.hipfire = Some(done);
+            self.hipfire_task = None;
+        }
+        engine_done || hipfire_up
     }
 }
 
@@ -252,6 +267,71 @@ fn run_engine(
     })
 }
 
+/// `cargo` and the CUDA compiler on the PATH: what a CUDA build of mistral.rs needs.
+pub fn cuda_toolchain() -> Result<(), String> {
+    let path = std::env::var_os("PATH");
+    for (tool, what) in [
+        ("cargo", "Rust (rustup.rs)"),
+        ("nvcc", "le CUDA Toolkit NVIDIA"),
+    ] {
+        if crate::agent::runtime::find_on_path(tool, path.as_deref()).is_none() {
+            return Err(format!("{tool} introuvable : installez {what}"));
+        }
+    }
+    Ok(())
+}
+
+/// The folder a CUDA build of `tag` installs into (`bin/mistralrs` under it).
+pub fn cuda_root(components: &Path, tag: &str) -> PathBuf {
+    install::mistral_root(components).join(format!("{tag}-cuda"))
+}
+
+/// `cargo install` of mistral.rs with CUDA, from the release tag, into the components
+/// folder; then smoke-tested and recorded like a downloaded build.
+fn run_cuda_build(tag: &str, env: &Env, lang: Lang, handle: &crate::task::Handle) -> EngineResult {
+    i18n::set_lang(lang);
+    cuda_toolchain()?;
+    let root = cuda_root(&env.components, tag);
+    let mut cargo = crate::platform::command("cargo");
+    cargo
+        .args([
+            "install",
+            "--locked",
+            "--git",
+            "https://github.com/EricLBuehler/mistral.rs",
+        ])
+        .args([
+            "--tag",
+            tag,
+            "mistralrs-cli",
+            "--features",
+            "cuda",
+            "--root",
+        ])
+        .arg(&root);
+    crate::task::run_streamed(cargo, handle).map_err(|last| format!("cargo install : {last}"))?;
+    let bin = root.join("bin").join(install::server_name());
+    handle.report(t("setup.smoke"), 0, None);
+    let smoke = install::smoke_test(&bin)?;
+    let register_error = match &env.config {
+        Some(path) => weight_surgeon::backend::config::load_from(path)
+            .and_then(|mut cfg| {
+                cfg.mistralrs_bin = Some(bin.clone());
+                weight_surgeon::backend::config::save_to(path, &cfg)
+            })
+            .err(),
+        None => Some("configuration utilisateur désactivée (WEIGHT_SURGEON_NO_USER_CONFIG)".into()),
+    };
+    Ok(EngineSummary {
+        tag: tag.to_owned(),
+        variant: "cuda".into(),
+        hash_line: tf("setup.built", &[("tag", &tag)]),
+        smoke,
+        already_there: false,
+        register_error,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,8 +348,14 @@ mod tests {
     }
 
     #[test]
+    fn a_cuda_build_lands_next_to_the_downloaded_builds() {
+        let root = cuda_root(Path::new("C:/data/components"), "v0.9.5");
+        assert_eq!(root, Path::new("C:/data/components/mistral.rs/v0.9.5-cuda"));
+    }
+
+    #[test]
     fn no_download_starts_without_consent_a_pick_a_plan_and_the_network() {
-        let mut s = Setup::new(None);
+        let mut s = Setup::default();
         let engine = Pick {
             engine: true,
             sample: false,
@@ -294,25 +380,5 @@ mod tests {
             !s.download_allowed(engine, true, true),
             "local only never downloads"
         );
-        s.set_variant(Variant::Vulkan);
-        assert!(s.plan.is_none(), "another build drops the plan");
-    }
-
-    #[test]
-    fn the_default_engine_follows_the_machine() {
-        let gpu = || vec![crate::diag::Gpu::default()];
-        let with_vulkan = SystemReport {
-            vulkan: Some(true),
-            gpus: gpu(),
-            ..Default::default()
-        };
-        assert_eq!(default_variant(Some(&with_vulkan)), Variant::Vulkan);
-        let without = SystemReport {
-            vulkan: Some(false),
-            gpus: gpu(),
-            ..Default::default()
-        };
-        assert_eq!(default_variant(Some(&without)), Variant::Cpu);
-        assert_eq!(default_variant(None), Variant::Cpu);
     }
 }

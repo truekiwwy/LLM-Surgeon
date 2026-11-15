@@ -2,9 +2,10 @@
 //! a size or a radius is written down. Views go through [`TOKENS`] and `ui::components`;
 //! `tests/ui_lint.rs` fails on a `Color32::` anywhere else.
 //!
-//! Two blues, two jobs: `accent` marks the one focus of attention of a region (active tab,
-//! selection, active mode, caret, focus ring), `action` fills the one primary action of a
-//! screen. Neither is ever small running text (4.0:1 and 2.3:1 on a panel).
+//! The palette is the "Studio" theme of Craft Anything: neutral near-black grounds, raised
+//! surfaces one step lighter, a warm white primary action with dark text, one blue that marks
+//! the focus of attention (active tab, selected choice, caret, focus ring) and is never small
+//! running text.
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontFamily, FontId, Margin, Shadow, Stroke, TextStyle, Theme,
@@ -12,19 +13,19 @@ use eframe::egui::{
 use weight_surgeon::graph::GraphRole;
 
 pub struct Colors {
-    /// Window background, visible between the panels.
+    /// Chrome: the title bar, the activity bar and the side panels.
     pub window: Color32,
-    /// 3D canvas, histogram, text fields.
+    /// The center of the window, the 3D canvas.
     pub canvas: Color32,
-    /// Panels.
+    /// Raised surfaces: fields, cards, the composer, menus, the settings dialog.
     pub surface: Color32,
-    /// A hovered row or secondary button.
+    /// A hovered row or button, the track of a segmented control.
     pub surface_hover: Color32,
-    /// The selected row.
+    /// A selected row, choice or activity.
     pub selection: Color32,
-    /// Structural borders, one physical pixel.
+    /// The outline of a control or a card, one physical pixel.
     pub border: Color32,
-    /// Separators inside a panel.
+    /// The lines between the zones of the window and inside a panel.
     pub separator: Color32,
     /// The focus of attention of a region.
     pub accent: Color32,
@@ -56,9 +57,8 @@ pub struct Space {
 /// Layout dimensions, all multiples of 8.
 pub struct Sizes {
     pub titlebar: f32,
-    pub statusbar: f32,
-    /// Gap between zones and around the body.
-    pub gap: f32,
+    /// The bar of activities on the left edge.
+    pub activity: f32,
     /// A list or table row.
     pub row: f32,
     /// A panel header.
@@ -70,23 +70,25 @@ pub struct Sizes {
     pub window_button: [f32; 2],
     pub left: f32,
     pub left_range: [f32; 2],
-    /// The left column folded: a rail holding its chevron.
-    pub rail: f32,
     pub right: f32,
     pub right_range: [f32; 2],
     /// Smallest width the center keeps when a column is dragged.
     pub center_min: f32,
+    /// Widest the reading column of the center gets (the session, the new-session form).
+    pub reading: f32,
     pub icon: f32,
     pub dot: f32,
 }
 
-/// The type scale: five sizes.
+/// The type scale.
 pub struct TypeScale {
     pub meta: f32,
     pub mono: f32,
     pub body: f32,
     pub title: f32,
     pub brand: f32,
+    /// The question that opens a page.
+    pub heading: f32,
 }
 
 pub struct ThemeTokens {
@@ -94,7 +96,10 @@ pub struct ThemeTokens {
     pub space: Space,
     pub size: Sizes,
     pub text: TypeScale,
+    /// Controls: buttons, fields, rows, segments.
     pub radius: u8,
+    /// Cards, the composer, dialogs.
+    pub radius_card: u8,
     /// Longest feedback transition, seconds.
     pub motion: f32,
     /// Icon and glyph stroke, points.
@@ -103,23 +108,23 @@ pub struct ThemeTokens {
 
 pub const TOKENS: ThemeTokens = ThemeTokens {
     color: Colors {
-        window: Color32::from_rgb(0x0E, 0x0F, 0x14),
-        canvas: Color32::from_rgb(0x0D, 0x0E, 0x12),
-        surface: Color32::from_rgb(0x16, 0x1B, 0x22),
-        surface_hover: Color32::from_rgb(0x1C, 0x22, 0x2B),
-        selection: Color32::from_rgb(0x1B, 0x29, 0x42),
-        border: Color32::from_rgb(0x2A, 0x34, 0x44),
-        separator: Color32::from_rgb(0x1B, 0x20, 0x28),
-        accent: Color32::from_rgb(0x27, 0x73, 0xF5),
-        action: Color32::from_rgb(0x09, 0x46, 0xC8),
-        action_hover: Color32::from_rgb(0x0B, 0x52, 0xE6),
-        on_action: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-        text: Color32::from_rgb(0xE6, 0xED, 0xF3),
-        text_secondary: Color32::from_rgb(0x9A, 0xA7, 0xB8),
-        text_disabled: Color32::from_rgb(0x6B, 0x77, 0x88),
+        window: Color32::from_rgb(0x10, 0x10, 0x14),
+        canvas: Color32::from_rgb(0x12, 0x13, 0x16),
+        surface: Color32::from_rgb(0x1B, 0x1C, 0x1F),
+        surface_hover: Color32::from_rgb(0x22, 0x23, 0x25),
+        selection: Color32::from_rgb(0x1E, 0x2C, 0x47),
+        border: Color32::from_rgb(0x2B, 0x2B, 0x2F),
+        separator: Color32::from_rgb(0x26, 0x27, 0x29),
+        accent: Color32::from_rgb(0x2F, 0x74, 0xE0),
+        action: Color32::from_rgb(0xF2, 0xF1, 0xEE),
+        action_hover: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+        on_action: Color32::from_rgb(0x10, 0x10, 0x14),
+        text: Color32::from_rgb(0xF2, 0xF1, 0xEE),
+        text_secondary: Color32::from_rgb(0x94, 0x94, 0x94),
+        text_disabled: Color32::from_rgb(0x75, 0x75, 0x75),
         ok: Color32::from_rgb(0x3F, 0xB9, 0x50),
         warn: Color32::from_rgb(0xD2, 0x99, 0x22),
-        error: Color32::from_rgb(0xFA, 0x5C, 0x54),
+        error: Color32::from_rgb(0xFF, 0x6A, 0x61),
         data: [
             Color32::from_rgb(0x2B, 0x36, 0x48),
             Color32::from_rgb(0x2D, 0x42, 0x66),
@@ -129,7 +134,7 @@ pub const TOKENS: ThemeTokens = ThemeTokens {
             Color32::from_rgb(0x7F, 0xA6, 0xEE),
             Color32::from_rgb(0xC2, 0xD6, 0xF8),
         ],
-        scrim: Color32::from_rgba_premultiplied(0x07, 0x08, 0x0A, 0xB8),
+        scrim: Color32::from_rgba_premultiplied(0x00, 0x00, 0x00, 0x99),
     },
     space: Space {
         xs: 4.0,
@@ -139,31 +144,32 @@ pub const TOKENS: ThemeTokens = ThemeTokens {
         xl: 24.0,
     },
     size: Sizes {
-        titlebar: 40.0,
-        statusbar: 24.0,
-        gap: 8.0,
-        row: 24.0,
-        header: 32.0,
-        control: 24.0,
-        cta: 32.0,
-        window_button: [48.0, 40.0],
+        titlebar: 48.0,
+        activity: 48.0,
+        row: 32.0,
+        header: 40.0,
+        control: 32.0,
+        cta: 40.0,
+        window_button: [48.0, 48.0],
         left: 280.0,
         left_range: [240.0, 400.0],
-        rail: 32.0,
         right: 320.0,
         right_range: [280.0, 480.0],
         center_min: 480.0,
+        reading: 800.0,
         icon: 16.0,
         dot: 8.0,
     },
     text: TypeScale {
-        meta: 11.0,
+        meta: 12.0,
         mono: 12.0,
-        body: 13.0,
-        title: 14.0,
+        body: 14.0,
+        title: 15.0,
         brand: 16.0,
+        heading: 24.0,
     },
-    radius: 2,
+    radius: 6,
+    radius_card: 10,
     motion: 0.12,
     stroke: 1.5,
 };
@@ -183,9 +189,14 @@ pub const GOOD: Color32 = TOKENS.color.ok;
 pub const WARN: Color32 = TOKENS.color.warn;
 pub const BAD: Color32 = TOKENS.color.error;
 
-/// The medium weight of the sans-serif: panel titles and the brand.
+/// The medium weight of the sans-serif: panel titles, buttons, the brand.
 pub fn medium() -> FontFamily {
     FontFamily::Name("medium".into())
+}
+
+/// The bold weight: the heading of a page.
+pub fn bold() -> FontFamily {
+    FontFamily::Name("bold".into())
 }
 
 /// The three role groups of a graph node. A role reads by the shape of its node, color is
@@ -331,7 +342,7 @@ pub fn style() -> egui::Style {
                 TextStyle::Button,
                 FontId::new(t.text.body, FontFamily::Proportional),
             ),
-            (TextStyle::Heading, FontId::new(t.text.brand, medium())),
+            (TextStyle::Heading, FontId::new(t.text.heading, bold())),
             (
                 TextStyle::Monospace,
                 FontId::new(t.text.mono, FontFamily::Monospace),
@@ -367,12 +378,12 @@ pub fn style() -> egui::Style {
     v.hyperlink_color = c.text;
     v.faint_bg_color = c.surface_hover;
     v.extreme_bg_color = c.canvas;
-    v.text_edit_bg_color = Some(c.canvas);
+    v.text_edit_bg_color = Some(c.surface);
     v.code_bg_color = c.canvas;
     v.warn_fg_color = c.warn;
     v.error_fg_color = c.error;
-    v.window_corner_radius = CornerRadius::same(t.radius);
-    v.menu_corner_radius = CornerRadius::same(t.radius);
+    v.window_corner_radius = CornerRadius::same(t.radius_card);
+    v.menu_corner_radius = CornerRadius::same(t.radius_card);
     v.window_shadow = Shadow::NONE;
     v.popup_shadow = Shadow::NONE;
     v.window_fill = c.surface;

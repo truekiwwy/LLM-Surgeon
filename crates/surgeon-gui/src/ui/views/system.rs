@@ -1,77 +1,234 @@
-//! System: the one place where the environment is configured. Four sections on the left
-//! (with the wizard to replay); machine and dependencies (with their repair), the AI
-//! providers (keys in the vault, models, prices, CLI runtimes), the updates, and the
-//! technical log with the diagnostics report (no personal path, no secret).
+//! The settings dialog, the one place where the environment is configured, sections on the
+//! left: general (language, local only, projects folder, the wizard to replay), the AI
+//! providers (keys in the vault, models, prices, CLI runtimes), the engine (machine,
+//! dependencies with their repair, inference backend), the updates, and the technical log
+//! with the diagnostics report (no personal path, no secret).
 
-use eframe::egui::{self, Rect, ScrollArea, Ui};
+use eframe::egui::{self, Id, Pos2, Rect, ScrollArea, Sense, Ui, Vec2};
 
-use super::super::components::{self as c, ButtonKind};
+use super::super::components::{self as c, ButtonKind, Segment};
 use super::super::i18n::{t, tf};
-use super::super::icons::State;
+use super::super::icons::{self, Icon, State};
 use super::super::layout::Regions;
 use super::super::theme::TOKENS as T;
-use super::left_column;
 use crate::agent::config::Connection;
 use crate::agent::detect::{Preset, Reason};
 use crate::app::{Section, SurgeonApp};
 use crate::desktop::UpdateState;
 use crate::diag::{actions_needed, Fix, Group, Row, Severity, Status, Uses};
-use weight_surgeon::bench::score::Backend;
+use crate::settings::Lang;
+
+/// The column of the sections.
+const NAV: f32 = 232.0;
+/// The largest the dialog gets.
+const SIZE: [f32; 2] = [1120.0, 760.0];
 
 fn section_label(section: Section) -> &'static str {
     match section {
-        Section::Machine => t("system.section.machine"),
-        Section::Providers => t("system.section.providers"),
-        Section::Updates => t("system.section.updates"),
-        Section::Journal => t("system.section.journal"),
+        Section::General => t("settings.section.general"),
+        Section::Providers => t("settings.section.providers"),
+        Section::Engine => t("settings.section.engine"),
+        Section::Updates => t("settings.section.updates"),
+        Section::Journal => t("settings.section.journal"),
     }
 }
 
-pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
-    left_column(
-        ui,
-        app,
-        regions.left,
-        "sections",
-        t("panel.sections"),
-        |ui, app| {
-            for section in Section::ALL {
-                let label = section_label(section);
-                if c::row(ui, app.system_section == section, label, |ui| {
-                    c::label(ui, label);
-                })
-                .clicked()
-                {
-                    app.system_section = section;
-                }
-            }
-            c::separator(ui);
-            if c::button(ui, t("system.wizard"), ButtonKind::Secondary)
-                .on_hover_text(t("system.wizard.tip"))
-                .clicked()
-            {
-                app.desktop.open_wizard();
-            }
-        },
+fn section_icon(section: Section) -> Icon {
+    match section {
+        Section::General => Icon::Sliders,
+        Section::Providers => Icon::Sparkle,
+        Section::Engine => Icon::Chip,
+        Section::Updates => Icon::Download,
+        Section::Journal => Icon::List,
+    }
+}
+
+/// The settings dialog over the window, open on `app.settings`. Escape, a click outside or
+/// the close button closes it.
+pub fn dialog(ctx: &egui::Context, app: &mut SurgeonApp) {
+    let Some(section) = app.settings else {
+        return;
+    };
+    let screen = ctx.content_rect();
+    let size = Vec2::new(
+        SIZE[0].min(screen.width() - 2.0 * T.size.activity),
+        SIZE[1].min(screen.height() - 2.0 * T.size.titlebar),
     );
-    // A section without a side panel takes the center and the right column.
-    let wide = Rect::from_min_max(regions.center.min, regions.right.max);
-    match app.system_section {
-        Section::Machine => machine(ui, app, regions),
-        Section::Providers => providers(ui, app, regions),
-        Section::Updates => {
-            c::Panel::new("updates")
-                .title(t("panel.updates"))
-                .show(ui, wide, |ui| updates(ui, app))
-        }
-        Section::Journal => journal(ui, app, regions),
+    let mut close = false;
+    let modal = egui::Modal::new(Id::new("settings"))
+        .backdrop_color(T.color.scrim)
+        .frame(c::popup_frame().inner_margin(0.0))
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            c::record(ui.ctx(), "settings", rect);
+            let nav = Rect::from_min_size(rect.min, Vec2::new(NAV, rect.height()));
+            let body = Rect::from_min_max(Pos2::new(nav.right(), rect.top()), rect.max);
+            c::vline(ui.painter(), nav.right(), rect.y_range(), T.color.separator);
+            c::region(ui, nav.shrink(T.space.m), "settings-nav", |ui| {
+                ui.add_space(T.space.xs);
+                c::strong(ui, t("settings.title"));
+                ui.add_space(T.space.m);
+                ui.spacing_mut().item_spacing.y = T.space.xs / 2.0;
+                for s in Section::ALL {
+                    let label = section_label(s);
+                    let picked = s == section;
+                    let row = c::row(ui, picked, label, |ui| {
+                        let (glyph, _) =
+                            ui.allocate_exact_size(Vec2::splat(T.size.icon), Sense::hover());
+                        let ink = if picked {
+                            T.color.accent
+                        } else {
+                            T.color.text_secondary
+                        };
+                        icons::paint(ui.painter(), glyph, section_icon(s), ink);
+                        c::line(ui, label);
+                    });
+                    if row.clicked() {
+                        app.settings = Some(s);
+                    }
+                }
+            });
+            let shut = Rect::from_min_size(
+                Pos2::new(
+                    body.right() - T.space.s - T.size.control,
+                    body.top() + T.space.s,
+                ),
+                Vec2::splat(T.size.control),
+            );
+            close = c::region(ui, shut, "settings-close", |ui| {
+                c::icon_button(ui, Icon::Close, t("settings.close")).clicked()
+            });
+            let right = Rect::from_min_max(
+                Pos2::new(body.right() - T.size.right, body.top() + T.size.header),
+                body.max,
+            );
+            let center = Rect::from_min_max(body.min, Pos2::new(right.left(), body.bottom()));
+            let regions = Regions {
+                titlebar: Rect::NOTHING,
+                activity: Rect::NOTHING,
+                left: nav,
+                center,
+                right,
+            };
+            if matches!(
+                section,
+                Section::Providers | Section::Engine | Section::Journal
+            ) {
+                c::vline(
+                    ui.painter(),
+                    right.left(),
+                    right.y_range(),
+                    T.color.separator,
+                );
+            }
+            match section {
+                Section::General => c::Panel::new("general")
+                    .bare()
+                    .title(t("settings.section.general"))
+                    .show(ui, body, |ui| general(ui, app)),
+                Section::Providers => providers(ui, app, &regions),
+                Section::Engine => machine(ui, app, &regions),
+                Section::Updates => c::Panel::new("updates")
+                    .bare()
+                    .title(t("panel.updates"))
+                    .show(ui, body, |ui| updates(ui, app)),
+                Section::Journal => journal(ui, app, &regions),
+            }
+        });
+    if close || modal.should_close() {
+        app.settings = None;
     }
 }
 
-/// The dependencies in the center, the machine on the right.
+/// One setting: its name and what it does on the left, its control on the right.
+fn setting(ui: &mut Ui, title: &str, hint: &str, control: impl FnOnce(&mut Ui)) {
+    ui.horizontal_top(|ui| {
+        let width = (ui.available_width() * 0.55).floor();
+        ui.allocate_ui_with_layout(
+            Vec2::new(width, T.size.control),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_width(width);
+                c::strong(ui, title);
+                c::secondary(ui, hint);
+            },
+        );
+        ui.add_space(T.space.l);
+        control(ui);
+    });
+    ui.add_space(T.space.l);
+}
+
+/// Language, local only, the projects folder, the wizard to replay, the version.
+fn general(ui: &mut Ui, app: &mut SurgeonApp) {
+    ScrollArea::vertical()
+        .id_salt("general")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            setting(ui, t("settings.lang"), t("settings.lang.hint"), |ui| {
+                let mut lang = app.desktop.lang();
+                let options = [
+                    Segment {
+                        value: Lang::Fr,
+                        label: "Français",
+                        tooltip: t("status.language"),
+                    },
+                    Segment {
+                        value: Lang::En,
+                        label: "English",
+                        tooltip: t("status.language"),
+                    },
+                ];
+                if c::segmented(ui, &mut lang, &options, c::font_body()) {
+                    app.desktop.set_lang(lang);
+                }
+            });
+            setting(ui, t("settings.local"), t("policy.local_only.tip"), |ui| {
+                let mut local = app.desktop.settings.local_only;
+                if c::switch(
+                    ui,
+                    Icon::Shield,
+                    t("status.local"),
+                    &mut local,
+                    t("policy.local_only.tip"),
+                ) {
+                    app.set_local_only(local);
+                }
+            });
+            let folder = app.studio.workspace.display().to_string();
+            let ctx = ui.ctx().clone();
+            setting(ui, t("settings.workspace"), &folder, |ui| {
+                let free = !app.workspace_picker.busy();
+                let why = t("project.source.picking");
+                if cfg!(windows)
+                    && c::button_if(
+                        ui,
+                        free,
+                        t("settings.workspace.change"),
+                        ButtonKind::Secondary,
+                        why,
+                    )
+                    .clicked()
+                {
+                    app.pick_workspace(&ctx, t("wiz.workspace.hint"));
+                }
+            });
+            setting(ui, t("system.wizard"), t("system.wizard.tip"), |ui| {
+                if c::button(ui, t("settings.wizard.run"), ButtonKind::Secondary).clicked() {
+                    app.settings = None;
+                    app.desktop.open_wizard();
+                }
+            });
+            let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+            setting(ui, t("settings.version"), &version, |_| {});
+        });
+}
+
+/// The dependencies in the center, the machine and the inference backend on the right.
 fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     let ctx = ui.ctx().clone();
     c::Panel::new("hardware")
+        .bare()
         .title(t("panel.hardware"))
         .show_with(
             ui,
@@ -89,11 +246,22 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                     app.desktop.refresh_system(&ctx);
                 }
             },
-            |ui, app| machine_facts(ui, app),
+            |ui, app| {
+                machine_facts(ui, app);
+                c::separator(ui);
+                // Its label is long (backend, API, layers, batch): it takes a line of its own.
+                c::secondary(ui, t("settings.backend"));
+                c::mono_wrapped(ui, app.backend_label(), T.color.text);
+                ui.add_space(T.space.s);
+                if c::button(ui, t("settings.backend.configure"), ButtonKind::Secondary).clicked() {
+                    app.dialog.open = true;
+                }
+            },
         );
     let rows = app.desktop.rows(app.dialog.saved(), uses(app));
     let mut fix = None;
     c::Panel::new("dependencies")
+        .bare()
         .title(t("panel.dependencies"))
         .show(ui, regions.center, |ui| {
             readiness(ui, &rows);
@@ -101,12 +269,7 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 .id_salt("deps")
                 .auto_shrink(false)
                 .show(ui, |ui| {
-                    for group in [
-                        Group::Essential,
-                        Group::Acceleration,
-                        Group::Agents,
-                        Group::Samples,
-                    ] {
+                    for group in [Group::Essential, Group::Acceleration, Group::Samples] {
                         c::section(ui, group_label(group));
                         for row in rows.iter().filter(|r| r.group == group) {
                             if let Some(f) = dependency(ui, row) {
@@ -161,17 +324,12 @@ pub(crate) fn machine_facts(ui: &mut Ui, app: &SurgeonApp) {
     }
 }
 
-/// The active choices the severities follow: the backend picked, a CLI runtime configured.
+/// What the machine calls for, the severities follow it: its GPU, the hipfire daemon.
 fn uses(app: &SurgeonApp) -> Uses {
+    let gpus = app.desktop.system.iter().flat_map(|s| s.gpus.iter());
     Uses {
-        llama_backend: app.dialog.saved().backend == Some(Backend::LlamaServer),
-        cli: app
-            .agents
-            .cfg
-            .connections
-            .iter()
-            .find(|c| c.kind.is_cli())
-            .map(|c| c.kind.name()),
+        vendor: crate::backend_choice::main_vendor(gpus.map(|g| g.name.as_str())),
+        hipfire_up: app.hipfire_up,
     }
 }
 
@@ -190,7 +348,6 @@ fn group_label(group: Group) -> &'static str {
     match group {
         Group::Essential => t("deps.group.essential"),
         Group::Acceleration => t("deps.group.acceleration"),
-        Group::Agents => t("deps.group.agents"),
         Group::Samples => t("deps.group.samples"),
     }
 }
@@ -210,6 +367,8 @@ fn dependency(ui: &mut Ui, row: &Row) -> Option<(Fix, bool)> {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if row.fix != Fix::None {
                 let (text, kind, force) = match row.status {
+                    // hipfire runs outside the app: its button opens the guide.
+                    _ if row.fix == Fix::Hipfire => (t("diag.guide"), ButtonKind::Secondary, false),
                     Status::Missing => (t("diag.install"), ButtonKind::Secondary, false),
                     Status::Outdated => (t("diag.repair"), ButtonKind::Secondary, false),
                     Status::Ok => (t("diag.reinstall"), ButtonKind::Ghost, true),
@@ -311,6 +470,7 @@ fn clock(line: &str) -> String {
 /// The technical log in the center, the diagnostics report on the right.
 fn journal(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     c::Panel::new("journal")
+        .bare()
         .title(t("panel.journal"))
         .show(ui, regions.center, |ui| {
             // shortcut: the log tail is read every frame; cache it if logs grow past a few MiB.
@@ -339,6 +499,7 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         });
     let rows = app.desktop.rows(app.dialog.saved(), uses(app));
     c::Panel::new("report")
+        .bare()
         .title(t("panel.report"))
         .show(ui, regions.right, |ui| {
             c::meta(ui, t("report.explain"));
@@ -357,7 +518,6 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
 
 fn reason_label(reason: Reason) -> &'static str {
     match reason {
-        Reason::NoToolBarrier => t("scan.reason.barrier"),
         Reason::NotSupported => t("scan.reason.unsupported"),
     }
 }
@@ -386,6 +546,7 @@ fn preset_label(preset: Option<Preset>) -> &'static str {
 /// scans (CLIs, loopback servers, environment keys: nothing is spent).
 fn providers(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     c::Panel::new("providers")
+        .bare()
         .title(t("panel.providers"))
         .show_with(
             ui,
@@ -412,6 +573,7 @@ fn providers(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
             },
         );
     c::Panel::new("provider")
+        .bare()
         .title(t("panel.provider"))
         .show(ui, regions.right, |ui| {
             ScrollArea::vertical()

@@ -73,9 +73,6 @@ pub struct EnvKey {
 /// Why a CLI found on the `PATH` is not offered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
-    /// No option of its non-interactive mode limits its tools to the `surgeon` MCP server:
-    /// its own shell, file and web tools would stay reachable.
-    NoToolBarrier,
     /// Not supported in this version.
     NotSupported,
 }
@@ -88,12 +85,8 @@ pub struct Other {
     pub reason: Reason,
 }
 
-/// The CLIs looked for besides Claude Code and Codex, checked against `opencode run --help`
-/// (2.2.7): `--format json` exists, but no MCP configuration nor tool restriction does.
-const OTHERS: [(&str, Reason); 2] = [
-    ("opencode", Reason::NoToolBarrier),
-    ("gemini", Reason::NotSupported),
-];
+/// The CLIs looked for besides the four runtimes.
+const OTHERS: [(&str, Reason); 1] = [("gemini", Reason::NotSupported)];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Server {
@@ -118,12 +111,17 @@ pub fn env_keys(present: impl Fn(&str) -> bool) -> Vec<EnvKey> {
         .collect()
 }
 
-/// Claude Code and Codex (with their checked options), then the other CLIs.
+/// The four runtimes (with their checked options), then the other CLIs.
 pub fn clis(path: Option<&OsStr>) -> (Vec<Detected>, Vec<Other>) {
-    let runtimes = [ProviderKind::ClaudeCode, ProviderKind::Codex]
-        .into_iter()
-        .filter_map(|k| runtime::detect(k, path))
-        .collect();
+    let runtimes = [
+        ProviderKind::ClaudeCode,
+        ProviderKind::Codex,
+        ProviderKind::OpenCode,
+        ProviderKind::Antigravity,
+    ]
+    .into_iter()
+    .filter_map(|k| runtime::detect(k, path))
+    .collect();
     let others = OTHERS
         .iter()
         .filter_map(|&(name, reason)| {
