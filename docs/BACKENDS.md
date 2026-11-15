@@ -8,9 +8,9 @@ graphique s'en sert au premier démarrage. Code : `src/backend/`.
 
 | Backend | Matériel | Ce que c'est | État |
 | --- | --- | --- | --- |
-| `mistralrs` | GPU selon le build (CUDA, Metal...) ou CPU | Un serveur [mistral.rs](https://github.com/EricLBuehler/mistral.rs) local (`mistralrs-server`, ou `mistralrs serve`) qui charge le dossier SafeTensors tel quel, sans conversion (un `.gguf` est aussi accepté). | Recommandé en premier par `backend detect` quand il est installé (section 6). |
-| `llama-server` | GPU (Vulkan, CUDA, Metal...) ou CPU | Un serveur `llama.cpp` local pour toute l'exécution. Un dossier SafeTensors Qwen2, Llama, Mistral, Gemma, Gemma 2 ou Phi-3 est converti par `surgeon` lui-même en GGUF (Rust pur, sans Python). | Backend GPU sans mistral.rs. |
-| `hipfire` | GPU AMD, HIP/ROCm | Démon externe [`warpfront/hipfire`](https://github.com/warpfront/hipfire), déjà lancé. | Utilisable sur tout système, Windows compris (section 7). |
+| `mistralrs` | GPU selon le build (CUDA, Metal...) ou CPU | Un serveur [mistral.rs](https://github.com/EricLBuehler/mistral.rs) local (`mistralrs-server`, ou `mistralrs serve`) qui charge le dossier SafeTensors tel quel, sans conversion (un `.gguf` est aussi accepté). | Recommandé par `backend detect` pour NVIDIA, Apple Silicon et le CPU quand il est installé, et sur AMD tant que hipfire ne répond pas (section 4). |
+| `llama-server` | GPU (Vulkan, CUDA, Metal...) ou CPU | Un serveur `llama.cpp` local pour toute l'exécution. Un dossier SafeTensors Qwen2, Llama, Mistral, Gemma, Gemma 2 ou Phi-3 est converti par `surgeon` lui-même en GGUF (Rust pur, sans Python). | Jamais recommandé : seulement sur `--backend llama-server` ou un fichier qui le nomme. |
+| `hipfire` | GPU AMD, HIP/ROCm | Démon externe [`warpfront/hipfire`](https://github.com/warpfront/hipfire), déjà lancé. | Recommandé pour un GPU AMD dès que son démon répond ; tout système, Windows compris par WSL2 (section 7). |
 | `native` | CPU | Générateur en Rust pur de `surgeon` (Qwen2, Llama/Mistral, Qwen3 en SafeTensors). Aucun programme externe. | Repli, défaut historique de `bench refusal` et du pipeline. |
 
 Tous partagent l'interface `TextGenerator` (`src/eval/generator.rs`) : un bench ne sait pas
@@ -92,21 +92,21 @@ surgeon backend detect --save   # écrit la recommandation comme configuration u
 surgeon backend show            # le fichier, et le backend qui en résulte
 ```
 
-La sonde cherche mistral.rs (`mistralrs_bin`, sinon `mistralrs-server` puis `mistralrs` dans
-`mistralrs_dir`, `$MISTRALRS_DIR`, puis le `PATH`), `llama-server` (dossier configuré,
-`$LLAMA_CPP_DIR`, `PATH`, puis `~/tools/llama-vulkan`) et lance `llama-server --list-devices` (délai
-de 30 s), puis interroge hipfire (section 7). Elle recommande, dans l'ordre : `mistralrs` quand il
-est installé ; `llama-server` avec `gpu_layers = 99` quand un GPU est listé ; sinon `native`.
-`hipfire` n'est jamais recommandé. Les moteurs trouvés sont tous enregistrés (`llama_cpp_dir`,
-`mistralrs_bin`, `hipfire_bin`) : un `--backend llama-server` explicite les retrouve ensuite.
-Exemple (Radeon RX 7600 XT, sans mistral.rs) :
+La sonde ne connaît que les moteurs Rust. Elle lit les GPU (NVML pour NVIDIA, sysfs pour AMD
+sous Linux, Apple Silicon, et sous Windows les adaptateurs d'affichage), en déduit le fabricant
+qui décide (NVIDIA, puis AMD, puis Apple ; sinon le CPU), cherche mistral.rs (`mistralrs_bin`,
+sinon `mistralrs-server` puis `mistralrs` dans `mistralrs_dir`, `$MISTRALRS_DIR`, puis le
+`PATH`) et interroge le démon hipfire (section 7 ; sur une machine AMD sans `hipfire_url`, à
+l'adresse par défaut `127.0.0.1:11435`). La cible est `hipfire` pour un GPU AMD et `mistralrs`
+sinon ; la recommandation est la cible quand elle est prête, sinon `mistralrs` s'il est installé,
+sinon `native`. llama.cpp n'est ni cherché ni recommandé ; `--backend llama-server` reste
+utilisable à la main. Exemple (Radeon RX 7600 XT, sans mistral.rs ni démon hipfire) :
 
 ```text
+[BACKEND]  GPU : AMD Radeon RX 7600 XT
 [BACKEND]  mistral.rs introuvable
-[BACKEND]  llama-server C:\Users\<vous>\tools\llama-vulkan\llama-server.exe
-  Vulkan0  AMD Radeon RX 7600 XT (16368 Mio)
-[BACKEND]  hipfire : hipfire introuvable : donnez --hipfire-bin ou --hipfire-url ...
-[BACKEND]  recommandé : llama-server (Vulkan, ngl=99, batch=1) (llama-server voit AMD Radeon RX 7600 XT (Vulkan) : tous les calques sur le GPU)
+[BACKEND]  hipfire : hipfire injoignable sur 127.0.0.1:11435 : lancez `hipfire serve` ...
+[BACKEND]  recommandé : native-cpu (mistral.rs introuvable : moteur natif (CPU, Rust) ; hipfire, le moteur des GPU AMD, prendra le relais dès que son démon répondra)
 ```
 
 `surgeon backend show` ajoute un avertissement, sans échouer, quand le backend configuré ne pourra
@@ -116,20 +116,16 @@ qui n'expose que `/v1/chat/completions`).
 **API pour une interface graphique.** Rien n'est propre au terminal :
 
 - Rust : `weight_surgeon::backend::detect_hardware_and_backends(&BackendConfig) -> BackendReport`
-  (`os`, `mistralrs { binary }`, `llama { server, dir, devices[], error }`, `hipfire { binary,
-  note }`, `recommended`, `reason`) ; `load_user_config()`, `save_to(path, &config)`,
-  `user_config_path()` ;
-  `BackendConfig` est `Serialize` / `Deserialize` (JSON : `{"backend":"llama-server",...}`, champs
+  (`os`, `gpus[]`, `vendor` (`nvidia`, `amd`, `apple`, `cpu`), `target`,
+  `mistralrs { binary }`, `hipfire { binary, up, note }`, `recommended`, `reason`) ;
+  `load_user_config()`, `save_to(path, &config)`, `user_config_path()` ;
+  `BackendConfig` est `Serialize` / `Deserialize` (JSON : `{"backend":"mistralrs",...}`, champs
   absents omis, champ inconnu refusé).
 - Sans lier la bibliothèque : `surgeon --json backend detect` et `surgeon --json backend show`, ou
-  l'outil MCP `surgeon_backends` (lecture seule, sans argument).
+  l'outil MCP `surgeon_backends` (lecture seule, sans argument, même rapport).
 
-Parcours conseillé au premier lancement : `detect` ; montrer `report.llama.devices` et
-`report.reason` ; sur confirmation, `detect --save` (ou `save_to` avec la configuration que
-l'utilisateur a modifiée). Ensuite aucune option de backend n'est nécessaire. `crates/surgeon-gui`
-suit ce parcours : la sonde tourne en tâche de fond, pré-remplit le formulaire (backend
-recommandé, `llama_cpp_dir`, `mistralrs_bin`) et ne change plus le backend dès que l'utilisateur
-en a cliqué un ; `hipfire` y est sélectionnable sur tout système.
+`crates/surgeon-gui` applique la même règle au premier lancement (`backend_choice`) et l'écrit
+dans la configuration utilisateur tant que l'utilisateur n'a pas choisi à la main.
 
 ## 5. `llama-server` : GPU, conversion, GGUF temporaire
 

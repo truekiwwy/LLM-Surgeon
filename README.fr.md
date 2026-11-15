@@ -422,9 +422,9 @@ Ce que ça veut dire : ce patch a beaucoup changé le modèle sur ces prompts (K
 ### 2.4 Application de bureau (Windows)
 
 `surgeon-gui.exe` est une application à lancer d'un double-clic, au-dessus du même moteur :
-un écran d'accueil, un assistant de premier lancement qui diagnostique votre machine (GPU,
-Vulkan, RAM, disque) et installe llama.cpp pour vous, le studio de cartes et le graphe 3D des
-poids. Rien n'est téléchargé sans votre accord explicite, affiché à côté de l'URL, de la
+un agent IA avec qui vous discutez dans une fenêtre façon IDE (un scan complet du modèle,
+ou un problème précis), un assistant de premier lancement qui diagnostique votre machine (GPU,
+Vulkan, RAM, disque) et installe llama.cpp pour vous, et le graphe 3D des poids. Rien n'est téléchargé sans votre accord explicite, affiché à côté de l'URL, de la
 taille et du SHA-256, et rien n'est envoyé nulle part.
 
 - **Installation** : l'installateur par utilisateur (sans droits administrateur) ou le ZIP
@@ -1662,7 +1662,7 @@ outputs:
   graph-demo\edges.csv
 ```
 
-`crates/surgeon-gui` est aussi le **LLM Surgery Studio**, trois espaces de travail choisis dans sa barre du haut : `Studio (Canvas)`, `Graphe 3D` et `Split (Canvas + 3D)`. Le canvas porte des cartes typées reliées de sortie en entrée : Model (`inspect`), Extract (`extract`), Patch (`apply`, en dry-run par défaut), Graph Diff (`graph --baseline`, puis ouvert et cadré dans la vue 3D) et Eval / Gate (`bench refusal --fail-on-warn`, GO ou NO-GO). `Run` sur une carte exécute d'abord les cartes en amont, chacune exactement comme ce CLI avec les mêmes options, dans le processus et annulable. Une branche se forke pour comparer deux réglages côte à côte, et le workspace s'enregistre en `*.surgeon-studio.json`. Le tiroir `patch.json` valide pendant la frappe (même `validate_patch`, chaque problème sur sa ligne), illumine en 3D les tenseurs ciblés avant toute écriture, et propose `Dry-Run`, `Apply (avec backup)` et `Rollback`. Détails dans [crates/surgeon-gui/README.md](crates/surgeon-gui/README.md).
+`crates/surgeon-gui` est aussi le **LLM Surgery Studio**, organisé comme un IDE dont l'éditeur serait un agent IA. Une session démarre sous l'une de deux formes : **Advance**, où l'agent inspecte tout le modèle, construit le graphe chirurgical et classe lui-même les problèmes qu'il trouve, ou **Scalping**, où l'utilisateur nomme un symptôme (refus excessifs, répétitions, hallucinations, langue, raisonnement) et l'agent va droit aux tenseurs en cause. L'agent (Anthropic, OpenAI ou tout endpoint compatible OpenAI, ou la CLI Claude Code / Codex où l'utilisateur est connecté) lance les outils MCP du moteur comme des jobs d'un projet persistant (le modèle source haché et jamais écrit, des copies de travail, des runs, un ledger en ajout seul), chaque écriture est une carte d'approbation calculée par le code, et chaque chiffre qu'il affirme est vérifié dans le ledger ([docs/AGENTS.md](docs/AGENTS.md), [docs/STUDIO.md](docs/STUDIO.md)). La vue 3D montre le graphe, un run rejoué par-dessus et le tenseur que l'agent désigne. Détails dans [crates/surgeon-gui/README.md](crates/surgeon-gui/README.md).
 
 <a id="patch-format"></a>
 ### 3.3 `patch.json` et les axes `rows` / `cols`
@@ -2067,7 +2067,7 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 <a id="tools"></a>
 ### 4.2 Outils
 
-`surgeon mcp` sert douze outils (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
+`surgeon mcp` sert quinze outils (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
 
 | Outil | Rôle |
 | --- | --- |
@@ -2076,13 +2076,16 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 | `surgeon_apply` | Applique un patch en place (`dry_run` pour vérifier d'abord) ; `gguf: true` pour un GGUF quantifié. |
 | `surgeon_eval` | Contrôles de boucles et d'attentes, export GGUF conditionnel. |
 | `surgeon_extract` | Vecteur de steering depuis une couche Qwen2, Llama/Mistral ou Qwen3. |
-| `surgeon_bench` | Mesure, avec `mode` `dump`, `logits`, `ppl` ou `eval`. |
+| `surgeon_bench` | Mesure, avec `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal` ; les jeux de sondes intégrés se passent de fichier : `builtin:math`, `builtin:logic`, `builtin:general` (eval) et `builtin:refusals` (refusal). |
 | `surgeon_autotune` | Coefficients par couche par régression ridge. |
 | `surgeon_diff` | Différence de deux checkpoints écrite dans un nouveau `.surgery`. |
 | `surgeon_lora` | `mode` `merge` (adaptateur fusionné en place) ou `extract` (adaptateur écrit). |
 | `surgeon_pipeline` | Décision sur un patch : `action` `plan`, `start` (travailleur en arrière-plan, renvoie un `job_id` tout de suite), `status`, `cancel`, `report`, `promote_patch` ([docs/PIPELINE.md](docs/PIPELINE.md)). |
 | `surgeon_graph` | Graphe écritures/lectures du flux résiduel avec bornes spectrales certifiées ; synthèse bornée, ou fichiers avec `out_dir`. |
-| `surgeon_backends` | Moteurs d'inférence de la machine (native, mistralrs, llama-server et ses GPU, hipfire), configuration utilisateur et backend recommandé ; lecture seule. |
+| `surgeon_backends` | GPU et moteurs d'inférence Rust de la machine (hipfire pour AMD, mistralrs pour NVIDIA, Apple Silicon ou CPU, native en secours), configuration utilisateur et backend recommandé ; lecture seule. |
+| `record_finding` | Projet du studio seulement : ajoute un constat au journal des preuves (`chat/findings.jsonl`), en citant le `run_id` que renvoie chaque autre outil dans un projet. |
+| `show_in_3d` | Projet du studio seulement : sélectionne un tenseur ou un nœud du graphe dans la vue 3D du studio (`chat/focus.json`). |
+| `update_plan` | Projet du studio seulement : remplace le plan affiché à l'utilisateur (`chat/plan.json`). |
 
 Une vraie session sur le faux modèle : le client envoie `initialize`, `notifications/initialized`, puis un `tools/call`. Le serveur écrit une ligne sur stderr, puis répond sur stdout (la réponse à `initialize` est omise, et les lignes de réponse sont coupées) :
 

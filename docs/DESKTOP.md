@@ -1,7 +1,8 @@
 # Desktop app (Windows): install, first run, troubleshooting, uninstall
 
-`surgeon-gui.exe` is LLM Surgery Studio: a home screen, a first-run wizard that checks the
-machine and installs llama.cpp, the card studio, the 3D weight graph and a Diagnostics page.
+`surgeon-gui.exe` is LLM Surgery Studio: an AI agent in an IDE-like window (a full scan of
+the model, or one precise problem), a first-run wizard that checks the machine and installs
+mistral.rs, the 3D weight graph and a settings dialog (AI providers, engine, dependencies).
 It runs the same engine as the `surgeon` command line (the same library, never a copy of it).
 
 ## Install
@@ -38,21 +39,37 @@ profile the **wizard** opens over it. It can be replayed any time (home screen, 
 Diagnostics > Repair).
 
 1. **Language**: French or English.
-2. **Your machine**: GPU and graphics API (Vulkan), VRAM, RAM, free disk, driver version.
-   Without Vulkan the message says so: the llama.cpp GPU build cannot start, the CPU build and
-   the native engines still work, and the app stays usable (its own interface uses OpenGL,
-   not Vulkan). An *offline mode* box replaces every download by manual instructions.
-3. **llama.cpp**: Vulkan (Radeon, Intel, NVIDIA), CPU only, or AMD HIP (optional). The
-   archive is chosen from the GitHub releases API; the screen shows the URL, size and
+2. **Your machine**: GPU, VRAM, RAM, free disk, driver version. An *offline mode* box
+   replaces every download by manual instructions.
+3. **Inference engine (Rust only, no llama.cpp)**. The first launch writes the backend into
+   your `config.toml` from the GPU (`backend_choice.rs`): **mistral.rs** for an NVIDIA GPU,
+   Apple Silicon or a plain CPU, **hipfire** for an AMD GPU. Until the engine is there, the
+   built-in native engine (CPU, Rust) runs, and an AMD machine runs mistral.rs while its
+   hipfire daemon is not up. The choice follows the machine at every start until a backend
+   is saved by hand in *Configurer…*; a file that still names `llama-server` is taken over.
+   - **hipfire** runs outside the app (Linux with ROCm; on Windows in WSL2) as a daemon on
+     `127.0.0.1:11435`. On Windows, *Install and start hipfire* (consent required) installs
+     Ubuntu 24.04 in WSL2 when missing, then as root in it ROCm 7.2.1, librocdxg 1.2.2 (SHA-256
+     checked), Rust and hipfire v0.4.6 (its official `install.sh --yes`), starts `hipfire serve`
+     and waits for it; the backend switches as soon as it answers (`hipfire_setup.rs`). The
+     GPU is first checked against the ROCm-under-WSL list (RX 9070/9060/7900/7800 XT, Ryzen AI):
+     an unlisted card (an RX 7600 XT, gfx1102) needs *Run it anyway*. The AMD Adrenalin 26.2.2
+     driver for WSL2 is the user's to install on Windows.
+   - **mistral.rs**: the official CPU build (`mistralrs-cpu-x86_64-pc-windows-msvc.zip`) is
+     downloaded; with an NVIDIA GPU, *Build with CUDA* runs `cargo install --git
+     …/mistral.rs --tag <release> mistralrs-cli --features cuda` when `cargo` and `nvcc`
+     are on the PATH (no official Windows CUDA build exists). macOS and Linux get the
+     archive name to install by hand.
+   The archive is chosen from the GitHub releases API; the screen shows the URL, size and
    SHA-256 and waits for **I allow this download**. The hash is the release's own `digest`
    when it publishes one; otherwise it is computed, shown and **pinned at first use** (a
    later download of the same archive name must match; there is no independent source to
    confirm that first value, and the wizard says so). Downloads resume after an interruption,
    can be cancelled, and the archive is extracted safely (nothing can leave the target
-   folder). A smoke test runs `llama-server --version`; the build is then recorded as your
-   **trusted toolchain**: `llama_cpp_dir` in your `config.toml`, the same record as
-   `--llama-cpp-dir`. Only this click sets it, never an agent.
-4. **Workspace**: the folder for your models, patches and canvases (created, checked
+   folder). A smoke test runs `mistralrs --version`; the build is then recorded as
+   `mistralrs_bin` in your `config.toml`, the same record as `--mistralrs-bin`. Only this
+   click sets it, never an agent.
+4. **Workspace**: the folder for your projects (created, checked
    writable). It cannot be inside the app's data folder.
 5. **Agent**: the `claude mcp add surgeon -- surgeon mcp --allow-dir ...` command for your
    workspace. Optional. There is no dedicated agent hub in this version.
@@ -66,17 +83,17 @@ Diagnostics > Repair).
 | What | Where |
 | --- | --- |
 | Settings | `%LOCALAPPDATA%\weight-surgeon\settings.json` |
-| Installed components | `%LOCALAPPDATA%\weight-surgeon\components\llama.cpp\<tag>-<variant>\` |
+| Installed components | `%LOCALAPPDATA%\weight-surgeon\components\mistral.rs\<tag>-<variant>\` |
 | Logs (rotated at 512 KiB, 3 older files kept) | `%LOCALAPPDATA%\weight-surgeon\logs\log.txt` |
-| Engine configuration (trusted llama.cpp) | `%APPDATA%\weight-surgeon\config.toml` (shared with the CLI) |
+| Engine configuration (backend, mistral.rs, hipfire) | `%APPDATA%\weight-surgeon\config.toml` (shared with the CLI) |
 
 ## Command line
 
 ```powershell
 surgeon-gui --version
 surgeon-gui --self-test                      # engine, OpenGL window, data folder; exit code 0 or 1
-surgeon-gui --screenshot a.png              # renders the Atelier without a window or a GPU
-surgeon-gui --screenshot d.png --screen diagnostics   # atelier, graph, analyses, agents, diagnostics, wizard
+surgeon-gui --screenshot a.png              # renders the agent without a window or a GPU
+surgeon-gui --screenshot d.png --screen settings:engine   # agent, agent:advance, agent:scalping, graph, settings[:section], wizard:N
 surgeon-gui --demo-data --no-motion --size 1920x1080 --scale 1.0 --screenshot g.png --screen graph
 surgeon-gui --demo-data                      # a throwaway workspace filled by the real engine, offline
 surgeon-gui --reset-settings                 # the wizard runs again at the next start
@@ -112,11 +129,11 @@ is shown. Installing it stays your action.
 | Symptom | What to do |
 | --- | --- |
 | The window does not open | Run `surgeon-gui --self-test` from a terminal: the `graphique` line says whether an OpenGL context could be created (update the GPU driver). |
-| "Vulkan missing" | Install the GPU vendor driver. Until then use the CPU build of llama.cpp or the native engines. |
-| The install says the file was blocked or deleted | An antivirus quarantined the download. Add an exclusion for `%LOCALAPPDATA%\weight-surgeon\components`, then Diagnostics > Repair. Or install llama.cpp by hand (offline mode shows the steps). |
+| "hipfire unreachable" | Start its daemon (`hipfire serve`, in WSL2 on Windows), then *Check again*. Meanwhile mistral.rs (CPU) or the native engine runs. |
+| The install says the file was blocked or deleted | An antivirus quarantined the download. Add an exclusion for `%LOCALAPPDATA%\weight-surgeon\components`, then Diagnostics > Repair. Or install mistral.rs by hand (offline mode shows the steps). |
 | "wrong SHA-256, archive deleted" | The download is corrupt or was tampered with. Retry; if it persists, install by hand and compare with the release page. |
 | "network unreachable" behind a proxy | The app reads `HTTPS_PROXY` / `HTTP_PROXY` and the manual proxy of Windows Internet Settings. Automatic configuration scripts (PAC) are not evaluated: set the variable or use offline mode. |
-| A replaced `llama-server.exe` is "in use" | A running executable cannot be deleted, so the new build is installed in a sibling folder (`...-2`) and registered; old folders are collected on a later start. Close llama-server to free them. |
+| A replaced `mistralrs.exe` is "in use" | A running executable cannot be deleted, so the new build is installed in a sibling folder (`...-2`) and registered; old folders are collected on a later start. |
 | Paths with spaces or accents | Supported (tested). Long paths are enabled by the manifest. |
 | Start over | `surgeon-gui --reset-settings`. Components and `config.toml` are kept; delete `%LOCALAPPDATA%\weight-surgeon` too for a clean slate. |
 
@@ -145,7 +162,7 @@ which applies when cargo runs from that folder). `.github/workflows/release.yml`
 - [ ] System step shows the real GPU, VRAM and Vulkan state.
 - [ ] Engine step: *Find the release* shows URL, size and hash; the download button stays
       disabled until the box is ticked; progress moves; **Cancel** works; rerun resumes.
-- [ ] After install: Diagnostics shows llama.cpp OK; `surgeon backend detect` sees the folder.
+- [ ] After install: Settings > Engine shows mistral.rs OK; `surgeon backend show` names the backend the machine called for.
 - [ ] Disconnect the network: the engine step explains it and shows manual instructions.
 - [ ] Sample model downloads, then *Repair* does nothing; `surgeon inspect` opens it.
 - [ ] Double-click the exe twice: one window; `surgeon-gui graph.json` from a second shell

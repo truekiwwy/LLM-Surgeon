@@ -421,9 +421,10 @@ What it means: this patch changed the model a lot on these prompts (KL 0.41 agai
 <a id="desktop"></a>
 ### 2.4 Desktop app (Windows)
 
-`surgeon-gui.exe` is a double-click application on top of the same engine: a home screen, a
-first-run wizard that checks your machine (GPU, Vulkan, RAM, disk) and installs llama.cpp for
-you, the card studio and the 3D weight graph. Nothing is downloaded without your explicit
+`surgeon-gui.exe` is a double-click application on top of the same engine: an AI agent you
+talk to in an IDE-like window (a full scan of the model, or one precise problem), a first-run
+wizard that checks your machine (GPU, Vulkan, RAM, disk) and installs llama.cpp for you, and
+the 3D weight graph. Nothing is downloaded without your explicit
 consent next to the URL, size and SHA-256, and nothing is sent anywhere.
 
 - **Install**: the per-user installer (no administrator rights) or the portable ZIP from the
@@ -1659,7 +1660,7 @@ outputs:
   graph-demo\edges.csv
 ```
 
-`crates/surgeon-gui` is also the **LLM Surgery Studio**, three workspaces chosen in its top bar: `Studio (Canvas)`, `Graphe 3D` and `Split (Canvas + 3D)`. The canvas holds typed cards wired output to input: Model (`inspect`), Extract (`extract`), Patch (`apply`, dry run by default), Graph Diff (`graph --baseline`, then opened and framed in the 3D view) and Eval / Gate (`bench refusal --fail-on-warn`, GO or NO-GO). `Run` on a card runs the cards upstream first, each one exactly as this CLI with the same flags, in process and cancellable. A branch can be forked to compare two settings side by side, and the workspace is saved as `*.surgeon-studio.json`. The `patch.json` drawer validates while you type (same `validate_patch`, every issue on its line), lights the targeted tensors in 3D before anything is written, and offers `Dry-Run`, `Apply (avec backup)` and `Rollback`. A fourth workspace, `Projets`, keeps persistent projects (the source model hashed and never written, working copies, runs, an append-only ledger) and runs any MCP tool from a form generated from its schema, through a job queue that replays every run from its event file ([docs/STUDIO.md](docs/STUDIO.md)). A fifth, `Agents`, lets an AI agent (Anthropic, OpenAI or any OpenAI-compatible endpoint, or the Claude Code / Codex CLI the user is signed in to) run those same tools as jobs of the project, with approvals computed by the code, budgets and an evidence log ([docs/AGENTS.md](docs/AGENTS.md)). Details in [crates/surgeon-gui/README.md](crates/surgeon-gui/README.md).
+`crates/surgeon-gui` is also the **LLM Surgery Studio**, laid out like an IDE whose editor is an AI agent. A session starts in one of two kinds: **Advance**, where the agent inspects the whole model, builds the surgery graph and ranks the problems it finds by itself, or **Scalping**, where the user names a symptom (excessive refusals, repetitions, hallucinations, language, reasoning) and the agent goes straight to the tensors involved. The agent (Anthropic, OpenAI or any OpenAI-compatible endpoint, or the Claude Code / Codex CLI the user is signed in to) runs the engine's MCP tools as jobs of a persistent project (the source model hashed and never written, working copies, runs, an append-only ledger), every write is an approval card computed by the code, and every figure it claims is checked against the ledger ([docs/AGENTS.md](docs/AGENTS.md), [docs/STUDIO.md](docs/STUDIO.md)). The 3D view shows the graph, a run replayed over it and the tensor the agent points at. Details in [crates/surgeon-gui/README.md](crates/surgeon-gui/README.md).
 
 <a id="patch-format"></a>
 ### 3.3 `patch.json` and the `rows` / `cols` axes
@@ -2064,7 +2065,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 <a id="tools"></a>
 ### 4.2 Tools
 
-`surgeon mcp` serves twelve tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
+`surgeon mcp` serves fifteen tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
 
 | Tool | Role |
 | --- | --- |
@@ -2073,13 +2074,16 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 | `surgeon_apply` | Applies a patch in place (`dry_run` to check first); `gguf: true` for a quantized GGUF. |
 | `surgeon_eval` | Loop and expectation checks, conditional GGUF export. |
 | `surgeon_extract` | Steering vector from a Qwen2, Llama/Mistral or Qwen3 layer. |
-| `surgeon_bench` | Measurement, with `mode` `dump`, `logits`, `ppl` or `eval`. |
+| `surgeon_bench` | Measurement, with `mode` `dump`, `logits`, `ppl`, `eval` or `refusal`; built-in probe sets need no file: `builtin:math`, `builtin:logic`, `builtin:general` (eval) and `builtin:refusals` (refusal). |
 | `surgeon_autotune` | Per-layer coefficients by ridge regression. |
 | `surgeon_diff` | Difference of two checkpoints written to a new `.surgery`. |
 | `surgeon_lora` | `mode` `merge` (adapter folded in place) or `extract` (adapter written). |
 | `surgeon_pipeline` | Decision on a patch: `action` `plan`, `start` (background worker, returns a `job_id` at once), `status`, `cancel`, `report`, `promote_patch` ([docs/PIPELINE.md](docs/PIPELINE.md)). |
 | `surgeon_graph` | Residual-stream write/read graph with certified spectral bounds; bounded summary, or files with `out_dir`. |
-| `surgeon_backends` | Inference engines of the machine (native, mistralrs, llama-server and its GPUs, hipfire), the user configuration and the recommended backend; read only. |
+| `surgeon_backends` | GPUs and Rust inference engines of the machine (hipfire for AMD, mistralrs for NVIDIA, Apple Silicon or CPU, native as fallback), the user configuration and the recommended backend; read only. |
+| `record_finding` | Studio project only: appends a finding to the evidence log (`chat/findings.jsonl`), citing the `run_id` every other tool returns in a project. |
+| `show_in_3d` | Studio project only: selects a tensor or graph node in the studio's 3D view (`chat/focus.json`). |
+| `update_plan` | Studio project only: replaces the plan shown to the user (`chat/plan.json`). |
 
 A real session on the fake model: the client sends `initialize`, `notifications/initialized`, then a `tools/call`. The server writes one line on stderr, then answers on stdout (the `initialize` answer is left out, and the answer line is cut):
 
