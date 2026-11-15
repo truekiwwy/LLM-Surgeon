@@ -144,10 +144,10 @@ fn tools_list(dir: &Path) -> Vec<Value> {
 // ------------------------------------------------------------------ tools/list and schemas
 
 #[test]
-fn tools_list_has_twelve_tools_and_the_new_schemas_are_valid() {
+fn tools_list_has_fifteen_tools_and_the_new_schemas_are_valid() {
     let dir = tempfile::tempdir().unwrap();
     let tools = tools_list(dir.path());
-    assert_eq!(tools.len(), 12);
+    assert_eq!(tools.len(), 15);
     let by_name = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap();
     for name in ["surgeon_diff", "surgeon_lora"] {
         let tool = by_name(name);
@@ -263,7 +263,10 @@ fn schema_kind_tools_equals_tools_list_for_the_new_tools() {
             "surgeon_lora",
             "surgeon_pipeline",
             "surgeon_graph",
-            "surgeon_backends"
+            "surgeon_backends",
+            "record_finding",
+            "show_in_3d",
+            "update_plan"
         ]
     );
 }
@@ -997,4 +1000,58 @@ fn with_shape<'a>(list: &[(&'a str, Vec<f32>)]) -> Vec<(&'a str, Vec<usize>, Vec
     list.iter()
         .map(|(n, v)| (*n, vec![ROWS, COLS], v.clone()))
         .collect()
+}
+
+// ------------------------------------------------------------------ studio tools
+
+#[test]
+fn studio_tools_write_under_chat_and_runs_are_journaled_with_their_id() {
+    let dir = tempfile::tempdir().unwrap();
+    // Outside a studio project: refused, nothing written.
+    let (is_error, env) = one_call(&cfg(dir.path()), "show_in_3d", json!({"target": "L3.down"}));
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "no_project");
+    assert!(!dir.path().join("chat").exists());
+
+    std::fs::write(dir.path().join("project.surgeon.json"), "{}").unwrap();
+    let responses = session(
+        &deps(),
+        &cfg(dir.path()),
+        &[
+            init(),
+            call(1, "surgeon_backends", json!({})),
+            call(2, "update_plan", json!({"steps": ["mesurer", "corriger"]})),
+            call(3, "show_in_3d", json!({"target": "L3.down"})),
+        ],
+    );
+    let (_, backends) = envelope(&responses, 1);
+    let run_id = backends["run_id"].as_str().unwrap().to_owned();
+    assert!(run_id.starts_with("mcp-"), "{run_id}");
+    let chat = dir.path().join("chat");
+    let runs = std::fs::read_to_string(chat.join("mcp_runs.jsonl")).unwrap();
+    let run: Value = serde_json::from_str(runs.lines().next().unwrap()).unwrap();
+    assert_eq!(run["run_id"], run_id.as_str());
+    assert_eq!(run["tool"], "surgeon_backends");
+    assert_eq!(
+        runs.lines().count(),
+        1,
+        "the studio tools are not journaled"
+    );
+    let plan: Value =
+        serde_json::from_str(&std::fs::read_to_string(chat.join("plan.json")).unwrap()).unwrap();
+    assert_eq!(plan["steps"], json!(["mesurer", "corriger"]));
+    let focus: Value =
+        serde_json::from_str(&std::fs::read_to_string(chat.join("focus.json")).unwrap()).unwrap();
+    assert_eq!(focus["target"], "L3.down");
+
+    let finding = json!({"text": "refus à 40 %", "evidence": [{"run_id": run_id, "value": 0.4}]});
+    let (is_error, _) = one_call(&cfg(dir.path()), "record_finding", finding);
+    assert!(!is_error);
+    let line = std::fs::read_to_string(chat.join("findings.jsonl")).unwrap();
+    let recorded: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(recorded["text"], "refus à 40 %");
+    assert_eq!(recorded["evidence"][0]["run_id"], run_id.as_str());
+    assert!(recorded["created_unix"].as_u64().is_some());
+    let (is_error, env) = one_call(&cfg(dir.path()), "record_finding", json!({"text": " "}));
+    assert!(is_error, "{env}");
 }

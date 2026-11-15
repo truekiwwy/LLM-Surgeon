@@ -10,8 +10,8 @@
 //! ```text
 //! flags > pipeline.json > user config.toml > default        (config::resolve)
 //! apply_user_config: fills the optional flags of the bench commands from the user file
-//! detect_hardware_and_backends: mistral.rs > llama-server + --list-devices > native
-//!                               (hipfire probed, never recommended)
+//! detect_hardware_and_backends: GPU vendor -> hipfire (AMD, daemon up) > mistral.rs > native
+//!                               (Rust engines only; llama.cpp is never recommended)
 //! ```
 
 pub mod config;

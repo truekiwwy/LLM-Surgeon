@@ -1533,7 +1533,7 @@ fn mcp_full_session_is_pure_json_rpc() {
         .contains("sauvegarde"));
     assert_eq!(
         responses[1]["result"]["tools"].as_array().unwrap().len(),
-        12
+        15
     );
     let (is_error, env) = envelope(&responses, 3);
     assert!(!is_error, "{env}");
@@ -2166,7 +2166,10 @@ fn schema_tools_kind_equals_tools_list() {
             "surgeon_lora",
             "surgeon_pipeline",
             "surgeon_graph",
-            "surgeon_backends"
+            "surgeon_backends",
+            "record_finding",
+            "show_in_3d",
+            "update_plan"
         ]
     );
     for tool in exported.as_array().unwrap() {
@@ -3097,7 +3100,7 @@ fn mcp_extract_tool_end_to_end() {
             .as_array()
             .unwrap()
             .len(),
-        12
+        15
     );
     let (is_error, env) = envelope(&responses, 2);
     assert!(!is_error, "{env}");
@@ -3203,7 +3206,7 @@ fn mcp_binary_extract_speaks_only_json_rpc() {
             .as_array()
             .unwrap()
             .len(),
-        12
+        15
     );
     assert!(!envelope(&responses, 2).0, "{out}");
     assert!(f.dir.path().join("bin.safetensors").exists());
@@ -5176,6 +5179,10 @@ fn bench_module_has_no_print_and_no_unsafe() {
     );
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
+        // The built-in probe sets live in builtin/: data, not code.
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
         let source = std::fs::read_to_string(&path).unwrap();
         let code = source.split("#[cfg(test)]").next().unwrap();
         for (n, line) in code.lines().enumerate() {

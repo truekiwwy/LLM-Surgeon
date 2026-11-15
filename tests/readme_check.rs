@@ -232,11 +232,11 @@ fn nested_bench_commands_and_mcp_tool_count_are_checked() {
     let count = tools.as_array().unwrap().len();
     let words = [
         "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-        "eleven", "twelve",
+        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
     ];
     let mots = [
         "zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf", "dix",
-        "onze", "douze",
+        "onze", "douze", "treize", "quatorze", "quinze", "seize",
     ];
     let (en, fr) = (read("README.md"), read("README.fr.md"));
     assert!(
@@ -440,13 +440,20 @@ fn both_readmes_cite_the_same_options_and_tools() {
         }
         found
     };
-    let real: BTreeSet<String> = tool_names().into_iter().collect();
+    // The studio tools (record_finding...) have no prefix: cited by their full name.
+    let (real, studio): (BTreeSet<String>, BTreeSet<String>) = tool_names()
+        .into_iter()
+        .partition(|n| n.starts_with("surgeon_"));
     for name in READMES {
         assert_eq!(
             mentioned(name),
             real,
             "{name}: MCP tools cited vs tools/list"
         );
+        let text = read(name);
+        for tool in &studio {
+            assert!(text.contains(&format!("`{tool}`")), "{name}: {tool}");
+        }
     }
 }
 

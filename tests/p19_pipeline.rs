@@ -980,7 +980,7 @@ fn the_binary_pillars_run_on_the_configured_backend_and_the_job_is_bound_to_it()
     assert_eq!(code, 2, "{v}");
     let message = v["error"]["message"].as_str().unwrap();
     assert!(
-        message.contains("--hipfire-url") && message.contains("llama-server"),
+        message.contains("--hipfire-url") && message.contains("mistralrs ou native"),
         "{message}"
     );
 }

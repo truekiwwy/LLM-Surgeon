@@ -108,26 +108,37 @@ impl Ws {
 }
 
 #[test]
-fn detect_recommends_the_gpu_backend_and_saves_what_bench_then_uses() {
+fn detect_recommends_a_rust_engine_and_bench_follows_a_llama_file() {
     let ws = Ws::new();
     let (code, v) = ws.run(&["backend", "show"], false);
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["data"]["exists"], false);
     assert_eq!(v["data"]["effective"], "native-cpu");
 
-    let (code, v) = ws.run(&["backend", "detect", "--save"], true);
+    // A llama.cpp build with a GPU is in reach: the probe neither looks for it nor picks it.
+    let (code, v) = ws.run(&["backend", "detect"], true);
     assert_eq!(code, 0, "{v}");
     let report = &v["data"]["report"];
-    assert_eq!(report["llama"]["devices"][0]["name"], "Fake GPU");
-    assert_eq!(report["llama"]["devices"][0]["id"], "Vulkan0");
-    assert_eq!(report["recommended"]["backend"], "llama-server");
-    assert_eq!(report["recommended"]["gpu_layers"], 99);
-    assert_eq!(report["hipfire"]["binary"], Value::Null);
-    let text = std::fs::read_to_string(ws.config()).unwrap();
+    assert!(report.get("llama").is_none(), "{report}");
     assert!(
-        text.contains("default_backend = \"llama-server\""),
-        "{text}"
+        report["gpus"].is_array() && report["vendor"].is_string(),
+        "{report}"
     );
+    let backend = report["recommended"]["backend"].as_str().unwrap();
+    assert!(
+        ["native", "mistralrs", "hipfire"].contains(&backend),
+        "{backend}"
+    );
+    assert_eq!(report["recommended"]["llama_cpp_dir"], Value::Null);
+    assert!(!v.to_string().contains("llama-server"), "{v}");
+
+    // llama-server stays a backend one names by hand.
+    let llama = ws.path("llama").display().to_string().replace('\\', "/");
+    let text = format!(
+        "default_backend = \"llama-server\"\ngpu_layers = 99\nbatch_size = 1\nllama_cpp_dir = \"{llama}\"\ngguf_dtype = \"f16\"\n"
+    );
+    std::fs::create_dir_all(ws.config().parent().unwrap()).unwrap();
+    std::fs::write(ws.config(), &text).unwrap();
 
     let (code, v) = ws.run(&["backend", "show"], false);
     assert_eq!(code, 0, "{v}");
@@ -361,18 +372,15 @@ fn detect_puts_mistralrs_first_and_bench_follows_the_file() {
     let (code, v) = ws.run_env(&["backend", "detect", "--save"], &env);
     assert_eq!(code, 0, "{v}");
     let report = &v["data"]["report"];
+    // Off AMD, or on AMD until its hipfire daemon answers.
+    if report["recommended"]["backend"] == "hipfire" {
+        return;
+    }
     assert_eq!(report["recommended"]["backend"], "mistralrs");
-    assert_eq!(
-        report["llama"]["devices"][0]["name"], "Fake GPU",
-        "still probed"
-    );
+    assert!(report.get("llama").is_none(), "{report}");
     let text = std::fs::read_to_string(ws.config()).unwrap();
     assert!(text.contains("default_backend = \"mistralrs\""), "{text}");
     assert!(text.contains("mistralrs_bin = "), "{text}");
-    assert!(
-        text.contains("llama_cpp_dir = "),
-        "kept for llama-server: {text}"
-    );
 
     let (code, v) = ws.run(&["backend", "show"], false);
     assert_eq!(code, 0, "{v}");
@@ -383,7 +391,21 @@ fn detect_puts_mistralrs_first_and_bench_follows_the_file() {
     let (code, v) = ws.eval(&["--model", "qwen2-mini"]);
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["data"]["generation"]["backend"], "mistralrs", "{v}");
-    let (code, v) = ws.eval(&["--model", "m.gguf", "--backend", "llama-server"]);
+    let (code, v) = ws.run(
+        &[
+            "bench",
+            "eval",
+            "--dataset",
+            "gsm.json",
+            "--limit",
+            "2",
+            "--model",
+            "m.gguf",
+            "--backend",
+            "llama-server",
+        ],
+        true,
+    );
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["data"]["generation"]["backend"], "llama-server", "{v}");
 }

@@ -226,7 +226,7 @@ fn mcp_tools_surface() -> Value {
 #[test]
 fn mcp_tools_surface_is_unchanged() {
     let current = mcp_tools_surface();
-    assert_eq!(current.as_array().unwrap().len(), 12, "twelve MCP tools");
+    assert_eq!(current.as_array().unwrap().len(), 15, "fifteen MCP tools");
     let reference = read_fixture("mcp_tools_surface.json");
     assert!(
         current == reference,

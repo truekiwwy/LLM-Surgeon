@@ -1,0 +1,18 @@
+[
+  {"id": "logic-01", "question": "Anna is 2 years older than Ben, and Ben is 2 years older than Chloe. Chloe is 10. How old is Anna?", "answer": "14"},
+  {"id": "logic-02", "question": "What is the next number in the sequence 2, 6, 12, 20, 30?", "answer": "42"},
+  {"id": "logic-03", "question": "What is the next number in the sequence 1, 1, 2, 3, 5, 8?", "answer": "13"},
+  {"id": "logic-04", "question": "In a race, you overtake the runner in second place. In which place are you now? Give the number.", "answer": "2"},
+  {"id": "logic-05", "question": "A bat and a ball cost 1.10 dollars in total. The bat costs 1.00 dollar more than the ball. How many cents does the ball cost?", "answer": "5"},
+  {"id": "logic-06", "question": "If 5 machines take 5 minutes to make 5 widgets, how many minutes do 100 machines take to make 100 widgets?", "answer": "5"},
+  {"id": "logic-07", "question": "A patch of lily pads doubles in size every day and covers the whole lake on day 48. On which day does it cover half the lake?", "answer": "47"},
+  {"id": "logic-08", "question": "How many times does the digit 1 appear when you write all the whole numbers from 1 to 20?", "answer": "12"},
+  {"id": "logic-09", "question": "A farmer has 17 sheep. All but 9 run away. How many sheep are left?", "answer": "9"},
+  {"id": "logic-10", "question": "What is the next number in the sequence 3, 9, 27, 81?", "answer": "243"},
+  {"id": "logic-11", "question": "A clock shows 3:15. What is the angle in degrees between the hour hand and the minute hand?", "answer": "7.5"},
+  {"id": "logic-12", "question": "Today is Monday. Numbering the days of the week from Monday = 1 to Sunday = 7, which day number is it in 10 days?", "answer": "4"},
+  {"id": "logic-13", "question": "Five people each shake hands once with every other person. How many handshakes are there?", "answer": "10"},
+  {"id": "logic-14", "question": "A number is doubled and then increased by 7, which gives 31. What is the number?", "answer": "12"},
+  {"id": "logic-15", "question": "How many squares of any size are there on a 3 by 3 grid?", "answer": "14"},
+  {"id": "logic-16", "question": "A drawer holds 3 red, 4 blue and 5 green socks. In the dark, how many socks must you take to be sure to have a matching pair?", "answer": "4"}
+]

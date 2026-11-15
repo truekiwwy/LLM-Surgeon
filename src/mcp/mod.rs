@@ -46,6 +46,7 @@ mod tools_backend;
 mod tools_graph;
 mod tools_p13;
 mod tools_pipeline;
+mod tools_session;
 
 use std::io::{BufReader, Write};
 

@@ -17,6 +17,7 @@ use super::protocol::{
 };
 use super::sandbox::Sandbox;
 use super::tools::{self, ToolContext};
+use super::tools_session;
 use crate::app::{exit, panic_message, AppDeps, ProgressEvent, ProgressSink};
 use crate::cli::McpArgs;
 use crate::extract::PromptSet;
@@ -345,11 +346,15 @@ impl<W: Write> Session<'_, W> {
             sink: &mut sink,
             pipeline: self.pipeline,
         };
+        let started = tools_session::now_unix();
         // A panic unwinds through BackupSet::drop (rollback) and never kills the server.
         let outcome = catch_unwind(AssertUnwindSafe(|| tools::call(name, arguments, &mut ctx)));
         self.finish();
         match outcome {
-            Ok(tool_result) => result(id, tool_result),
+            Ok(mut tool_result) => {
+                tools_session::stamp(&ctx, name, started, &mut tool_result);
+                result(id, tool_result)
+            }
             Err(payload) => {
                 let _ = writeln!(
                     self.err,

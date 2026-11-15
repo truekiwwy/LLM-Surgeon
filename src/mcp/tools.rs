@@ -423,6 +423,7 @@ pub fn tool_definitions() -> Value {
         list.push(super::tools_pipeline::definition());
         list.extend(super::tools_graph::definitions());
         list.extend(super::tools_backend::definitions());
+        list.extend(super::tools_session::definitions());
     }
     sorted(tools)
 }
@@ -467,7 +468,7 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_BENCH,
             "Mesure d'une chirurgie",
-            "Mesure l'effet d'une chirurgie, selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision.",
+            "Mesure l'effet d'une chirurgie, selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH ou un jeu intégré builtin:math|logic|general, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts ou builtin:refusals, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision.",
             schema_value::<BenchToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
@@ -503,6 +504,7 @@ pub(crate) fn is_known(name: &str) -> bool {
         || name == super::tools_pipeline::TOOL_PIPELINE
         || super::tools_graph::NAMES.contains(&name)
         || super::tools_backend::NAMES.contains(&name)
+        || super::tools_session::NAMES.contains(&name)
 }
 
 pub(crate) struct ToolContext<'a> {
@@ -517,6 +519,9 @@ pub(crate) struct ToolContext<'a> {
 /// (`isError: true`), never a JSON-RPC error: the agent reads it and can correct itself.
 pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value {
     let (command, result) = match name {
+        _ if super::tools_session::NAMES.contains(&name) => {
+            super::tools_session::call(name, arguments, ctx)
+        }
         TOOL_CHECK => ("check", check(arguments, ctx)),
         TOOL_INSPECT => ("inspect", inspect(arguments, ctx)),
         TOOL_APPLY => ("apply", apply(arguments, ctx)),
@@ -1090,7 +1095,7 @@ pub struct BenchToolArgs {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     #[schemars(
-        description = "eval : tableau JSON (ou JSONL) de {question|problem, answer|solution, id?}."
+        description = "eval : tableau JSON (ou JSONL) de {question|problem, answer|solution, id?}, ou un jeu intégré sans fichier : builtin:math, builtin:logic, builtin:general."
     )]
     pub dataset: Option<PathBuf>,
     #[serde(default)]
@@ -1125,7 +1130,7 @@ pub struct BenchToolArgs {
     pub chat_template: Option<ChatTemplate>,
     #[serde(default)]
     #[schemars(
-        description = "dump, refusal : fichier de prompts (tableau JSON de chaînes ou de {text}, JSONL ou texte)."
+        description = "dump, refusal : fichier de prompts (tableau JSON de chaînes ou de {text}, JSONL ou texte), ou un jeu intégré : builtin:refusals (demandes légitimes souvent refusées à tort), builtin:math, builtin:logic, builtin:general."
     )]
     pub prompts: Option<PathBuf>,
     #[serde(default)]
@@ -1479,6 +1484,11 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             .ok_or_else(|| invalid("invalid_arguments", format!("{name} requis")))?;
         sandboxed(ctx, name, value, &root)
     };
+    // A built-in probe set is embedded in the binary: no file to sandbox.
+    let source = |ctx: &ToolContext, name: &str, value: &Option<PathBuf>| match value {
+        Some(set) if crate::bench::builtin::is_builtin(set) => Ok(set.clone()),
+        _ => path(ctx, name, value),
+    };
     let optional_path = |ctx: &ToolContext, name: &str, value: &Option<PathBuf>| {
         value
             .as_ref()
@@ -1551,7 +1561,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             )?;
             let req = EvalRequest {
                 model: path(ctx, "model", &args.model)?,
-                dataset: path(ctx, "dataset", &args.dataset)?,
+                dataset: source(ctx, "dataset", &args.dataset)?,
                 backend: eval_backend,
                 baseline_model: optional_path(ctx, "baseline_model", &args.baseline_model)?,
                 limit: args.limit.map_or(bench::DEFAULT_LIMIT, |l| l as usize),
@@ -1566,7 +1576,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             core_bench_eval(&req, &engines, fail_on_warn, ctx.deps, &ui, ctx.sink)
         }
         BenchMode::Dump => {
-            let prompts_file = path(ctx, "prompts", &args.prompts)?;
+            let prompts_file = source(ctx, "prompts", &args.prompts)?;
             let prompts = extract::load_prompt_texts(&prompts_file)
                 .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?;
             let req = DumpRequest {
@@ -1586,7 +1596,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             core_bench_dump(&req, ctx.deps, &ui, ctx.sink)
         }
         BenchMode::Refusal => {
-            let prompts_file = path(ctx, "prompts", &args.prompts)?;
+            let prompts_file = source(ctx, "prompts", &args.prompts)?;
             let prompts = extract::load_prompt_texts(&prompts_file)
                 .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?;
             let markers_file = optional_path(ctx, "markers_file", &args.markers_file)?;

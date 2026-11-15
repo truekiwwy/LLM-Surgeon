@@ -3067,6 +3067,14 @@ fn backend_cli(command: &BackendCommand, io: &mut Io) -> CoreResult {
             };
             let mut text = String::new();
             text.push_str(&format!(
+                "{} GPU : {}\n",
+                ui::badge(&ui, "BACKEND"),
+                match report.gpus.is_empty() {
+                    true => "aucun".to_owned(),
+                    false => report.gpus.join(", "),
+                }
+            ));
+            text.push_str(&format!(
                 "{} mistral.rs {}\n",
                 ui::badge(&ui, "BACKEND"),
                 report
@@ -3074,30 +3082,6 @@ fn backend_cli(command: &BackendCommand, io: &mut Io) -> CoreResult {
                     .as_ref()
                     .map_or("introuvable".into(), |m| m.binary.display().to_string())
             ));
-            match &report.llama {
-                Some(l) => {
-                    text.push_str(&format!(
-                        "{} llama-server {}\n",
-                        ui::badge(&ui, "BACKEND"),
-                        l.server.display()
-                    ));
-                    for d in &l.devices {
-                        text.push_str(&format!(
-                            "  {} {} ({} Mio)\n",
-                            ui::metric(&ui, format!("{:<8}", d.id)),
-                            d.name,
-                            d.vram_mib.map_or("?".into(), |v| v.to_string())
-                        ));
-                    }
-                    if let Some(e) = &l.error {
-                        text.push_str(&format!("  ! --list-devices : {e}\n"));
-                    }
-                }
-                None => text.push_str(&format!(
-                    "{} llama-server introuvable\n",
-                    ui::badge(&ui, "BACKEND")
-                )),
-            }
             text.push_str(&format!(
                 "{} hipfire : {}\n",
                 ui::badge(&ui, "BACKEND"),

@@ -456,7 +456,10 @@ pub fn run(
         }
     }
     let items = dataset::load(&req.dataset, req.format, req.limit)?;
-    let dataset_sha256 = sha256_file(&req.dataset)?;
+    let dataset_sha256 = match super::builtin::dataset(&req.dataset) {
+        Some(set) => super::sha256_hex(set.unwrap_or_default().as_bytes()),
+        None => sha256_file(&req.dataset)?,
+    };
     let mut evaluate = |model: &Path, tag: &str| -> Result<(Vec<ItemResult>, u64)> {
         let started = Instant::now();
         // Kept until the suite ends: a converted GGUF is a temporary file.
