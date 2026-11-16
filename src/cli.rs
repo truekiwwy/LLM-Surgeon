@@ -932,6 +932,10 @@ pub struct McpArgs {
     /// separator), else the current directory.
     #[arg(long)]
     pub allow_dir: Vec<PathBuf>,
+    /// Folder or file the tools may read but never write (the source model), repeatable:
+    /// analyses and measures (inspect, check, graph and its baseline, bench...) only.
+    #[arg(long)]
+    pub allow_read: Vec<PathBuf>,
     /// Refuse surgeon_apply and GGUF exports.
     #[arg(long)]
     pub read_only: bool,

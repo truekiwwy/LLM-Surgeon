@@ -700,6 +700,7 @@ surgeon mcp [OPTIONS]
 | Option | Default | Role |
 | --- | --- | --- |
 | `--allow-dir` | `$SURGEON_MCP_ALLOW_DIRS`, else the current folder | Allowed folder, repeatable; every path must resolve under one of them. |
+| `--allow-read` | none | Folder or file read but never written (the source model), repeatable: analyses and measures may read it, any output or `surgeon_apply` there is refused. |
 | `--read-only` | off | Refuse the tools that write (`surgeon_apply`, GGUF exports...). |
 | `--allow-no-backup` | off | Honor `backup: false` in patches; a backup is imposed otherwise. |
 

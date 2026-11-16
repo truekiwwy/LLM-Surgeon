@@ -109,9 +109,10 @@ pub fn run_stdio(args: &McpArgs, deps: &AppDeps, out: &mut dyn Write, err: &mut 
     };
     let _ = writeln!(
         err,
-        "surgeon mcp {} : prêt sur stdio, {} dossier(s) autorisé(s){}",
+        "surgeon mcp {} : prêt sur stdio, {} dossier(s) autorisé(s), {} en lecture seule{}",
         env!("CARGO_PKG_VERSION"),
         cfg.sandbox.roots().len(),
+        cfg.sandbox.read_roots().len(),
         if cfg.read_only { ", lecture seule" } else { "" }
     );
     serve(BufReader::new(std::io::stdin()), out, err, deps, &cfg)

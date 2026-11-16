@@ -1948,6 +1948,24 @@
           ]
         },
         {
+          "action": "Append",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "allow_read",
+          "long": "allow-read",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "ALLOW_READ"
+          ]
+        },
+        {
           "action": "SetTrue",
           "aliases": null,
           "default_values": [

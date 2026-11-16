@@ -356,22 +356,20 @@ impl AgyHome {
     }
 }
 
-/// The `surgeon mcp` arguments for a mode.
+/// The `surgeon mcp` arguments for a mode: the project is read and written; the source
+/// model is read only (`--allow-read`), for paired before / after measures, in every mode.
+/// The server refuses any write there whatever the mode.
 pub fn mcp_args(mode: AgentMode, project: &Path, source_dir: Option<&Path>) -> Vec<String> {
     let mut args = vec![
         "mcp".to_owned(),
         "--allow-dir".into(),
         project.display().to_string(),
     ];
-    match mode {
-        AgentMode::Ask => {
-            if let Some(dir) = source_dir {
-                args.extend(["--allow-dir".into(), dir.display().to_string()]);
-            }
-            args.push("--read-only".into());
-        }
-        // The source model's folder is not allowed at all: only working copies are reachable.
-        AgentMode::Modify => {}
+    if let Some(dir) = source_dir {
+        args.extend(["--allow-read".into(), dir.display().to_string()]);
+    }
+    if mode == AgentMode::Ask {
+        args.push("--read-only".into());
     }
     args
 }

@@ -12,11 +12,13 @@ CLI front-end, extension agent, extension points) est défini dans
 ```bash
 surgeon mcp --allow-dir /chemin/vers/modeles
 surgeon mcp --allow-dir /modeles --allow-dir /directions --read-only
+surgeon mcp --allow-dir /projet --allow-read /modeles/origine
 ```
 
 | Option | Effet |
 | --- | --- |
 | `--allow-dir <dossier>` | Dossier autorisé, répétable. Défaut : `$SURGEON_MCP_ALLOW_DIRS` (séparateur du système : `;` sous Windows, `:` ailleurs), sinon le dossier courant. |
+| `--allow-read <chemin>` | Dossier ou fichier lisible mais jamais écrit (le modèle d'origine), répétable. Les chemins que les outils d'analyse et de mesure lisent y sont acceptés : `model` de `surgeon_check`, `surgeon_inspect`, `surgeon_eval`, `surgeon_extract`, `surgeon_autotune`, `surgeon_graph` ; `baseline` et `vector` de `surgeon_graph` ; les modèles, jeux, textes et `baseline_model` de `surgeon_bench` ; les fichiers de prompts, d'étiquettes et `arch_spec`. Tout chemin écrit ou exécuté (`out`, `out_dir`, `cache_dir`, `export_gguf`, `backup_dir`, `judge_cache`, `llama_cpp_dir`), tout `surgeon_apply`, `surgeon_diff`, `surgeon_lora` et `surgeon_pipeline` restent limités à `--allow-dir` (`error.kind = "path_not_allowed"`, message « dossier en lecture seule »). |
 | `--read-only` | Refuse `surgeon_apply`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en mode `dump`, `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora` (les deux modes), `surgeon_graph` avec `out_dir` ou `cache_dir` et les actions `start`, `cancel`, `promote_patch` de `surgeon_pipeline` (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out` et `surgeon_graph` sans sortie restent permis. |
 | `--allow-no-backup` | Respecte `backup: false` dans un patch. Sans cette option, la sauvegarde est imposée. |
 
@@ -477,7 +479,9 @@ n'est jamais renvoyé en ligne ; il faut `out_dir` et lire `graph.json` (schéma
 `surgeon schema --kind graph`). Avec `--read-only`, un appel sans `out_dir` ni `cache_dir`
 reste autorisé (lecture seule) ; fournir l'un des deux donne `error.kind = "read_only"`
 avant toute écriture. Tous les chemins (`model`, `out_dir`, `cache_dir`, `vector`,
-`baseline`) passent par le bac à sable `--allow-dir`.
+`baseline`) passent par le bac à sable `--allow-dir` ; `model`, `vector` et `baseline`
+peuvent aussi être lus dans une racine `--allow-read`, ce qui permet de comparer une copie
+de travail à son modèle d'origine sans jamais écrire dans ce dernier.
 
 Exemple d'appel sans écriture :
 

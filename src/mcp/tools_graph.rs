@@ -185,7 +185,7 @@ fn graph(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     };
     let format = args.format.unwrap_or_else(|| vec![OutputFormat::Json]);
     let core = GraphArgs {
-        model: sandboxed(ctx, "model", &args.model)?,
+        model: readable(ctx, "model", &args.model)?,
         out_dir: optional_path(ctx, "out_dir", &args.out_dir)?,
         format,
         layers: args.layers,
@@ -198,7 +198,7 @@ fn graph(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         edges,
         min_alignment: args.min_alignment.unwrap_or(0.0),
         edge_weight: args.edge_weight.unwrap_or(EdgeWeight::Alignment),
-        vector: optional_path(ctx, "vector", &args.vector)?,
+        vector: optional_read(ctx, "vector", &args.vector)?,
         kurtosis_threshold: args.kurtosis_threshold.unwrap_or(10.0),
         color_scale: args.color_scale.unwrap_or(ColorScaleArg::Quantile),
         palette: args.palette.unwrap_or(PaletteArg::Diverging),
@@ -209,7 +209,7 @@ fn graph(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         estimate: args.estimate,
         jobs: args.jobs.unwrap_or(0) as usize,
         overwrite: args.overwrite,
-        baseline: optional_path(ctx, "baseline", &args.baseline)?,
+        baseline: optional_read(ctx, "baseline", &args.baseline)?,
         fast_hash: args.fast_hash,
     };
     crate::graph::core_graph_with(&core, ctx.deps, ctx.sink, args.max_seconds)
@@ -220,11 +220,30 @@ fn parse<T: serde::de::DeserializeOwned>(arguments: Value) -> Result<T, Outcome>
         .map_err(|e| invalid("invalid_arguments", format!("arguments invalides : {e}")))
 }
 
+/// A path the tool may write (`out_dir`, `cache_dir`): `--allow-dir` roots only.
 fn sandboxed(ctx: &ToolContext, argument: &str, path: &Path) -> Result<PathBuf, Outcome> {
     ctx.cfg
         .sandbox
         .resolve(argument, path, ctx.cfg.sandbox.base())
         .map_err(|e| invalid("path_not_allowed", e))
+}
+
+/// A path the tool only reads (the model, its baseline): `--allow-read` roots count too.
+fn readable(ctx: &ToolContext, argument: &str, path: &Path) -> Result<PathBuf, Outcome> {
+    ctx.cfg
+        .sandbox
+        .resolve_read(argument, path, ctx.cfg.sandbox.base())
+        .map_err(|e| invalid("path_not_allowed", e))
+}
+
+fn optional_read(
+    ctx: &ToolContext,
+    argument: &str,
+    path: &Option<PathBuf>,
+) -> Result<Option<PathBuf>, Outcome> {
+    path.as_ref()
+        .map(|p| readable(ctx, argument, p))
+        .transpose()
 }
 
 fn optional_path(

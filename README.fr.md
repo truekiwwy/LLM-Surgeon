@@ -702,6 +702,7 @@ surgeon mcp [OPTIONS]
 | Option | Défaut | Rôle |
 | --- | --- | --- |
 | `--allow-dir` | `$SURGEON_MCP_ALLOW_DIRS`, sinon le dossier courant | Dossier autorisé, répétable ; chaque chemin doit se résoudre sous l'un d'eux. |
+| `--allow-read` | aucun | Dossier ou fichier lu mais jamais écrit (le modèle d'origine), répétable : analyses et mesures peuvent le lire, toute sortie ou `surgeon_apply` y est refusé. |
 | `--read-only` | désactivé | Refuse les outils qui écrivent (`surgeon_apply`, exports GGUF...). |
 | `--allow-no-backup` | désactivé | Respecte `backup: false` dans les patchs ; une sauvegarde est imposée sinon. |
 

@@ -921,14 +921,13 @@ impl Hub {
         }
     }
 
+    /// The source model's read root for the MCP server: its model folder, or the lone file
+    /// (never the whole folder a stray weights file sits in).
     fn source_dir(&self, project: &Path) -> Option<PathBuf> {
         let text = std::fs::read_to_string(project.join("project.surgeon.json")).ok()?;
         let m = crate::studio::project::load_manifest(&text).ok()?;
         let s = m.source?.path;
-        Some(match s.is_dir() {
-            true => s,
-            false => s.parent()?.to_path_buf(),
-        })
+        Some(crate::studio::copy::model_root(&s).to_path_buf())
     }
 
     fn tick_cli(&mut self) {

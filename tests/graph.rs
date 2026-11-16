@@ -853,6 +853,91 @@ fn mcp_read_only_refuses_out_dir_and_cache_dir_before_writing() {
     assert_eq!(env["data"]["outputs"], json!([]));
 }
 
+#[test]
+fn mcp_allow_read_roots_serve_baselines_and_benches_but_never_writes() {
+    let (workspace, origin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let copy = model(workspace.path());
+    let source = model(origin.path());
+    fake_qwen2::write_prompt_files(workspace.path()).unwrap();
+    let prompts = workspace.path().join("pos.json");
+    let strict = McpConfig::new(&[workspace.path().to_path_buf()], false, false).unwrap();
+    let config = McpConfig::new(&[workspace.path().to_path_buf()], false, false)
+        .unwrap()
+        .with_read_roots(&[origin.path().to_path_buf()])
+        .unwrap();
+    let small = json!({"rank": 4, "oversample": 2, "power_iters": 1});
+    let graph = |model: &Path, extra: Value| {
+        let mut args = json!({"model": s(model), "baseline": s(&source)});
+        for (k, v) in small
+            .as_object()
+            .unwrap()
+            .iter()
+            .chain(extra.as_object().unwrap())
+        {
+            args[k] = v.clone();
+        }
+        args
+    };
+
+    // The paired before / after: the copy against the source model as baseline.
+    let (is_error, env) = one_call(&config, "surgeon_graph", graph(&copy, json!({})));
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["baseline_diff"]["nodes_changed"], 0, "{env}");
+    // Without the read root the same baseline is out of reach.
+    let (is_error, env) = one_call(&strict, "surgeon_graph", graph(&copy, json!({})));
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "path_not_allowed", "{env}");
+
+    // A measure reads the source model and writes its result in the workspace.
+    let dump = |out: &Path| json!({"mode": "dump", "model": s(&source), "prompts": s(&prompts), "out": s(out)});
+    let measured = workspace.path().join("source-dump.safetensors");
+    let (is_error, env) = one_call(&config, "surgeon_bench", dump(&measured));
+    assert!(!is_error, "{env}");
+    assert!(measured.is_file());
+
+    // Nothing is ever written in the read root: graph outputs, cache, bench outputs.
+    let before = file_hashes(&source);
+    let denied = [
+        (
+            "surgeon_graph",
+            graph(&copy, json!({"out_dir": s(&origin.path().join("out"))})),
+        ),
+        (
+            "surgeon_graph",
+            graph(&copy, json!({"cache_dir": s(&origin.path().join("cache"))})),
+        ),
+        (
+            "surgeon_bench",
+            dump(&origin.path().join("dump.safetensors")),
+        ),
+    ];
+    for (tool, arguments) in denied {
+        let (is_error, env) = one_call(&config, tool, arguments);
+        assert!(is_error, "{tool}: {env}");
+        assert_eq!(env["error"]["kind"], "path_not_allowed", "{env}");
+        assert!(env["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("lecture seule")));
+    }
+    let (is_error, env) = one_call(
+        &config,
+        "surgeon_apply",
+        json!({"model": s(&source), "patch": {"schema_version": 1, "backup": true, "operations": []}}),
+    );
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "path_not_allowed", "{env}");
+    assert_eq!(
+        file_hashes(&source),
+        before,
+        "the source model is untouched"
+    );
+    assert_eq!(
+        std::fs::read_dir(origin.path()).unwrap().count(),
+        1,
+        "nothing created"
+    );
+}
+
 // ------------------------------------------------------------------ fast hash, baseline, ndjson
 
 /// Multiplies the F32 tensor `name` of `<model>/model.safetensors` in place.

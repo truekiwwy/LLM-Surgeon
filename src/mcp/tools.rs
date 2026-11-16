@@ -560,6 +560,7 @@ fn parse<T: DeserializeOwned>(arguments: Value) -> Result<T, Outcome> {
         .map_err(|e| invalid("invalid_arguments", format!("arguments invalides : {e}")))
 }
 
+/// A path the tool may write: `--allow-dir` roots only. The default for path arguments.
 fn sandboxed(
     ctx: &ToolContext,
     argument: &str,
@@ -572,9 +573,22 @@ fn sandboxed(
         .map_err(|e| invalid("path_not_allowed", e))
 }
 
+/// A path the tool only reads: the `--allow-read` roots (the source model) count too.
+fn readable(
+    ctx: &ToolContext,
+    argument: &str,
+    path: &Path,
+    base: &Path,
+) -> Result<PathBuf, Outcome> {
+    ctx.cfg
+        .sandbox
+        .resolve_read(argument, path, base)
+        .map_err(|e| invalid("path_not_allowed", e))
+}
+
 fn check(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     let args: CheckToolArgs = parse(arguments)?;
-    let model = sandboxed(ctx, "model", &args.model, ctx.cfg.sandbox.base())?;
+    let model = readable(ctx, "model", &args.model, ctx.cfg.sandbox.base())?;
     let args = CheckArgs {
         model,
         policy_ram_margin_gib: None,
@@ -584,7 +598,7 @@ fn check(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
 
 fn inspect(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     let args: InspectToolArgs = parse(arguments)?;
-    let model = sandboxed(ctx, "model", &args.model, ctx.cfg.sandbox.base())?;
+    let model = readable(ctx, "model", &args.model, ctx.cfg.sandbox.base())?;
     let layers = match &args.layers {
         Some(layers) => layers
             .to_selection()
@@ -592,7 +606,7 @@ fn inspect(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         None => LayerSelection::All,
     };
     let arch_spec = match &args.arch_spec {
-        Some(path) => Some(sandboxed(ctx, "arch_spec", path, ctx.cfg.sandbox.base())?),
+        Some(path) => Some(readable(ctx, "arch_spec", path, ctx.cfg.sandbox.base())?),
         None => None,
     };
     let core_args = InspectArgs {
@@ -681,10 +695,10 @@ fn eval(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         ));
     }
     let root = ctx.cfg.sandbox.base().to_path_buf();
-    let model = sandboxed(ctx, "model", &args.model, &root)?;
+    let model = readable(ctx, "model", &args.model, &root)?;
     let prompts = match (&args.prompts_file, args.prompts) {
         (Some(file), None) => {
-            let file = sandboxed(ctx, "prompts_file", file, &root)?;
+            let file = readable(ctx, "prompts_file", file, &root)?;
             load_prompts(&file).map_err(|e| invalid("invalid_input", e))?
         }
         (None, Some(prompts)) => normalize_prompts(prompts)?,
@@ -726,7 +740,7 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     }
     let args: ExtractToolArgs = parse(arguments)?;
     let root = ctx.cfg.sandbox.base().to_path_buf();
-    let model_dir = sandboxed(ctx, "model", &args.model, &root)?;
+    let model_dir = readable(ctx, "model", &args.model, &root)?;
     let pos_prompts = prompt_set(
         ctx,
         "pos",
@@ -757,7 +771,7 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     };
     let labels = match &args.labels_file {
         Some(file) => {
-            let path = sandboxed(ctx, "labels_file", file, &root)?;
+            let path = readable(ctx, "labels_file", file, &root)?;
             let labels = extract::load_labels(&path)
                 .map_err(|m| invalid("invalid_input", format!("labels_file : {m}")))?;
             Some(labels)
@@ -857,9 +871,9 @@ fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     let root = ctx.cfg.sandbox.base().to_path_buf();
     let bad = |m: String| invalid("invalid_arguments", m);
     let request = AutotuneRequest {
-        model: sandboxed(ctx, "model", &args.model, &root)?,
-        vector: sandboxed(ctx, "vector", &args.vector, &root)?,
-        eval_dataset: sandboxed(ctx, "eval_dataset", &args.eval_dataset, &root)?,
+        model: readable(ctx, "model", &args.model, &root)?,
+        vector: readable(ctx, "vector", &args.vector, &root)?,
+        eval_dataset: readable(ctx, "eval_dataset", &args.eval_dataset, &root)?,
         layer_range: args
             .target_layer_range
             .as_deref()
@@ -906,7 +920,7 @@ fn prompt_set(
     let texts = match (inline, file) {
         (Some(list), None) => extract::check_texts(list),
         (None, Some(path)) => {
-            let path = sandboxed(ctx, &format!("{set}_prompts_file"), path, root)?;
+            let path = readable(ctx, &format!("{set}_prompts_file"), path, root)?;
             extract::load_prompt_texts(&path)
         }
         _ => {
@@ -1478,11 +1492,15 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         return Err(failure);
     }
     let root = ctx.cfg.sandbox.base().to_path_buf();
+    // Read paths: models, datasets, baselines. What a mode writes (dump `out`, the judge
+    // cache) or runs (llama_cpp_dir) goes through `sandboxed` below, never these.
+    let required = |name: &str, value: &Option<PathBuf>| {
+        value
+            .clone()
+            .ok_or_else(|| invalid("invalid_arguments", format!("{name} requis")))
+    };
     let path = |ctx: &ToolContext, name: &str, value: &Option<PathBuf>| {
-        let value = value
-            .as_ref()
-            .ok_or_else(|| invalid("invalid_arguments", format!("{name} requis")))?;
-        sandboxed(ctx, name, value, &root)
+        readable(ctx, name, &required(name, value)?, &root)
     };
     // A built-in probe set is embedded in the binary: no file to sandbox.
     let source = |ctx: &ToolContext, name: &str, value: &Option<PathBuf>| match value {
@@ -1492,6 +1510,12 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     let optional_path = |ctx: &ToolContext, name: &str, value: &Option<PathBuf>| {
         value
             .as_ref()
+            .map(|v| readable(ctx, name, v, &root))
+            .transpose()
+    };
+    let optional_write = |ctx: &ToolContext, name: &str, value: &Option<PathBuf>| {
+        value
+            .as_ref()
             .map(|v| sandboxed(ctx, name, v, &root))
             .transpose()
     };
@@ -1499,7 +1523,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     // operator's $LLAMA_CPP_DIR is not.
     // A broken user file only matters to the modes that generate (below).
     let user = crate::backend::load_user_config();
-    let llama_cpp_dir = match optional_path(ctx, "llama_cpp_dir", &args.llama_cpp_dir)? {
+    let llama_cpp_dir = match optional_write(ctx, "llama_cpp_dir", &args.llama_cpp_dir)? {
         Some(dir) => Some(dir),
         None => std::env::var_os("LLAMA_CPP_DIR")
             .map(PathBuf::from)
@@ -1582,7 +1606,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             let req = DumpRequest {
                 model: path(ctx, "model", &args.model)?,
                 prompts,
-                out: path(ctx, "out", &args.out)?,
+                out: sandboxed(ctx, "out", &required("out", &args.out)?, &root)?,
                 dtype: args.dtype.unwrap_or_default(),
                 out_dtype: args.out_dtype.unwrap_or_default(),
                 max_tokens: args
@@ -1638,7 +1662,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                         model: path(ctx, "judge_model", &args.judge_model)?,
                         role: args.judge_role.unwrap_or_default(),
                         template: optional_path(ctx, "judge_template", &args.judge_template)?,
-                        cache: optional_path(ctx, "judge_cache", &args.judge_cache)?,
+                        cache: optional_write(ctx, "judge_cache", &args.judge_cache)?,
                         partial_as_refusal: args.partial_as_refusal.unwrap_or(false),
                         timeout,
                     },

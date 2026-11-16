@@ -61,7 +61,14 @@ impl McpConfig {
         })
     }
 
-    /// `--allow-dir`, else `$SURGEON_MCP_ALLOW_DIRS` split with the system separator.
+    /// Adds roots the tools may read but never write (`--allow-read`).
+    pub fn with_read_roots(mut self, paths: &[PathBuf]) -> io::Result<Self> {
+        self.sandbox = self.sandbox.with_read_roots(paths)?;
+        Ok(self)
+    }
+
+    /// `--allow-dir`, else `$SURGEON_MCP_ALLOW_DIRS` split with the system separator, then
+    /// the `--allow-read` roots.
     pub fn from_args(args: &McpArgs) -> io::Result<Self> {
         let dirs = match args.allow_dir.is_empty() {
             false => args.allow_dir.clone(),
@@ -73,7 +80,7 @@ impl McpConfig {
                 })
                 .unwrap_or_default(),
         };
-        Self::new(&dirs, args.read_only, args.allow_no_backup)
+        Self::new(&dirs, args.read_only, args.allow_no_backup)?.with_read_roots(&args.allow_read)
     }
 }
 

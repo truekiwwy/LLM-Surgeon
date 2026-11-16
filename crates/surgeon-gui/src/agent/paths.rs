@@ -48,6 +48,12 @@ impl ProjectPaths {
              - project_dir : {project}\n\
              - origin_path : {origin} (modèle d'origine, verrouillé en écriture)\n\
              - working_copy_path : {copy}\n\
+             Lecture seule de l'origine : les outils d'analyse et de mesure lisent \
+             origin_path. Pour une comparaison appariée avant / après, passe-le en baseline \
+             de surgeon_graph (model = working_copy_path) et en baseline_model de \
+             surgeon_bench, ou mesure-le directement en model avec le même jeu que la copie. \
+             Toute écriture dans origin_path est refusée par le serveur : sorties, caches et \
+             corrections vont dans project_dir.\n\
              Autonomie : le projet est ouvert et tout ce qu'il faut est ci-dessus. Ne t'arrête \
              pas pour demander un chemin ni un dataset : inspecte directement \
              working_copy_path (surgeon_inspect, surgeon_graph), mesure avec le jeu intégré \
@@ -98,6 +104,8 @@ mod tests {
             format!("working_copy_path : {}", copy.display()),
             format!("project_dir : {}", dir.path().display()),
             "builtin:refusals".to_owned(),
+            "passe-le en baseline de surgeon_graph".to_owned(),
+            "baseline_model de surgeon_bench".to_owned(),
             "Ne t'arrête pas pour demander un chemin".to_owned(),
         ] {
             assert!(brief.contains(&needle), "{needle} in {brief}");

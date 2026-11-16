@@ -1461,10 +1461,20 @@ fn cli_runtimes_are_detected_from_their_real_help_and_run_with_the_mcp_barrier()
         !args.iter().any(|a| a.contains("inspecte")),
         "the prompt goes on stdin"
     );
-    // "Modify": no read-only server, but the source model is not an allowed folder.
+    // The source model is a read root in every mode, never a writable folder.
+    let source_arg = |args: &[String]| {
+        args.windows(2)
+            .map(|w| (w[0].as_str(), w[1].clone()))
+            .filter(|(_, v)| *v == source.display().to_string())
+            .map(|(flag, _)| flag.to_owned())
+            .collect::<Vec<_>>()
+    };
+    let ask = runtime::mcp_args(AgentMode::Ask, &project, Some(&source));
+    assert_eq!(source_arg(&ask), ["--allow-read"]);
+    // "Modify": no read-only server, and still no write on the source model.
     let modify = runtime::mcp_args(AgentMode::Modify, &project, Some(&source));
     assert!(!modify.contains(&"--read-only".to_owned()));
-    assert!(!modify.contains(&source.display().to_string()));
+    assert_eq!(source_arg(&modify), ["--allow-read"]);
     assert!(!runtime::allowed_tools(AgentMode::Modify).contains(&"surgeon_pipeline".to_owned()));
     let codex_args = runtime::launch(&runtime::LaunchInput {
         detected: &codex,
