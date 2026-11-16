@@ -237,7 +237,7 @@ pub fn tree(ui: &mut Ui, app: &mut SurgeonApp) {
     });
     ui.add_space(T.space.xs);
     let Some(step) = app.timeline.current() else {
-        c::empty(ui, t("tree.empty"), t("tree.empty.hint"));
+        c::empty(ui, Icon::Cube, t("tree.empty"), t("tree.empty.hint"));
         return;
     };
     let visible = app.visible(&step.report);

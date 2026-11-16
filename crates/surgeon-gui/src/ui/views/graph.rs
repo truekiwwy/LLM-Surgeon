@@ -120,17 +120,11 @@ fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
         .animate_value_with_time(egui::Id::new("layout-blend"), target, time);
     let blend = t_ * t_ * (3.0 - 2.0 * t_);
     let Some(step) = app.timeline.current() else {
-        ui.add_space(T.space.l);
-        ui.horizontal(|ui| {
-            ui.add_space(T.space.l);
-            ui.vertical(|ui| {
-                let (title, hint) = match app.feed {
-                    Some(_) => (t("graph.waiting"), t("graph.waiting.hint")),
-                    None => (t("graph.empty"), t("graph.empty.hint")),
-                };
-                c::empty(ui, title, hint);
-            });
-        });
+        let (title, hint) = match app.feed {
+            Some(_) => (t("graph.waiting"), t("graph.waiting.hint")),
+            None => (t("graph.empty"), t("graph.empty.hint")),
+        };
+        c::empty(ui, Icon::Cube, title, hint);
         return;
     };
     let visible = app.visible(&step.report);
@@ -344,7 +338,12 @@ fn chronology(ui: &mut Ui, app: &mut SurgeonApp) {
 
 pub fn inspector(ui: &mut Ui, app: &mut SurgeonApp) {
     let Some(step) = app.timeline.current() else {
-        c::empty(ui, t("inspector.empty"), t("inspector.empty.hint"));
+        c::empty(
+            ui,
+            Icon::Search,
+            t("inspector.empty"),
+            t("inspector.empty.hint"),
+        );
         return;
     };
     let run = app.run_view();

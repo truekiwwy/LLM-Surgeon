@@ -287,7 +287,7 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
 /// The machine in key / value rows: OS, GPUs, Vulkan, memory, disk, notes.
 pub(crate) fn machine_facts(ui: &mut Ui, app: &SurgeonApp) {
     let Some(s) = &app.desktop.system else {
-        c::empty(ui, t("diag.no_probe"), t("diag.no_probe.hint"));
+        c::empty(ui, Icon::Chip, t("diag.no_probe"), t("diag.no_probe.hint"));
         return;
     };
     c::kv(ui, t("diag.os"), &format!("{} {}", s.os, s.arch));
@@ -476,7 +476,7 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
             // shortcut: the log tail is read every frame; cache it if logs grow past a few MiB.
             let lines = crate::logging::tail(&crate::paths::logs_dir(), 200);
             if lines.is_empty() {
-                c::empty(ui, t("journal.empty"), t("journal.empty.hint"));
+                c::empty(ui, Icon::List, t("journal.empty"), t("journal.empty.hint"));
                 return;
             }
             ScrollArea::vertical()
@@ -867,7 +867,7 @@ pub(crate) fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
         .clone()
         .and_then(|id| hub.cfg.connection(&id).cloned())
     else {
-        c::empty(ui, t("prov.pick"), t("prov.pick.hint"));
+        c::empty(ui, Icon::Chat, t("prov.pick"), t("prov.pick.hint"));
         message(ui, hub);
         return;
     };

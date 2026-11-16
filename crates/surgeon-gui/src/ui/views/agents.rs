@@ -5,6 +5,8 @@
 //! agent established). What the agent may do is chosen in the form; connections are
 //! configured in the settings. The consent dialog opens before the first request to a remote connection.
 
+use std::collections::{HashMap, HashSet};
+
 use eframe::egui::{self, Id, Order, Pos2, Rect, ScrollArea, Ui, Vec2};
 
 use super::super::components::{self as c, ButtonKind, Segment};
@@ -112,7 +114,7 @@ fn mission_label(mission: Option<Mission>) -> String {
 fn sessions(ui: &mut Ui, app: &mut SurgeonApp) {
     // Without a project the center holds the form that creates one.
     if app.agents.project.is_none() {
-        c::secondary(ui, t("project.none"));
+        c::empty(ui, Icon::Plus, t("project.empty"), t("project.empty.hint"));
         return;
     }
     let busy = app.agents.busy();
@@ -129,7 +131,12 @@ fn sessions(ui: &mut Ui, app: &mut SurgeonApp) {
     let now = now_unix();
     let lines = app.agents.conversations().to_vec();
     if lines.is_empty() {
-        c::secondary(ui, t("chat.list.empty"));
+        c::empty(
+            ui,
+            Icon::Chat,
+            t("chat.list.empty"),
+            t("chat.list.empty.hint"),
+        );
         return;
     }
     let mut open = None;
@@ -435,13 +442,8 @@ pub fn picker(ui: &mut Ui, app: &mut SurgeonApp, width: f32) {
 fn thread(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
     let col = column(rect);
     let header = Rect::from_min_size(col.min, Vec2::new(col.width(), T.size.header + T.space.s));
-    let field_height = 3.0 * T.size.row + T.size.control + T.space.m;
-    let note = match app.agents.message.is_some() {
-        true => T.size.row,
-        false => 0.0,
-    };
     let field = Rect::from_min_max(
-        Pos2::new(col.left(), col.bottom() - T.space.l - note - field_height),
+        Pos2::new(col.left(), col.bottom() - T.space.l - c::composer_height()),
         Pos2::new(col.right(), col.bottom() - T.space.l),
     );
     let body = Rect::from_min_max(
@@ -462,20 +464,18 @@ fn thread(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
     c::region(ui, field, "session-field", |ui| {
         let hub = &app.agents;
         let ready = !hub.busy() && !hub.input.trim().is_empty() && hub.connected();
-        let keys = t("chat.keys");
+        let note = hub.message.clone();
         if c::composer(
             ui,
             &mut app.agents.input,
             t("chat.hint"),
-            keys,
+            t("chat.keys"),
+            note.as_ref().map(|(text, error)| (text.as_str(), *error)),
             ready,
             t("chat.send"),
         ) {
             app.agents.send_input();
             ui.ctx().request_repaint();
-        }
-        if let Some((text, error)) = app.agents.message.clone() {
-            c::message(ui, &text, error);
         }
     });
 }
@@ -530,48 +530,81 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
     let Some(conv) = app.agents.conversation() else {
         return;
     };
-    for message in &conv.messages {
-        for block in &message.blocks {
+    let blocks = || conv.messages.iter().flat_map(|m| &m.blocks);
+    // A result is shown inside its call's row, not as a row of its own.
+    let results: HashMap<&str, (&str, bool)> = blocks()
+        .filter_map(|b| match b {
+            Block::ToolResult {
+                id,
+                content,
+                is_error,
+            } => Some((id.as_str(), (content.as_str(), *is_error))),
+            _ => None,
+        })
+        .collect();
+    let calls: HashSet<&str> = blocks()
+        .filter_map(|b| match b {
+            Block::ToolUse { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    for (n, message) in conv.messages.iter().enumerate() {
+        let mut named = false;
+        for (k, block) in message.blocks.iter().enumerate() {
+            let row_id = Id::new(("tool", &conv.id, n, k));
             match (block, message.role) {
                 (Block::Text { text }, Role::User) => {
                     c::bubble(ui, text);
                     ui.add_space(T.space.m);
                 }
                 (Block::Text { text }, Role::Assistant) => {
-                    c::meta(ui, t("chat.agent"));
+                    if !named {
+                        c::meta(ui, t("chat.agent"));
+                        named = true;
+                    }
                     c::label(ui, text.as_str());
                     ui.add_space(T.space.m);
                 }
-                (Block::ToolUse { name, input, .. }, _) => {
-                    let line = tf("chat.tool_call", &[("name", name), ("input", &input)]);
-                    c::icon_line(ui, Icon::StepForward, line).on_hover_text(input.to_string());
+                (Block::ToolUse { id, name, input }, _) => {
+                    let result = results.get(id.as_str());
+                    let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
+                    let mut details = vec![pretty.as_str()];
+                    details.extend(result.map(|(content, _)| *content));
+                    let failed = result.is_some_and(|(_, error)| *error);
+                    c::tool_row(ui, row_id, name, &tool_summary(input), failed, &details);
                 }
                 (
                     Block::ToolResult {
-                        content, is_error, ..
+                        id,
+                        content,
+                        is_error,
                     },
                     _,
-                ) => {
-                    let first = result_line(content);
-                    match is_error {
-                        true => c::status(ui, State::Error, first),
-                        false => c::icon_line(ui, Icon::StepBack, first),
-                    };
+                ) if !calls.contains(id.as_str()) => {
+                    let summary = result_line(content);
+                    c::tool_row(
+                        ui,
+                        row_id,
+                        t("chat.result"),
+                        &summary,
+                        *is_error,
+                        &[content],
+                    );
                 }
-                (Block::Opaque { .. }, _) => {}
+                _ => {}
             }
         }
     }
-    let plan = app
-        .agents
-        .conversation()
-        .map(|c| c.plan.as_slice())
-        .unwrap_or_default();
-    if !plan.is_empty() {
-        c::section(ui, t("chat.plan"));
-        for (k, step) in plan.iter().enumerate() {
-            c::label(ui, format!("{}. {step}", k + 1));
-        }
+    if !conv.plan.is_empty() {
+        ui.add_space(T.space.s);
+        c::inset_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            c::meta(ui, t("chat.plan"));
+            for (k, step) in conv.plan.iter().enumerate() {
+                c::label(ui, format!("{}. {}", k + 1, plan_step(step)));
+            }
+        });
+        ui.add_space(T.space.m);
     }
     if let Some(s) = &app.agents.session {
         if !s.streaming.is_empty() {
@@ -593,6 +626,40 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
             ),
         );
     }
+}
+
+/// The step without the number or bullet the agent may have written: the card numbers it.
+fn plan_step(step: &str) -> &str {
+    let step = step.trim_start();
+    let rest = step.trim_start_matches(|c: char| c.is_ascii_digit());
+    let marked = match rest.len() < step.len() {
+        true => rest.strip_prefix(['.', ')']),
+        false => rest.strip_prefix(['-', '*', '\u{2022}']),
+    };
+    marked.map_or(step, str::trim_start)
+}
+
+/// What a folded tool row says of its input: the command, prompt or path it names, else
+/// its compact JSON, on one line.
+fn tool_summary(input: &serde_json::Value) -> String {
+    const KEYS: [&str; 10] = [
+        "command",
+        "cmd",
+        "description",
+        "prompt",
+        "file_path",
+        "path",
+        "pattern",
+        "text",
+        "target",
+        "model",
+    ];
+    let text = KEYS
+        .iter()
+        .find_map(|k| input[k].as_str())
+        .map_or_else(|| input.to_string(), str::to_owned);
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    line.trim().chars().take(120).collect()
 }
 
 /// One line for a tool result: `← surgeon_inspect · run r…` for an engine result (its
@@ -683,17 +750,18 @@ fn evidence_log(ui: &mut Ui, app: &mut SurgeonApp) {
     if let Some(p) = &project {
         entries.extend(evidence::mcp_runs(&Dirs::of(p).mcp_runs()));
     }
+    let findings = project
+        .as_ref()
+        .map(|p| evidence::read(&Dirs::of(p).findings()))
+        .unwrap_or_default();
+    if findings.is_empty() {
+        c::empty(ui, Icon::Check, t("finding.none"), t("finding.none.hint"));
+        return;
+    }
     ScrollArea::vertical()
         .id_salt("evidence")
         .auto_shrink(false)
         .show(ui, |ui| {
-            let findings = project
-                .as_ref()
-                .map(|p| evidence::read(&Dirs::of(p).findings()))
-                .unwrap_or_default();
-            if findings.is_empty() {
-                c::empty(ui, t("finding.none"), t("policy.findings.none"));
-            }
             for f in findings.iter().rev() {
                 let (state, word) = match f.status(&entries) {
                     Status::Measured(_) => (State::Ok, t("finding.measured")),
@@ -763,5 +831,29 @@ fn consent(ctx: &egui::Context, app: &mut SurgeonApp) {
         Some(true) => app.agents.accept_consent(),
         Some(false) => app.agents.consent_for = None,
         None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plan_step_loses_the_number_the_agent_wrote() {
+        assert_eq!(plan_step("1. Inspecter la copie"), "Inspecter la copie");
+        assert_eq!(plan_step(" 12) Mesurer"), "Mesurer");
+        assert_eq!(plan_step("- Corriger"), "Corriger");
+        assert_eq!(plan_step("3 couches à revoir"), "3 couches à revoir");
+        assert_eq!(plan_step("Sans numéro"), "Sans numéro");
+    }
+
+    #[test]
+    fn a_tool_summary_names_the_command_else_the_compact_input() {
+        let shell = serde_json::json!({"command": "Get-ChildItem\n-Recurse", "timeout": 5});
+        assert_eq!(tool_summary(&shell), "Get-ChildItem");
+        let engine = serde_json::json!({"model": "copies/c1"});
+        assert_eq!(tool_summary(&engine), "copies/c1");
+        let other = serde_json::json!({"n": 1});
+        assert_eq!(tool_summary(&other), r#"{"n":1}"#);
     }
 }

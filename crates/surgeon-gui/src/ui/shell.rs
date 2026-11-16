@@ -195,17 +195,30 @@ fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect, controls: bool) {
             if app.agents.project.is_some() {
                 views::agents::picker(ui, app, T.size.left);
             }
-            let mut local = app.desktop.settings.local_only;
-            if c::switch(
-                ui,
-                Icon::Shield,
-                t("status.local"),
-                &mut local,
-                t("policy.local_only.tip"),
-            ) {
-                app.set_local_only(local);
+            let local = app.desktop.settings.local_only;
+            let local_seg = c::Seg {
+                text: t("status.local"),
+                state: if local { State::Ok } else { State::Idle },
+                tip: t("policy.local_only.tip"),
+                max: T.size.left,
+                on: Some(local),
+            };
+            let flipped = match work_status(app) {
+                Some((state, text, tip)) => {
+                    let work = c::Seg {
+                        text: &text,
+                        state,
+                        tip: &tip,
+                        max: T.size.left,
+                        on: None,
+                    };
+                    c::capsule(ui, &[work, local_seg])[1].clicked()
+                }
+                None => c::capsule(ui, &[local_seg])[0].clicked(),
+            };
+            if flipped {
+                app.set_local_only(!local);
             }
-            work_status(ui, app);
         });
     });
 }
@@ -305,37 +318,44 @@ fn resize_edges(ui: &mut Ui, screen: Rect) {
     }
 }
 
-/// The work running in the background, in the title bar: an install, the project's jobs,
-/// else the last message. Nothing when all is quiet.
-fn work_status(ui: &mut Ui, app: &mut SurgeonApp) {
+/// The first segment of the title bar's capsule, with its tooltip: an install, the
+/// project's jobs, an error, else the open project and the state of its working copy.
+/// `None` when no project is open and all is quiet.
+fn work_status(app: &mut SurgeonApp) -> Option<(State, String, String)> {
     if let Some(p) = app.desktop.setup.progress().first() {
         let pct = p
             .fraction()
             .map_or(String::new(), |f| format!(" {:.0} %", f * 100.0));
-        c::status(
-            ui,
-            State::Active,
-            tf("status.install", &[("label", &p.label), ("pct", &pct)]),
-        );
-        return;
+        let text = tf("status.install", &[("label", &p.label), ("pct", &pct)]);
+        return Some((State::Active, text.clone(), text));
     }
     let running = app.studio.manager.as_ref().map_or(0, |m| m.running.len());
     let queued = app.studio.manager.as_ref().map_or(0, |m| m.queue.len());
     if running + queued > 0 {
-        c::status(
-            ui,
-            State::Active,
-            tf("status.jobs", &[("running", &running), ("queued", &queued)]),
-        );
-        return;
+        let text = tf("status.jobs", &[("running", &running), ("queued", &queued)]);
+        return Some((State::Active, text.clone(), text));
     }
-    let message = app
-        .studio
-        .message
-        .clone()
-        .or_else(|| app.desktop.message.clone().map(|m| (m, true)));
-    if let Some((text, error)) = message {
-        let state = if error { State::Error } else { State::Ok };
-        c::status(ui, state, text);
+    let error = match app.studio.message.clone() {
+        Some((text, true)) => Some(text),
+        _ => app.desktop.message.clone(),
+    };
+    if let Some(text) = error {
+        return Some((State::Error, text.clone(), text));
     }
+    let name = app.studio.manager.as_ref()?.project.manifest.name.clone();
+    let entries = app.ledger().to_vec();
+    Some(match app.studio.active_copy(&entries) {
+        Some(copy) => {
+            let (state, word) = match copy.writes {
+                0 => (State::Ok, t("copy.intact")),
+                _ => (State::Warn, t("copy.modified")),
+            };
+            (state, format!("{name} · {word}"), copy.path)
+        }
+        None => (
+            State::Idle,
+            format!("{name} · {}", t("copy.none")),
+            t("copy.new.tip").to_owned(),
+        ),
+    })
 }

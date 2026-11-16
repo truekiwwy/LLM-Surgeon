@@ -3,6 +3,7 @@
 //! request, and for the open project the conversation, approval cards, plan, evidence log and
 //! "always" rules. No drawing here: `ui::views::agents` does it.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -42,6 +43,32 @@ struct CliChat {
     /// this run's.
     focus_seen: SystemTime,
     plan_seen: SystemTime,
+    tools: CliTools,
+}
+
+/// The tool blocks of a CLI run. Its events carry no ids, and the CLIs answer their calls in
+/// the order they were made: each result goes to the oldest call still waiting.
+#[derive(Default)]
+struct CliTools {
+    made: usize,
+    unanswered: VecDeque<String>,
+}
+
+impl CliTools {
+    fn call(&mut self, name: String, input: serde_json::Value) -> Block {
+        self.made += 1;
+        let id = format!("cli-{}", self.made);
+        self.unanswered.push_back(id.clone());
+        Block::ToolUse { id, name, input }
+    }
+
+    fn result(&mut self, content: String) -> Block {
+        Block::ToolResult {
+            id: self.unanswered.pop_front().unwrap_or_default(),
+            content,
+            is_error: false,
+        }
+    }
 }
 
 /// The JSON of `path` when it was written after `seen`, which moves to that time: each write
@@ -867,6 +894,7 @@ impl Hub {
             kind: conn.kind,
             focus_seen: now,
             plan_seen: now,
+            tools: CliTools::default(),
         });
         Ok(())
     }
@@ -905,39 +933,37 @@ impl Hub {
 
     fn tick_cli(&mut self) {
         self.watch_cli();
-        let Some(cli) = &self.cli else {
+        let Some(cli) = &mut self.cli else {
             return;
         };
         let mut ended = false;
-        let mut lines = Vec::new();
+        let mut blocks = Vec::new();
+        let text = |text: String| Block::Text { text };
         while let Ok(e) = cli.run.rx.try_recv() {
             match e {
-                runtime::Event::Text(t) => lines.push(t),
-                runtime::Event::Tool { name, input } => lines.push(format!("→ {name} {input}")),
-                runtime::Event::ToolResult(r) => {
-                    lines.push(format!("← {}", r.chars().take(300).collect::<String>()))
-                }
-                runtime::Event::Done { cost_usd, summary } => lines.push(format!(
+                runtime::Event::Text(t) => blocks.push(text(t)),
+                // Real tool blocks, so the thread folds each call on one row.
+                runtime::Event::Tool { name, input } => blocks.push(cli.tools.call(name, input)),
+                runtime::Event::ToolResult(content) => blocks.push(cli.tools.result(content)),
+                runtime::Event::Done { cost_usd, summary } => blocks.push(text(format!(
                     "[{} terminé : {summary}{}]",
                     cli.kind.label(),
                     cost_usd
                         .map(|c| format!(", {c:.4} $ selon l'outil"))
                         .unwrap_or_default()
-                )),
-                runtime::Event::Error(e) => lines.push(format!("[erreur : {e}]")),
+                ))),
+                runtime::Event::Error(e) => blocks.push(text(format!("[erreur : {e}]"))),
                 runtime::Event::Exit(code) => {
-                    lines.push(format!("[fin du processus, code {code:?}]"));
+                    blocks.push(text(format!("[fin du processus, code {code:?}]")));
                     ended = true;
                 }
             }
         }
         if let Some(conv) = &mut self.cli_conv {
-            if !lines.is_empty() {
+            if !blocks.is_empty() {
                 conv.messages.push(Message {
                     role: Role::Assistant,
-                    blocks: vec![Block::Text {
-                        text: lines.join("\n"),
-                    }],
+                    blocks,
                 });
             }
             if ended {
@@ -985,5 +1011,26 @@ impl Hub {
             "consentement enregistré : renvoyez le message".into(),
             false,
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_results_go_to_their_calls_in_order() {
+        let mut tools = CliTools::default();
+        let a = tools.call("execute".into(), serde_json::json!({"command": "ls"}));
+        let b = tools.call("surgeon_check".into(), serde_json::json!({}));
+        let id = |block: &Block| match block {
+            Block::ToolUse { id, .. } | Block::ToolResult { id, .. } => id.clone(),
+            _ => String::new(),
+        };
+        assert_ne!(id(&a), id(&b));
+        assert_eq!(id(&tools.result("first".into())), id(&a));
+        assert_eq!(id(&tools.result("second".into())), id(&b));
+        // A result with no call left stays apart: it matches no row's call.
+        assert_eq!(id(&tools.result("stray".into())), "");
     }
 }

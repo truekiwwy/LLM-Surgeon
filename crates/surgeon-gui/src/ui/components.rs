@@ -247,11 +247,46 @@ pub fn status(ui: &mut Ui, state: State, text: impl Into<String>) -> Response {
     .inner
 }
 
-/// What an empty panel says: what is missing, then what to do next.
-pub fn empty(ui: &mut Ui, title: &str, hint: &str) {
-    ui.add_space(T.space.s);
-    label(ui, title);
-    secondary(ui, hint);
+/// What an empty panel says, centered in the room left: a ringed badge with `icon`, what is
+/// missing, then what to do next (two lines at most).
+pub fn empty(ui: &mut Ui, icon: Icon, title: &str, hint: &str) {
+    const BADGE: f32 = 36.0;
+    let room = ui.available_rect_before_wrap();
+    let width = room.width().clamp(0.0, T.size.left - 2.0 * T.space.l);
+    let centered = |text: &str, font: FontId, color: Color32, rows: usize| {
+        let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, color, width);
+        job.wrap.max_rows = rows;
+        job.halign = Align::Center;
+        ui.painter().layout_job(job)
+    };
+    let title_g = centered(title, font_strong(), T.color.text, 1);
+    let hint_g = centered(hint, font_meta(), T.color.text_secondary, 2);
+    let height = BADGE + T.space.m + title_g.size().y + T.space.xs + hint_g.size().y;
+    // Inside a scroll area the room has no bottom: the block then sits at the top.
+    let top = match room.height().is_finite() && room.height() > height {
+        true => room.center().y - height / 2.0,
+        false => room.top() + T.space.l,
+    };
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(room.width(), top - room.top() + height),
+        Sense::hover(),
+    );
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, title));
+    let painter = ui.painter();
+    let x = rect.center().x;
+    let badge = Rect::from_center_size(Pos2::new(x, top + BADGE / 2.0), Vec2::splat(BADGE));
+    painter.circle_filled(badge.center(), BADGE / 2.0, T.color.surface);
+    painter.circle_stroke(
+        badge.center(),
+        BADGE / 2.0 - px(painter) / 2.0,
+        Stroke::new(px(painter), T.color.border),
+    );
+    icons::paint(painter, badge, icon, T.color.text_secondary);
+    let title_y = badge.bottom() + T.space.m;
+    let hint_y = title_y + title_g.size().y + T.space.xs;
+    // A centered galley is laid out around x = 0.
+    painter.galley(Pos2::new(x, title_y), title_g, T.color.text);
+    painter.galley(Pos2::new(x, hint_y), hint_g, T.color.text_secondary);
 }
 
 /// A message line: an error names its cause, a success what was done.
@@ -1440,22 +1475,166 @@ pub fn activity(
     response.on_hover_text(tooltip)
 }
 
-/// The agent's message field: a rounded card with the text, the keys hint and the send
-/// button. `true` when the user sends while `ready` (Enter or the button; Shift+Enter is a
-/// new line).
+/// One segment of a [`capsule`]: its text (cut at `max` wide), the state dot after it, and
+/// `on` for a segment that toggles (`None`: it only reports).
+pub struct Seg<'a> {
+    pub text: &'a str,
+    pub state: State,
+    pub tip: &'a str,
+    pub max: f32,
+    pub on: Option<bool>,
+}
+
+/// Segments side by side in one outlined capsule of control height, a hairline between
+/// them: `[project · copy Ok ● | Local ●]`. Returns each segment's response.
+pub fn capsule(ui: &mut Ui, segs: &[Seg<'_>]) -> Vec<Response> {
+    let pad = T.space.m;
+    let galleys: Vec<_> = segs
+        .iter()
+        .map(|s| {
+            let mut job = egui::text::LayoutJob::simple_singleline(
+                s.text.to_owned(),
+                font_body(),
+                T.color.text,
+            );
+            job.wrap = egui::text::TextWrapping::truncate_at_width(s.max);
+            ui.painter().layout_job(job)
+        })
+        .collect();
+    let widths: Vec<f32> = galleys
+        .iter()
+        .map(|g| (pad + g.size().x + T.space.s + T.size.dot + pad).round())
+        .collect();
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(widths.iter().sum(), T.size.control),
+        Sense::hover(),
+    );
+    let rect = snap(ui.painter(), rect);
+    let last = segs.len().saturating_sub(1);
+    let mut x = rect.left();
+    let mut out = Vec::with_capacity(segs.len());
+    for (k, ((seg, galley), w)) in segs.iter().zip(galleys).zip(widths).enumerate() {
+        let cell = Rect::from_min_max(Pos2::new(x, rect.top()), Pos2::new(x + w, rect.bottom()));
+        x += w;
+        let sense = match seg.on {
+            Some(_) => Sense::click(),
+            None => Sense::hover(),
+        };
+        let response = ui.interact(cell, ui.id().with(("capsule", k)), sense);
+        response.widget_info(|| match seg.on {
+            Some(on) => WidgetInfo::selected(WidgetType::Checkbox, true, on, seg.text),
+            None => WidgetInfo::labeled(WidgetType::Label, true, seg.text),
+        });
+        let painter = ui.painter();
+        if seg.on.is_some() && response.hovered() {
+            let r = T.radius;
+            let corners = egui::CornerRadius {
+                nw: if k == 0 { r } else { 0 },
+                sw: if k == 0 { r } else { 0 },
+                ne: if k == last { r } else { 0 },
+                se: if k == last { r } else { 0 },
+            };
+            painter.rect_filled(cell, corners, T.color.surface_hover);
+        }
+        if k > 0 {
+            vline(painter, cell.left(), cell.y_range(), T.color.border);
+        }
+        let text_pos = Pos2::new(cell.left() + pad, cell.center().y - galley.size().y / 2.0);
+        let dot_x = text_pos.x + galley.size().x + T.space.s + T.size.dot / 2.0;
+        painter.galley(text_pos, galley, T.color.text);
+        icons::dot(painter, Pos2::new(dot_x, cell.center().y), seg.state);
+        if response.has_focus() {
+            focus_ring(painter, cell);
+        }
+        out.push(response.on_hover_text(seg.tip));
+    }
+    outline(ui.painter(), rect, T.radius, T.color.border);
+    out
+}
+
+/// A tool call in the thread, folded on one row: the chevron, the tool's name and a short
+/// summary. A click unfolds `details` (the input, the result) under it.
+pub fn tool_row(ui: &mut Ui, id: Id, name: &str, summary: &str, failed: bool, details: &[&str]) {
+    let open_id = id.with("open");
+    let open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    let response = row(ui, false, name, |ui| {
+        ui.spacing_mut().item_spacing.x = T.space.s;
+        let (glyph, _) = ui.allocate_exact_size(Vec2::splat(T.size.icon), Sense::hover());
+        let chevron = if open {
+            Icon::ChevronDown
+        } else {
+            Icon::ChevronRight
+        };
+        icons::paint(ui.painter(), glyph, chevron, T.color.text_secondary);
+        if failed {
+            let (dot, _) = ui.allocate_exact_size(Vec2::splat(T.size.dot), Sense::hover());
+            icons::dot(ui.painter(), dot.center(), State::Error);
+        }
+        // Not selectable: a click on the text unfolds the row like a click beside it.
+        ui.add(Label::new(rich(name, font_mono(), T.color.text)).selectable(false));
+        ui.add(
+            Label::new(rich(summary, font_meta(), T.color.text_secondary))
+                .truncate()
+                .selectable(false),
+        );
+    });
+    if response.clicked() {
+        ui.data_mut(|d| d.insert_temp(open_id, !open));
+    }
+    if !open {
+        return;
+    }
+    ui.horizontal_top(|ui| {
+        // Under the name, past the chevron's column.
+        ui.add_space(T.space.s + T.size.icon);
+        inset_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            for (k, detail) in details.iter().enumerate() {
+                if k > 0 {
+                    separator(ui);
+                }
+                mono_wrapped(ui, *detail, T.color.text_secondary);
+            }
+        });
+    });
+}
+
+/// The frame of the [`composer`]: three rows of text and the nested send button.
+const COMPOSER_FRAME: f32 = 3.0 * T.size.row + T.space.l;
+/// The line under the frame: the last message and the keys hint.
+const COMPOSER_NOTE: f32 = T.size.row - T.space.s;
+
+/// The height [`composer`] takes, its note line included.
+pub fn composer_height() -> f32 {
+    COMPOSER_FRAME + T.space.xs + COMPOSER_NOTE
+}
+
+/// The agent's message field: one rounded card holding the text and the send button in its
+/// bottom-right corner, then a line of its own under it with `note` (the last message, if
+/// any) on the left and the keys hint on the right, so neither ever covers the other. `true`
+/// when the user sends while `ready` (Enter or the button; Shift+Enter is a new line).
 pub fn composer(
     ui: &mut Ui,
     text: &mut String,
     hint: &str,
     keys: &str,
+    note: Option<(&str, bool)>,
     ready: bool,
     send_tip: &str,
 ) -> bool {
-    let rows = 3;
-    let height = rows as f32 * T.size.row + T.size.control + T.space.m;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    // One allocation for the frame and its note line: the parts are placed in it, so no
+    // child scope can move the parent's cursor between them.
+    let size = Vec2::new(ui.available_width(), composer_height());
+    let (whole, _) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter();
-    let rect = snap(painter, rect);
+    let rect = snap(
+        painter,
+        Rect::from_min_size(whole.min, Vec2::new(whole.width(), COMPOSER_FRAME)),
+    );
+    let line = Rect::from_min_max(
+        Pos2::new(whole.left(), whole.bottom() - COMPOSER_NOTE),
+        whole.max,
+    );
     painter.rect_filled(rect, T.radius_card, T.color.surface);
     let id = ui.id().with("composer");
     let focused = ui.memory(|m| m.has_focus(id));
@@ -1470,10 +1649,14 @@ pub fn composer(
         && ui.input_mut(|i| {
             !i.modifiers.shift && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
         });
-    let inner = rect.shrink2(Vec2::new(T.space.l, T.space.m));
+    let send = Rect::from_min_size(
+        rect.max - Vec2::splat(T.space.s + T.size.control),
+        Vec2::splat(T.size.control),
+    );
+    // The text stops short of the button's column: a long line wraps instead of running under it.
     let field = Rect::from_min_max(
-        inner.min,
-        Pos2::new(inner.right(), inner.bottom() - T.size.control),
+        rect.min + Vec2::new(T.space.l, T.space.m),
+        Pos2::new(send.left() - T.space.s, rect.bottom() - T.space.m),
     );
     let edit = TextEdit::multiline(text)
         .id(id)
@@ -1481,42 +1664,49 @@ pub fn composer(
         .hint_text(rich(hint, font_body(), T.color.text_disabled))
         .frame(egui::Frame::NONE)
         .margin(egui::Margin::ZERO)
-        .desired_rows(rows);
+        .desired_rows(3);
     scrolled(ui, field, id.with("scroll"), edit);
-    let bar = Rect::from_min_max(Pos2::new(inner.left(), field.bottom()), inner.max);
-    ui.painter().text(
-        Pos2::new(bar.left(), bar.center().y),
-        Align2::LEFT_CENTER,
-        keys,
-        font_meta(),
-        T.color.text_disabled,
+    let sense = match ready {
+        true => Sense::click(),
+        false => Sense::hover(),
+    };
+    let response = ui.interact(send, id.with("send"), sense);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ready, send_tip));
+    let painter = ui.painter();
+    let (fill, ink) = match (ready, response.hovered()) {
+        (true, true) => (T.color.action_hover, T.color.on_action),
+        (true, false) => (T.color.action, T.color.on_action),
+        (false, _) => (T.color.surface_hover, T.color.text_disabled),
+    };
+    painter.rect_filled(snap(painter, send), T.radius, fill);
+    icons::paint(painter, send, Icon::Send, ink);
+    if response.has_focus() {
+        focus_ring(painter, send);
+    }
+    let clicked = response.on_hover_text(send_tip).clicked();
+    let mut row = ui.new_child(
+        UiBuilder::new()
+            .max_rect(line.shrink2(Vec2::new(T.space.xs, 0.0)))
+            .layout(Layout::right_to_left(Align::Center)),
     );
-    let send = Rect::from_min_size(
-        Pos2::new(bar.right() - T.size.control, bar.top()),
-        Vec2::splat(T.size.control),
-    );
-    let clicked = ui
-        .scope_builder(UiBuilder::new().max_rect(send), |ui| {
-            ui.add_enabled_ui(ready, |ui| {
-                let response = ui.interact(send, id.with("send"), Sense::click());
-                response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ready, send_tip));
-                let painter = ui.painter();
-                let (fill, ink) = match (ready, response.hovered()) {
-                    (true, true) => (T.color.action_hover, T.color.on_action),
-                    (true, false) => (T.color.action, T.color.on_action),
-                    (false, _) => (T.color.surface_hover, T.color.text_disabled),
-                };
-                painter.rect_filled(snap(painter, send), T.radius, fill);
-                icons::paint(painter, send, Icon::Send, ink);
-                response.on_hover_text(send_tip).clicked()
-            })
-            .inner
-        })
-        .inner;
+    row.spacing_mut().item_spacing.x = T.space.l;
+    // Right to left: the keys keep their room, the note is cut where it would meet them.
+    row.add(Label::new(rich(keys, font_meta(), T.color.text_disabled)).truncate());
+    if let Some((text, error)) = note {
+        row.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = T.space.s;
+            let state = if error { State::Error } else { State::Ok };
+            let (dot, _) =
+                ui.allocate_exact_size(Vec2::new(T.space.s, COMPOSER_NOTE), Sense::hover());
+            icons::dot(ui.painter(), dot.center(), state);
+            ui.add(Label::new(rich(text, font_meta(), T.color.text_secondary)).truncate());
+        });
+    }
     ready && (clicked || enter)
 }
 
-/// A message of the user in the thread: right-aligned, on a raised bubble.
+/// A message of the user in the thread: a raised bubble on the right, its text read from
+/// the left.
 pub fn bubble(ui: &mut Ui, text: &str) {
     let max = (ui.available_width() * 0.8).max(T.size.left);
     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
@@ -1526,7 +1716,10 @@ pub fn bubble(ui: &mut Ui, text: &str) {
             .inner_margin(egui::Margin::symmetric(T.space.l as i8, T.space.m as i8))
             .show(ui, |ui| {
                 ui.set_max_width(max);
-                ui.add(Label::new(rich(text, font_body(), T.color.text)).wrap());
+                // The bubble's own layout is left to right, or the wrapped lines align right.
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    ui.add(Label::new(rich(text, font_body(), T.color.text)).wrap());
+                });
             });
     });
 }
