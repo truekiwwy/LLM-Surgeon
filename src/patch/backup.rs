@@ -273,7 +273,7 @@ fn create_unique(dir: &Path, name: &OsStr) -> Result<(PathBuf, File)> {
     )))
 }
 
-fn restore(backup: &Path, original: &Path) -> io::Result<()> {
+pub(super) fn restore(backup: &Path, original: &Path) -> io::Result<()> {
     let mut tmp = original.as_os_str().to_owned();
     tmp.push(".ws-restore");
     let tmp = PathBuf::from(tmp);

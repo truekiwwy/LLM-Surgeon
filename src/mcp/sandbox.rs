@@ -107,6 +107,12 @@ impl Sandbox {
         self.resolve_in(argument, path, base, true)
     }
 
+    /// Under an `--allow-read` root, even one nested in an `--allow-dir` (which `resolve`
+    /// accepts): for the tools that must never write the source model.
+    pub fn is_read_only(&self, path: &Path) -> bool {
+        resolve_lenient(path).is_some_and(|p| self.read_roots.iter().any(|root| within(&p, root)))
+    }
+
     /// A path a tool only reads: inside an `--allow-dir` or an `--allow-read` root.
     pub fn resolve_read(
         &self,

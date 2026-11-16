@@ -34,6 +34,7 @@ mod backup;
 mod error;
 mod executor;
 pub mod gguf;
+mod restore;
 mod schema;
 pub mod untie;
 mod validate;
@@ -44,6 +45,7 @@ pub use executor::{
     apply_patch, apply_patch_with, ApplyOptions, ApplyReport, OpStats, OperationReport,
     PatchBackend, RollbackHandle, TensorReport, PROJECTOR_TOLERANCE,
 };
+pub use restore::core_restore;
 pub use schema::{
     load_patch, parse_patch, Axis, LayerRange, LayerSelection, LayersField, Operation,
     OperationKind, PatchFile, Projection,

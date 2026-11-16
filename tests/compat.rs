@@ -64,6 +64,13 @@
 //!   gained `pos_projections`, `neg_projections` and `holdout` (the content of
 //!   `<out>.stats.json` and how d′ was measured). Only those three stdout hashes and the
 //!   tool schema hash moved; every extraction file is byte for byte what it was.
+//! - native rollback and CLI / MCP parity: the subcommand `restore` (`--model`, `--backup`,
+//!   `--backup-dir`, `--from-origin`) and its sixteenth tool `surgeon_restore`; the modes
+//!   `judge_sample` and `judge_eval` of `surgeon_bench` (the `bench judge-sample` and `bench
+//!   judge-eval` subcommands) with its three optional properties `responses`, `n` and
+//!   `labels`. Only the tool schema hash moved; no existing option, property or output
+//!   changed. `backend detect --save` stays CLI only on purpose: an agent never rewrites the
+//!   operator's configuration.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
@@ -235,7 +242,7 @@ fn mcp_tools_surface() -> Value {
 #[test]
 fn mcp_tools_surface_is_unchanged() {
     let current = mcp_tools_surface();
-    assert_eq!(current.as_array().unwrap().len(), 15, "fifteen MCP tools");
+    assert_eq!(current.as_array().unwrap().len(), 16, "sixteen MCP tools");
     let reference = read_fixture("mcp_tools_surface.json");
     assert!(
         current == reference,

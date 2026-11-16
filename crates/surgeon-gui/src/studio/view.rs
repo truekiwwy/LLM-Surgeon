@@ -45,12 +45,13 @@ pub enum Target {
 
 /// The tools that write a model: they belong to the surgery form of the Atelier, the others
 /// to Analyses. A tool the engine adds later lands in Analyses.
-pub const SURGERY_TOOLS: [&str; 5] = [
+pub const SURGERY_TOOLS: [&str; 6] = [
     "surgeon_apply",
     "surgeon_extract",
     "surgeon_autotune",
     "surgeon_lora",
     "surgeon_diff",
+    "surgeon_restore",
 ];
 
 pub fn is_surgery(tool: &str) -> bool {
@@ -500,10 +501,10 @@ pub fn is_write_on(entry: &ledger::Entry, path: &str) -> bool {
         && is_surgery(&entry.tool)
         && !estimate::is_preview(&entry.tool, &entry.params)
         && entry.params["model"] == path
-        // Extraction and diff read the model: only these three change it.
+        // Extraction and diff read the model: only these four change it.
         && matches!(
             entry.tool.as_str(),
-            "surgeon_apply" | "surgeon_lora" | "surgeon_autotune"
+            "surgeon_apply" | "surgeon_lora" | "surgeon_autotune" | "surgeon_restore"
         )
 }
 

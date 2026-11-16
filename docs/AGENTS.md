@@ -175,7 +175,15 @@ Les règles « toujours » (`chat/agent.json` : même outil, même ensemble d'ar
 identiques, et pour un chemin du projet le même dossier, `copies/c1/*`) restent lues par la
 politique, mais l'interface n'en crée plus depuis G7 : sans panneau Contrat, elles ne
 pourraient plus être révoquées. Elles n'ont jamais été proposées pour une action destructrice
-(apply en place, fusion LoRA, annulation de pipeline) ni pour un dépassement de budget.
+(apply en place, fusion LoRA, `surgeon_restore`, annulation de pipeline) ni pour un
+dépassement de budget.
+
+Rollback : le brief système (`agent/paths.rs`) dit à l'agent que, dès qu'une contre-mesure
+`surgeon_bench` montre une régression après un `surgeon_apply`, il dispose de
+`surgeon_restore` sur `working_copy_path` (dernière sauvegarde, sauvegardes nommées, ou
+`from_origin` = `origin_path`), et qu'il vérifie `data.identical` et les SHA-256 renvoyés.
+Comme `surgeon_apply`, c'est un outil en place : seulement sur une copie de `copies/`, avec
+une carte d'approbation à chaque appel.
 
 La promotion d'un résultat vers le modèle d'origine ou vers un export n'est jamais
 déclenchable par l'agent : c'est une action humaine, depuis l'onglet Projets, avec le verdict

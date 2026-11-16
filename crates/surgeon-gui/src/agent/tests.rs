@@ -998,6 +998,13 @@ fn forbidden_calls_are_answered_without_running_anything() {
             ..
         }
     ));
+    assert!(matches!(
+        policy::classify("surgeon_restore", &json!({"model": "copies/c1"}), m, &scope),
+        Decision::Approval {
+            allow_always: false,
+            ..
+        }
+    ));
 
     // Through the loop: the answer is an error result and no run exists.
     e.mock = Arc::new(Mock::new(vec![]));

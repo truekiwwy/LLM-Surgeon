@@ -59,6 +59,9 @@ l'utilisateur est pressé. Si une étape échoue, arrête-toi et rapporte l'erre
   Rust pur sur un dossier Qwen2. Appelle `surgeon_backends` d'abord : `backend: "mistralrs"`
   mesure la copie patchée sur le GPU sans conversion quand mistral.rs est installé.
 - Pour une non-régression de génération, utilise `surgeon_eval` sur la copie patchée.
+- Si une mesure montre une régression, remets la copie en état avec `surgeon_restore`
+  (`model` = la copie ; sans autre argument, la dernière sauvegarde ; `from_origin` pour
+  repartir de l'original) et vérifie que `data.identical` vaut `true`.
 
 ## 7. Ne rien annoncer sans mesure
 

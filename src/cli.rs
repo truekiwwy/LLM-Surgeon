@@ -66,6 +66,8 @@ pub enum Commands {
     Inspect(InspectArgs),
     /// Apply a patch.json to a model.
     Apply(ApplyArgs),
+    /// Put a model back byte for byte, from an `apply` backup or from the origin model.
+    Restore(RestoreArgs),
     /// Evaluate a model on prompts.
     Eval(EvalArgs),
     /// Extract a steering vector from a Qwen2, Llama/Mistral or Qwen3 layer (pure Rust, CPU).
@@ -828,6 +830,24 @@ pub struct ApplyArgs {
     pub backup_dir: Option<PathBuf>,
     #[command(flatten)]
     pub surgery: crate::surgery::cli_args::SurgeryApplyArgs,
+}
+
+/// `surgeon restore` (`patch::restore`). Without `--backup` nor `--from-origin`: the newest
+/// `<name>.bak-*` of each backed up file of the model.
+#[derive(Debug, Clone, Args)]
+pub struct RestoreArgs {
+    /// File or folder to put back.
+    #[arg(long)]
+    pub model: PathBuf,
+    /// Backup written by `apply` (`<name>.bak-<stamp>`), repeatable for a sharded model.
+    #[arg(long, conflicts_with = "from_origin")]
+    pub backup: Vec<PathBuf>,
+    /// Where `apply --backup-dir` put the backups, for the detection. Default: next to the model.
+    #[arg(long, conflicts_with_all = ["backup", "from_origin"])]
+    pub backup_dir: Option<PathBuf>,
+    /// Origin model (file or folder): each of its files is copied over the model.
+    #[arg(long)]
+    pub from_origin: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]

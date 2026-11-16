@@ -368,6 +368,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Check(_) => "check",
         Commands::Inspect(_) => "inspect",
         Commands::Apply(_) => "apply",
+        Commands::Restore(_) => "restore",
         Commands::Eval(_) => "eval",
         Commands::Extract(_) => "extract",
         Commands::Schema(_) => "schema",
@@ -436,6 +437,7 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         Commands::Check(args) => core_check(args, deps, &io.ui),
         Commands::Inspect(args) => core_inspect(args, deps, &io.ui),
         Commands::Apply(args) => apply(args, deps, io),
+        Commands::Restore(args) => crate::patch::core_restore(args, deps),
         Commands::Eval(args) => eval(args, deps, &io.ui),
         Commands::Extract(cmd) => extract_cli(cmd, deps, io),
         Commands::Plugins(_) => plugins_list(&io.ui),
@@ -3293,9 +3295,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 out: a.out.clone(),
                 overwrite: a.overwrite,
             };
-            let run = bench::calibration::sample(&req).map_err(invalid)?;
-            let text = bench::calibration::sample_text(&ui, &run);
-            bench_outcome(&run, false, text)
+            core_bench_judge_sample(&req, &ui)
         }
         BenchCommand::JudgeEval(a) => {
             let req = JudgeEvalRequest {
@@ -3663,6 +3663,12 @@ pub fn core_bench_refusal(
         .map_err(|e| bench_failure(&e))?;
     }
     bench_outcome(&run, fail_on_warn, bench_report::refusal_text(ui, &run))
+}
+
+/// `bench judge-sample`: the stratified sample of a refusal run to label by hand.
+pub fn core_bench_judge_sample(req: &SampleRequest, ui: &Ui) -> CoreResult {
+    let run = bench::calibration::sample(req).map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, false, bench::calibration::sample_text(ui, &run))
 }
 
 /// `bench judge-eval`: a llama.cpp judge against human labels. Writes the calibration

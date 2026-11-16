@@ -56,6 +56,12 @@ impl ProjectPaths {
              surgeon_bench, ou mesure-le directement en model avec le même jeu que la copie. \
              Toute écriture dans origin_path est refusée par le serveur : sorties, caches et \
              corrections vont dans project_dir.\n\
+             Rollback : dès qu'une contre-mesure surgeon_bench montre une régression après un \
+             surgeon_apply, remets la copie en état avec surgeon_restore (model = \
+             working_copy_path ; sans autre argument il reprend la dernière sauvegarde \
+             <nom>.bak-*, backup = les data.backups de l'apply pour en viser une, from_origin = \
+             origin_path pour repartir du modèle d'origine), puis vérifie que data.identical \
+             vaut true et que sha256_after égale sha256_source pour chaque fichier.\n\
              Autonomie : le projet est ouvert et tout ce qu'il faut est ci-dessus. Ne t'arrête \
              pas pour demander un chemin ni un dataset : inspecte directement \
              working_copy_path (surgeon_inspect, surgeon_graph), mesure avec le jeu intégré \
@@ -108,6 +114,8 @@ mod tests {
             "builtin:refusals".to_owned(),
             "passe-le en baseline de surgeon_graph".to_owned(),
             "baseline_model de surgeon_bench".to_owned(),
+            "remets la copie en état avec surgeon_restore".to_owned(),
+            "from_origin = origin_path".to_owned(),
             "Ne t'arrête pas pour demander un chemin".to_owned(),
         ] {
             assert!(brief.contains(&needle), "{needle} in {brief}");
