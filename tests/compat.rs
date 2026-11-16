@@ -58,6 +58,12 @@
 //! - read-only roots of the MCP sandbox: the option `mcp --allow-read` (the source model,
 //!   read by analyses and measures, never written). The rewrite added that one entry to
 //!   `cli_surface.json` and nothing else; no tool schema, no output hash moved.
+//! - self-contained engine tools: `eval_dataset` of `surgeon_autotune` is no longer
+//!   required (exactly one of it or the new inline `eval_prompts`; every former call stays
+//!   valid), and it takes `builtin:<set>` like `--eval-dataset`. The `extract --json` data
+//!   gained `pos_projections`, `neg_projections` and `holdout` (the content of
+//!   `<out>.stats.json` and how d′ was measured). Only those three stdout hashes and the
+//!   tool schema hash moved; every extraction file is byte for byte what it was.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

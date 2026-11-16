@@ -4,10 +4,12 @@
 
 use std::path::{Path, PathBuf};
 
-/// The built-in probe sets of the engine (`surgeon_bench`), with what each measures.
+/// The built-in probe sets of the engine, with what each measures and where they go.
 const PROBES: &str = "builtin:math, builtin:logic, builtin:general (surgeon_bench eval : \
                       calcul, logique, connaissances, réponses numériques) et builtin:refusals \
-                      (surgeon_bench refusal : demandes légitimes souvent refusées à tort)";
+                      (surgeon_bench refusal : demandes légitimes souvent refusées à tort) ; \
+                      ils servent aussi d'eval_dataset à surgeon_autotune et de \
+                      *_prompts_file à surgeon_extract";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectPaths {

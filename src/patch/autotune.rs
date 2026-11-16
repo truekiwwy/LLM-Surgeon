@@ -156,7 +156,7 @@ impl std::str::FromStr for L2Reg {
 pub struct AutotuneRequest {
     pub model: PathBuf,
     pub vector: PathBuf,
-    pub eval_dataset: PathBuf,
+    pub eval: EvalSource,
     /// Inclusive `(A, B)`; default every layer up to the readout.
     pub layer_range: Option<(usize, usize)>,
     pub readout_layer: Option<usize>,
@@ -440,6 +440,25 @@ pub struct AutotuneRun {
 
 // ------------------------------------------------------------------ pipeline
 
+/// Where the evaluation prompts come from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EvalSource {
+    /// A JSON / JSONL file, or a `builtin:<set>` embedded in the binary.
+    File(PathBuf),
+    /// The items themselves, as in a file: strings or `{text, target?}`.
+    Inline(Vec<Value>),
+}
+
+impl EvalSource {
+    pub fn load(&self) -> Result<Vec<EvalItem>> {
+        match self {
+            Self::File(path) => load_eval_dataset(path),
+            Self::Inline(values) => eval_items(values.clone())
+                .map_err(|m| AutotuneError::InvalidArgument(format!("eval_prompts : {m}"))),
+        }
+    }
+}
+
 /// One evaluation prompt and its optional target projection.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvalItem {
@@ -447,12 +466,20 @@ pub struct EvalItem {
     pub target: Option<f64>,
 }
 
-/// JSON array (or JSONL) of strings or of `{text, target?}`.
+/// JSON array (or JSONL) of strings or of `{text, target?}`, or the questions of a
+/// `builtin:<set>` (no target: the objective's default applies).
 pub fn load_eval_dataset(path: &Path) -> Result<Vec<EvalItem>> {
     let bad = |m: String| AutotuneError::Input {
         path: path.to_path_buf(),
         message: m,
     };
+    if let Some(set) = crate::bench::builtin::prompts(path) {
+        let texts = set.map_err(bad)?;
+        return Ok(texts
+            .into_iter()
+            .map(|text| EvalItem { text, target: None })
+            .collect());
+    }
     let raw = std::fs::read_to_string(path).map_err(|e| bad(e.to_string()))?;
     let content = raw.trim_start_matches('\u{feff}').trim();
     let values: Vec<Value> = match content.starts_with('[') {
@@ -463,8 +490,13 @@ pub fn load_eval_dataset(path: &Path) -> Result<Vec<EvalItem>> {
             .map(|l| serde_json::from_str(l).map_err(|e| bad(format!("JSONL invalide : {e}"))))
             .collect::<Result<_>>()?,
     };
+    eval_items(values).map_err(bad)
+}
+
+/// Strings or `{text, target?}`: at least one, none empty, finite targets.
+pub fn eval_items(values: Vec<Value>) -> std::result::Result<Vec<EvalItem>, String> {
     if values.is_empty() {
-        return Err(bad("aucun prompt".into()));
+        return Err("aucun prompt".into());
     }
     values
         .into_iter()
@@ -479,19 +511,21 @@ pub fn load_eval_dataset(path: &Path) -> Result<Vec<EvalItem>> {
                         .unwrap_or_default(),
                     match o.get("target") {
                         None | Some(Value::Null) => None,
-                        Some(t) => Some(t.as_f64().filter(|x| x.is_finite()).ok_or_else(|| {
-                            bad(format!("prompt {i} : target doit être un nombre"))
-                        })?),
+                        Some(t) => {
+                            Some(t.as_f64().filter(|x| x.is_finite()).ok_or_else(|| {
+                                format!("prompt {i} : target doit être un nombre")
+                            })?)
+                        }
                     },
                 ),
                 _ => {
-                    return Err(bad(format!(
+                    return Err(format!(
                         "prompt {i} : chaîne ou objet {{text, target?}} attendu"
-                    )))
+                    ))
                 }
             };
             match text.trim().is_empty() {
-                true => Err(bad(format!("prompt {i} : texte vide"))),
+                true => Err(format!("prompt {i} : texte vide")),
                 false => Ok(EvalItem { text, target }),
             }
         })
@@ -806,7 +840,7 @@ pub fn run_with(
             "aucune couche de la plage {first}-{last} n'est ≤ la couche de lecture {readout}"
         )));
     }
-    let items = load_eval_dataset(&req.eval_dataset)?;
+    let items = req.eval.load()?;
     let default_target = match req.objective {
         Objective::Suppress => req.target_projection.or(info.neg_mean),
         Objective::Amplify => req.target_projection.or(info.pos_mean),
@@ -1238,5 +1272,21 @@ mod tests {
             std::fs::write(&p, bad).unwrap();
             assert!(load_eval_dataset(&p).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn eval_sources_builtin_and_inline() {
+        let logic = EvalSource::File("builtin:logic".into()).load().unwrap();
+        assert!(logic.len() >= 15 && logic.iter().all(|i| i.target.is_none()));
+        let refusals = EvalSource::File("builtin:refusals".into()).load().unwrap();
+        assert!(!refusals.is_empty(), "prompts only: no gold answer needed");
+        assert!(EvalSource::File("builtin:poetry".into()).load().is_err());
+        let inline = EvalSource::Inline(vec![
+            Value::from("a"),
+            serde_json::json!({"text": "b", "target": 0.5}),
+        ]);
+        assert_eq!(inline.load().unwrap()[1].target, Some(0.5));
+        let err = EvalSource::Inline(vec![]).load().unwrap_err();
+        assert!(err.to_string().contains("eval_prompts"), "{err}");
     }
 }

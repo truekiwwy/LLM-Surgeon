@@ -33,7 +33,7 @@ use crate::extract::{
     self, ChatTemplate, DTypeChoice, ExtractRequest, MethodOptions, Pooling, Site,
     DEFAULT_LEACE_RCOND, DEFAULT_LEACE_SHRINKAGE,
 };
-use crate::patch::autotune::{parse_layer_range, AutotuneRequest, L2Reg};
+use crate::patch::autotune::{parse_layer_range, AutotuneRequest, EvalSource, L2Reg};
 use crate::patch::{LayerSelection, LayersField, PatchFile, Projection, ValidationIssue};
 use crate::plugin::{unknown_method_message, Registry, DEFAULT_METHOD};
 use crate::ui::Ui;
@@ -218,13 +218,17 @@ pub struct ExtractToolArgs {
     #[schemars(description = "Prompts positifs : ceux qui présentent le comportement à isoler.")]
     pub pos_prompts: Option<Vec<String>>,
     #[serde(default)]
-    #[schemars(description = "Fichier de prompts positifs (tableau JSON, JSONL ou texte).")]
+    #[schemars(
+        description = "Fichier de prompts positifs (tableau JSON, JSONL ou texte), ou un jeu intégré : builtin:refusals, builtin:math, builtin:logic, builtin:general."
+    )]
     pub pos_prompts_file: Option<PathBuf>,
     #[serde(default)]
     #[schemars(description = "Prompts négatifs ou neutres.")]
     pub neg_prompts: Option<Vec<String>>,
     #[serde(default)]
-    #[schemars(description = "Fichier de prompts négatifs (tableau JSON, JSONL ou texte).")]
+    #[schemars(
+        description = "Fichier de prompts négatifs (tableau JSON, JSONL ou texte), ou un jeu intégré : builtin:refusals, builtin:math, builtin:logic, builtin:general."
+    )]
     pub neg_prompts_file: Option<PathBuf>,
     #[serde(default = "default_extract_layer")]
     #[schemars(
@@ -573,6 +577,20 @@ fn sandboxed(
         .map_err(|e| invalid("path_not_allowed", e))
 }
 
+/// A read path that may name a built-in probe set (`builtin:<set>`), embedded in the
+/// binary: no file to sandbox then.
+fn readable_or_builtin(
+    ctx: &ToolContext,
+    argument: &str,
+    path: &Path,
+    base: &Path,
+) -> Result<PathBuf, Outcome> {
+    match crate::bench::builtin::is_builtin(path) {
+        true => Ok(path.to_path_buf()),
+        false => readable(ctx, argument, path, base),
+    }
+}
+
 /// A path the tool only reads: the `--allow-read` roots (the source model) count too.
 fn readable(
     ctx: &ToolContext,
@@ -793,7 +811,7 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Arguments de surgeon_autotune : coefficients α par couche ajustés par ridge sur des réponses mesurées en mémoire."
+    description = "Arguments de surgeon_autotune : coefficients α par couche ajustés par ridge sur des réponses mesurées en mémoire. Fournir exactement un de eval_dataset ou eval_prompts."
 )]
 pub struct AutotuneToolArgs {
     #[schemars(
@@ -804,8 +822,16 @@ pub struct AutotuneToolArgs {
         description = "Fichier direction de surgeon_extract (tenseur direction et métadonnées)."
     )]
     pub vector: PathBuf,
-    #[schemars(description = "Tableau JSON (ou JSONL) de chaînes ou d'objets {text, target?}.")]
-    pub eval_dataset: PathBuf,
+    #[serde(default)]
+    #[schemars(
+        description = "Fichier de prompts d'évaluation : tableau JSON (ou JSONL) de chaînes ou d'objets {text, target?}, ou un jeu intégré sans fichier : builtin:math, builtin:logic, builtin:general, builtin:refusals (ses questions, sans cible)."
+    )]
+    pub eval_dataset: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "Prompts d'évaluation en ligne, mêmes règles qu'un fichier : chaînes ou objets {text, target?} (target : projection visée pour ce prompt)."
+    )]
+    pub eval_prompts: Option<Vec<Value>>,
     #[serde(default)]
     #[schemars(
         description = "Couches candidates \"A-B\" ; défaut : 0 jusqu'à la couche de lecture."
@@ -873,7 +899,17 @@ fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     let request = AutotuneRequest {
         model: readable(ctx, "model", &args.model, &root)?,
         vector: readable(ctx, "vector", &args.vector, &root)?,
-        eval_dataset: readable(ctx, "eval_dataset", &args.eval_dataset, &root)?,
+        eval: match (&args.eval_dataset, args.eval_prompts) {
+            (Some(path), None) => {
+                EvalSource::File(readable_or_builtin(ctx, "eval_dataset", path, &root)?)
+            }
+            (None, Some(items)) => EvalSource::Inline(items),
+            _ => {
+                return Err(bad(
+                    "fournir exactement un de eval_dataset ou eval_prompts".into()
+                ))
+            }
+        },
         layer_range: args
             .target_layer_range
             .as_deref()
@@ -920,7 +956,7 @@ fn prompt_set(
     let texts = match (inline, file) {
         (Some(list), None) => extract::check_texts(list),
         (None, Some(path)) => {
-            let path = readable(ctx, &format!("{set}_prompts_file"), path, root)?;
+            let path = readable_or_builtin(ctx, &format!("{set}_prompts_file"), path, root)?;
             extract::load_prompt_texts(&path)
         }
         _ => {

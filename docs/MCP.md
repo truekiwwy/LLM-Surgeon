@@ -75,7 +75,15 @@ Chaque résultat contient la même enveloppe que `surgeon --json` :
 (couche, site, pooling, `d_prime`, `threshold_accuracy`, `pos_mean_proj`, `neg_mean_proj`,
 `cos_mean_pos_neg`...). Un fichier compagnon `<out>.stats.json` (`"schema": 1`) garde la
 projection de chaque prompt et le seuil ; `surgeon tui --vector` le dessine. Le résultat de
-l'outil donne son chemin dans `data.stats_path`. Seuls Qwen2/Qwen2.5 sont supportés
+l'outil donne son chemin dans `data.stats_path` et en reprend le contenu, sans fichier à
+relire : `data.stats` (`d_prime`, `threshold_accuracy`, `cosine_means`, `raw_diff_norm`,
+moyennes et seuil, mesurés sur tous les prompts), `data.pos_projections`,
+`data.neg_projections`, `data.layer`, et `data.holdout` (`frac`, `stats_basis:
+"all_prompts"`, `n_train_pos`, `n_train_neg`, `n_holdout_pos`, `n_holdout_neg`, et `stats` :
+la méthode réajustée sur la part gardée et mesurée sur la part retenue, `null` sans
+`holdout_frac` ou sous 10 prompts par classe). Les fichiers de prompts acceptent aussi un jeu
+intégré (`builtin:refusals`, `builtin:math`, `builtin:logic`, `builtin:general`).
+Seuls Qwen2/Qwen2.5 sont supportés
 (`model_type: "qwen2"`).
 
 ```bash
@@ -265,7 +273,9 @@ sans rien écrire. Le shard et `config.json` sont sauvegardés (`data.backups`) 
 l'octet près si une opération échoue ensuite. Sans `config.json` à côté du modèle, le patch
 est refusé avant toute écriture.
 
-`surgeon_autotune` (`model`, `vector`, `eval_dataset` requis ; `target_layer_range` "A-B",
+`surgeon_autotune` (`model`, `vector` requis, et exactement un de `eval_dataset` : fichier ou
+jeu intégré `builtin:math|logic|general|refusals`, comme `surgeon autotune --eval-dataset`, ou
+`eval_prompts` : les prompts en ligne, chaînes ou `{text, target?}` ; `target_layer_range` "A-B",
 `readout_layer`, `proj`, `objective` `suppress`/`amplify`/`target`, `target_projection`,
 `l2_reg` nombre ou "auto", `probe_alpha`, `alpha_max`, `min_alpha`, `max_forwards`,
 `max_tokens`, `dtype`, `site`, `pooling`, `chat_template`, `out`, `overwrite`) mesure en
@@ -525,7 +535,8 @@ Serveur lancé avec `--read-only` :
   `surgeon_autotune` `vector`, `eval_dataset`, `out`) ; pour `surgeon_graph`, `model`,
   `out_dir`, `cache_dir`, `vector` et `baseline`.
   est résolu par le système (liens symboliques, `..`) et doit tomber sous un dossier
-  autorisé, sinon `error.kind = "path_not_allowed"`, sans révéler la cible.
+  autorisé, sinon `error.kind = "path_not_allowed"`, sans révéler la cible. Un jeu intégré
+  `builtin:<jeu>` n'est pas un fichier : il est lu dans le binaire, hors sandbox.
 - **Sauvegarde imposée** avant toute écriture, vérifiée par SHA-256 ; une sauvegarde ratée
   bloque l'écriture.
 - **Rollback automatique** sur erreur, NaN/Inf, annulation (`notifications/cancelled`,

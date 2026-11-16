@@ -1373,7 +1373,19 @@
           ]
         },
         "eval_dataset": {
-          "type": "string"
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eval_prompts": {
+          "default": null,
+          "items": true,
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "l2_reg": {
           "default": null,
@@ -1551,7 +1563,6 @@
         }
       },
       "required": [
-        "eval_dataset",
         "model",
         "vector"
       ],

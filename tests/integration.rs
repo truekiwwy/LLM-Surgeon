@@ -5861,6 +5861,115 @@ fn mcp_extract_methods_and_autotune_tool() {
 }
 
 #[test]
+fn mcp_extract_returns_its_stats_and_autotune_takes_builtin_and_inline_sets() {
+    let t = autotune_fixture("F32");
+    let root = t.f.dir.path();
+    // 12 prompts per class: enough for a hold-out of 0.5 (10 per class at least).
+    let make = |words: &[&str]| -> Vec<String> {
+        (0..12)
+            .map(|i| format!("{} {} est {}", FILLER[i % 4], words[i], words[(i + 5) % 12]))
+            .collect()
+    };
+    let tune = |eval: Value| {
+        let mut args =
+            json!({"model": "qwen2-mini", "vector": "h.safetensors", "target_layer_range": "0-2"});
+        args.as_object_mut()
+            .unwrap()
+            .extend(eval.as_object().unwrap().clone());
+        args
+    };
+    let lines = [
+        init("2025-06-18"),
+        call(
+            1,
+            "surgeon_extract",
+            json!({"model": "qwen2-mini", "pos_prompts": make(&POS_WORDS), "neg_prompts": make(&NEG_WORDS), "layer": 2, "out": "h.safetensors", "holdout_frac": 0.5}),
+        ),
+        call(
+            2,
+            "surgeon_autotune",
+            tune(json!({"eval_dataset": "builtin:logic"})),
+        ),
+        call(
+            3,
+            "surgeon_autotune",
+            tune(
+                json!({"eval_prompts": ["le soleil est chaleur", {"text": "la nuit est froid", "target": 0.1}]}),
+            ),
+        ),
+        call(
+            4,
+            "surgeon_autotune",
+            tune(json!({"eval_dataset": "builtin:logic", "eval_prompts": ["x"]})),
+        ),
+        call(5, "surgeon_autotune", tune(json!({}))),
+        call(
+            6,
+            "surgeon_extract",
+            json!({"model": "qwen2-mini", "pos_prompts_file": "builtin:refusals", "neg_prompts": make(&NEG_WORDS), "layer": 2, "out": "b.safetensors"}),
+        ),
+    ];
+    let responses = session(&deps(), &mcp_cfg(root), &lines);
+
+    // Extract: everything of <out>.stats.json, and how d′ was measured, in the response.
+    let (is_error, env) = envelope(&responses, 1);
+    assert!(!is_error, "{env}");
+    let data = &env["data"];
+    let file: Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("h.safetensors.stats.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(data["pos_projections"], file["pos_projections"]);
+    assert_eq!(data["neg_projections"], file["neg_projections"]);
+    assert_eq!(data["stats"]["d_prime"], file["d_prime"]);
+    assert_eq!(
+        data["stats"]["threshold_accuracy"],
+        file["threshold_accuracy"]
+    );
+    assert_eq!(data["stats"]["cosine_means"], file["cos_mean_pos_neg"]);
+    assert_eq!(data["stats"]["raw_diff_norm"], file["raw_diff_norm"]);
+    assert_eq!(data["layer"], 2);
+    let h = &data["holdout"];
+    assert_eq!(h["frac"], 0.5);
+    assert_eq!(h["stats_basis"], "all_prompts");
+    assert_eq!(
+        [
+            &h["n_train_pos"],
+            &h["n_holdout_pos"],
+            &h["n_train_neg"],
+            &h["n_holdout_neg"]
+        ],
+        [&json!(6), &json!(6), &json!(6), &json!(6)]
+    );
+    assert!(h["stats"]["threshold_accuracy"].is_number(), "{h}");
+    assert!(h["stats"].get("d_prime").is_some(), "{h}");
+
+    // Autotune on a built-in set with the vector just extracted, then on inline prompts.
+    let (is_error, env) = envelope(&responses, 2);
+    assert!(!is_error, "{env}");
+    assert!(env["data"]["patch"].is_object(), "{env}");
+    let (is_error, env) = envelope(&responses, 3);
+    assert!(!is_error, "{env}");
+    assert!(env["data"]["patch"].is_object(), "{env}");
+    for id in [4, 5] {
+        let (is_error, env) = envelope(&responses, id);
+        assert!(is_error);
+        assert_eq!(env["error"]["kind"], "invalid_arguments", "{env}");
+    }
+    // A built-in prompt set is no file: the sandbox lets it through.
+    let (_, env) = envelope(&responses, 6);
+    assert_ne!(env["error"]["kind"], "path_not_allowed", "{env}");
+
+    // The CLI takes the same built-in set.
+    let mut args = t.args(&[]);
+    let at = args.iter().position(|a| a == "--eval-dataset").unwrap();
+    args[at + 1] = "builtin:logic".into();
+    let (code, v) = run_args(&deps(), &args);
+    assert_eq!(code, 0, "{v}");
+    assert!(v["data"]["patch"].is_object());
+}
+
+#[test]
 fn linalg_module_has_no_print_and_no_unsafe() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/linalg");
     for entry in std::fs::read_dir(dir).unwrap() {

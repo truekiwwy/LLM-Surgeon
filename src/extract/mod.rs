@@ -170,6 +170,23 @@ impl PromptSet {
     }
 }
 
+/// `stats` always measures the written direction on the prompts it was fit on; with
+/// `holdout_frac`, the method is fit again on the kept prompts and measured on the held-out
+/// ones, which says whether the separation generalizes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HoldoutReport {
+    /// Fraction asked for (0: none).
+    pub frac: f64,
+    /// What `stats` was measured on: `"all_prompts"`, always.
+    pub stats_basis: &'static str,
+    pub n_train_pos: usize,
+    pub n_train_neg: usize,
+    pub n_holdout_pos: usize,
+    pub n_holdout_neg: usize,
+    /// The same statistics, out of sample; null without a hold-out.
+    pub stats: Option<SeparationStats>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExtractRequest {
     pub model_dir: PathBuf,
@@ -195,7 +212,13 @@ pub struct ExtractReport {
     pub n_pos: usize,
     pub n_neg: usize,
     pub dtype_used: String,
+    /// Separation of the written direction, fit and measured on every prompt.
     pub stats: SeparationStats,
+    /// Projection of each prompt on the written direction, as in `<out>.stats.json`.
+    pub pos_projections: Vec<f64>,
+    pub neg_projections: Vec<f64>,
+    /// The train / held-out split and the out-of-sample separation.
+    pub holdout: HoldoutReport,
     pub warnings: Vec<String>,
     pub duration_ms: u128,
     /// Direction method (prompt 11, additive): its registry identifier.
@@ -555,6 +578,7 @@ fn run_pipeline(
         warnings.push("séparation faible (d′ < 1) : direction peu fiable".into());
     }
     warnings.extend(out.warnings);
+    let holdout = holdout_report(method, &ctx, &pos, &neg, cancel, &mut warnings);
 
     if observer.on_event(ExtractEvent::Writing).is_break() {
         return Err(ExtractError::Cancelled);
@@ -654,6 +678,9 @@ fn run_pipeline(
         n_neg: neg.len(),
         dtype_used,
         stats,
+        pos_projections,
+        neg_projections,
+        holdout,
         warnings,
         duration_ms: started.elapsed().as_millis(),
         method: method.id(),
@@ -661,6 +688,70 @@ fn run_pipeline(
         leace_path: leace_out,
         sidecar_paths: sidecar_paths.collect(),
     })
+}
+
+/// The split of `holdout_frac` (from the method parameters), and the method fit again on
+/// the kept prompts then measured on the held-out ones. A refit the method refuses (labels
+/// given per prompt, say) leaves `stats` null with a warning.
+fn holdout_report(
+    method: &dyn ExtractionMethod,
+    ctx: &ExtractContext,
+    pos: &[Vec<f64>],
+    neg: &[Vec<f64>],
+    cancel: &AtomicBool,
+    warnings: &mut Vec<String>,
+) -> HoldoutReport {
+    let frac = ctx
+        .params
+        .get("holdout_frac")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let active = frac > 0.0 && pos.len().min(neg.len()) >= MIN_HOLDOUT_PER_CLASS;
+    let ignored = format!(
+        "--holdout-frac ignoré : au moins {MIN_HOLDOUT_PER_CLASS} prompts par classe requis"
+    );
+    if frac > 0.0 && !active && !warnings.contains(&ignored) {
+        warnings.push(ignored);
+    }
+    let split = |rows: &[Vec<f64>]| {
+        let mask = holdout_mask(rows.len(), if active { frac } else { 0.0 });
+        let (held, train): (Vec<_>, Vec<_>) = rows.iter().zip(mask).partition(|(_, h)| *h);
+        let rows = |v: Vec<(&Vec<f64>, bool)>| v.into_iter().map(|(r, _)| r.clone()).collect();
+        (rows(train), rows(held))
+    };
+    let ((pos_train, pos_held), (neg_train, neg_held)): ((Vec<_>, Vec<_>), (Vec<_>, Vec<_>)) =
+        (split(pos), split(neg));
+    let stats = active
+        .then(|| -> Result<SeparationStats> {
+            // The refit must not hold out again inside its own training part.
+            let mut params = ctx.params.clone();
+            if let Some(p) = params.as_object_mut() {
+                p.insert("holdout_frac".into(), 0.0.into());
+            }
+            let train_ctx = ExtractContext {
+                params: &params,
+                ..*ctx
+            };
+            let acts = ActivationSet {
+                pos: &pos_train,
+                neg: &neg_train,
+            };
+            let fit = method.extract(&train_ctx, &acts, cancel)?;
+            Ok(separation_along(&pos_held, &neg_held, &fit.direction)?.stats)
+        })
+        .and_then(|r| {
+            r.map_err(|e| warnings.push(format!("hold-out non mesuré : {e}")))
+                .ok()
+        });
+    HoldoutReport {
+        frac,
+        stats_basis: "all_prompts",
+        n_train_pos: pos_train.len(),
+        n_train_neg: neg_train.len(),
+        n_holdout_pos: pos_held.len(),
+        n_holdout_neg: neg_held.len(),
+        stats,
+    }
 }
 
 fn invalid_output(message: String) -> ExtractError {

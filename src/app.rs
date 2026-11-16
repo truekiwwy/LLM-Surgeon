@@ -100,7 +100,9 @@ use crate::hardware::{
     self, BudgetPolicy, HardwareBudget, HardwareError, HardwareProbe, SystemProbe, Verdict,
 };
 use crate::kernel::{self, IoConfig, IoMeter, KernelChoice, Level};
-use crate::patch::autotune::{self, AutotuneError, AutotuneEvent, AutotuneRequest, AutotuneRun};
+use crate::patch::autotune::{
+    self, AutotuneError, AutotuneEvent, AutotuneRequest, AutotuneRun, EvalSource,
+};
 use crate::patch::gguf::{self, GgufApplyArgs, GgufApplyError, Requant};
 use crate::patch::{
     self, apply_patch, apply_patch_with, load_patch, untie, validate_patch, ApplyOptions,
@@ -2859,6 +2861,18 @@ fn extract_text(ui: &Ui, report: &ExtractReport) -> String {
     if let Some(diag) = &report.method_diagnostics {
         text.push_str(&method_line(ui, diag));
     }
+    if let Some(h) = &report.holdout.stats {
+        let d_prime = h.d_prime.map_or("∞".to_owned(), |d| format!("{d:.2}"));
+        text.push_str(&format!(
+            "{} d′ {} · accuracy {} on {} + {} held-out prompts
+",
+            ui::badge(ui, "HOLDOUT"),
+            ui::metric(ui, d_prime),
+            ui::metric(ui, format!("{:.0}%", h.threshold_accuracy * 100.0)),
+            report.holdout.n_holdout_pos,
+            report.holdout.n_holdout_neg,
+        ));
+    }
     for path in report.leace_path.iter().chain(&report.sidecar_paths) {
         text.push_str(&format!(
             "{} {}
@@ -3749,7 +3763,7 @@ fn autotune_cli(
     let request = AutotuneRequest {
         model: args.model.clone(),
         vector: args.vector.clone(),
-        eval_dataset: args.eval_dataset.clone(),
+        eval: EvalSource::File(args.eval_dataset.clone()),
         layer_range: args.target_layer_range,
         readout_layer: args.readout_layer,
         proj: args.proj,
