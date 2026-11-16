@@ -30,7 +30,7 @@ type ModelsTask = (String, Task<Result<Vec<String>, String>>);
 type KeyTask = (String, Secret, Task<Result<Vec<String>, String>>);
 
 /// The sign-in check of a CLI connection.
-type CliTask = (String, Task<Result<(), String>>);
+type CliTask = (String, Task<Result<Vec<String>, String>>);
 
 /// One line of the conversation list: id, title, creation time.
 pub type ConvLine = (String, String, u64);
@@ -296,13 +296,32 @@ impl Hub {
             .map_or(0, |s| s.cards.len() + usize::from(s.question.is_some()))
     }
 
-    /// The project uses `pick` (connection and model), or the global default with `None`.
-    pub fn pick(&mut self, pick: Option<(String, Option<String>)>) {
-        (self.agent.connection, self.agent.model) = match pick {
-            Some((id, model)) => (Some(id), model),
-            None => (None, None),
-        };
+    /// The project uses connection `id`, or the global default with `None`. The model follows
+    /// the connection (the one last picked with it, else its default), so a model of another
+    /// provider is never sent.
+    pub fn pick_connection(&mut self, id: Option<String>) {
+        self.agent.model = id
+            .as_deref()
+            .and_then(|id| self.cfg.connection(id))
+            .and_then(Connection::preferred_model)
+            .map(str::to_owned);
+        self.agent.connection = id;
         self.price_model = self.model().unwrap_or_default();
+        self.agent_changed();
+    }
+
+    /// The project uses `model` with its current connection, remembered for that connection.
+    pub fn pick_model(&mut self, model: String) {
+        let Some(id) = self.connection().map(|c| c.id.clone()) else {
+            return;
+        };
+        if let Some(c) = self.cfg.connections.iter_mut().find(|c| c.id == id) {
+            c.last_model = Some(model.clone());
+        }
+        self.save_cfg();
+        self.agent.connection = Some(id);
+        self.price_model = model.clone();
+        self.agent.model = Some(model);
         self.agent_changed();
     }
 
@@ -365,6 +384,7 @@ impl Hub {
             base_url: base.to_owned(),
             models,
             default_model: None,
+            last_model: None,
             verified: false,
             prices: Default::default(),
         };
@@ -537,6 +557,9 @@ impl Hub {
             let kind = self.cfg.connection(&id).map(|c| c.kind);
             if let Some(c) = self.cfg.connections.iter_mut().find(|c| c.id == id) {
                 c.verified = result.is_ok();
+                if let Some(models) = result.as_ref().ok().filter(|m| !m.is_empty()) {
+                    c.models = models.clone();
+                }
             }
             self.save_cfg();
             self.login = match (&result, kind) {
@@ -544,7 +567,7 @@ impl Hub {
                 _ => None,
             };
             self.message = Some(match result {
-                Ok(()) => (format!("{id} : connecté, prêt"), false),
+                Ok(_) => (format!("{id} : connecté, prêt"), false),
                 Err(e) => (format!("{id} : non connecté : {e}"), true),
             });
         }

@@ -373,26 +373,41 @@ fn start(ui: &mut Ui, app: &mut SurgeonApp, mode: Mode) {
     ui.ctx().request_repaint();
 }
 
-/// `connection · model`: the ready connections and their models, the global default, and
-/// a way to the settings when what is wanted is not there.
+/// The provider, then its model: the provider's choice resets the model, so the model list
+/// only ever holds what the active provider takes.
 pub fn picker(ui: &mut Ui, app: &mut SurgeonApp, width: f32) {
+    let (conn_w, model_w) = (width * 0.4, width * 0.6);
+    // The title bar lays out right to left: the model goes first to land after its provider.
+    match ui.layout().prefer_right_to_left() {
+        true => {
+            model_picker(ui, app, model_w);
+            connection_picker(ui, app, conn_w);
+        }
+        false => {
+            connection_picker(ui, app, conn_w);
+            model_picker(ui, app, model_w);
+        }
+    }
+}
+
+/// The ready connections, the global default, and a way to the settings.
+fn connection_picker(ui: &mut Ui, app: &mut SurgeonApp, width: f32) {
     #[derive(Clone, PartialEq)]
     enum Pick {
         /// The global default (no project choice).
         Default,
-        Use(String, Option<String>),
+        Use(String),
         Configure,
     }
     let hub = &app.agents;
-    let shown = match (hub.connection(), hub.model()) {
-        (Some(conn), Some(model)) => format!("{} · {model}", conn.label),
-        (Some(conn), None) => conn.label.clone(),
-        (None, _) => t("picker.none").into(),
-    };
-    let current = match &hub.agent.connection {
-        Some(id) => Pick::Use(id.clone(), hub.agent.model.clone()),
-        None => Pick::Default,
-    };
+    let shown = hub
+        .connection()
+        .map_or_else(|| t("picker.none").to_owned(), |c| c.label.clone());
+    let current = hub
+        .agent
+        .connection
+        .clone()
+        .map_or(Pick::Default, Pick::Use);
     let default = hub
         .cfg
         .default_connection
@@ -404,7 +419,7 @@ pub fn picker(ui: &mut Ui, app: &mut SurgeonApp, width: f32) {
         .connections
         .iter()
         .filter(|c| c.ready())
-        .cloned()
+        .map(|c| (c.id.clone(), c.label.clone()))
         .collect();
     let mut picked = current.clone();
     c::select(ui, "session-picker", &shown, width, |ui| {
@@ -412,28 +427,60 @@ pub fn picker(ui: &mut Ui, app: &mut SurgeonApp, width: f32) {
             let text = tf("picker.default", &[("connection", label)]);
             c::option(ui, &mut picked, Pick::Default, &text);
         }
-        for conn in &ready {
-            if conn.models.is_empty() {
-                c::option(
-                    ui,
-                    &mut picked,
-                    Pick::Use(conn.id.clone(), None),
-                    &conn.label,
-                );
-            }
-            for m in &conn.models {
-                let text = format!("{} · {m}", conn.label);
-                let value = Pick::Use(conn.id.clone(), Some(m.clone()));
-                c::option(ui, &mut picked, value, &text);
-            }
+        for (id, label) in ready {
+            c::option(ui, &mut picked, Pick::Use(id), &label);
         }
         c::option(ui, &mut picked, Pick::Configure, t("picker.configure"));
     });
     if picked != current {
         match picked {
-            Pick::Default => app.agents.pick(None),
-            Pick::Use(id, model) => app.agents.pick(Some((id, model))),
+            Pick::Default => app.agents.pick_connection(None),
+            Pick::Use(id) => app.agents.pick_connection(Some(id)),
             Pick::Configure => configure(app),
+        }
+    }
+}
+
+/// The models of the active connection, and a free field for a name it does not list.
+fn model_picker(ui: &mut Ui, app: &mut SurgeonApp, width: f32) {
+    let hub = &mut app.agents;
+    let Some(choices) = hub.connection().map(|c| c.model_choices()) else {
+        return;
+    };
+    // The free field lives in this place's memory: the title bar and the form each have one.
+    let id = ui.id().with("custom-model");
+    if let Some(mut typed) = ui.data(|d| d.get_temp::<String>(id)) {
+        let field = c::field_mono(ui, &mut typed, t("picker.model.custom.hint"), width);
+        if field.lost_focus() {
+            ui.data_mut(|d| d.remove::<String>(id));
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !typed.trim().is_empty() {
+                hub.pick_model(typed.trim().to_owned());
+            }
+            return;
+        }
+        if !field.has_focus() {
+            field.request_focus();
+        }
+        ui.data_mut(|d| d.insert_temp(id, typed));
+        return;
+    }
+    let current = hub.model();
+    let shown = current
+        .clone()
+        .unwrap_or_else(|| t("picker.model.default").to_owned());
+    let mut picked = current.clone();
+    let mut custom = false;
+    c::select(ui, "model-picker", &shown, width, |ui| {
+        for m in &choices {
+            c::option(ui, &mut picked, Some(m.clone()), m);
+        }
+        c::option(ui, &mut custom, true, t("picker.model.custom"));
+    });
+    if custom {
+        ui.data_mut(|d| d.insert_temp(id, current.unwrap_or_default()));
+    } else if picked != current {
+        if let Some(model) = picked {
+            hub.pick_model(model);
         }
     }
 }
@@ -486,7 +533,10 @@ fn session_header(ui: &mut Ui, app: &mut SurgeonApp) {
     let model = app
         .agents
         .conversation()
-        .map(|c| format!("{} · {}", c.connection, c.model))
+        .map(|c| match c.model.as_str() {
+            "" => format!("{} · {}", c.connection, t("picker.model.default")),
+            m => format!("{} · {m}", c.connection),
+        })
         .unwrap_or_default();
     ui.horizontal_centered(|ui| {
         let icon = match mission {

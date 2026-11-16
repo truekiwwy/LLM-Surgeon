@@ -171,8 +171,9 @@ pub fn login_command(kind: ProviderKind) -> &'static str {
 }
 
 /// Whether the CLI found on `path` reports a signed-in account; the error says what failed.
-/// Antigravity is checked inside its isolated profile, which is removed afterwards.
-pub fn signed_in(kind: ProviderKind, path: Option<&OsStr>) -> Result<(), String> {
+/// Antigravity is checked inside its isolated profile, which is removed afterwards. `Ok`
+/// carries the models the check listed (OpenCode, Antigravity), empty for the others.
+pub fn signed_in(kind: ProviderKind, path: Option<&OsStr>) -> Result<Vec<String>, String> {
     let bin = find_on_path(binary_name(kind), path)
         .ok_or_else(|| format!("{} introuvable dans le PATH", kind.name()))?;
     let agy = match kind {
@@ -190,7 +191,10 @@ pub fn signed_in(kind: ProviderKind, path: Option<&OsStr>) -> Result<(), String>
         home.clear();
     }
     match checked {
-        Some((true, _)) => Ok(()),
+        Some((true, text)) => Ok(match status_args(kind).contains(&"models") {
+            true => model_lines(&text),
+            false => Vec::new(),
+        }),
         Some((false, text)) => Err(crate::logging::mask_secrets(
             text.lines()
                 .map(str::trim)
@@ -199,6 +203,19 @@ pub fn signed_in(kind: ProviderKind, path: Option<&OsStr>) -> Result<(), String>
         )),
         None => Err(format!("{} ne répond pas", kind.name())),
     }
+}
+
+/// The ids of a `models` listing: one per line (`provider/model` for OpenCode). Lines with
+/// spaces (headers, notices) are not ids.
+pub fn model_lines(text: &str) -> Vec<String> {
+    let mut ids: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.contains(char::is_whitespace) && !l.ends_with(':'))
+        .map(str::to_owned)
+        .collect();
+    ids.dedup();
+    ids
 }
 
 type Env = Vec<(OsString, OsString)>;

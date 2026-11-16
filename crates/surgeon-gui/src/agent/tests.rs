@@ -528,6 +528,7 @@ fn local_only_mode_never_opens_a_remote_connection() {
         base_url: String::new(),
         models: vec![],
         default_model: None,
+        last_model: None,
         verified: false,
         prices: Default::default(),
     };
@@ -1276,6 +1277,7 @@ fn an_api_key_never_lands_in_a_file_an_export_or_an_error() {
         base_url: api.base(),
         models: vec!["m".into()],
         default_model: None,
+        last_model: None,
         verified: false,
         prices: Default::default(),
     };
@@ -1671,6 +1673,7 @@ fn a_project_inherits_the_default_connection_until_it_picks_its_own() {
         base_url: "http://127.0.0.1:11434/v1".into(),
         models: models.iter().map(|m| m.to_string()).collect(),
         default_model: default_model.map(str::to_owned),
+        last_model: None,
         verified: false,
         prices: Default::default(),
     };
@@ -1687,12 +1690,36 @@ fn a_project_inherits_the_default_connection_until_it_picks_its_own() {
         Some("b"),
         "the connection's default model"
     );
-    hub.pick(Some(("lmstudio".into(), None)));
+    hub.pick_connection(Some("lmstudio".into()));
     assert_eq!(hub.connection().unwrap().id, "lmstudio");
     assert_eq!(hub.model().as_deref(), Some("x"), "its first model");
-    hub.pick(Some(("ollama".into(), Some("a".into()))));
+    hub.pick_connection(Some("ollama".into()));
+    assert_eq!(
+        hub.model().as_deref(),
+        Some("b"),
+        "the new provider's default"
+    );
+    hub.pick_model("a".into());
     assert_eq!(hub.model().as_deref(), Some("a"), "the project's own model");
-    hub.pick(None);
+    hub.pick_connection(Some("lmstudio".into()));
+    assert_eq!(
+        hub.model().as_deref(),
+        Some("x"),
+        "never the other provider's model"
+    );
+    hub.pick_connection(Some("ollama".into()));
+    assert_eq!(
+        hub.model().as_deref(),
+        Some("a"),
+        "the last one picked there"
+    );
+    let saved = AgentsConfig::load(&dir.path().join("agents.json")).unwrap();
+    assert_eq!(
+        saved.connection("ollama").unwrap().last_model.as_deref(),
+        Some("a"),
+        "remembered in agents.json"
+    );
+    hub.pick_connection(None);
     assert_eq!(hub.model().as_deref(), Some("b"), "back to the default");
     assert!(!hub.cfg.connection("untested").unwrap().ready());
 }
@@ -1797,7 +1824,21 @@ fn a_signed_in_cli_passes_its_own_status_check() {
         "absent"
     );
     fake_cli(dir.path(), "codex", "--json", &[]);
-    assert_eq!(runtime::signed_in(ProviderKind::Codex, Some(&path)), Ok(()));
+    assert_eq!(
+        runtime::signed_in(ProviderKind::Codex, Some(&path)),
+        Ok(vec![])
+    );
+    // OpenCode's check is its model list: the picker offers what it printed.
+    fake_cli(
+        dir.path(),
+        "opencode",
+        "",
+        &["ollama/qwen:latest", "opencode/big-pickle"],
+    );
+    assert_eq!(
+        runtime::signed_in(ProviderKind::OpenCode, Some(&path)).unwrap(),
+        ["ollama/qwen:latest", "opencode/big-pickle"]
+    );
     assert_eq!(
         runtime::login_command(ProviderKind::ClaudeCode),
         "claude auth login"
@@ -1837,4 +1878,116 @@ fn a_cli_write_of_focus_or_plan_is_taken_once_and_only_when_newer_than_the_run()
         super::view::read_if_newer(&dir.path().join("plan.json"), &mut seen),
         None
     );
+}
+
+#[test]
+fn each_provider_offers_only_its_own_models() {
+    let conn = |kind, models: &[&str]| Connection {
+        id: "c".into(),
+        kind,
+        label: "c".into(),
+        base_url: String::new(),
+        models: models.iter().map(|m| m.to_string()).collect(),
+        default_model: None,
+        last_model: None,
+        verified: true,
+        prices: Default::default(),
+    };
+    assert_eq!(
+        conn(ProviderKind::ClaudeCode, &[]).model_choices(),
+        ["sonnet", "opus", "haiku", "fable"]
+    );
+    assert_eq!(
+        conn(ProviderKind::Codex, &[]).model_choices(),
+        ["gpt-5-codex", "o3", "o4-mini"]
+    );
+    for kind in [
+        ProviderKind::OpenCode,
+        ProviderKind::Antigravity,
+        ProviderKind::Anthropic,
+        ProviderKind::OpenAi,
+        ProviderKind::Compatible,
+    ] {
+        assert!(
+            conn(kind, &[]).model_choices().is_empty(),
+            "{kind:?}: listed by the provider, never invented"
+        );
+    }
+    assert_eq!(
+        conn(ProviderKind::Codex, &["gpt-x"]).model_choices(),
+        ["gpt-x"],
+        "a listed model wins over the built-in names"
+    );
+    assert_eq!(
+        conn(ProviderKind::ClaudeCode, &[]).preferred_model(),
+        None,
+        "no pick yet: the CLI's own default"
+    );
+    assert_eq!(
+        runtime::model_lines(
+            "Models:
+ollama/qwen:latest
+
+  opencode/big-pickle  
+note: x y
+"
+        ),
+        ["ollama/qwen:latest", "opencode/big-pickle"]
+    );
+}
+
+#[test]
+fn every_cli_runtime_gets_the_picked_model_as_its_model_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let home = runtime::AgyHome {
+        profile: dir.path().join("profiles").join("agy"),
+        user: dir.path().join("user"),
+    };
+    std::fs::create_dir_all(home.user.join(".gemini")).unwrap();
+    for name in ["oauth_creds.json", "google_accounts.json"] {
+        std::fs::write(home.user.join(".gemini").join(name), b"{}").unwrap();
+    }
+    let surgeon = dir.path().join("surgeon.exe");
+    let scratch = dir.path().join("scratch");
+    for (kind, model) in [
+        (ProviderKind::ClaudeCode, "opus"),
+        (ProviderKind::Codex, "o3"),
+        (ProviderKind::OpenCode, "ollama/qwen"),
+        (ProviderKind::Antigravity, "gemini-pro"),
+    ] {
+        let detected = runtime::Detected {
+            kind,
+            path: dir.path().join("cli.exe"),
+            version: "1".into(),
+            missing: Vec::new(),
+        };
+        let args = |model| -> Vec<String> {
+            let l = runtime::launch(&runtime::LaunchInput {
+                detected: &detected,
+                surgeon: &surgeon,
+                mode: AgentMode::Ask,
+                project: &project,
+                source_dir: None,
+                model,
+                prompt: "p",
+                scratch: &scratch,
+                agy: Some(&home),
+            })
+            .unwrap();
+            l.args.iter().map(|a| a.to_string_lossy().into()).collect()
+        };
+        let with = args(Some(model));
+        let at = with.iter().position(|a| a == "--model");
+        assert_eq!(
+            at.map(|i| with[i + 1].as_str()),
+            Some(model),
+            "{kind:?}: {with:?}"
+        );
+        assert!(
+            !args(None).contains(&"--model".to_owned()),
+            "{kind:?}: no pick, the CLI's own default"
+        );
+    }
 }

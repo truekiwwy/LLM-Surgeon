@@ -82,6 +82,16 @@ impl ProviderKind {
         matches!(self, Self::Anthropic | Self::OpenAi)
     }
 
+    /// The `--model` names of a CLI that cannot list its own, offered until a list comes
+    /// back. API connections list theirs from the provider, never from here.
+    pub fn fallback_models(self) -> &'static [&'static str] {
+        match self {
+            Self::ClaudeCode => &["sonnet", "opus", "haiku", "fable"],
+            Self::Codex => &["gpt-5-codex", "o3", "o4-mini"],
+            _ => &[],
+        }
+    }
+
     pub fn default_base(self) -> &'static str {
         match self {
             Self::Anthropic => anthropic::DEFAULT_BASE,
@@ -120,6 +130,9 @@ pub struct Connection {
     /// The model a project gets when it does not pick one.
     #[serde(default)]
     pub default_model: Option<String>,
+    /// The model last picked with this connection, picked again when a project switches to it.
+    #[serde(default)]
+    pub last_model: Option<String>,
     /// A CLI runtime whose sign-in check passed (Tester).
     #[serde(default)]
     pub verified: bool,
@@ -149,6 +162,25 @@ impl Connection {
         self.default_model
             .as_deref()
             .or(self.models.first().map(String::as_str))
+    }
+
+    /// The models the pickers offer: the last list, else the CLI's built-in names.
+    pub fn model_choices(&self) -> Vec<String> {
+        match self.models.is_empty() {
+            true => self
+                .kind
+                .fallback_models()
+                .iter()
+                .map(|m| (*m).to_owned())
+                .collect(),
+            false => self.models.clone(),
+        }
+    }
+
+    /// The model a switch to this connection lands on: the last one picked with it, else the
+    /// one it hands down (`None`: a CLI's own default, no `--model`).
+    pub fn preferred_model(&self) -> Option<&str> {
+        self.last_model.as_deref().or(self.inherited_model())
     }
 
     /// Whether requests stay on this machine (CLI runtimes reach their own servers).
