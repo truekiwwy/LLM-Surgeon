@@ -37,9 +37,11 @@ impl ProjectPaths {
 
     /// The paths and the autonomy rules, for the system prompt and the CLI prompt.
     pub fn brief(&self) -> String {
+        // Plain `C:\...`: a verbatim `\\?\` prefix breaks PowerShell's Join-Path in CLI runs.
+        let plain = |p: &Path| weight_surgeon::graph::model::plain_path(p.to_path_buf());
         let shown = |p: &Option<PathBuf>, none: &str| {
-            p.as_ref()
-                .map_or(none.to_owned(), |p| p.display().to_string())
+            p.as_deref()
+                .map_or(none.to_owned(), |p| plain(p).display().to_string())
         };
         format!(
             "Chemins absolus du projet :\n\
@@ -54,7 +56,7 @@ impl ProjectPaths {
              réellement ambigu l'exige (les écritures passent de toute façon par une \
              approbation). Chaque outil surgeon_* renvoie un run_id : cite-le dans \
              record_finding.",
-            project = self.project.display(),
+            project = plain(&self.project).display(),
             origin = shown(&self.origin, "aucun"),
             copy = shown(
                 &self.copy,
@@ -99,6 +101,21 @@ mod tests {
             "Ne t'arrête pas pour demander un chemin".to_owned(),
         ] {
             assert!(brief.contains(&needle), "{needle} in {brief}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_brief_never_shows_a_verbatim_prefix() {
+        let paths = ProjectPaths {
+            project: PathBuf::from(r"\\?\C:\work\p"),
+            origin: Some(PathBuf::from(r"\\?\C:\models\m")),
+            copy: Some(PathBuf::from(r"\\?\C:\work\p\copies\copy-1")),
+        };
+        let brief = paths.brief();
+        assert!(!brief.contains(r"\\?\"), "{brief}");
+        for needle in [r"C:\work\p", r"C:\models\m", r"C:\work\p\copies\copy-1"] {
+            assert!(brief.contains(needle), "{needle} in {brief}");
         }
     }
 }

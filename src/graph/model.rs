@@ -30,7 +30,7 @@ const FAST_HASH_WINDOW: u64 = 1 << 20;
 
 /// `canonicalize` returns verbatim `\\?\C:\...` paths on Windows; the report and the MCP
 /// envelope are nicer, and external tools safer, with the plain short form.
-fn plain_path(path: PathBuf) -> PathBuf {
+pub fn plain_path(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
         let plain = path

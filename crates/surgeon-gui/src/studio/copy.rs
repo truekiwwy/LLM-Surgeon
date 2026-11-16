@@ -33,11 +33,37 @@ pub fn plan(source: &Path) -> Result<CopyPlan, String> {
         }
         false => vec![source.to_path_buf()],
     };
+    sized(files)
+}
+
+fn sized(files: Vec<PathBuf>) -> Result<CopyPlan, String> {
     let mut bytes = 0;
     for f in &files {
-        bytes += std::fs::metadata(f).map_err(io)?.len();
+        bytes += std::fs::metadata(f)
+            .map_err(|e| format!("{} : {e}", f.display()))?
+            .len();
     }
     Ok(CopyPlan { files, bytes })
+}
+
+/// The folder a model lives in: `source` itself, or the parent of a weights file picked inside
+/// a Hugging Face model folder (one holding `config.json`), whose companions inference needs.
+pub fn model_root(source: &Path) -> &Path {
+    match source.parent() {
+        Some(dir) if source.is_file() && dir.join("config.json").is_file() => dir,
+        _ => source,
+    }
+}
+
+/// What a working copy holds: every visible top-level file of [`model_root`] (config,
+/// tokenizer, chat template, shard index, shards), never dotfiles like `.gitattributes`.
+pub fn copy_plan(source: &Path) -> Result<CopyPlan, String> {
+    let mut files = plan(model_root(source))?.files;
+    files.retain(|f| {
+        !f.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+    });
+    sized(files)
 }
 
 /// Free bytes on the volume holding `dir` (the mount point that is its longest prefix).
@@ -77,7 +103,7 @@ pub fn make(
     cancel: &AtomicBool,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<PathBuf, String> {
-    let plan = plan(source)?;
+    let plan = copy_plan(source)?;
     check_space(plan.bytes, free)?;
     let target = copies.join(id);
     if target.exists() {
@@ -163,6 +189,37 @@ mod tests {
         let copy = make(&src, ws.path(), "c", u64::MAX, &never, |_, _| {}).unwrap();
         assert_eq!(copy, ws.path().join("c").join("m.gguf"));
         assert_eq!(std::fs::read(copy).unwrap(), b"gguf");
+    }
+
+    #[test]
+    fn a_weights_file_picked_in_a_model_folder_brings_its_companions() {
+        let ws = tempfile::tempdir().unwrap();
+        let src = model(ws.path());
+        for name in ["tokenizer.json", "chat_template.jinja", ".gitattributes"] {
+            std::fs::write(src.join(name), name).unwrap();
+        }
+        std::fs::create_dir_all(src.join(".cache")).unwrap();
+        let weights = src.join("model.safetensors");
+        // The studio holds the source open for reading while it copies.
+        #[cfg(windows)]
+        let _held = super::super::lock::lock(&weights).unwrap();
+        let never = AtomicBool::new(false);
+        let copy = make(&weights, ws.path(), "c", u64::MAX, &never, |_, _| {}).unwrap();
+        assert_eq!(copy, ws.path().join("c").join("model.safetensors"));
+        let mut names: Vec<_> = std::fs::read_dir(ws.path().join("c"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "chat_template.jinja",
+                "config.json",
+                "model.safetensors",
+                "tokenizer.json"
+            ]
+        );
     }
 
     #[test]

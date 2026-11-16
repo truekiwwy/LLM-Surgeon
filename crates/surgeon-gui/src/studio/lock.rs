@@ -17,11 +17,12 @@ pub struct SourceLock {
     pub files: usize,
 }
 
-/// Locks `source`, a weights file or a model folder (every file and folder under it).
+/// Locks `source`, a weights file or a model folder (every file and folder under it). A file
+/// picked inside a model folder locks that folder: the working copy reads its companions too.
 pub fn lock(source: &Path) -> Result<SourceLock, String> {
     let mut handles = Vec::new();
     let mut files = 0;
-    let mut pending = vec![source.to_path_buf()];
+    let mut pending = vec![super::copy::model_root(source).to_path_buf()];
     while let Some(path) = pending.pop() {
         let dir = path.is_dir();
         if dir {
