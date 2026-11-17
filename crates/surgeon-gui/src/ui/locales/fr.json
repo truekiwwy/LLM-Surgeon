@@ -1,6 +1,12 @@
 {
   "action.cancel": "Annuler",
+  "activity.all": "toutes les couches",
+  "activity.apply": "Patch {target}…",
+  "activity.autotune": "Autotune {target}…",
+  "activity.bench": "Benchmark {target}…",
   "activity.commands": "Commandes ({key})",
+  "activity.extract": "Extraction {target}…",
+  "activity.inspect": "Inspection {target}…",
   "age.days": "{n} j",
   "age.hours": "{n} h",
   "age.minutes": "{n} min",

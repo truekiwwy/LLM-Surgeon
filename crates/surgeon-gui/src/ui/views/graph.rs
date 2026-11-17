@@ -13,6 +13,7 @@ use super::super::icons::{Icon, State};
 use super::super::layout::{self, Part, Regions};
 use super::super::theme::TOKENS as T;
 use super::{explorer, num, opt};
+use crate::agent::activity;
 use crate::app::{LayoutMode, SurgeonApp};
 use crate::camera::Orbit;
 use crate::source::Step;
@@ -144,6 +145,10 @@ fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
         Some(run) => app.layer.fill(run, step),
         None => app.layer = Layer::default(),
     }
+    let activity = match app.agents.busy() {
+        true => app.agents.conversation().and_then(activity::current),
+        false => None,
+    };
     let view = View {
         step,
         blend,
@@ -152,6 +157,8 @@ fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
         selected,
         targets: &targets,
         layer: run.is_some().then_some(&app.layer),
+        activity: activity.as_ref(),
+        animate: app.motion,
     };
     if let Some(click) = viewport::show(ui, &view, &mut app.camera, &mut app.buffers) {
         app.selected = click.map(|i| step.report.nodes[i].id.clone());

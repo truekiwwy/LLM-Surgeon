@@ -494,8 +494,8 @@ impl SurgeonApp {
         };
         let node = &step.report.nodes[i];
         self.camera.target = match self.layout {
-            LayoutMode::Column => node.pos_column,
-            LayoutMode::Constellation => node.pos_constellation,
+            LayoutMode::Column => step.scene.column[i],
+            LayoutMode::Constellation => step.scene.helix[i],
         };
         self.open_layers.insert(node.layer);
         self.selected = Some(node.id.clone());
@@ -1003,10 +1003,12 @@ mod tests {
         app.agents.session = Some(session);
         poll_until(&mut app, &ctx, |a| a.focus.is_some());
         app.poll(&ctx);
-        let node = report.nodes.iter().find(|n| n.id == "L1.mlp_out").unwrap();
+        let step = app.timeline.current().unwrap();
+        let i = step.index["L1.mlp_out"];
+        let (node, centre) = (&report.nodes[i], step.scene.column[i]);
         assert_eq!(node.tensor, tensor);
         assert_eq!(app.selected.as_deref(), Some("L1.mlp_out"));
-        assert_eq!(app.camera.target, node.pos_column);
+        assert_eq!(app.camera.target, centre);
         assert!(app.open_layers.contains(&Some(1)));
         assert_eq!(app.tab, Tab::Agent);
 
@@ -1025,7 +1027,7 @@ mod tests {
         app.poll(&ctx);
         assert_eq!(app.timeline.current().unwrap().report.parameters.rank, 8);
         assert_eq!(app.selected.as_deref(), Some("L1.mlp_out"));
-        assert_eq!(app.camera.target, node.pos_column);
+        assert_eq!(app.camera.target, centre);
     }
 
     #[test]

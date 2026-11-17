@@ -199,8 +199,8 @@ pub fn bold() -> FontFamily {
     FontFamily::Name("bold".into())
 }
 
-/// The three role groups of a graph node. A role reads by the shape of its node, color is
-/// kept for data and selection.
+/// The three role groups of a graph node. A role reads by its color and, for who cannot tell
+/// the colors apart, by the shape of its node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoleShape {
     Circle,
@@ -213,6 +213,39 @@ pub const fn role_shape(role: GraphRole) -> RoleShape {
         GraphRole::AttnOut | GraphRole::Q | GraphRole::K | GraphRole::V => RoleShape::Circle,
         GraphRole::Gate | GraphRole::Up | GraphRole::MlpOut => RoleShape::Square,
         GraphRole::Embed | GraphRole::LmHead => RoleShape::Diamond,
+    }
+}
+
+/// The 3D colors of the role groups: embeddings and head cyan, attention indigo, MLP amber.
+pub const ROLE_EMBED: Color32 = Color32::from_rgb(0x4F, 0xD3, 0xE8);
+pub const ROLE_ATTENTION: Color32 = Color32::from_rgb(0x7C, 0x83, 0xFF);
+pub const ROLE_MLP: Color32 = Color32::from_rgb(0xF5, 0xA5, 0x24);
+/// A changed node, from a small to a large relative change.
+pub const DIVERGE_LOW: Color32 = Color32::from_rgb(0xFF, 0x6F, 0x61);
+pub const DIVERGE_HIGH: Color32 = Color32::from_rgb(0xFF, 0x2E, 0xC4);
+/// Layers the agent's running tool works on.
+pub const ACTIVE: Color32 = Color32::from_rgb(0xFF, 0xD8, 0x6B);
+
+pub const fn role_color(role: GraphRole) -> Color32 {
+    match role_shape(role) {
+        RoleShape::Circle => ROLE_ATTENTION,
+        RoleShape::Square => ROLE_MLP,
+        RoleShape::Diamond => ROLE_EMBED,
+    }
+}
+
+/// Coral at no change, magenta from 10 % relative change on.
+pub fn diverge(relative_change: f64) -> Color32 {
+    let t = (relative_change.abs() / 0.1).min(1.0) as f32;
+    mix(DIVERGE_HIGH, DIVERGE_LOW, t)
+}
+
+/// `c` toward white (`t` > 0) or toward the canvas (`t` < 0): the light and the shadow of a
+/// shaded node.
+pub fn shade(c: Color32, t: f32) -> Color32 {
+    match t >= 0.0 {
+        true => mix(Color32::WHITE, c, t),
+        false => mix(BG, c, -t),
     }
 }
 

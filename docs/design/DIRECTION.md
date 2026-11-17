@@ -15,7 +15,7 @@ barrées.
 - **Monde.** La fenêtre d'IDE sombre et douce de Craft Anything : surfaces presque noires,
   contrôles arrondis, un seul bouton clair par écran.
 - **Moments.** Deux : le formulaire de nouvelle session (une question, des choix en tuiles,
-  `Démarrer`) et le graphe 3D filaire, seul visuel riche, où l'agent montre un tenseur.
+  `Démarrer`) et le graphe 3D, seul visuel riche, où l'agent montre un tenseur.
 - **Signature.** Le logomark carré en grille de blocs, et le bouton principal blanc cassé.
 
 ## 2. Règle de l'accent
@@ -119,7 +119,7 @@ idées en puces, ce que l'agent peut faire, le fournisseur, et `Démarrer` à dr
 | D-02 | ~~Plus d'écran d'accueil~~ remplacée par D-31 | |
 | D-03 | ~~Onglet `Projets` réparti entre Atelier et Analyses~~ remplacée par D-31 | |
 | D-04 | ~~Cartes et éditeur de patch dans l'Atelier~~ remplacée par D-32 | |
-| D-05 | Le rôle d'un nœud 3D se lit à sa forme (cercle, carré, losange), pas à sa couleur | couleur réservée aux données et à la sélection |
+| D-05 | ~~Le rôle d'un nœud 3D se lit à sa forme, pas à sa couleur~~ remplacée par D-40 | |
 | D-06 | Copie active = dossier le plus récent de `copies/` ; « modifiée » = au moins une écriture réussie du ledger sur cette copie | calculé depuis le ledger, jamais déclaré |
 | D-07 | ~~`[ADVANCE]` lance l'agent~~ remplacée par D-14, puis D-30 | |
 | D-08 | ~~L'assistant garde `Lang::pick`~~ remplacée par D-29 | |
@@ -136,3 +136,4 @@ idées en puces, ce que l'agent peut faire, le fournisseur, et `Démarrer` à dr
 | D-37 | Backend d'inférence : Rust seulement dans l'application (plus de llama.cpp : ni option, ni installation, ni lignes de dépendances). Au premier lancement, `backend_choice` écrit le backend d'après le GPU : mistral.rs (NVIDIA, Apple Silicon, CPU), hipfire (AMD) ; en attendant, mistral.rs puis le moteur natif. Le choix suit la machine jusqu'à un enregistrement à la main ; un fichier qui nomme encore llama-server est repris | demande de l'utilisateur : « pas de llama.cpp, que du Rust » |
 | D-38 | Un agent CLI travaille seul sur le projet ouvert : chemins exacts et consigne d'autonomie dans son prompt, copie de travail créée par « Démarrer », jeux de sondes `builtin:*` dans le moteur, et `record_finding` / `show_in_3d` / `update_plan` servis par le MCP `surgeon` avec un journal `chat/mcp_runs.jsonl` qui rend ses constats vérifiables. La sonde du moteur (`surgeon_backends`, `backend detect`) suit la règle D-37 | un vrai test avec Claude Code : l'agent demandait des chemins et un dataset, et ni les Preuves ni la vue 3D ne bougeaient |
 | D-39 | Passe de finition sur Craft Anything (`crates/ui-egui/src/theme.rs` du dépôt : palette Studio identique à la nôtre, on la garde) : barre de titre en capsule segmentée bordée (`components::capsule`, `[projet · état de la copie ● \| Local ●]`), zone de saisie en un seul cadre avec le bouton d'envoi imbriqué et une ligne dédiée dessous pour le message et le raccourci, appels d'outils repliés sur une ligne (`components::tool_row`, les CLI produisent de vrais blocs `ToolUse` / `ToolResult`), carte Plan sans double numérotation, états vides centrés (badge rond bordé de 36, titre, deux lignes) | retour d'un test réel : textes superposés, pavés JSON bruts, état vide en haut à gauche |
+| D-40 | La vue 3D quitte le filaire : nœuds ombrés colorés par rôle (embeddings et tête cyan, attention indigo, MLP ambre), écart Δ du corail au magenta, la forme gardée pour qui ne distingue pas les couleurs. Disposition calculée par le GUI (`scene.rs`) depuis rôle et couche : Colonne en grille (attention à gauche, MLP à droite, flux résiduel au centre), Constellation en hélice ; les dispositions spectrales du rapport ne sont plus dessinées. Repères `L0…Ln`, anneau pulsant et carte de la sélection, couches de l'outil en cours de l'agent qui ondulent sous un bandeau | demande de l'utilisateur : le filaire gris se lisait mal et ne montrait pas l'agent au travail |

@@ -17,6 +17,7 @@
 //! - [`config`]: connections, consents, per-project settings (no secret).
 //! - [`view`]: the Agents page; [`selftest`]: the `--self-test` dialogue.
 
+pub mod activity;
 pub mod anthropic;
 pub mod config;
 pub mod detect;

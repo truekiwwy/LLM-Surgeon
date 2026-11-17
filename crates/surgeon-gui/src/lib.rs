@@ -44,6 +44,7 @@ pub mod raster;
 pub mod releases;
 pub mod runner;
 pub mod sample_model;
+pub mod scene;
 pub mod selftest;
 pub mod settings;
 pub mod source;
