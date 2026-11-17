@@ -122,7 +122,11 @@ fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
     let Some(step) = app.timeline.current() else {
         let (title, hint) = match app.feed {
             Some(_) => (t("graph.waiting"), t("graph.waiting.hint")),
-            None => (t("graph.empty"), t("graph.empty.hint")),
+            // Why the project's graph could not be read, when it could not.
+            None => (
+                t("graph.empty"),
+                app.stream_error.as_deref().unwrap_or(t("graph.empty.hint")),
+            ),
         };
         c::empty(ui, Icon::Cube, title, hint);
         return;
@@ -436,6 +440,10 @@ fn node_inspector(ui: &mut Ui, step: &Step, node: &NodeReport) {
     let m = &node.metrics;
     c::strong(ui, node_title(node));
     c::mono_secondary(ui, node.tensor.as_str());
+    let measured = step.report.parameters.rank > 0;
+    if !measured {
+        c::secondary(ui, t("inspector.unmeasured"));
+    }
 
     c::section(ui, t("inspector.tensor"));
     c::kv(
@@ -454,6 +462,9 @@ fn node_inspector(ui: &mut Ui, step: &Step, node: &NodeReport) {
         c::kv(ui, t("inspector.expert"), &e.to_string());
     }
     c::kv(ui, t("inspector.bytes"), &node.weight_bytes.to_string());
+    if !measured {
+        return;
+    }
 
     c::section(ui, t("inspector.spectrum"));
     let interval = |lo: Option<f64>, hi: Option<f64>| match (lo, hi) {
@@ -563,6 +574,9 @@ fn model_summary(ui: &mut Ui, report: &GraphReport) {
     let (m, g) = (&report.model, &report.global);
     c::strong(ui, m.architecture.as_str());
     c::mono_secondary(ui, m.path.as_str());
+    if report.parameters.rank == 0 {
+        c::secondary(ui, t("inspector.unmeasured"));
+    }
     c::section(ui, t("inspector.model"));
     c::kv(ui, t("inspector.format"), &m.format);
     c::kv(ui, t("inspector.layers"), &m.layers.to_string());

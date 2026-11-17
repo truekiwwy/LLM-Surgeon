@@ -20,7 +20,7 @@ use crate::agent::mission::{Mission, Symptom};
 use crate::agent::policy::AgentMode;
 use crate::agent::provider::{Block, Role};
 use crate::agent::session::{Choice, Dirs};
-use crate::app::{Mode, Section, SurgeonApp};
+use crate::app::{Mode, RightPane, Section, SurgeonApp, Tab};
 use crate::studio::project::now_unix;
 
 pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
@@ -49,9 +49,26 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
             }
         },
     );
-    c::Panel::new("evidence")
-        .title(t("panel.evidence"))
-        .show(ui, regions.right, |ui| evidence_log(ui, app));
+    let title = match app.right {
+        RightPane::Evidence => t("panel.evidence"),
+        RightPane::Results => t("panel.results"),
+    };
+    c::Panel::new("evidence").title(title).show_with(
+        ui,
+        regions.right,
+        app,
+        |ui, app| {
+            let panes = [
+                (RightPane::Evidence, t("panel.evidence")),
+                (RightPane::Results, t("panel.results")),
+            ];
+            c::segmented_small(ui, &mut app.right, &panes, t("pane.tip"));
+        },
+        |ui, app| match app.right {
+            RightPane::Evidence => evidence_log(ui, app),
+            RightPane::Results => super::results::show(ui, app),
+        },
+    );
     consent(ui.ctx(), app);
 }
 
@@ -572,6 +589,15 @@ fn session_header(ui: &mut Ui, app: &mut SurgeonApp) {
                     app.agents.export(&project);
                 }
             }
+            if let Some(target) = app.focus.clone() {
+                let text = tf("focus.show", &[("target", &target)]);
+                if c::button(ui, &text, ButtonKind::Ghost)
+                    .on_hover_text(t("focus.show.tip"))
+                    .clicked()
+                {
+                    app.tab = Tab::Graph;
+                }
+            }
         });
     });
 }
@@ -795,12 +821,10 @@ fn approval(ui: &mut Ui, app: &mut SurgeonApp) {
 
 /// What the agent established: each finding with the measure it rests on, newest first.
 fn evidence_log(ui: &mut Ui, app: &mut SurgeonApp) {
-    let mut entries = app.ledger().to_vec();
-    let project = app.agents.project.clone();
-    if let Some(p) = &project {
-        entries.extend(evidence::mcp_runs(&Dirs::of(p).mcp_runs()));
-    }
-    let findings = project
+    let entries = app.runs();
+    let findings = app
+        .agents
+        .project
         .as_ref()
         .map(|p| evidence::read(&Dirs::of(p).findings()))
         .unwrap_or_default();

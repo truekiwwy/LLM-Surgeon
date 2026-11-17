@@ -581,6 +581,26 @@ fn gguf_dense_and_moe_models_are_read_with_structural_edges() {
 }
 
 #[test]
+fn skeleton_has_the_nodes_of_the_full_graph_and_no_metrics() {
+    let dir = tempfile::tempdir().unwrap();
+    let model_path = model(dir.path());
+    let out = dir.path().join("out");
+    let (code, env) = run_json(&deps(), &graph_args(s(&model_path), s(&out)));
+    assert_eq!(code, 0, "{env}");
+    let full: GraphReport = serde_json::from_value(read_json(&out.join("graph.json"))).unwrap();
+
+    let skeleton = weight_surgeon::graph::skeleton(&model_path).unwrap();
+    assert_eq!(skeleton.parameters.rank, 0, "marked unmeasured");
+    let ids = |r: &GraphReport| r.nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&skeleton), ids(&full));
+    for (a, b) in skeleton.nodes.iter().zip(&full.nodes) {
+        assert_eq!(a.pos_column, b.pos_column, "{}: same column layout", a.id);
+        assert_eq!(a.metrics.sigma1, None);
+    }
+    assert!(!skeleton.edges.is_empty() && skeleton.edges.iter().all(|e| e.weight == 0.0));
+}
+
+#[test]
 fn estimate_never_runs_the_svd_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let model_path = model(dir.path());

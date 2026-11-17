@@ -15,8 +15,10 @@ use weight_surgeon::graph::output::GraphReport;
 use weight_surgeon::graph::stream::GraphPatch;
 use weight_surgeon::graph::GraphRole;
 
+use crate::agent::evidence;
 use crate::agent::mission::Mission;
 use crate::agent::paths::ProjectPaths;
+use crate::agent::session::Dirs;
 use crate::agent::view::Hub;
 use crate::backend_choice;
 use crate::backend_dialog::BackendDialog;
@@ -28,7 +30,9 @@ use crate::source::{self, Input, Timeline};
 use crate::studio::bus::RunView;
 use crate::studio::ledger;
 use crate::studio::live::{Layer, Replay};
+use crate::studio::results::{self, Run};
 use crate::studio::view::{Studio, Target};
+use crate::task::Task;
 use crate::ui::layout::Columns;
 use crate::ui::palette::Palette;
 use crate::ui::{fonts, i18n, shell, theme};
@@ -92,6 +96,38 @@ impl Section {
     }
 }
 
+/// What the right column of the agent shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightPane {
+    Evidence,
+    Results,
+}
+
+/// A file read again only when its modification time changed: path, time, entries.
+type RunCache = Option<(PathBuf, Option<SystemTime>, Vec<ledger::Entry>)>;
+type RunStamp = [Option<(PathBuf, Option<SystemTime>)>; 2];
+
+/// `cache` for `path`, read again with `read` when the file changed.
+fn cached(
+    cache: &mut RunCache,
+    path: Option<PathBuf>,
+    read: impl FnOnce(&Path) -> Vec<ledger::Entry>,
+) -> &[ledger::Entry] {
+    let Some(path) = path else {
+        *cache = None;
+        return &[];
+    };
+    let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    let stale = cache
+        .as_ref()
+        .is_none_or(|(p, m, _)| *p != path || *m != modified);
+    if stale {
+        let entries = read(&path);
+        *cache = Some((path, modified, entries));
+    }
+    cache.as_ref().map_or(&[], |(_, _, e)| e)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
     Column,
@@ -144,7 +180,21 @@ pub struct SurgeonApp {
     pub settings: Option<Section>,
     /// The system picker of the workspace folder (wizard, settings).
     pub workspace_picker: Picker,
-    ledger_cache: Option<(PathBuf, Option<SystemTime>, Vec<ledger::Entry>)>,
+    pub right: RightPane,
+    /// The last node an agent showed (`show_in_3d`), and whether the camera still has to
+    /// reach it (the graph holding it may not be loaded yet).
+    pub focus: Option<String>,
+    center_pending: bool,
+    /// The project whose graph the 3D view follows, the graph run shown (`None`: the
+    /// architecture), and whether the graph on screen was loaded for the project rather than
+    /// opened by hand.
+    graph_for: Option<PathBuf>,
+    graph_run: Option<String>,
+    auto_graph: bool,
+    skeleton: Option<Task<Result<GraphReport, String>>>,
+    ledger_cache: RunCache,
+    mcp_cache: RunCache,
+    results_cache: Option<(RunStamp, Vec<Run>)>,
 }
 
 impl SurgeonApp {
@@ -194,7 +244,16 @@ impl SurgeonApp {
             motion: true,
             settings: None,
             workspace_picker: Picker::default(),
+            right: RightPane::Evidence,
+            focus: None,
+            center_pending: false,
+            graph_for: None,
+            graph_run: None,
+            auto_graph: false,
+            skeleton: None,
             ledger_cache: None,
+            mcp_cache: None,
+            results_cache: None,
         };
         if app
             .agents
@@ -346,6 +405,101 @@ impl SurgeonApp {
         };
         self.stream_error = None;
         self.selected = None;
+        self.auto_graph = false;
+    }
+
+    /// Shows a graph loaded for the project: replaced by the next one, unlike one opened by
+    /// hand.
+    fn show_project_graph(&mut self, ctx: &egui::Context, input: Input) {
+        self.set_input(ctx, input);
+        self.auto_graph = true;
+        // set_input cleared the selection: an agent's focus is applied again.
+        self.center_pending |= self.focus.is_some();
+    }
+
+    /// The graph of the open project on the 3D view: the newest `surgeon_graph` run that
+    /// wrote one, else the architecture read from the model's headers (no SVD), so that the
+    /// network is there as soon as the project is open. A graph opened by hand stays until
+    /// a new graph run of the project ends.
+    fn follow_project_graph(&mut self, ctx: &egui::Context) {
+        let project = self.agents.project.clone();
+        let newest = {
+            let (ledger, mcp) = self.run_lists();
+            results::newest_graph(ledger.iter().chain(mcp))
+        };
+        if project != self.graph_for {
+            self.graph_for = project.clone();
+            self.skeleton = None;
+            self.focus = None;
+            self.center_pending = false;
+            if self.auto_graph {
+                self.timeline = Timeline::default();
+                self.feed = None;
+                self.auto_graph = false;
+            }
+            let free = self.timeline.is_empty() && self.feed.is_none();
+            if free {
+                self.stream_error = None;
+            }
+            self.graph_run = newest.as_ref().filter(|_| !free).map(|(id, _)| id.clone());
+            let model = project
+                .as_deref()
+                .map(ProjectPaths::of)
+                .and_then(|p| p.copy.or(p.origin));
+            if let (true, None, Some(model)) = (free, &newest, model) {
+                let wake = ctx.clone();
+                self.skeleton = Some(Task::spawn(
+                    move || wake.request_repaint(),
+                    move |_| weight_surgeon::graph::skeleton(&model).map_err(|e| e.to_string()),
+                ));
+            }
+        }
+        if let Some((id, path)) = newest.filter(|(id, _)| self.graph_run.as_ref() != Some(id)) {
+            self.graph_run = Some(id);
+            self.skeleton = None;
+            match source::open(&path) {
+                Ok(input) => self.show_project_graph(ctx, input),
+                Err(e) => self.stream_error = Some(e),
+            }
+        }
+        if let Some(done) = self.skeleton.as_ref().and_then(Task::poll) {
+            self.skeleton = None;
+            let free = self.auto_graph || (self.timeline.is_empty() && self.feed.is_none());
+            match done {
+                Ok(report) if free => self.show_project_graph(ctx, Input::Report(Box::new(report))),
+                Ok(_) => {}
+                Err(e) => self.stream_error = Some(e),
+            }
+        }
+    }
+
+    /// What `show_in_3d` asked: the node selected now, the camera on it as soon as the graph
+    /// holding it is on screen.
+    pub fn show_focus(&mut self, target: String) {
+        self.selected = Some(target.clone());
+        self.focus = Some(target);
+        self.center_pending = true;
+    }
+
+    /// Selects the focused node, opens its layer in the tree and centers the camera on it.
+    fn center_on_focus(&mut self) {
+        if !self.center_pending {
+            return;
+        }
+        let Some(step) = self.timeline.current() else {
+            return;
+        };
+        let Some(&i) = self.focus.as_ref().and_then(|f| step.index.get(f)) else {
+            return;
+        };
+        let node = &step.report.nodes[i];
+        self.camera.target = match self.layout {
+            LayoutMode::Column => node.pos_column,
+            LayoutMode::Constellation => node.pos_constellation,
+        };
+        self.open_layers.insert(node.layer);
+        self.selected = Some(node.id.clone());
+        self.center_pending = false;
     }
 
     /// The backends (mistral.rs found, the hipfire daemon answering) can take seconds: probe
@@ -480,27 +634,52 @@ impl SurgeonApp {
         Ok(())
     }
 
-    /// The project's ledger, read again only when the file changed.
-    pub fn ledger(&mut self) -> &[ledger::Entry] {
-        let path = self
+    /// The project's ledger (studio jobs) and the runs CLI agents made through MCP
+    /// (`chat/mcp_runs.jsonl`), each read again only when its file changed.
+    fn run_lists(&mut self) -> (&[ledger::Entry], &[ledger::Entry]) {
+        let ledger = self
             .studio
             .manager
             .as_ref()
             .map(|m| m.project.ledger_path());
-        let Some(path) = path else {
-            self.ledger_cache = None;
-            return &[];
-        };
-        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        let stale = self
-            .ledger_cache
-            .as_ref()
-            .is_none_or(|(p, m, _)| *p != path || *m != modified);
-        if stale {
-            let entries = ledger::read(&path).unwrap_or_default();
-            self.ledger_cache = Some((path, modified, entries));
+        let mcp = self
+            .agents
+            .project
+            .as_deref()
+            .map(|p| Dirs::of(p).mcp_runs());
+        (
+            cached(&mut self.ledger_cache, ledger, |p| {
+                ledger::read(p).unwrap_or_default()
+            }),
+            cached(&mut self.mcp_cache, mcp, evidence::mcp_runs),
+        )
+    }
+
+    /// The project's ledger.
+    pub fn ledger(&mut self) -> &[ledger::Entry] {
+        self.run_lists().0
+    }
+
+    /// The ledger and the MCP runs, as one list a finding can cite.
+    pub fn runs(&mut self) -> Vec<ledger::Entry> {
+        let (ledger, mcp) = self.run_lists();
+        ledger.iter().chain(mcp).cloned().collect()
+    }
+
+    /// The measuring runs of the project for the Results panel, parsed again only when one
+    /// of the files changed.
+    pub fn results(&mut self) -> &[Run] {
+        self.run_lists();
+        let stamp = |c: &RunCache| c.as_ref().map(|(p, m, _)| (p.clone(), *m));
+        let stamp = [stamp(&self.ledger_cache), stamp(&self.mcp_cache)];
+        if self.results_cache.as_ref().is_none_or(|(s, _)| *s != stamp) {
+            let entries = [&self.ledger_cache, &self.mcp_cache]
+                .into_iter()
+                .flatten()
+                .flat_map(|(_, _, e)| e);
+            self.results_cache = Some((stamp, results::runs(entries)));
         }
-        self.ledger_cache.as_ref().map_or(&[], |(_, _, e)| e)
+        self.results_cache.as_ref().map_or(&[], |(_, r)| r)
     }
 
     /// Drains the background channels and runs the debounced validation.
@@ -528,9 +707,11 @@ impl SurgeonApp {
         let ended = self.studio.tick(ctx);
         self.agents.tick(&mut self.studio, &ended);
         self.start_after_copy(&ended);
+        self.follow_project_graph(ctx);
         if let Some(target) = self.agents.take_focus() {
-            self.selected = Some(target);
+            self.show_focus(target);
         }
+        self.center_on_focus();
         if self.agents.busy() {
             ctx.request_repaint_after(crate::studio::bus::FRAME);
         }
@@ -668,6 +849,8 @@ pub fn step_selection(order: &[usize], current: Option<usize>, delta: isize) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -708,34 +891,218 @@ mod tests {
         assert_eq!(Section::from_name("machine"), Some(Section::Engine));
     }
 
-    #[test]
-    fn starting_without_a_working_copy_makes_one_then_starts() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("model");
-        std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("model.safetensors"), b"weights").unwrap();
-        let workspace = dir.path().join("projects");
+    /// A window on a new project `p` of `source`, opened and polled once; never the user's
+    /// settings nor connections.
+    fn app_on(dir: &Path, source: &Path) -> (egui::Context, SurgeonApp, PathBuf) {
+        let workspace = dir.join("projects");
         std::fs::create_dir_all(&workspace).unwrap();
         let project =
-            crate::studio::project::Project::create(&workspace, "p", Some(&source)).unwrap();
+            crate::studio::project::Project::create(&workspace, "p", Some(source)).unwrap();
         let env = crate::actions::Env {
-            components: dir.path().join("components"),
+            components: dir.join("components"),
             config: None,
-            settings: dir.path().join("settings.json"),
+            settings: dir.join("settings.json"),
         };
         let desktop = Desktop::detached(None, Default::default(), env);
         let ctx = egui::Context::default();
         let mut app = SurgeonApp::with_shell(&ctx, None, desktop, workspace);
         app.dialog.read_only();
-        // Never the user's connections: a hub on a file of its own, with none.
         app.agents = Hub::new(
-            dir.path().join("agents.json"),
+            dir.join("agents.json"),
             Box::new(crate::agent::vault::SessionStore::default()),
             std::sync::Arc::new(|| {}),
         );
         app.studio.open_project(&ctx, &project.dir);
         app.poll(&ctx);
         assert_eq!(app.agents.project.as_deref(), Some(project.dir.as_path()));
+        (ctx, app, project.dir)
+    }
+
+    /// Polls until `done` or 30 s.
+    fn poll_until(app: &mut SurgeonApp, ctx: &egui::Context, done: impl Fn(&SurgeonApp) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !done(app) && std::time::Instant::now() < deadline {
+            app.poll(ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(done(app), "timed out");
+    }
+
+    /// A two-layer llama-shaped model of zeros: every attention and MLP matrix, [4, 4].
+    fn write_model(dir: &Path) {
+        let names: Vec<String> = (0..2)
+            .flat_map(|l| {
+                ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
+                    .into_iter()
+                    .chain(["self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj"])
+                    .chain(["mlp.down_proj"])
+                    .map(move |m| format!("model.layers.{l}.{m}.weight"))
+            })
+            .collect();
+        let size = 4 * 4 * 4;
+        let header: serde_json::Map<String, serde_json::Value> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let at = i * size;
+                let info = serde_json::json!({"dtype": "F32", "shape": [4, 4],
+                                              "data_offsets": [at, at + size]});
+                (n.clone(), info)
+            })
+            .collect();
+        let mut header = serde_json::to_vec(&header).unwrap();
+        while !header.len().is_multiple_of(8) {
+            header.push(b' ');
+        }
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(header);
+        bytes.extend(vec![0u8; names.len() * size]);
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("model.safetensors"), bytes).unwrap();
+    }
+
+    #[test]
+    fn an_open_project_shows_its_architecture_and_follows_show_in_3d_and_graph_runs() {
+        use crate::agent::mock::{call, say, Mock};
+        use crate::agent::session::{Conversation, Session, Settings};
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("model");
+        write_model(&source);
+        let (ctx, mut app, project) = app_on(dir.path(), &source);
+
+        // The architecture comes at once, with no graph run: every matrix, unmeasured.
+        poll_until(&mut app, &ctx, |a| !a.timeline.is_empty());
+        let report = app.timeline.current().unwrap().report.clone();
+        assert_eq!(report.parameters.rank, 0);
+        assert_eq!(report.nodes.len(), 14);
+        assert!(!report.edges.is_empty());
+        assert!(app.selected.is_none());
+
+        // The agent shows a tensor by name: selected by its graph id, camera on it, its
+        // layer open in the tree. The view is not switched for the user.
+        let tensor = "model.layers.1.mlp.down_proj.weight";
+        let mock = Arc::new(Mock::new(vec![
+            call(vec![(
+                "s",
+                "show_in_3d",
+                serde_json::json!({"target": tensor}),
+            )]),
+            say("Voilà la projection de sortie du MLP de la couche 1."),
+        ]));
+        let dirs = Dirs::of(&project);
+        let conv = Conversation {
+            id: Session::new_id(&dirs),
+            ..Conversation::default()
+        };
+        let mut session = Session::new(conv, mock, Settings::default(), Vec::new(), dirs, {
+            Arc::new(|| {})
+        });
+        session.consented = true;
+        session.send("montre-moi la couche 1").unwrap();
+        app.agents.session = Some(session);
+        poll_until(&mut app, &ctx, |a| a.focus.is_some());
+        app.poll(&ctx);
+        let node = report.nodes.iter().find(|n| n.id == "L1.mlp_out").unwrap();
+        assert_eq!(node.tensor, tensor);
+        assert_eq!(app.selected.as_deref(), Some("L1.mlp_out"));
+        assert_eq!(app.camera.target, node.pos_column);
+        assert!(app.open_layers.contains(&Some(1)));
+        assert_eq!(app.tab, Tab::Agent);
+
+        // A surgeon_graph run of a CLI agent ends: its graph replaces the architecture, and
+        // the agent's node stays selected and centered.
+        let mut measured = report.clone();
+        measured.parameters.rank = 8;
+        let file = project.join("out").join("graph.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, serde_json::to_vec(&measured).unwrap()).unwrap();
+        let line = serde_json::json!({"run_id": "mcp-1", "tool": "surgeon_graph", "ok": true,
+            "exit_code": 0, "data": {"outputs": [file]}, "started_unix": 1, "finished_unix": 2});
+        std::fs::write(Dirs::of(&project).mcp_runs(), format!("{line}\n")).unwrap();
+        app.camera = Orbit::default();
+        app.poll(&ctx);
+        app.poll(&ctx);
+        assert_eq!(app.timeline.current().unwrap().report.parameters.rank, 8);
+        assert_eq!(app.selected.as_deref(), Some("L1.mlp_out"));
+        assert_eq!(app.camera.target, node.pos_column);
+    }
+
+    #[test]
+    fn a_graph_opened_by_hand_is_not_replaced_by_the_project_architecture() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("model");
+        write_model(&source);
+        let (ctx, mut app, _) = app_on(dir.path(), &source);
+        assert!(app.skeleton.is_some(), "the architecture is being read");
+        // A graph opened before the architecture arrives keeps the view.
+        let by_hand = crate::ui::views::tests::report();
+        app.set_input(&ctx, Input::Report(Box::new(by_hand.clone())));
+        poll_until(&mut app, &ctx, |a| a.skeleton.is_none());
+        assert_eq!(app.timeline.current().unwrap().report, by_hand);
+    }
+
+    #[test]
+    fn results_are_read_from_the_project_ledger_and_the_mcp_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("model");
+        write_model(&source);
+        let (_ctx, mut app, project) = app_on(dir.path(), &source);
+        assert!(app.results().is_empty());
+
+        let ledger_path = app.studio.manager.as_ref().unwrap().project.ledger_path();
+        let item = |id: &str, ok: bool| {
+            serde_json::json!({"id": id, "gold": "6", "extracted": if ok { "6" } else { "5" },
+                               "correct": ok, "output_excerpt": ""})
+        };
+        let report = serde_json::json!({
+            "dataset": "builtin:math", "n": 1, "correct": 1, "accuracy": 1.0,
+            "ci95_low": 0.2, "ci95_high": 1.0, "items": [item("math-01", true)],
+            "baseline": {"n": 1, "accuracy": 0.0, "ci95_low": 0.0, "ci95_high": 0.8,
+                         "items": [item("math-01", false)]},
+            "paired": {"gained": ["math-01"], "lost": []},
+        });
+        let studio_run = ledger::Entry {
+            run_id: "r1".into(),
+            tool: "surgeon_bench".into(),
+            label: "eval".into(),
+            params: serde_json::json!({"mode": "eval"}),
+            resumed_from: None,
+            started_unix: 100,
+            finished_unix: 160,
+            hashes: Default::default(),
+            versions: Default::default(),
+            verdict: ledger::Verdict::Ok,
+            exit_code: 0,
+            result: report,
+            error: None,
+        };
+        ledger::append(&ledger_path, &studio_run).unwrap();
+        let line = serde_json::json!({"run_id": "mcp-7", "tool": "surgeon_extract", "ok": false,
+            "exit_code": 1, "data": null, "started_unix": 200, "finished_unix": 205});
+        std::fs::write(Dirs::of(&project).mcp_runs(), format!("{line}\n")).unwrap();
+
+        let runs = app.results().to_vec();
+        let ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["mcp-7", "r1"], "newest first, both sources");
+        assert_eq!(runs[0].verdict, ledger::Verdict::Failed);
+        let bench = runs[1].bench.as_ref().unwrap();
+        assert_eq!(runs[1].seconds, 60);
+        assert_eq!(bench.dataset.as_deref(), Some("builtin:math"));
+        assert_eq!((bench.after.rate, bench.before.unwrap().rate), (1.0, 0.0));
+        assert_eq!((bench.gained, bench.lost), (1, 0));
+        let first = &bench.items[0];
+        assert!(first.question.as_deref().unwrap().starts_with("A baker"));
+        assert_eq!(first.before.as_ref().unwrap().text, "5");
+    }
+
+    #[test]
+    fn starting_without_a_working_copy_makes_one_then_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("model");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("model.safetensors"), b"weights").unwrap();
+        let (ctx, mut app, project_dir) = app_on(dir.path(), &source);
         app.agents.input = "go".into();
 
         app.start_session(Mission::Advance);
@@ -746,7 +1113,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(app.pending_start.is_none(), "the copy ended");
-        let paths = ProjectPaths::of(&project.dir);
+        let paths = ProjectPaths::of(&project_dir);
         assert!(paths
             .copy
             .as_ref()

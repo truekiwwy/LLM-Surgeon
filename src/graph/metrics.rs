@@ -275,6 +275,54 @@ pub struct NodeAnalysis {
     pub energy_weights: Vec<f32>,
 }
 
+impl NodeAnalysis {
+    /// A node with its shape only: zero metrics and an empty basis, whose edges align at 0.
+    pub fn unmeasured(rows: usize, cols: usize) -> Self {
+        Self {
+            metrics: NodeMetrics {
+                rows,
+                cols,
+                rank: 0,
+                frobenius_norm: 0.0,
+                energy: 0.0,
+                residual_energy: 0.0,
+                range_energy: 0.0,
+                rel_error: 0.0,
+                sigma1: None,
+                sigma1_lower: None,
+                sigma1_upper: None,
+                d_spec: None,
+                d_spec_lower: None,
+                d_spec_upper: None,
+                erank_energy_lower: 0.0,
+                erank_energy_upper: 0.0,
+                erank_l1: None,
+                full_spectrum: false,
+                kurtosis: 0.0,
+                kurtosis_excess: 0.0,
+                channels: ChannelStats {
+                    count: 0,
+                    norm_median: 0.0,
+                    norm_max: 0.0,
+                    norm_argmax: 0,
+                    kurtosis_max: 0.0,
+                    outliers: Vec::new(),
+                },
+                e_write: None,
+                e_read: None,
+                non_finite: 0,
+                singular_values: Vec::new(),
+            },
+            basis: Basis {
+                rows: 0,
+                cols: 0,
+                values: Vec::new(),
+            },
+            energy_weights: Vec::new(),
+        }
+    }
+}
+
 pub struct AnalyzeOptions<'a> {
     pub params: RsvdParams,
     pub full_spectrum_max_dim: usize,

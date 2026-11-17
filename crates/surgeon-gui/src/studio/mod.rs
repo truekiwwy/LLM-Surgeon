@@ -24,5 +24,6 @@ pub mod ledger;
 pub mod live;
 pub mod lock;
 pub mod project;
+pub mod results;
 pub mod selftest;
 pub mod view;
