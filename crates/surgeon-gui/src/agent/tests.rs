@@ -527,6 +527,9 @@ fn local_only_mode_never_opens_a_remote_connection() {
         label: "A".into(),
         base_url: String::new(),
         models: vec![],
+        default_model: None,
+        last_model: None,
+        verified: false,
         prices: Default::default(),
     };
     assert!(matches!(
@@ -995,6 +998,13 @@ fn forbidden_calls_are_answered_without_running_anything() {
             ..
         }
     ));
+    assert!(matches!(
+        policy::classify("surgeon_restore", &json!({"model": "copies/c1"}), m, &scope),
+        Decision::Approval {
+            allow_always: false,
+            ..
+        }
+    ));
 
     // Through the loop: the answer is an error result and no run exists.
     e.mock = Arc::new(Mock::new(vec![]));
@@ -1273,6 +1283,9 @@ fn an_api_key_never_lands_in_a_file_an_export_or_an_error() {
         label: "Anthropic test".into(),
         base_url: api.base(),
         models: vec!["m".into()],
+        default_model: None,
+        last_model: None,
+        verified: false,
         prices: Default::default(),
     };
     store.set(&conn.id, &Secret::new(KEY)).unwrap();
@@ -1435,6 +1448,7 @@ fn cli_runtimes_are_detected_from_their_real_help_and_run_with_the_mcp_barrier()
         model: None,
         prompt: "inspecte",
         scratch: &dir.path().join("scratch"),
+        agy: None,
     };
     let l = runtime::launch(&input).unwrap();
     let args: Vec<String> = l
@@ -1456,10 +1470,20 @@ fn cli_runtimes_are_detected_from_their_real_help_and_run_with_the_mcp_barrier()
         !args.iter().any(|a| a.contains("inspecte")),
         "the prompt goes on stdin"
     );
-    // "Modify": no read-only server, but the source model is not an allowed folder.
+    // The source model is a read root in every mode, never a writable folder.
+    let source_arg = |args: &[String]| {
+        args.windows(2)
+            .map(|w| (w[0].as_str(), w[1].clone()))
+            .filter(|(_, v)| *v == source.display().to_string())
+            .map(|(flag, _)| flag.to_owned())
+            .collect::<Vec<_>>()
+    };
+    let ask = runtime::mcp_args(AgentMode::Ask, &project, Some(&source));
+    assert_eq!(source_arg(&ask), ["--allow-read"]);
+    // "Modify": no read-only server, and still no write on the source model.
     let modify = runtime::mcp_args(AgentMode::Modify, &project, Some(&source));
     assert!(!modify.contains(&"--read-only".to_owned()));
-    assert!(!modify.contains(&source.display().to_string()));
+    assert_eq!(source_arg(&modify), ["--allow-read"]);
     assert!(!runtime::allowed_tools(AgentMode::Modify).contains(&"surgeon_pipeline".to_owned()));
     let codex_args = runtime::launch(&runtime::LaunchInput {
         detected: &codex,
@@ -1497,6 +1521,138 @@ fn cli_runtimes_are_detected_from_their_real_help_and_run_with_the_mcp_barrier()
 }
 
 #[test]
+fn opencode_and_antigravity_keep_their_tools_and_meet_surgeon_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let detected = |kind| runtime::Detected {
+        kind,
+        path: dir.path().join("cli.exe"),
+        version: "1".into(),
+        missing: Vec::new(),
+    };
+    let (opencode, agy) = (
+        detected(ProviderKind::OpenCode),
+        detected(ProviderKind::Antigravity),
+    );
+    let home = runtime::AgyHome {
+        profile: dir.path().join("profiles").join("agy"),
+        user: dir.path().join("user"),
+    };
+    let input = runtime::LaunchInput {
+        detected: &opencode,
+        surgeon: &dir.path().join("surgeon.exe"),
+        mode: AgentMode::Modify,
+        project: &project,
+        source_dir: Some(&dir.path().join("model")),
+        model: Some("ollama/qwen"),
+        prompt: "scanne",
+        scratch: &dir.path().join("scratch"),
+        agy: Some(&home),
+    };
+
+    // OpenCode: a private server, its inline configuration adds surgeon and keeps its own
+    // tools inside the project.
+    let l = runtime::launch(&input).unwrap();
+    let args: Vec<String> = l.args.iter().map(|a| a.to_string_lossy().into()).collect();
+    assert_eq!(&args[..2], ["run", "--standalone"]);
+    assert!(args.contains(&"--auto".into()) && !args.iter().any(|a| a.contains("scanne")));
+    let config = l
+        .env
+        .iter()
+        .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+        .unwrap();
+    let config: Value = serde_json::from_str(&config.1.to_string_lossy()).unwrap();
+    assert_eq!(config["permission"]["external_directory"], "deny");
+    let command = config["mcp"]["surgeon"]["command"].as_array().unwrap();
+    assert!(!command.iter().any(|a| a == "--read-only"), "Modify");
+    assert_eq!(l.stdin, "scanne");
+
+    // Antigravity: not signed in, a clear refusal and nothing left behind.
+    let refused = runtime::launch(&runtime::LaunchInput {
+        detected: &agy,
+        ..input
+    });
+    assert!(refused.unwrap_err().contains("agy"));
+    // Signed in: the profile holds the sign-in and surgeon as the only MCP server.
+    std::fs::create_dir_all(home.user.join(".gemini")).unwrap();
+    for name in ["oauth_creds.json", "google_accounts.json"] {
+        std::fs::write(home.user.join(".gemini").join(name), b"{}").unwrap();
+    }
+    std::fs::write(home.user.join(".gemini").join("settings.json"), b"global").unwrap();
+    let l = runtime::launch(&runtime::LaunchInput {
+        detected: &agy,
+        ..input
+    })
+    .unwrap();
+    let gemini = home.profile.join(".gemini");
+    assert!(gemini.join("oauth_creds.json").is_file());
+    assert!(
+        !gemini.join("settings.json").exists(),
+        "nothing else is taken from the user"
+    );
+    let mcp: Value = serde_json::from_str(
+        &std::fs::read_to_string(gemini.join("config").join("mcp_config.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(mcp["mcpServers"].as_object().unwrap().len(), 1);
+    assert!(mcp["mcpServers"]["surgeon"]["args"].is_array());
+    let profile = home.profile.clone().into_os_string();
+    assert!(l.env.contains(&("USERPROFILE".into(), profile.clone())));
+    assert!(l.env.contains(&("HOME".into(), profile)));
+    let message: Value = serde_json::from_str(l.stdin.trim()).unwrap();
+    assert_eq!(
+        (
+            message["event"].as_str(),
+            message["message"]["content"].as_str()
+        ),
+        (Some("user"), Some("scanne"))
+    );
+    home.clear();
+    assert!(
+        !home.profile.exists(),
+        "the copied sign-in goes with the profile"
+    );
+}
+
+#[test]
+fn opencode_and_antigravity_streams_are_read() {
+    // Lines of real runs (opencode 2.2.7, agy 1.4.4), shortened.
+    let e = runtime::parse_opencode(
+        r#"{"type":"tool_use","part":{"type":"tool","tool":"execute","state":{"status":"completed","input":{"code":"await tools.surgeon.surgeon_check()"},"output":"ok"}}}"#,
+    );
+    assert!(matches!(&e[0], runtime::Event::Tool { name, .. } if name == "execute"));
+    assert_eq!(e[1], runtime::Event::ToolResult("ok".into()));
+    let e = runtime::parse_opencode(r#"{"type":"text","part":{"type":"text","text":"OK"}}"#);
+    assert_eq!(e, vec![runtime::Event::Text("OK".into())]);
+    let tools =
+        r#"{"type":"step_finish","part":{"type":"step-finish","reason":"tool-calls","cost":0}}"#;
+    assert!(
+        runtime::parse_opencode(tools).is_empty(),
+        "a turn goes on after tool calls"
+    );
+    let stop = r#"{"type":"step_finish","part":{"type":"step-finish","reason":"stop","cost":0}}"#;
+    assert!(matches!(
+        runtime::parse_opencode(stop)[0],
+        runtime::Event::Done { .. }
+    ));
+
+    let init = r#"{"event":"init","conversation_id":"c","init":{"tools":["run_command"],"permission_mode":"always-proceed"}}"#;
+    assert!(runtime::parse_agy(init).is_empty());
+    let input = r#"{"event":"step_update","step_update":{"step_index":0,"state":"DONE","step_type":"user_input"}}"#;
+    assert!(runtime::parse_agy(input).is_empty());
+    let quota = r#"{"event":"result","result":{"status":"ERROR","response":"","error":"Individual quota reached.","finished_reason":"error"}}"#;
+    assert_eq!(
+        runtime::parse_agy(quota),
+        vec![runtime::Event::Error("Individual quota reached.".into())]
+    );
+    let done = r#"{"event":"result","result":{"status":"SUCCESS","response":"OK","finished_reason":"end_turn"}}"#;
+    let e = runtime::parse_agy(done);
+    assert_eq!(e[0], runtime::Event::Text("OK".into()));
+    assert!(matches!(&e[1], runtime::Event::Done { summary, .. } if summary == "end_turn"));
+}
+
+#[test]
 fn codex_json_events_are_read() {
     let e = runtime::parse_codex(
         r#"{"type":"item.completed","item":{"id":"1","type":"agent_message","text":"salut"}}"#,
@@ -1507,4 +1663,338 @@ fn codex_json_events_are_read() {
     );
     assert!(matches!(&e[0], runtime::Event::Tool { name, .. } if name == "surgeon_check"));
     assert!(runtime::parse_codex("pas du json").is_empty());
+}
+
+#[test]
+fn a_project_inherits_the_default_connection_until_it_picks_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = super::view::Hub::new(
+        dir.path().join("agents.json"),
+        Box::new(SessionStore::default()),
+        Arc::new(|| {}),
+    );
+    let conn = |id: &str, models: &[&str], default_model: Option<&str>| Connection {
+        id: id.into(),
+        kind: ProviderKind::Compatible,
+        label: id.into(),
+        base_url: "http://127.0.0.1:11434/v1".into(),
+        models: models.iter().map(|m| m.to_string()).collect(),
+        default_model: default_model.map(str::to_owned),
+        last_model: None,
+        verified: false,
+        prices: Default::default(),
+    };
+    hub.cfg.connections = vec![
+        conn("ollama", &["a", "b"], Some("b")),
+        conn("lmstudio", &["x"], None),
+        conn("untested", &[], None),
+    ];
+    assert!(hub.connection().is_none(), "no default, no choice");
+    hub.cfg.default_connection = Some("ollama".into());
+    assert_eq!(hub.connection().unwrap().id, "ollama");
+    assert_eq!(
+        hub.model().as_deref(),
+        Some("b"),
+        "the connection's default model"
+    );
+    hub.pick_connection(Some("lmstudio".into()));
+    assert_eq!(hub.connection().unwrap().id, "lmstudio");
+    assert_eq!(hub.model().as_deref(), Some("x"), "its first model");
+    hub.pick_connection(Some("ollama".into()));
+    assert_eq!(
+        hub.model().as_deref(),
+        Some("b"),
+        "the new provider's default"
+    );
+    hub.pick_model("a".into());
+    assert_eq!(hub.model().as_deref(), Some("a"), "the project's own model");
+    hub.pick_connection(Some("lmstudio".into()));
+    assert_eq!(
+        hub.model().as_deref(),
+        Some("x"),
+        "never the other provider's model"
+    );
+    hub.pick_connection(Some("ollama".into()));
+    assert_eq!(
+        hub.model().as_deref(),
+        Some("a"),
+        "the last one picked there"
+    );
+    let saved = AgentsConfig::load(&dir.path().join("agents.json")).unwrap();
+    assert_eq!(
+        saved.connection("ollama").unwrap().last_model.as_deref(),
+        Some("a"),
+        "remembered in agents.json"
+    );
+    hub.pick_connection(None);
+    assert_eq!(hub.model().as_deref(), Some("b"), "back to the default");
+    assert!(!hub.cfg.connection("untested").unwrap().ready());
+}
+
+#[test]
+fn the_scan_offers_checked_runtimes_and_reports_the_other_clis_with_a_reason() {
+    use super::detect::{self, Reason};
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::env::join_paths([dir.path()]).unwrap();
+    let help = "-p, --print\n--output-format stream-json\n--mcp-config\n--strict-mcp-config\n--allowedTools\n--permission-prompts\n--tools";
+    fake_cli(dir.path(), "claude", help, &[]);
+    fake_cli(
+        dir.path(),
+        "opencode",
+        "--format json
+--auto
+--archived
+--standalone",
+        &[],
+    );
+    fake_cli(
+        dir.path(),
+        "agy",
+        "--print
+--output-format
+--input-format
+--model",
+        &[],
+    );
+    fake_cli(dir.path(), "gemini", "--prompt", &[]);
+    let (runtimes, others) = detect::clis(Some(&path));
+    let found: Vec<_> = runtimes.iter().map(|r| (r.kind, r.usable())).collect();
+    assert_eq!(
+        found,
+        [
+            (ProviderKind::ClaudeCode, true),
+            (ProviderKind::OpenCode, true),
+            (ProviderKind::Antigravity, true)
+        ]
+    );
+    let reasons: Vec<_> = others.iter().map(|o| (o.name, o.reason)).collect();
+    assert_eq!(reasons, [("gemini", Reason::NotSupported)]);
+    assert!(others[0].version.starts_with("9.9.9"), "{:?}", others[0]);
+}
+
+#[test]
+fn a_loopback_server_is_probed_for_its_models() {
+    let api = FakeApi::serve(vec![json_reply(
+        200,
+        json!({"object": "list", "data": [{"id": "qwen2.5:7b"}, {"id": "llama3.1:8b"}]}),
+    )]);
+    let models = super::detect::probe(&format!("{}/v1", api.base())).unwrap();
+    assert_eq!(models, ["llama3.1:8b", "qwen2.5:7b"]);
+    assert!(api.seen()[0].head.starts_with("GET /v1/models"));
+}
+
+#[test]
+fn a_refused_key_is_never_stored_and_an_accepted_one_is() {
+    let api = FakeApi::serve(vec![
+        json_reply(401, json!({"error": {"message": "invalid key"}})),
+        json_reply(200, json!({"data": [{"id": "m-1"}]})),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let mut studio = crate::studio::view::Studio::new(dir.path().join("projects"));
+    let mut hub = super::view::Hub::new(
+        dir.path().join("agents.json"),
+        Box::new(SessionStore::default()),
+        Arc::new(|| {}),
+    );
+    hub.new_preset = None;
+    hub.new_url = format!("{}/v1", api.base());
+    hub.add_connection();
+    let id = hub.selected.clone().unwrap();
+    let mut attempt = |hub: &mut super::view::Hub, key: &str| {
+        hub.key_input = key.into();
+        hub.try_typed_key(&id);
+        assert!(hub.key_input.is_empty(), "the field never keeps the key");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while hub.trying_key(&id) && Instant::now() < deadline {
+            hub.tick(&mut studio, &[]);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    attempt(&mut hub, "sk-refused");
+    assert!(hub.store.get(&id).unwrap().is_none(), "refused: not stored");
+    assert!(hub.message.as_ref().is_some_and(|(_, error)| *error));
+    attempt(&mut hub, "sk-accepted");
+    assert_eq!(
+        hub.store.get(&id).unwrap().map(|s| s.expose().to_owned()),
+        Some("sk-accepted".into())
+    );
+    assert_eq!(hub.cfg.connection(&id).unwrap().models, ["m-1"]);
+    assert_eq!(hub.key_tail(&id).as_deref(), Some("••••…pted"));
+}
+
+#[test]
+fn a_signed_in_cli_passes_its_own_status_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::env::join_paths([dir.path()]).unwrap();
+    assert!(
+        runtime::signed_in(ProviderKind::Codex, Some(&path)).is_err(),
+        "absent"
+    );
+    fake_cli(dir.path(), "codex", "--json", &[]);
+    assert_eq!(
+        runtime::signed_in(ProviderKind::Codex, Some(&path)),
+        Ok(vec![])
+    );
+    // OpenCode's check is its model list: the picker offers what it printed.
+    fake_cli(
+        dir.path(),
+        "opencode",
+        "",
+        &["ollama/qwen:latest", "opencode/big-pickle"],
+    );
+    assert_eq!(
+        runtime::signed_in(ProviderKind::OpenCode, Some(&path)).unwrap(),
+        ["ollama/qwen:latest", "opencode/big-pickle"]
+    );
+    assert_eq!(
+        runtime::login_command(ProviderKind::ClaudeCode),
+        "claude auth login"
+    );
+}
+
+#[test]
+fn the_mission_briefs_the_agent_and_stays_with_the_conversation() {
+    use super::mission::{Mission, Symptom};
+    let mut e = env(vec![mock::say("Je regarde o_proj.")], AgentMode::Ask);
+    let mission = Mission::Scalping(Symptom::Refusals);
+    e.s.conv.mission = Some(mission);
+    e.s.send("Il refuse tout ce qui parle de serrures").unwrap();
+    e.settle();
+    let system = &e.mock.requests()[0].system;
+    assert!(system.contains(&mission.brief()), "{system}");
+    let path = Dirs::of(&e.m.project.dir).conversation(&e.s.conv.id);
+    let saved = Conversation::load(&path).unwrap();
+    assert_eq!(saved.mission, Some(mission));
+}
+
+#[test]
+fn a_cli_write_of_focus_or_plan_is_taken_once_and_only_when_newer_than_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("focus.json");
+    std::fs::write(&path, r#"{"target":"L3.down"}"#).unwrap();
+    let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+    // Written before the run started: not this run's.
+    let mut seen = written;
+    assert_eq!(super::view::read_if_newer(&path, &mut seen), None);
+    let mut seen = written - Duration::from_secs(1);
+    let focus = super::view::read_if_newer(&path, &mut seen).unwrap();
+    assert_eq!(focus["target"], "L3.down");
+    assert_eq!(seen, written);
+    assert_eq!(super::view::read_if_newer(&path, &mut seen), None, "once");
+    assert_eq!(
+        super::view::read_if_newer(&dir.path().join("plan.json"), &mut seen),
+        None
+    );
+}
+
+#[test]
+fn each_provider_offers_only_its_own_models() {
+    let conn = |kind, models: &[&str]| Connection {
+        id: "c".into(),
+        kind,
+        label: "c".into(),
+        base_url: String::new(),
+        models: models.iter().map(|m| m.to_string()).collect(),
+        default_model: None,
+        last_model: None,
+        verified: true,
+        prices: Default::default(),
+    };
+    assert_eq!(
+        conn(ProviderKind::ClaudeCode, &[]).model_choices(),
+        ["sonnet", "opus", "haiku", "fable"]
+    );
+    assert_eq!(
+        conn(ProviderKind::Codex, &[]).model_choices(),
+        ["gpt-5-codex", "o3", "o4-mini"]
+    );
+    for kind in [
+        ProviderKind::OpenCode,
+        ProviderKind::Antigravity,
+        ProviderKind::Anthropic,
+        ProviderKind::OpenAi,
+        ProviderKind::Compatible,
+    ] {
+        assert!(
+            conn(kind, &[]).model_choices().is_empty(),
+            "{kind:?}: listed by the provider, never invented"
+        );
+    }
+    assert_eq!(
+        conn(ProviderKind::Codex, &["gpt-x"]).model_choices(),
+        ["gpt-x"],
+        "a listed model wins over the built-in names"
+    );
+    assert_eq!(
+        conn(ProviderKind::ClaudeCode, &[]).preferred_model(),
+        None,
+        "no pick yet: the CLI's own default"
+    );
+    assert_eq!(
+        runtime::model_lines(
+            "Models:
+ollama/qwen:latest
+
+  opencode/big-pickle  
+note: x y
+"
+        ),
+        ["ollama/qwen:latest", "opencode/big-pickle"]
+    );
+}
+
+#[test]
+fn every_cli_runtime_gets_the_picked_model_as_its_model_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let home = runtime::AgyHome {
+        profile: dir.path().join("profiles").join("agy"),
+        user: dir.path().join("user"),
+    };
+    std::fs::create_dir_all(home.user.join(".gemini")).unwrap();
+    for name in ["oauth_creds.json", "google_accounts.json"] {
+        std::fs::write(home.user.join(".gemini").join(name), b"{}").unwrap();
+    }
+    let surgeon = dir.path().join("surgeon.exe");
+    let scratch = dir.path().join("scratch");
+    for (kind, model) in [
+        (ProviderKind::ClaudeCode, "opus"),
+        (ProviderKind::Codex, "o3"),
+        (ProviderKind::OpenCode, "ollama/qwen"),
+        (ProviderKind::Antigravity, "gemini-pro"),
+    ] {
+        let detected = runtime::Detected {
+            kind,
+            path: dir.path().join("cli.exe"),
+            version: "1".into(),
+            missing: Vec::new(),
+        };
+        let args = |model| -> Vec<String> {
+            let l = runtime::launch(&runtime::LaunchInput {
+                detected: &detected,
+                surgeon: &surgeon,
+                mode: AgentMode::Ask,
+                project: &project,
+                source_dir: None,
+                model,
+                prompt: "p",
+                scratch: &scratch,
+                agy: Some(&home),
+            })
+            .unwrap();
+            l.args.iter().map(|a| a.to_string_lossy().into()).collect()
+        };
+        let with = args(Some(model));
+        let at = with.iter().position(|a| a == "--model");
+        assert_eq!(
+            at.map(|i| with[i + 1].as_str()),
+            Some(model),
+            "{kind:?}: {with:?}"
+        );
+        assert!(
+            !args(None).contains(&"--model".to_owned()),
+            "{kind:?}: no pick, the CLI's own default"
+        );
+    }
 }

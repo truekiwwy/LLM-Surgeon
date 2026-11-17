@@ -27,6 +27,25 @@ un rejeu arrivé au bout montre exactement ce qui était à l'écran en direct.
 - **Source** : le rejeu ouvert s'il y en a un, sinon le run suivi s'il tourne, sinon le
   premier job en cours du projet.
 
+### Rendu
+
+- **Disposition** (`scene.rs`, calculée dans `Step` depuis rôle, couche et expert) : en
+  Colonne, une rangée par couche, attention à gauche, MLP à droite un tiers de rangée plus
+  haut, les écrivains près du flux résiduel au centre, embeddings et tête sur le flux ; les
+  experts reculent en profondeur. En Constellation, les mêmes hauteurs en anneaux tournés
+  d'une couche à l'autre (hélice). L'écart vertical vaut au moins deux diamètres de nœud.
+- **Nœuds** : halo, corps ombré, face éclairée et reflet, couleur par rôle (cyan, indigo,
+  ambre) et forme par rôle (losange, cercle, carré) ; en Diff Δ, du corail au magenta selon
+  l'écart relatif (plein à 10 %). Profondeur de champ : les nœuds lointains reculent vers le
+  fond, plus en hélice.
+- **Arêtes** : un seul mesh, chacune en dégradé de la couleur de sa source à celle de sa
+  cible, bord adouci d'un pixel ; celles de la sélection plus épaisses, les autres atténuées.
+- **Agent** : la sélection (`show_in_3d` ou clic) pulse et porte une carte (id, σ1, erank,
+  κ) ; ses arêtes et celles des couches de l'outil en cours font couler des perles de la
+  source vers la cible. L'appel d'outil sans résultat de la conversation
+  (`agent::activity`) fait onduler ses couches et s'affiche en haut du canvas
+  (`Autotune down_proj L11–L14…`). Sans mouvement (`--no-motion`) l'image est fixe.
+
 ### États : jamais la couleur seule
 
 | État | Glyphe autour du nœud | Couleur | Mot (liste, infobulle, légende) |
@@ -117,14 +136,15 @@ reste plat sur les gros graphes :
   de 400 nœuds ; les arêtes structurelles et celles du nœud sélectionné sont toujours là.
   Une arête de moins d'un demi-pixel n'est pas dessinée.
 - **Niveaux de détail** : le budget d'arêtes baisse avec le nombre de nœuds ; les rayons
-  suivent la profondeur (2,5 à 9 px) ; les étiquettes ne sont dessinées que pour la sélection
-  et le survol.
+  suivent la profondeur (2,5 à 11 px) ; halo et reflet seulement au-dessus de 3,5 px ; les
+  repères de couche qui se chevauchent sont sautés ; les étiquettes de nœud ne sont dessinées
+  que pour la sélection et le survol.
 - **Tampons réutilisés** : projections, ordre de profondeur, cibles du picking et formes
   vivent dans `viewport::Buffers` d'une frame à l'autre ; la couche du run (`live::Layer`)
   est remplie en place.
 - **Mesure** : `cargo test --release -- --ignored frame_cost` (dans `crates/surgeon-gui`)
   mesure le côté CPU d'une frame (mise en page egui et tessellation, sans l'envoi GPU) sur
-  600 nœuds et 2 390 arêtes avec une couche de run : 1,3 ms par frame (release) sur la
+  600 nœuds et 2 390 arêtes avec une couche de run : 1,9 ms par frame (release) sur la
   machine de développement, sous les 16,7 ms de 60 i/s.
 - **Mémoire bornée en direct** : le canal tient 1 024 lignes, la vue garde une entrée par
   nœud et par (nœud, métrique) et 500 lignes de journal (test sur 200 000 événements).

@@ -29,7 +29,7 @@ use crate::eval::{locate_binary, EvalError};
 /// The daemon's documented port.
 pub const DEFAULT_PORT: u16 = 11435;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const ALTERNATIVE: &str = "--backend mistralrs, llama-server ou native";
+const ALTERNATIVE: &str = "--backend mistralrs ou native";
 pub const CHAT_ONLY: &str = "hipfire n'expose que /v1/chat/completions, sans graine documentée : \
     son gabarit de chat s'ajoute à celui du bench, les résultats ne sont ni reproductibles ni \
     comparables aux autres backends";
@@ -119,14 +119,16 @@ pub fn model_name(model: &Path) -> String {
 
 pub fn detect(config: &BackendConfig) -> HipfireDetection {
     let binary = binary(config);
-    let note = match probe(config) {
+    let probed = probe(config);
+    let up = probed.is_ok();
+    let note = match probed {
         Ok(e) => match e.warning() {
             Some(w) => format!("démon sur 127.0.0.1:{} ; {w}", e.port),
             None => format!("démon sur 127.0.0.1:{} (/v1/completions)", e.port),
         },
         Err(e) => e,
     };
-    HipfireDetection { binary, note }
+    HipfireDetection { binary, up, note }
 }
 
 #[cfg(test)]

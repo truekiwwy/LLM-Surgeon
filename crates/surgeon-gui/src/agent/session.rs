@@ -15,6 +15,8 @@ use serde_json::Value;
 
 use super::config::{AskMode, Prices, RunBudgets};
 use super::evidence::{self, Finding};
+use super::mission::Mission;
+use super::paths::ProjectPaths;
 use super::policy::{self, AgentMode, Decision, Rule, Scope};
 use super::provider::{
     stream_with_retries, Block, Delta, LlmProvider, Message, ProviderError, Request, RetryPolicy,
@@ -94,6 +96,9 @@ pub struct Conversation {
     /// Only counted when the user typed prices for this model.
     pub cost_usd: f64,
     pub plan: Vec<String>,
+    /// What the session is for; older conversations have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission: Option<Mission>,
 }
 
 impl Conversation {
@@ -175,6 +180,20 @@ impl Dirs {
 
     pub fn findings(&self) -> PathBuf {
         self.chat.join("findings.jsonl")
+    }
+
+    /// The runs of a CLI agent, journaled by the engine's MCP server.
+    pub fn mcp_runs(&self) -> PathBuf {
+        self.chat.join("mcp_runs.jsonl")
+    }
+
+    /// The last `show_in_3d` and `update_plan` of a CLI agent, written by the MCP server.
+    pub fn focus(&self) -> PathBuf {
+        self.chat.join("focus.json")
+    }
+
+    pub fn plan(&self) -> PathBuf {
+        self.chat.join("plan.json")
     }
 
     pub fn agent(&self) -> PathBuf {
@@ -956,9 +975,9 @@ impl Session {
              projet du studio. Mode : {mode}. Les outils surgeon_* sont ceux du serveur MCP du \
              moteur ; chaque appel devient un run du projet (identifiant r…), journalisé.\n\
              Règles :\n\
-             - Le modèle d'origine n'est jamais écrit : travaille sur copies/ (une copie de \
-             travail se crée depuis l'onglet Projets ; demande-la avec ask_user s'il n'y en a \
-             pas). Chemins limités au dossier du projet et à celui du modèle.\n\
+             - Le modèle d'origine n'est jamais écrit : travaille sur la copie de travail \
+             (working_copy_path ci-dessous). Chemins limités au dossier du projet et à celui \
+             du modèle.\n\
              - La politique d'approbation est appliquée par le studio, pas par toi : un refus \
              ou une interdiction est définitif pour cet appel. La promotion d'un résultat vers \
              le modèle d'origine ou un export est une action humaine.\n\
@@ -968,14 +987,19 @@ impl Session {
              - Chaque chiffre que tu affirmes vient d'un run : consigne-le avec record_finding \
              (run_id et valeur exacte). Sinon dis que c'est déduit ou inconnu.\n\
              - Tiens le plan à jour avec update_plan ; montre un tenseur avec show_in_3d.\n\
-             Projet : {project}",
+             {paths}{mission}",
             tag = tools::FRAME_TAG,
-            project = self.outgoing(
+            mission = self
+                .conv
+                .mission
+                .map(|m| format!("\n\n{}", m.brief()))
+                .unwrap_or_default(),
+            paths = self.outgoing(
                 &self
                     .dirs
                     .chat
                     .parent()
-                    .map(|p| p.display().to_string())
+                    .map(|p| ProjectPaths::of(p).brief())
                     .unwrap_or_default()
             ),
         )

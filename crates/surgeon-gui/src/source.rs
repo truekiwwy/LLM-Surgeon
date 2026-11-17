@@ -13,6 +13,8 @@ use weight_surgeon::graph::diff::NodeDiff;
 use weight_surgeon::graph::output::{GraphReport, SCHEMA_VERSION};
 use weight_surgeon::graph::stream::GraphPatch;
 
+use crate::scene::Scene;
+
 /// How often a followed file is polled once its end is reached.
 const POLL: Duration = Duration::from_millis(200);
 
@@ -115,6 +117,8 @@ pub struct Step {
     pub edges: Vec<(usize, usize, usize)>,
     /// Node index by graph id and by tensor name: event `node_id`s use either.
     pub index: HashMap<String, usize>,
+    /// Where the 3D view puts the nodes.
+    pub scene: Scene,
 }
 
 impl Step {
@@ -146,11 +150,13 @@ impl Step {
                 .cmp(&ea.structural)
                 .then(eb.weight.abs().total_cmp(&ea.weight.abs()))
         });
+        let scene = Scene::new(&report.nodes, report.model.layers);
         Self {
             report,
             touched,
             edges,
             index,
+            scene,
         }
     }
 }

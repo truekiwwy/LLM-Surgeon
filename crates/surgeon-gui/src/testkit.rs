@@ -179,6 +179,12 @@ fn handle(mut stream: TcpStream, port: u16, state: &Mutex<State>) {
     let _ = stream.shutdown(Shutdown::Both);
 }
 
+/// The seven matrices of a layer, in the order a synthetic graph cycles through them.
+const ROLES: [weight_surgeon::graph::GraphRole; 7] = {
+    use weight_surgeon::graph::GraphRole as R;
+    [R::Q, R::K, R::V, R::AttnOut, R::Gate, R::Up, R::MlpOut]
+};
+
 /// A synthetic graph of `nodes` matrices built from the fixture's first node: distinct ids
 /// and tensor names, positions on a deterministic helix, a chain of structural edges and
 /// three weighted edges per node.
@@ -198,6 +204,7 @@ pub fn graph(nodes: usize) -> weight_surgeon::graph::output::GraphReport {
             n.id = format!("L{i}.n");
             n.tensor = format!("model.layers.{i}.mlp.down_proj.weight");
             n.layer = Some(i / 7);
+            n.role = ROLES[i % 7];
             n.seq = i;
             n.pos_column = [0.6 * angle.cos(), 1.6 * t - 0.8, 0.6 * angle.sin()];
             n.pos_constellation = [0.8 * (3.0 * angle).sin(), 0.5 * angle.cos(), t - 0.5];

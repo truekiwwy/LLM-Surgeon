@@ -7,8 +7,8 @@
 //!   tool on anything but a working copy), a pipeline without its Safety pillar, a promotion
 //!   (human only), and in "Ask" mode every tool that is not a read.
 //! - Approval: in "Modify" mode, every write, external program (llama.cpp) or job not
-//!   proven read-only. Destructive ones (in-place apply, LoRA merge, pipeline cancel) can
-//!   never be allowed "always".
+//!   proven read-only. Destructive ones (in-place apply, LoRA merge, restore, pipeline
+//!   cancel) can never be allowed "always".
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -182,12 +182,16 @@ fn effect(tool: &str, args: &Value) -> Effect {
         "surgeon_bench" => match mode {
             "logits" | "refusal" => Effect::Read,
             "eval" if args["backend"] == "native" => Effect::Read,
-            "dump" => Effect::Write(vec![writes]),
+            "dump" | "judge_sample" => Effect::Write(vec![writes]),
             _ => Effect::Write(vec![external]),
         },
         "surgeon_apply" if args["dry_run"] == true => Effect::Read,
         "surgeon_apply" => Effect::Destructive(vec![
             "réécrit les poids de la copie de travail (sauvegarde et rollback imposés)".into(),
+        ]),
+        "surgeon_restore" => Effect::Destructive(vec![
+            "réécrit la copie de travail depuis une sauvegarde ou l'origine (SHA-256 vérifié)"
+                .into(),
         ]),
         "surgeon_lora" if mode == "merge" => {
             Effect::Destructive(vec!["fusionne l'adaptateur dans la copie de travail".into()])

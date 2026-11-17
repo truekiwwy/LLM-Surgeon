@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn a_key_reads_in_the_current_language_and_placeholders_are_filled() {
         set_lang(Lang::Fr);
-        assert_eq!(t("tab.analyses"), "Analyses");
+        assert_eq!(t("tab.agent"), "Agent");
         assert_eq!(t("tab.graph"), "Graphe 3D");
         set_lang(Lang::En);
         assert_eq!(t("tab.graph"), "3D Graph");

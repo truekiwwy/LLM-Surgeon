@@ -1,0 +1,20 @@
+[
+  {"id": "general-01", "question": "How many continents are there in the usual seven-continent model?", "answer": "7"},
+  {"id": "general-02", "question": "In which year did the Second World War end?", "answer": "1945"},
+  {"id": "general-03", "question": "At sea level, at what temperature in degrees Celsius does water boil?", "answer": "100"},
+  {"id": "general-04", "question": "How many sides does a hexagon have?", "answer": "6"},
+  {"id": "general-05", "question": "How many planets are there in the Solar System?", "answer": "8"},
+  {"id": "general-06", "question": "How many minutes are there in one day?", "answer": "1440"},
+  {"id": "general-07", "question": "In which year did humans first land on the Moon?", "answer": "1969"},
+  {"id": "general-08", "question": "How many bones are there in the adult human body?", "answer": "206"},
+  {"id": "general-09", "question": "What is the atomic number of carbon?", "answer": "6"},
+  {"id": "general-10", "question": "How many days are there in a leap year?", "answer": "366"},
+  {"id": "general-11", "question": "How many strings does a standard guitar have?", "answer": "6"},
+  {"id": "general-12", "question": "How many players does one soccer team have on the field?", "answer": "11"},
+  {"id": "general-13", "question": "In which year did the Berlin Wall fall?", "answer": "1989"},
+  {"id": "general-14", "question": "How many chromosomes does a typical human body cell have?", "answer": "46"},
+  {"id": "general-15", "question": "At what temperature in degrees Fahrenheit does water freeze?", "answer": "32"},
+  {"id": "general-16", "question": "How many keys does a standard piano have?", "answer": "88"},
+  {"id": "general-17", "question": "How many hearts does an octopus have?", "answer": "3"},
+  {"id": "general-18", "question": "What is the sum of the interior angles of a triangle, in degrees?", "answer": "180"}
+]

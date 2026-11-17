@@ -1,8 +1,11 @@
 //! A background job with a progress readout and a cancel flag, polled from the UI thread.
 
-use std::sync::atomic::AtomicBool;
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Default)]
 pub struct Progress {
@@ -81,9 +84,112 @@ impl<T: Send + 'static> Task<T> {
     }
 }
 
+/// One line of a program's output, readable whatever it wrote: UTF-16 output (`wsl.exe`'s own
+/// messages) loses its NUL bytes, invalid UTF-8 is replaced.
+pub fn output_line(bytes: &[u8]) -> String {
+    let kept: Vec<u8> = bytes.iter().copied().filter(|b| *b != 0).collect();
+    String::from_utf8_lossy(&kept).trim().to_owned()
+}
+
+/// Runs `cmd` to its end, each line it writes (stdout and stderr) shown as the progress;
+/// the cancel flag kills it. The error carries the last line written.
+pub fn run_streamed(mut cmd: Command, handle: &Handle) -> Result<(), String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let (tx, lines) = mpsc::channel();
+    let pipes: [Option<Box<dyn Read + Send>>; 2] = [
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    ];
+    for pipe in pipes.into_iter().flatten() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(pipe).split(b'\n').map_while(Result::ok) {
+                let line = output_line(&line);
+                if !line.is_empty() {
+                    let _ = tx.send(line);
+                }
+            }
+        });
+    }
+    let mut last = String::new();
+    let status = loop {
+        for line in lines.try_iter() {
+            handle.report(&line, 0, None);
+            last = line;
+        }
+        if handle.cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(crate::ui::i18n::t("setup.cancelled").into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    for line in lines.try_iter() {
+        last = line;
+    }
+    match status.success() {
+        true => Ok(()),
+        false => Err(last),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_lines_read_utf16_and_utf8_alike() {
+        let utf16: Vec<u8> = "Ubuntu-24.04\r"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        assert_eq!(output_line(&utf16), "Ubuntu-24.04");
+        assert_eq!(
+            output_line("[2/6] ROCm 7.2.1 ".as_bytes()),
+            "[2/6] ROCm 7.2.1"
+        );
+    }
+
+    #[test]
+    fn a_streamed_command_reports_its_lines_and_its_last_one_on_failure() {
+        let shell = |script: &str| {
+            let mut c = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+            c.args(if cfg!(windows) {
+                ["/C", script]
+            } else {
+                ["-c", script]
+            });
+            c
+        };
+        let task = Task::spawn(
+            || {},
+            move |h| run_streamed(shell("echo un&& echo deux&& exit 3"), h),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let result = loop {
+            if let Some(r) = task.poll() {
+                break r;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(result, Err("deux".into()));
+    }
     use std::time::{Duration, Instant};
 
     #[test]

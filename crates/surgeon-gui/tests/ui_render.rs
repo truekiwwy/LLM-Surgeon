@@ -1,11 +1,12 @@
-//! The real window, rendered off screen on the `--demo-data` workspace: every tab in both
-//! languages, the keyboard (tabs, palette, tree), both modes, the theme's contrasts and type
+//! The real window, rendered off screen on the `--demo-data` workspace: both views, the
+//! new-session form and every section of the settings in both languages, the keyboard
+//! (views, settings, palette, tree), both kinds of session, the theme's contrasts and type
 //! coverage, and the accent budget of each screen (docs/design/DIRECTION.md, section 2).
 
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, RawInput, Rect, Vec2};
 use surgeon_gui::actions::Env;
 use surgeon_gui::agent::policy::AgentMode;
-use surgeon_gui::app::{Mode, SurgeonApp, Tab};
+use surgeon_gui::app::{Mode, Section, SurgeonApp, Tab};
 use surgeon_gui::desktop::Desktop;
 use surgeon_gui::settings::{Lang, Settings};
 use surgeon_gui::ui::{components, fonts, theme};
@@ -81,19 +82,41 @@ fn raw_key(text: &str) -> bool {
     keys.contains_key(text)
 }
 
+/// The demo session waits on an approval, so New session is refused: drop it by hand.
+fn empty_session(b: &mut Bench) {
+    b.app.agents.session = None;
+    b.app.agents.cli_conv = None;
+    assert!(b.app.agents.conversation().is_none());
+}
+
+/// The texts of one frame of the settings dialog on `section`, over the agent.
+fn settings_texts(b: &mut Bench, section: Section) -> Vec<String> {
+    b.app.settings = Some(section);
+    b.texts(Tab::Agent)
+}
+
 #[test]
-fn every_tab_renders_in_both_languages_without_a_raw_key() {
-    for (lang, atelier, graph) in [
-        (Lang::Fr, "Atelier", "Graphe 3D"),
-        (Lang::En, "Workshop", "3D Graph"),
+fn every_view_and_section_renders_in_both_languages_without_a_raw_key() {
+    for (lang, evidence, inspector) in [
+        (Lang::Fr, "Preuves", "Inspecteur"),
+        (Lang::En, "Evidence", "Inspector"),
     ] {
         let mut b = bench(lang);
-        for tab in Tab::ALL {
-            let texts = b.texts(tab);
-            assert!(texts.iter().any(|t| t == atelier), "{lang:?} {tab:?}");
-            assert!(texts.iter().any(|t| t == graph), "{lang:?} {tab:?}");
+        let mut screens = vec![
+            ("agent", b.texts(Tab::Agent)),
+            ("graph", b.texts(Tab::Graph)),
+        ];
+        assert!(screens[0].1.iter().any(|t| t == evidence), "{lang:?}");
+        assert!(screens[1].1.iter().any(|t| t == inspector), "{lang:?}");
+        empty_session(&mut b);
+        screens.push(("form", b.texts(Tab::Agent)));
+        for section in Section::ALL {
+            screens.push(("settings", settings_texts(&mut b, section)));
+        }
+        b.app.settings = None;
+        for (name, texts) in screens {
             let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
-            assert!(raw.is_empty(), "{lang:?} {tab:?}: {raw:?}");
+            assert!(raw.is_empty(), "{lang:?} {name}: {raw:?}");
         }
     }
 }
@@ -101,37 +124,45 @@ fn every_tab_renders_in_both_languages_without_a_raw_key() {
 #[test]
 fn the_language_switch_repaints_the_window() {
     let mut b = bench(Lang::Fr);
-    assert!(b
-        .texts(Tab::Analyses)
-        .iter()
-        .any(|t| t == "Lancer l'analyse"));
+    assert!(b.texts(Tab::Agent).iter().any(|t| t == "Preuves"));
     b.app.desktop.set_lang(Lang::En);
-    let texts = b.texts(Tab::Analyses);
-    assert!(texts.iter().any(|t| t == "Run the analysis"), "{texts:?}");
-    assert!(!texts.iter().any(|t| t == "Lancer l'analyse"));
+    let texts = b.texts(Tab::Agent);
+    assert!(texts.iter().any(|t| t == "Evidence"), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == "Preuves"));
 }
 
 #[test]
-fn the_keyboard_reaches_tabs_palette_and_tree() {
+fn the_keyboard_reaches_views_settings_palette_and_tree() {
     let mut b = bench(Lang::En);
     b.press(key(Key::Num2, Modifiers::COMMAND));
     assert_eq!(b.app.tab, Tab::Graph);
-    b.press(key(Key::Num5, Modifiers::COMMAND));
-    assert_eq!(b.app.tab, Tab::Diagnostics);
+    b.press(key(Key::Num1, Modifiers::COMMAND));
+    assert_eq!(b.app.tab, Tab::Agent);
+    b.press(key(Key::B, Modifiers::COMMAND));
+    assert!(b.app.columns.collapsed, "Ctrl+B folds the left column");
+    assert!(b.app.desktop.settings.left_collapsed, "and keeps it");
+    b.press(key(Key::B, Modifiers::COMMAND));
+    assert!(!b.app.columns.collapsed);
+
+    // Ctrl+, opens the settings; Escape closes them.
+    b.press(key(Key::Comma, Modifiers::COMMAND));
+    assert_eq!(b.app.settings, Some(Section::General));
+    b.press(vec![]);
+    b.press(key(Key::Escape, Modifiers::NONE));
+    assert_eq!(b.app.settings, None);
 
     // Ctrl+K, a query, Enter: the first match runs.
     b.press(key(Key::K, Modifiers::COMMAND));
     assert!(b.app.palette.open);
-    b.press(vec![Event::Text("analyses".into())]);
+    b.press(vec![Event::Text("graph".into())]);
     b.press(key(Key::Enter, Modifiers::NONE));
     assert!(!b.app.palette.open);
-    assert_eq!(b.app.tab, Tab::Analyses);
+    assert_eq!(b.app.tab, Tab::Graph);
     b.press(key(Key::K, Modifiers::COMMAND));
     b.press(key(Key::Escape, Modifiers::NONE));
     assert!(!b.app.palette.open);
 
     // Down walks the tree from the selection, Escape clears it.
-    b.app.tab = Tab::Graph;
     let before = b.app.selected.clone();
     b.press(key(Key::ArrowDown, Modifiers::NONE));
     assert!(b.app.selected.is_some() && b.app.selected != before);
@@ -140,39 +171,97 @@ fn the_keyboard_reaches_tabs_palette_and_tree() {
 }
 
 #[test]
-fn advance_puts_the_agent_in_read_only_and_the_atelier_on_the_audit() {
-    let mut b = bench(Lang::Fr);
+fn a_new_session_offers_the_full_scan_and_the_precise_problem() {
+    let mut b = bench(Lang::En);
+    empty_session(&mut b);
+    b.app.set_mode(Mode::Advance);
+    let advance = b.texts(Tab::Agent);
+    for text in ["Full scan (Advance)", "Precise problem (Scalping)", "Start"] {
+        assert!(advance.iter().any(|t| t == text), "{text}: {advance:?}");
+    }
+    assert!(!advance.iter().any(|t| t == "Excessive refusals"));
+    b.app.set_mode(Mode::Scalping);
+    assert_eq!(b.app.desktop.settings.mode, Mode::Scalping, "kept");
     assert_eq!(
         b.app.agents.agent.mode,
         AgentMode::Modify,
-        "the demo starts in Modify"
+        "the contract is not the kind of session"
     );
-    let scalping = b.texts(Tab::Atelier);
-    assert!(
-        scalping.iter().any(|t| t == "CHIRURGIE · CIBLAGE"),
-        "{scalping:?}"
-    );
-    b.app.set_mode(Mode::Advance);
-    assert_eq!(b.app.agents.agent.mode, AgentMode::Ask);
-    let advance = b.texts(Tab::Atelier);
-    assert!(
-        advance.iter().any(|t| t == "AUDIT IA · LECTURE SEULE"),
-        "{advance:?}"
-    );
-    assert!(advance.iter().any(|t| t == "Lancer l'audit"));
+    let scalping = b.texts(Tab::Agent);
+    for text in [
+        "Excessive refusals",
+        "Repetitions and loops",
+        "Describe the problem",
+    ] {
+        assert!(scalping.iter().any(|t| t == text), "{text}: {scalping:?}");
+    }
+}
+
+/// One frame of the window, and the rectangle the layout dump calls `name`.
+fn frame_and(b: &mut Bench, name: &str) -> (raster::Image, Rect) {
+    let app = &mut b.app;
+    let frame = raster::render(&b.ctx, SIZE, 1.0, |ui| app.draw(ui));
+    let rect = components::take_dump(&b.ctx)
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, r)| r)
+        .unwrap_or_else(|| panic!("no {name} in the layout dump"));
+    (frame.image, rect)
 }
 
 #[test]
-fn the_demo_waits_on_an_approval_in_the_atelier_and_in_agents() {
+fn a_long_description_scrolls_inside_its_field_and_covers_nothing_below() {
+    let mut b = bench(Lang::Fr);
+    empty_session(&mut b);
+    b.app.tab = Tab::Agent;
+    b.app.set_mode(Mode::Advance);
+    // The first frame of the form settles its layout; the second is the reference.
+    frame_and(&mut b, "multiline");
+    let (empty, field) = frame_and(&mut b, "multiline");
+    b.app.agents.input = (1..=60)
+        .map(|k| {
+            format!(
+                "ligne {k} du problème décrit
+"
+            )
+        })
+        .collect();
+    let (long, grown) = frame_and(&mut b, "multiline");
+    assert_eq!(field, grown, "the field keeps its size");
+    // The band under the field (ideas, what the agent may do, Start) is pixel for pixel the same.
+    let band = (field.bottom() as u32 + 2)..(field.bottom() as u32 + 160);
+    let width = empty.width as usize;
+    let changed: Vec<(u32, u32)> = band
+        .flat_map(|y| (0..empty.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let i = (y as usize * width + x as usize) * 4;
+            empty.rgba[i..i + 4] != long.rgba[i..i + 4]
+        })
+        .collect();
+    let span = |f: fn(&(u32, u32)) -> u32| {
+        let v: Vec<u32> = changed.iter().map(f).collect();
+        (v.iter().min().copied(), v.iter().max().copied())
+    };
+    assert!(
+        changed.is_empty(),
+        "the text drew over what is below its field: x {:?}, y {:?}",
+        span(|p| p.0),
+        span(|p| p.1)
+    );
+}
+
+#[test]
+fn the_demo_waits_on_an_approval_in_the_thread_only() {
     let mut b = bench(Lang::En);
-    for tab in [Tab::Atelier, Tab::Agents] {
-        let texts = b.texts(tab);
-        assert!(
-            texts.iter().any(|t| t == "Allow once"),
-            "{tab:?}: {texts:?}"
-        );
-        assert!(texts.iter().any(|t| t == "Deny"), "{tab:?}");
+    let texts = b.texts(Tab::Agent);
+    assert!(texts.iter().any(|t| t == "Allow once"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "Deny"));
+    for text in ["Sessions", "Evidence"] {
+        assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
     }
+    let graph = b.texts(Tab::Graph);
+    assert!(!graph.iter().any(|t| t == "Allow once"), "{graph:?}");
+    assert!(b.app.agents.pending() > 0, "the activity bar counts it");
 }
 
 #[test]
@@ -221,14 +310,14 @@ fn the_embedded_faces_cover_french_and_the_symbols() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/");
     let face = |name: &str| cmap(&std::fs::read(format!("{dir}{name}")).unwrap());
     let mono = face("JetBrainsMono-Regular.ttf");
-    for name in ["Barlow-Regular.ttf", "Barlow-Medium.ttf"] {
+    for name in ["DMSans-Regular.ttf", "DMSans-Medium.ttf", "DMSans-Bold.ttf"] {
         let sans = face(name);
         let missing: String = fonts::FRENCH
             .chars()
             .filter(|c| !sans.contains(c))
             .collect();
         assert!(missing.is_empty(), "{name} lacks {missing:?}");
-        // A symbol Barlow lacks falls back to the monospace face, which must have it.
+        // A symbol DM Sans lacks falls back to the monospace face, which must have it.
         let nowhere: String = fonts::SYMBOLS
             .chars()
             .filter(|c| !sans.contains(c) && !mono.contains(c))
@@ -246,9 +335,9 @@ fn the_embedded_faces_cover_french_and_the_symbols() {
     assert!(missing.is_empty(), "JetBrains Mono lacks {missing:?}");
 }
 
-/// Share of pixels within 24 (Chebyshev, RGB) of either blue, outside the data regions.
+/// Share of pixels within 24 (Chebyshev, RGB) of the accent, outside the data regions.
 fn accent_share(image: &raster::Image, data: &[Rect]) -> f64 {
-    let blues = [theme::TOKENS.color.accent, theme::TOKENS.color.action];
+    let blues = [theme::TOKENS.color.accent];
     let (mut hits, mut total) = (0u64, 0u64);
     for y in 0..image.height {
         for x in 0..image.width {
@@ -284,7 +373,7 @@ fn no_screen_spends_more_than_three_percent_of_its_pixels_on_the_accent() {
         let frame = raster::render(&b.ctx, SIZE, 1.0, |ui| app.draw(ui));
         let data: Vec<Rect> = components::take_dump(&b.ctx)
             .into_iter()
-            .filter(|(name, _)| ["preview", "graph-view", "histogram"].contains(&name.as_str()))
+            .filter(|(name, _)| name == "graph-view")
             .map(|(_, r)| r)
             .collect();
         let share = accent_share(&frame.image, &data);

@@ -1,8 +1,25 @@
 # Hub d'agents : fournisseurs IA, boucle d'agent, approbations, journal des preuves
 
-La page `Agents` de `surgeon-gui` pilote le moteur par un agent IA sans quitter l'application :
-connecter un fournisseur, discuter, laisser l'agent lancer des analyses et proposer des
-modifications de modèle, avec des approbations calculées par le code.
+L'agent est la vue principale de `surgeon-gui` : il pilote le moteur sans quitter l'application,
+lance des analyses et propose des modifications de modèle, avec des approbations calculées par
+le code. Les fournisseurs se configurent dans `Réglages > IA` (et à l'étape 02 de l'assistant) ;
+la vue ne garde que l'usage : projet et sessions à gauche, session au centre, preuves à
+droite. Ce que l'agent peut faire (Demander / Modifier) se choisit dans le formulaire de
+nouvelle session.
+
+## 0. Deux missions
+
+Une session démarre d'un formulaire, sous l'une de deux formes enregistrées avec la
+conversation (`mission` dans `<conversation>.json`) et rappelées à l'agent dans son prompt
+système (`agent/mission.rs`) :
+
+| Mission | L'utilisateur donne | L'agent fait |
+| --- | --- | --- |
+| `Advance` (scan complet) | rien, ou des précisions | `surgeon_check`, `surgeon_inspect`, le graphe complet (`surgeon_graph`) sur une copie, la recherche des anomalies (normes et rangs hors de leur rôle, conditionnement, couches ou experts atypiques, écart à une référence, comportement en lecture), un rapport classé avec `record_finding`, puis les corrections une par une |
+| `Scalping` (problème précis) | un symptôme (refus, répétitions, hallucinations, langue ou format, raisonnement, autre) et sa description | les tenseurs les plus probables pour ce symptôme seulement, une mesure qui confirme ou infirme, puis la correction la plus ciblée |
+
+La mission ne change ni la politique ni le mode : en mode Demander l'agent ne peut que
+proposer, en mode Modifier chaque écriture reste une carte d'approbation.
 
 Code : `crates/surgeon-gui/src/agent/` (`provider`, `anthropic`, `openai`, `http`, `mock`,
 `vault`, `runtime`, `tools`, `policy`, `evidence`, `session`, `config`, `view`, `selftest`).
@@ -17,11 +34,21 @@ Pré-requis : le socle Studio ([STUDIO.md](STUDIO.md)) : l'agent travaille dans 
 | Compatible OpenAI | URL de base, clé facultative | `GET {base}/models` |
 | Claude Code (CLI) | la connexion déjà faite dans l'outil | choisie dans l'outil, ou `--model` |
 | Codex CLI | la connexion déjà faite dans l'outil | idem, `--model` |
+| OpenCode CLI | la connexion déjà faite dans l'outil | `--model fournisseur/modèle` |
+| Antigravity CLI (`agy`) | la connexion de l'outil, copiée dans un profil isolé le temps du run | idem, `--model` |
 
 « Compatible OpenAI » couvre OpenRouter (`https://openrouter.ai/api/v1`), Ollama
 (`http://127.0.0.1:11434/v1`), LM Studio (`http://127.0.0.1:1234/v1`) et `llama-server`
 (`http://127.0.0.1:8080/v1`). Aucun identifiant de modèle n'est codé en dur : la liste vient du
-bouton `Tester et lister les modèles`. Le modèle se choisit par projet.
+bouton `Tester`. Une connexion désignée « par défaut » sert à tous les projets ; chaque projet
+peut choisir la sienne, et son modèle, dans l'en-tête de la session. Le sélecteur ne propose
+que les connexions prêtes : une CLI vérifiée, une API dont la liste de modèles est revenue.
+
+**Détection** (`agent/detect.rs`, à la première visite et sur « Analyser à nouveau », sans
+rien consommer) : `claude`, `codex`, `opencode` et `agy` dans le `PATH` avec leurs options
+vérifiées ; `gemini` signalé « non pris en charge » ; Ollama `:11434`,
+LM Studio `:1234` et `llama-server` `:8080` sur loopback (`/v1/models`, 300 ms, en
+parallèle) ; la présence de `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`.
 
 **Prix** : saisis par l'utilisateur, en dollars par million de tokens d'entrée et de sortie,
 par modèle. Aucun tarif n'est codé en dur ; sans prix, le coût est affiché « inconnu » et le
@@ -30,12 +57,17 @@ budget de coût ne s'applique pas.
 **Réseau** : HTTPS obligatoire, sauf vers cette machine (`localhost`, `127.0.0.1`, `::1`) où
 HTTP est accepté. Pas de redirection suivie, pas d'identifiant dans l'URL. Le mode « Local
 seulement » refuse avant toute connexion ce qui n'est pas sur cette machine, runtimes CLI
-compris.
+compris, et aucun téléchargement. Le réglage vit dans `settings.json` (lu une fois depuis
+un ancien `agents.json`) ; un badge `Local` le rappelle dans la barre d'état.
 
 ### Clés d'API
 
 - Windows : Gestionnaire d'identifiants, identifiant générique `LLM-Surgeon/agent/<id>`,
   persisté pour l'utilisateur. Rien d'autre n'est écrit.
+- Une clé saisie n'est enregistrée qu'une fois acceptée : le studio demande d'abord la liste
+  des modèles avec elle ; un refus la laisse hors du coffre. Une clé d'environnement n'est lue
+  qu'au clic sur `Utiliser`, puis suit le même chemin. La page n'en montre que la fin
+  (`••••…a1f3`).
 - Sans coffre (autres systèmes pour l'instant) : la clé vit en mémoire pour la session, ou
   vient de la variable `SURGEON_AGENT_KEY_<ID>` ; la page l'indique en orange.
 - Une clé n'est jamais dans `agents.json`, `chat/`, les journaux, les exports ni à l'écran
@@ -136,14 +168,22 @@ la prose de l'agent, les résultats d'outils et les sorties de modèle n'y entre
 | Interdit | outil inconnu ; chemin hors sandbox ; ce que refuse le gestionnaire de jobs (écriture sur le modèle d'origine, outil en place hors `copies/`) ; pipeline sans pilier `safety` (porte Sécurité désactivée) ; `surgeon_pipeline promote_patch` ; toute écriture en mode Demander |
 
 La carte d'approbation affiche l'action, les **paramètres exacts** (le JSON qui partira au job,
-produit par le studio), les conséquences et l'estimation de coût, avec `Autoriser une fois`,
-`Toujours pour ce projet` et `Refuser`.
+produit par le studio), les conséquences et l'estimation de coût, avec `Autoriser une fois`
+et `Refuser`.
 
-« Toujours pour ce projet » enregistre une règle étroite dans `chat/agent.json` : même outil,
-même ensemble d'arguments, valeurs identiques, et pour un chemin du projet le même dossier
-(`copies/c1/*`). Elle est datée et se révoque dans la colonne de droite. Elle n'est jamais
-proposée pour une action destructrice (apply en place, fusion LoRA, annulation de pipeline) ni
-pour un dépassement de budget.
+Les règles « toujours » (`chat/agent.json` : même outil, même ensemble d'arguments, valeurs
+identiques, et pour un chemin du projet le même dossier, `copies/c1/*`) restent lues par la
+politique, mais l'interface n'en crée plus depuis G7 : sans panneau Contrat, elles ne
+pourraient plus être révoquées. Elles n'ont jamais été proposées pour une action destructrice
+(apply en place, fusion LoRA, `surgeon_restore`, annulation de pipeline) ni pour un
+dépassement de budget.
+
+Rollback : le brief système (`agent/paths.rs`) dit à l'agent que, dès qu'une contre-mesure
+`surgeon_bench` montre une régression après un `surgeon_apply`, il dispose de
+`surgeon_restore` sur `working_copy_path` (dernière sauvegarde, sauvegardes nommées, ou
+`from_origin` = `origin_path`), et qu'il vérifie `data.identical` et les SHA-256 renvoyés.
+Comme `surgeon_apply`, c'est un outil en place : seulement sur une copie de `copies/`, avec
+une carte d'approbation à chaque appel.
 
 La promotion d'un résultat vers le modèle d'origine ou vers un export n'est jamais
 déclenchable par l'agent : c'est une action humaine, depuis l'onglet Projets, avec le verdict
@@ -177,6 +217,32 @@ depuis le ledger du projet à chaque affichage :
 L'interface n'affiche donc jamais « Mesuré » un chiffre sans run associé. Les chiffres écrits
 dans le texte libre de la conversation ne sont pas contrôlés : seul le journal fait foi.
 
+Pour un runtime CLI, `record_finding` est un outil du serveur MCP `surgeon` (section 8) qui
+écrit la même ligne dans `chat/findings.jsonl` (`conversation: "mcp"`). Ses runs ne sont pas
+dans le ledger du projet : le serveur journalise chaque appel d'outil dans
+`chat/mcp_runs.jsonl` (`run_id` `mcp-…`, outil, `ok`, `exit_code`, `data`) et renvoie ce
+`run_id` dans le résultat. Le panneau Preuves lit ce journal avec le ledger : un constat qui
+cite un `run_id` MCP et une valeur présente dans ses données est « Mesuré ». Un résultat de plus
+de 256 Kio (un rapport de graphe) est journalisé sans ses données et ne peut pas appuyer une
+valeur.
+
+## 6 bis. Ce que l'agent sait du projet
+
+Le prompt système (API) et le prompt d'un runtime CLI contiennent les chemins absolus
+`project_dir`, `origin_path` (verrouillé) et `working_copy_path` (la copie la plus récente de
+`copies/`, relue à chaque tour), les jeux de sondes intégrés et une consigne d'autonomie : ne
+pas s'arrêter pour demander un chemin ou un dataset, inspecter `working_copy_path`, mesurer avec
+le jeu qui correspond au symptôme, ne questionner que pour un choix irréversible ou ambigu.
+
+Jeux intégrés (`surgeon_bench`, embarqués dans le moteur, `src/bench/builtin/`) :
+`builtin:math` (18), `builtin:logic` (16), `builtin:general` (18), réponses numériques pour le
+mode `eval` ; `builtin:refusals` (18 demandes légitimes souvent refusées à tort) pour le mode
+`refusal`. Chaque symptôme du Scalping nomme le sien (`Symptom::probe`).
+
+« Démarrer » sur un projet qui a un modèle d'origine mais aucune copie de travail lance d'abord
+la copie (`studio_copy`), puis la session dès qu'elle est faite ; un échec de la copie
+s'affiche et laisse le formulaire tel quel.
+
 ## 7. Persistance
 
 Dans le dossier `chat/` du projet :
@@ -193,36 +259,82 @@ Dans le dossier `chat/` du projet :
 Les connexions et consentements sont dans `agents.json`, à côté de `settings.json`. Le coût
 cumulé du projet (somme des conversations) s'affiche dans la barre du projet.
 
-## 8. Runtimes CLI (Claude Code, Codex)
+## 8. Runtimes CLI (Claude Code, Codex, OpenCode, Antigravity)
 
 C'est la voie pour un compte d'abonnement : l'outil officiel, installé et connecté par
-l'utilisateur, est lancé en mode non interactif. Le studio ne lit, ne copie ni ne stocke aucun
-jeton de ces outils et n'implémente aucune authentification par compte.
+l'utilisateur, est lancé en mode non interactif avec `surgeon mcp` comme serveur du moteur.
+Le studio n'implémente aucune authentification par compte et ne lit aucun identifiant, sauf
+pour Antigravity (voir plus bas).
 
 Détection : l'exécutable dans le `PATH`, `--version`, et la présence de chaque option utilisée
-dans `--help` (Claude Code) ou `exec --help` (Codex) ; une option absente est signalée et
-l'outil n'est pas utilisé.
+dans l'aide (`claude --help`, `codex exec --help`, `opencode run --help`, `agy --help`) ; une
+option absente est signalée et l'outil n'est pas utilisé. Une CLI n'est « prête » qu'après
+`Tester`, qui lance sa propre vérification sans quota (`claude auth status`,
+`codex login status`, `opencode models --standalone`, `agy models` dans le profil isolé) ;
+sinon la page donne la commande de connexion à copier (`claude auth login`, `codex login`,
+`opencode auth login`, `agy`).
 
-| | Claude Code | Codex |
-| --- | --- | --- |
-| Commande | `claude -p --output-format stream-json --verbose --strict-mcp-config --mcp-config <fichier> --tools "" --allowedTools mcp__surgeon__… --permission-prompts none --no-session-persistence [--model]` | `codex exec --json --ephemeral --skip-git-repo-check --sandbox read-only --cd <projet> --config approval_policy="never" --config mcp_servers.surgeon.command=… .args=… .enabled_tools=[…] [--model] -` |
-| Prompt | sur l'entrée standard | sur l'entrée standard (`-`) |
-| Outils | le seul serveur `surgeon mcp`, outils intégrés désactivés | le serveur `surgeon mcp`, liste `enabled_tools` |
+| | Lancement | Prompt | Outils |
+| --- | --- | --- | --- |
+| Claude Code | `claude -p --output-format stream-json --verbose --strict-mcp-config --mcp-config <fichier> --tools "" --allowedTools mcp__surgeon__… --permission-prompts none --no-session-persistence [--model]` | entrée standard | le seul serveur `surgeon`, outils intégrés désactivés |
+| Codex | `codex exec --json --ephemeral --skip-git-repo-check --sandbox read-only --cd <projet> --config approval_policy="never" --config mcp_servers.surgeon.… [--model] -` | entrée standard | le serveur `surgeon`, liste `enabled_tools` |
+| OpenCode | `opencode run --standalone --auto --format json --archived [--model]`, configuration en ligne `OPENCODE_CONFIG_CONTENT` (serveur `surgeon`, `external_directory: deny`), `OPENCODE_DISABLE_PROJECT_CONFIG=1` | entrée standard | ses outils natifs, dans le dossier du projet seulement, plus `surgeon` |
+| Antigravity | `agy --input-format stream-json --output-format stream-json [--model] -p=`, `USERPROFILE` et `HOME` sur le profil isolé | un message `{"event":"user",…}` sur l'entrée standard | ses outils natifs (`toolPermission: always-proceed`, projet de confiance), plus `surgeon` |
 
-Barrière, puisque les approbations internes de ces outils ne sont pas contrôlées par le
-studio (la page l'affiche) :
+OpenCode passe par son propre serveur (`--standalone`) : le service d'arrière-plan partagé ne
+lirait pas la configuration en ligne. Ses règles de permission sont évaluées par
+`findLast` (la dernière règle qui correspond l'emporte, vérifié dans le code de la 2.2.7) :
+`external_directory: deny`, ajoutée après ses défauts, tient même avec `--auto`.
 
-- mode Demander : `surgeon mcp --allow-dir <projet> --allow-dir <dossier du modèle>
-  --read-only`, outils de lecture seulement ;
-- mode Modifier : `surgeon mcp --allow-dir <projet>` seulement (le modèle d'origine est hors
-  d'atteinte), tous les outils sauf `surgeon_pipeline` (qui peut promouvoir).
+**Profil isolé d'Antigravity** : `%LOCALAPPDATA%\weight-surgeon\profiles\agy\`, recréé à chaque
+lancement et supprimé à la fin du run (ou à son arrêt). Il contient `.gemini/oauth_creds.json`
+et `.gemini/google_accounts.json` copiés depuis le dossier personnel (rien d'autre n'est lu),
+`.gemini/config/mcp_config.json` avec `surgeon` pour seul serveur, et
+`.gemini/antigravity-cli/settings.json` (`toolPermission: always-proceed`, le projet en dossier
+de confiance). La configuration globale de l'utilisateur (serveurs MCP, plugins, autorisations)
+n'est ni lue ni modifiée. Cette copie de la connexion est la seule exception à la règle « le
+studio ne copie aucun jeton », décidée par l'utilisateur (D-36).
 
-Le binaire `surgeon` est cherché à côté de l'application, puis dans le `PATH`. Le mode local
+**Barrière.** Les approbations internes de ces outils ne sont pas contrôlées par le studio
+(la page l'affiche). Ce qui protège le modèle d'origine :
+
+- le **verrou noyau** (`studio/lock.rs`) : tant que le projet est ouvert, le studio garde
+  chaque fichier et dossier du modèle d'origine ouvert en lecture avec le seul partage
+  `FILE_SHARE_READ`. Windows refuse alors toute autre ouverture en écriture, toute
+  troncature, tout renommage et toute suppression, quel que soit le processus (terminal
+  d'un agent, script, Explorateur) ; la lecture reste libre. Aucune action approuvée n'écrit
+  sur l'origine (la politique l'interdit), le verrou tient donc jusqu'à la fermeture du
+  projet. L'état s'affiche sous la copie de travail (« Origine verrouillée (N fichier(s)) ») ;
+- le serveur `surgeon` : en mode Demander `--allow-dir <projet> --allow-dir <dossier du
+  modèle> --read-only` ; en mode Modifier `--allow-dir <projet>` seulement ;
+- pour Claude Code et Codex en plus, la liste d'outils (lecture seule en mode Demander, tout
+  sauf `surgeon_pipeline` en mode Modifier ; `record_finding`, `show_in_3d` et `update_plan`
+  dans les deux modes).
+
+**Outils du studio sur MCP.** Le serveur `surgeon` sert aussi `record_finding`, `show_in_3d` et
+`update_plan` quand son premier dossier autorisé est un projet du studio
+(`project.surgeon.json`) ; ils écrivent `chat/findings.jsonl`, `chat/focus.json` et
+`chat/plan.json`, que la fenêtre lit pendant le run (Preuves, sélection dans la vue 3D, plan
+de la conversation ; un fichier plus ancien que le run est ignoré). Une session API garde ses
+versions internes de ces trois outils : `tools::engine_definitions` retire les doublons.
+
+Le serveur MCP du moteur est l'application elle-même : la CLI lance `surgeon-gui.exe mcp …`
+(`runner::serve_mcp`, mêmes arguments que `surgeon mcp`, avant toute fenêtre ou console), donc
+aucun binaire `surgeon` séparé n'est requis et le moteur a toujours la version de la fenêtre.
+Le mode local
 seulement interdit les runtimes CLI.
 
 Limites : la conversation d'un runtime est enregistrée en texte (pas de reprise de session de
-l'outil) ; ses actions ne passent pas par les cartes d'approbation ni par le gestionnaire de
-jobs du projet (le ledger ne les contient pas) ; le coût affiché est celui que l'outil annonce.
+l'outil) ; ses actions, appels `surgeon` compris, ne passent pas par les cartes d'approbation
+ni par le gestionnaire de jobs du projet (le ledger ne les contient pas, `chat/mcp_runs.jsonl`
+oui) ; le coût affiché est
+celui que l'outil annonce. OpenCode et Antigravity peuvent écrire avec leurs propres outils
+dans le dossier du projet, copies de travail comprises. Le verrou dure tant que le studio
+tourne : un processus qui fermerait le studio (ce que le terminal d'un agent peut faire avec
+les droits de l'utilisateur) le relâcherait. Hors Windows, il n'existe pas : l'état s'affiche
+« Origine non verrouillée ». Pour Antigravity, seuls le texte final et le type de chaque étape
+sont lus du flux (`result`, `step_update`) : les arguments des outils n'ont pas encore été
+observés sur un run réel.
 
 ## 9. Ajouter un fournisseur
 
@@ -243,7 +355,7 @@ jobs du projet (le ledger ne les contient pas) ; le coût affiché est celui que
 cd crates/surgeon-gui
 cargo test agent                          # faux serveurs, dialogues, politique, coffre, CLI
 cargo run -- --self-test                  # dont « agent » : dialogue scripté sur le vrai moteur
-cargo run -- --screenshot a.png --screen agents
+cargo run -- --screenshot a.png --screen agent:scalping --demo-data
 ```
 
 ## Limites connues

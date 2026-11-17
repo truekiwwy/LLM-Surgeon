@@ -1,17 +1,14 @@
-//! The five views, and what they share: the explorer of the left column (the project, its
-//! working copy, the tensor tree), number formats and the per-tensor values the histogram,
-//! the delta table and the targets read.
+//! The two views and the sections of the settings dialog, and what they share: the left
+//! column (the project, its working copy, the tensor tree) and number formats.
 
 pub mod agents;
-pub mod analyses;
-pub mod atelier;
-pub mod diagnostics;
 pub mod graph;
+pub mod results;
+pub mod system;
 
 use std::collections::BTreeMap;
 
 use eframe::egui::{self, Rect, ScrollArea, Sense, Ui, Vec2};
-use weight_surgeon::graph::output::GraphReport;
 
 use super::components::{self as c, ButtonKind};
 use super::i18n::{t, tf};
@@ -42,72 +39,57 @@ pub fn duration(secs: u64) -> String {
     }
 }
 
-// ------------------------------------------------------------------ per-tensor values
-
-/// What the histogram measures: the change against the baseline when the report carries
-/// one, else the norm of the weights.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Metric {
-    /// |Δ‖W‖F| / ‖W‖F against `--baseline`.
-    Delta,
-    /// ‖W‖F.
-    Norm,
-}
-
-pub fn metric(report: &GraphReport) -> Metric {
-    match report.baseline_diff {
-        Some(_) => Metric::Delta,
-        None => Metric::Norm,
-    }
-}
-
-pub fn metric_label(metric: Metric) -> &'static str {
-    match metric {
-        Metric::Delta => t("metric.delta"),
-        Metric::Norm => t("metric.norm"),
-    }
-}
-
-/// The value of every node for [`metric`] (`None`: not compared).
-pub fn delta_values(report: &GraphReport) -> Vec<Option<f64>> {
-    match &report.baseline_diff {
-        Some(diff) => {
-            let by_id: BTreeMap<&str, f64> = diff
-                .nodes
-                .iter()
-                .map(|d| (d.id.as_str(), d.relative_change.abs()))
-                .collect();
-            report
-                .nodes
-                .iter()
-                .map(|n| by_id.get(n.id.as_str()).copied())
-                .collect()
-        }
-        None => report
-            .nodes
-            .iter()
-            .map(|n| Some(n.metrics.frobenius_norm))
-            .collect(),
+/// How long ago, in the largest whole unit: `now`, `5 min`, `3 h`, `2 d`.
+pub fn age(secs: u64) -> String {
+    match secs {
+        s if s < 60 => t("age.now").into(),
+        s if s < 3600 => tf("age.minutes", &[("n", &(s / 60))]),
+        s if s < 86_400 => tf("age.hours", &[("n", &(s / 3600))]),
+        s => tf("age.days", &[("n", &(s / 86_400))]),
     }
 }
 
 // ------------------------------------------------------------------ explorer
 
-/// The left column of the work tabs: the project and its copy, then the tensor tree.
+/// The left column of the 3D view: the project and its copy, then the tensor tree.
 pub fn explorer(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
-    c::Panel::new("explorer")
-        .title(t("panel.explorer"))
-        .show(ui, rect, |ui| {
-            context(ui, app);
-            c::separator(ui);
-            tree(ui, app);
-        });
+    left_column(ui, app, rect, "explorer", t("panel.explorer"), |ui, app| {
+        context(ui, app);
+        c::separator(ui);
+        tree(ui, app);
+    });
 }
 
-/// The project picker, or the creation form, and the working copy.
-pub fn context(ui: &mut Ui, app: &mut SurgeonApp) {
+/// The left column of a view: a panel whose header folds it (`Ctrl+B` too; the activity
+/// bar unfolds it). Folded, it has no width and draws nothing.
+pub fn left_column(
+    ui: &mut Ui,
+    app: &mut SurgeonApp,
+    rect: Rect,
+    name: &'static str,
+    title: &str,
+    body: impl FnOnce(&mut Ui, &mut SurgeonApp),
+) {
+    if app.columns.collapsed {
+        return;
+    }
+    c::Panel::new(name).title(title).show_with(
+        ui,
+        rect,
+        app,
+        |ui, app| {
+            if c::icon_button(ui, Icon::ChevronLeft, t("left.collapse")).clicked() {
+                app.toggle_left();
+            }
+        },
+        body,
+    );
+}
+
+/// The project picker of `width`, when there is a project to pick; `true` when a project is
+/// open.
+pub fn project_select(ui: &mut Ui, app: &mut SurgeonApp, width: f32) -> bool {
     let ctx = ui.ctx().clone();
-    let width = ui.available_width();
     let current = app
         .studio
         .manager
@@ -134,17 +116,54 @@ pub fn context(ui: &mut Ui, app: &mut SurgeonApp) {
     if let Some(dir) = open {
         app.studio.open_project(&ctx, &dir);
     }
-    if current.is_none() {
-        ui.add_space(T.space.s);
-        c::field(ui, &mut app.studio.new_name, t("project.name.hint"), width);
-        ui.add_space(T.space.xs);
+    current.is_some()
+}
+
+/// The source model of a new project: the system picker (a weights file or a model folder)
+/// and the path it gave. Outside Windows, the path typed by hand.
+fn source_picker(ui: &mut Ui, app: &mut SurgeonApp, width: f32) {
+    if !cfg!(windows) {
         c::field_mono(
             ui,
             &mut app.studio.new_source,
             t("project.source.hint"),
             width,
         );
+        return;
+    }
+    let ctx = ui.ctx().clone();
+    let free = !app.studio.picking();
+    ui.horizontal(|ui| {
+        let choices = [
+            (false, t("project.source.file")),
+            (true, t("project.source.folder")),
+        ];
+        for (folder, text) in choices {
+            let why = t("project.source.picking");
+            if c::button_if(ui, free, text, ButtonKind::Secondary, why).clicked() {
+                app.studio
+                    .pick_source(&ctx, folder, t("project.source.title"));
+            }
+        }
+    });
+    ui.add_space(T.space.xs);
+    let path = app.studio.new_source.trim().to_owned();
+    match path.is_empty() {
+        true => c::meta(ui, t("project.source.none")),
+        false => c::mono_secondary(ui, path.as_str()).on_hover_text(path.as_str()),
+    };
+}
+
+/// The project picker, or the creation form, and the working copy.
+pub fn context(ui: &mut Ui, app: &mut SurgeonApp) {
+    let ctx = ui.ctx().clone();
+    let width = ui.available_width();
+    if !project_select(ui, app, width) {
         ui.add_space(T.space.s);
+        source_picker(ui, app, width);
+        ui.add_space(T.space.m);
+        c::field(ui, &mut app.studio.new_name, t("project.name.hint"), width);
+        ui.add_space(T.space.m);
         let ready = !app.studio.new_name.trim().is_empty() && !app.studio.creating();
         let text = match app.studio.creating() {
             true => t("project.creating"),
@@ -154,7 +173,7 @@ pub fn context(ui: &mut Ui, app: &mut SurgeonApp) {
             ui,
             ready,
             text,
-            ButtonKind::Secondary,
+            ButtonKind::Primary,
             t("project.create.why"),
         )
         .clicked()
@@ -179,6 +198,20 @@ pub fn context(ui: &mut Ui, app: &mut SurgeonApp) {
             c::status(ui, icons::State::Idle, t("copy.none"));
         }
     });
+    match &app.studio.source_lock {
+        Some(Ok(held)) => {
+            c::status(
+                ui,
+                icons::State::Ok,
+                tf("source.locked", &[("n", &held.files)]),
+            )
+            .on_hover_text(t("source.locked.tip"));
+        }
+        Some(Err(e)) => {
+            c::status(ui, icons::State::Warn, t("source.unlocked")).on_hover_text(e.as_str());
+        }
+        None => {}
+    }
     ui.add_space(T.space.s);
     if c::button(ui, t("copy.new"), ButtonKind::Secondary)
         .on_hover_text(t("copy.new.tip"))
@@ -205,7 +238,7 @@ pub fn tree(ui: &mut Ui, app: &mut SurgeonApp) {
     });
     ui.add_space(T.space.xs);
     let Some(step) = app.timeline.current() else {
-        c::empty(ui, t("tree.empty"), t("tree.empty.hint"));
+        c::empty(ui, Icon::Cube, t("tree.empty"), t("tree.empty.hint"));
         return;
     };
     let visible = app.visible(&step.report);
@@ -322,8 +355,9 @@ pub fn tree(ui: &mut Ui, app: &mut SurgeonApp) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use weight_surgeon::graph::output::GraphReport;
     use weight_surgeon::graph::stream::GraphPatch;
 
     pub fn report() -> GraphReport {
@@ -342,27 +376,10 @@ mod tests {
         assert_eq!(num(-2.5e6), "-2.500e6");
         assert_eq!(duration(42), "42 s");
         assert_eq!(duration(65), "1 min 05 s");
-    }
-
-    #[test]
-    fn the_histogram_reads_the_baseline_when_there_is_one() {
-        let mut report = report();
-        assert_eq!(metric(&report), Metric::Delta);
-        let values = delta_values(&report);
-        assert_eq!(values.len(), report.nodes.len());
-        let changed = report
-            .nodes
-            .iter()
-            .position(|n| n.id == "L1.attn_out")
-            .unwrap();
-        let top = values.iter().flatten().fold(0.0_f64, |a, b| a.max(*b));
-        assert_eq!(
-            values[changed],
-            Some(top),
-            "the one changed node is the largest"
-        );
-        report.baseline_diff = None;
-        assert_eq!(metric(&report), Metric::Norm);
-        assert!(delta_values(&report).iter().all(Option::is_some));
+        crate::ui::i18n::set_lang(crate::settings::Lang::En);
+        assert_eq!(age(59), "now");
+        assert_eq!(age(3599), "59 min");
+        assert_eq!(age(7200), "2 h");
+        assert_eq!(age(3 * 86_400 + 5), "3 d");
     }
 }

@@ -53,6 +53,9 @@ impl ChatTemplate {
 /// A JSON array of strings, else whatever `eval::load_prompts` reads (array of objects,
 /// JSONL, plain text), keeping only the texts.
 pub fn load_prompt_texts(path: &Path) -> std::result::Result<Vec<String>, String> {
+    if let Some(set) = crate::bench::builtin::prompts(path) {
+        return check_texts(set?);
+    }
     let raw = std::fs::read_to_string(path).map_err(|e| format!("{} : {e}", path.display()))?;
     let content = raw.trim_start_matches('\u{feff}').trim();
     if content.starts_with('[') {

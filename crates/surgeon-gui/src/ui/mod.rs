@@ -14,3 +14,4 @@ pub mod palette;
 pub mod shell;
 pub mod theme;
 pub mod views;
+pub mod wizard;

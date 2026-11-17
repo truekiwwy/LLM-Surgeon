@@ -581,6 +581,26 @@ fn gguf_dense_and_moe_models_are_read_with_structural_edges() {
 }
 
 #[test]
+fn skeleton_has_the_nodes_of_the_full_graph_and_no_metrics() {
+    let dir = tempfile::tempdir().unwrap();
+    let model_path = model(dir.path());
+    let out = dir.path().join("out");
+    let (code, env) = run_json(&deps(), &graph_args(s(&model_path), s(&out)));
+    assert_eq!(code, 0, "{env}");
+    let full: GraphReport = serde_json::from_value(read_json(&out.join("graph.json"))).unwrap();
+
+    let skeleton = weight_surgeon::graph::skeleton(&model_path).unwrap();
+    assert_eq!(skeleton.parameters.rank, 0, "marked unmeasured");
+    let ids = |r: &GraphReport| r.nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&skeleton), ids(&full));
+    for (a, b) in skeleton.nodes.iter().zip(&full.nodes) {
+        assert_eq!(a.pos_column, b.pos_column, "{}: same column layout", a.id);
+        assert_eq!(a.metrics.sigma1, None);
+    }
+    assert!(!skeleton.edges.is_empty() && skeleton.edges.iter().all(|e| e.weight == 0.0));
+}
+
+#[test]
 fn estimate_never_runs_the_svd_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let model_path = model(dir.path());
@@ -762,7 +782,7 @@ fn schema_kind_graph_is_the_report_schema() {
     assert_eq!(code, 0);
     let tools: Value = serde_json::from_str(&out).unwrap();
     let list = tools.as_array().unwrap();
-    assert_eq!(list.len(), 12);
+    assert_eq!(list.len(), 16);
     let graph = list.iter().find(|t| t["name"] == "surgeon_graph").unwrap();
     assert_eq!(graph["inputSchema"]["required"], json!(["model"]));
     assert!(graph["inputSchema"]["properties"]["out_dir"].is_object());
@@ -851,6 +871,91 @@ fn mcp_read_only_refuses_out_dir_and_cache_dir_before_writing() {
     assert!(!is_error, "{env}");
     assert_eq!(env["data"]["global"]["nodes"], 30);
     assert_eq!(env["data"]["outputs"], json!([]));
+}
+
+#[test]
+fn mcp_allow_read_roots_serve_baselines_and_benches_but_never_writes() {
+    let (workspace, origin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let copy = model(workspace.path());
+    let source = model(origin.path());
+    fake_qwen2::write_prompt_files(workspace.path()).unwrap();
+    let prompts = workspace.path().join("pos.json");
+    let strict = McpConfig::new(&[workspace.path().to_path_buf()], false, false).unwrap();
+    let config = McpConfig::new(&[workspace.path().to_path_buf()], false, false)
+        .unwrap()
+        .with_read_roots(&[origin.path().to_path_buf()])
+        .unwrap();
+    let small = json!({"rank": 4, "oversample": 2, "power_iters": 1});
+    let graph = |model: &Path, extra: Value| {
+        let mut args = json!({"model": s(model), "baseline": s(&source)});
+        for (k, v) in small
+            .as_object()
+            .unwrap()
+            .iter()
+            .chain(extra.as_object().unwrap())
+        {
+            args[k] = v.clone();
+        }
+        args
+    };
+
+    // The paired before / after: the copy against the source model as baseline.
+    let (is_error, env) = one_call(&config, "surgeon_graph", graph(&copy, json!({})));
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["baseline_diff"]["nodes_changed"], 0, "{env}");
+    // Without the read root the same baseline is out of reach.
+    let (is_error, env) = one_call(&strict, "surgeon_graph", graph(&copy, json!({})));
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "path_not_allowed", "{env}");
+
+    // A measure reads the source model and writes its result in the workspace.
+    let dump = |out: &Path| json!({"mode": "dump", "model": s(&source), "prompts": s(&prompts), "out": s(out)});
+    let measured = workspace.path().join("source-dump.safetensors");
+    let (is_error, env) = one_call(&config, "surgeon_bench", dump(&measured));
+    assert!(!is_error, "{env}");
+    assert!(measured.is_file());
+
+    // Nothing is ever written in the read root: graph outputs, cache, bench outputs.
+    let before = file_hashes(&source);
+    let denied = [
+        (
+            "surgeon_graph",
+            graph(&copy, json!({"out_dir": s(&origin.path().join("out"))})),
+        ),
+        (
+            "surgeon_graph",
+            graph(&copy, json!({"cache_dir": s(&origin.path().join("cache"))})),
+        ),
+        (
+            "surgeon_bench",
+            dump(&origin.path().join("dump.safetensors")),
+        ),
+    ];
+    for (tool, arguments) in denied {
+        let (is_error, env) = one_call(&config, tool, arguments);
+        assert!(is_error, "{tool}: {env}");
+        assert_eq!(env["error"]["kind"], "path_not_allowed", "{env}");
+        assert!(env["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("lecture seule")));
+    }
+    let (is_error, env) = one_call(
+        &config,
+        "surgeon_apply",
+        json!({"model": s(&source), "patch": {"schema_version": 1, "backup": true, "operations": []}}),
+    );
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "path_not_allowed", "{env}");
+    assert_eq!(
+        file_hashes(&source),
+        before,
+        "the source model is untouched"
+    );
+    assert_eq!(
+        std::fs::read_dir(origin.path()).unwrap().count(),
+        1,
+        "nothing created"
+    );
 }
 
 // ------------------------------------------------------------------ fast hash, baseline, ndjson

@@ -1,59 +1,38 @@
-//! Choosing the llama.cpp archive from the GitHub releases API. Pure: the JSON comes in, the
+//! Choosing the mistral.rs archive from the GitHub releases API. Pure: the JSON comes in, the
 //! plan comes out; the network lives in [`crate::net`].
 //!
-//! `releases/latest` cannot be used: on ggml-org/llama.cpp it points at a tag with a single
-//! `nightly-tag.txt` asset. The list is scanned newest first for the first release that has
-//! the wanted archive.
+//! The releases carry Python wheels and binary archives; the app installs the CPU zip of its
+//! own target (`mistralrs-cpu-<triple>.zip`, a single `mistralrs` binary). The list is scanned
+//! newest first for the first release that has it.
 
 use serde::Deserialize;
 
-/// Which llama.cpp build the operator wants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Variant {
-    /// GPU through Vulkan (AMD Radeon, Intel, NVIDIA).
-    Vulkan,
-    /// CPU only.
-    Cpu,
-    /// AMD HIP (ROCm), optional.
-    Hip,
-}
+/// The build the app installs: the official CPU archive (GPU builds come from a CUDA build or
+/// by hand, see `backend_choice`).
+pub const VARIANT: &str = "cpu";
 
-impl Variant {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Vulkan => "vulkan",
-            Self::Cpu => "cpu",
-            Self::Hip => "hip",
-        }
-    }
-}
-
-/// OS and CPU architecture, as the release names them.
+/// The target triple the release names its archives with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Target {
-    pub os: &'static str,
-    pub arch: &'static str,
+    pub triple: &'static str,
 }
 
 impl Target {
     pub fn current() -> Self {
         Self {
-            os: match std::env::consts::OS {
-                "windows" => "win",
-                "macos" => "macos",
-                _ => "ubuntu",
-            },
-            arch: match std::env::consts::ARCH {
-                "aarch64" => "arm64",
-                _ => "x64",
+            triple: match (std::env::consts::OS, std::env::consts::ARCH) {
+                ("windows", _) => "x86_64-pc-windows-msvc",
+                ("macos", _) => "aarch64-apple-darwin",
+                (_, "aarch64") => "aarch64-unknown-linux-gnu",
+                _ => "x86_64-unknown-linux-gnu",
             },
         }
     }
 
-    /// Only the Windows zip archives are installed by the app; elsewhere the wizard gives
-    /// manual instructions.
+    /// Only the Windows zip archive is installed by the app; elsewhere the wizard gives
+    /// manual instructions (`tar.gz` archives).
     pub fn supported(self) -> bool {
-        self.os == "win"
+        self.triple.ends_with("windows-msvc")
     }
 }
 
@@ -94,40 +73,18 @@ pub fn parse_digest(digest: &str) -> Option<String> {
         .then(|| hex.to_ascii_lowercase())
 }
 
-/// `llama-<tag>-bin-<os>-<flavor>-<arch>.zip`, flavor being `vulkan`, `cpu` or `rocm-<ver>`.
-/// The `cudart-` runtime bundles and the other flavors never match.
-fn matches(name: &str, variant: Variant, target: Target) -> bool {
-    let suffix = format!("-{}.zip", target.arch);
-    let marker = format!("-bin-{}-", target.os);
-    let Some(flavor) = name
-        .strip_prefix("llama-")
-        .and_then(|n| n.strip_suffix(&suffix))
-        .and_then(|n| n.split_once(&marker))
-        .map(|(_, flavor)| flavor)
-    else {
-        return false;
-    };
-    match variant {
-        Variant::Vulkan => flavor == "vulkan",
-        Variant::Cpu => flavor == "cpu",
-        Variant::Hip => flavor.starts_with("rocm-") || flavor == "hip-radeon",
-    }
-}
-
-/// The newest release that carries the wanted archive.
-pub fn select(releases: &[Release], variant: Variant, target: Target) -> Option<Plan> {
+/// The newest release that carries the CPU zip of `target`.
+pub fn select(releases: &[Release], target: Target) -> Option<Plan> {
+    let wanted = format!("mistralrs-{VARIANT}-{}.zip", target.triple);
     releases.iter().filter(|r| !r.draft).find_map(|r| {
-        let asset = r
-            .assets
-            .iter()
-            .find(|a| matches(&a.name, variant, target))?;
+        let asset = r.assets.iter().find(|a| a.name == wanted)?;
         Some(Plan {
             tag: r.tag_name.clone(),
             name: asset.name.clone(),
             url: asset.browser_download_url.clone(),
             size: asset.size,
             sha256: asset.digest.as_deref().and_then(parse_digest),
-            variant: variant.label(),
+            variant: VARIANT,
         })
     })
 }
@@ -142,8 +99,7 @@ mod tests {
     use super::*;
 
     const WIN: Target = Target {
-        os: "win",
-        arch: "x64",
+        triple: "x86_64-pc-windows-msvc",
     };
 
     fn release(tag: &str, assets: &[(&str, Option<String>)]) -> Release {
@@ -163,51 +119,55 @@ mod tests {
     }
 
     #[test]
-    fn picks_the_flavor_and_skips_look_alikes() {
+    fn picks_the_cpu_zip_of_the_target_and_skips_look_alikes() {
         let digest = format!("sha256:{}", "AB".repeat(32));
         let rs = [release(
-            "b1",
+            "v0.9.5",
             &[
-                ("cudart-llama-bin-win-cuda-12.4-x64.zip", None),
-                ("llama-b1-bin-win-cuda-12.4-x64.zip", None),
-                ("llama-b1-bin-win-cpu-x64.zip", None),
-                ("llama-b1-bin-win-vulkan-arm64.zip", None),
-                ("llama-b1-bin-win-vulkan-x64.zip", Some(digest)),
-                ("llama-b1-bin-win-rocm-10.0-x64.zip", None),
+                (
+                    "mistralrs-0.9.5+cuda128.sm80-cp310-abi3-manylinux_2_35_x86_64.whl",
+                    None,
+                ),
+                ("mistralrs-cpu-x86_64-unknown-linux-gnu.tar.gz", None),
+                ("mistralrs-metal-aarch64-apple-darwin.tar.gz", None),
+                ("mistralrs-cpu-x86_64-pc-windows-msvc.zip", Some(digest)),
             ],
         )];
-        let vk = select(&rs, Variant::Vulkan, WIN).unwrap();
-        assert_eq!(vk.name, "llama-b1-bin-win-vulkan-x64.zip");
-        assert_eq!(vk.sha256, Some("ab".repeat(32)));
+        let plan = select(&rs, WIN).unwrap();
+        assert_eq!(plan.name, "mistralrs-cpu-x86_64-pc-windows-msvc.zip");
         assert_eq!(
-            select(&rs, Variant::Cpu, WIN).unwrap().name,
-            "llama-b1-bin-win-cpu-x64.zip"
+            (plan.sha256, plan.tag.as_str()),
+            (Some("ab".repeat(32)), "v0.9.5")
         );
-        assert_eq!(
-            select(&rs, Variant::Hip, WIN).unwrap().name,
-            "llama-b1-bin-win-rocm-10.0-x64.zip"
-        );
-        let arm = Target {
-            os: "win",
-            arch: "arm64",
+        let mac = Target {
+            triple: "aarch64-apple-darwin",
         };
-        assert_eq!(
-            select(&rs, Variant::Vulkan, arm).unwrap().name,
-            "llama-b1-bin-win-vulkan-arm64.zip"
+        assert!(
+            select(&rs, mac).is_none(),
+            "no zip there: installed by hand"
         );
-        assert!(select(&rs, Variant::Hip, arm).is_none());
+        assert!(WIN.supported() && !mac.supported());
     }
 
     #[test]
-    fn skips_the_empty_latest_release_and_drafts() {
-        let mut draft = release("b3", &[("llama-b3-bin-win-cpu-x64.zip", None)]);
+    fn skips_releases_without_the_archive_and_drafts() {
+        let mut draft = release(
+            "v0.9.6",
+            &[("mistralrs-cpu-x86_64-pc-windows-msvc.zip", None)],
+        );
         draft.draft = true;
         let rs = [
-            release("v0.9.0", &[("nightly-tag.txt", None)]),
             draft,
-            release("b2", &[("llama-b2-bin-win-cpu-x64.zip", None)]),
+            release(
+                "v0.9.5-py",
+                &[("mistralrs-0.9.5-cp310-abi3-win_amd64.whl", None)],
+            ),
+            release(
+                "v0.9.4",
+                &[("mistralrs-cpu-x86_64-pc-windows-msvc.zip", None)],
+            ),
         ];
-        assert_eq!(select(&rs, Variant::Cpu, WIN).unwrap().tag, "b2");
+        assert_eq!(select(&rs, WIN).unwrap().tag, "v0.9.4");
     }
 
     #[test]

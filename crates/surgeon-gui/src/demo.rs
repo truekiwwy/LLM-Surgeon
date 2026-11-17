@@ -105,7 +105,7 @@ fn build_project(root: &Path, workspace: &Path) -> Result<PathBuf, String> {
     Ok(project.dir)
 }
 
-/// The fixture graph, its changed tensor selected, the cut under it.
+/// The fixture graph, its changed tensor selected.
 fn graph(ctx: &egui::Context, app: &mut SurgeonApp) -> Result<(), String> {
     let GraphPatch::Snapshot { report } =
         serde_json::from_str(FIXTURE.trim()).map_err(|e| e.to_string())?
@@ -114,14 +114,11 @@ fn graph(ctx: &egui::Context, app: &mut SurgeonApp) -> Result<(), String> {
     };
     app.set_input(ctx, Input::Report(report));
     let step = app.timeline.current().ok_or("graphe vide")?;
-    let values = crate::ui::views::delta_values(&step.report);
-    let top = values.iter().flatten().fold(0.0_f64, |a, b| a.max(*b));
     let changed = step.report.nodes.iter().find(|n| n.id == "L1.attn_out");
     if let Some(node) = changed {
         app.open_layers.insert(node.layer);
         app.selected = Some(node.id.clone());
     }
-    app.threshold = Some(top * 0.5);
     app.diff = true;
     Ok(())
 }
@@ -141,6 +138,9 @@ fn agents(root: &Path, project: &Path) -> Result<Hub, String> {
             label: "Ollama (local)".into(),
             base_url: "http://127.0.0.1:11434/v1".into(),
             models: vec!["qwen2.5:7b".into(), "llama3.1:8b".into()],
+            default_model: None,
+            last_model: None,
+            verified: false,
             prices: Default::default(),
         },
         Connection {
@@ -149,6 +149,9 @@ fn agents(root: &Path, project: &Path) -> Result<Hub, String> {
             label: "Anthropic".into(),
             base_url: String::new(),
             models: Vec::new(),
+            default_model: None,
+            last_model: None,
+            verified: false,
             prices: Default::default(),
         },
     ];

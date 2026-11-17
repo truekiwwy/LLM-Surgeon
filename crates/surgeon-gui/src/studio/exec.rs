@@ -1,9 +1,8 @@
 //! The real executor: an engine tool goes through `weight_surgeon::mcp::call_tool`, the
 //! code path of `surgeon mcp` (same argument schema, sandbox, cores, backups and rollback),
-//! with the project folder and the source model's folder as allowed directories. The
-//! working copy is the only job the studio runs itself.
+//! with the project folder as allowed directory and the source model's folder as read-only
+//! root. The working copy is the only job the studio runs itself.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -25,16 +24,21 @@ impl Executor for EngineExecutor {
         if spec.tool == COPY_TOOL {
             return working_copy(args, ctx, rec);
         }
-        let mut roots = vec![ctx.project_dir.clone()];
-        if let Some(source) = &ctx.source {
-            let dir = match source.path.is_dir() {
-                true => source.path.clone(),
-                false => source.path.parent().unwrap_or(Path::new(".")).to_path_buf(),
-            };
-            roots.push(dir);
-        }
+        // The source model is read only, as for the CLI runtimes (`--allow-read`): the
+        // engine itself refuses a write there, not only the policy.
+        let read: Vec<_> = ctx
+            .source
+            .iter()
+            .map(|s| super::copy::model_root(&s.path).to_path_buf())
+            .collect();
         // allow_no_backup false: the apply backups are imposed, as over MCP.
-        let cfg = match McpConfig::new(&roots, spec.read_only, false) {
+        let cfg = McpConfig::new(
+            std::slice::from_ref(&ctx.project_dir),
+            spec.read_only,
+            false,
+        )
+        .and_then(|cfg| cfg.with_read_roots(&read));
+        let cfg = match cfg {
             Ok(cfg) => cfg,
             Err(e) => return Outcome::failed(format!("dossiers autorisés : {e}")),
         };

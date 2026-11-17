@@ -16,14 +16,6 @@ pub enum Lang {
 }
 
 impl Lang {
-    /// The French or the English text: strings of the desktop screens live next to the UI.
-    pub fn pick<'a>(self, fr: &'a str, en: &'a str) -> &'a str {
-        match self {
-            Self::Fr => fr,
-            Self::En => en,
-        }
-    }
-
     /// `fr`, `fr_FR.UTF-8`, `fr-FR`... anything else is English.
     pub fn from_locale(locale: &str) -> Self {
         match locale.trim().to_ascii_lowercase().starts_with("fr") {
@@ -47,6 +39,17 @@ impl Lang {
     }
 }
 
+/// The two kinds of agent session: `Scalping`, the user names a precise problem and the agent
+/// goes straight to it; `Advance`, the agent scans the whole model and finds the problems.
+/// Kept as the kind the new-session form offers first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Scalping,
+    Advance,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -62,6 +65,13 @@ pub struct Settings {
     /// Widths of the left and right columns, in points (put back on the grid when read).
     pub left_width: Option<f32>,
     pub right_width: Option<f32>,
+    /// The left column folded to its rail (`Ctrl+B`).
+    pub left_collapsed: bool,
+    pub mode: Mode,
+    /// No request leaves the machine: no remote AI, no CLI runtime, no download.
+    pub local_only: bool,
+    /// The inference backend follows the hardware (`backend_choice`) until one is saved by hand.
+    pub backend_auto: bool,
 }
 
 impl Settings {
@@ -116,6 +126,8 @@ mod tests {
         let mut s = Settings {
             language: Some(Lang::En),
             wizard_done: true,
+            left_collapsed: true,
+            mode: Mode::Advance,
             ..Default::default()
         };
         s.pins.insert("a.zip".into(), "ab".repeat(32));
@@ -126,6 +138,19 @@ mod tests {
         Settings::reset(&path).unwrap();
         Settings::reset(&path).unwrap();
         assert!(!Settings::load(&path).unwrap().wizard_done);
+    }
+
+    #[test]
+    fn a_file_written_before_g6_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            br#"{"language":"fr","wizard_done":true,"left_width":280.0}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&path).unwrap();
+        assert_eq!((s.mode, s.left_collapsed), (Mode::Scalping, false));
     }
 
     #[test]

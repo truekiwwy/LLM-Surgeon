@@ -27,7 +27,7 @@ const STATUS: &str = "status.json";
 const LOCK: &str = "project.lock";
 
 /// Tools that rewrite their `model` in place: only a working copy may be given.
-const IN_PLACE: [&str; 2] = ["surgeon_apply", "surgeon_lora"];
+const IN_PLACE: [&str; 3] = ["surgeon_apply", "surgeon_lora", "surgeon_restore"];
 /// Arguments a tool writes to: never inside the source model.
 const WRITE_KEYS: [&str; 7] = [
     "out",

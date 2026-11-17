@@ -1,6 +1,9 @@
 //! The agent's tools: the engine's `tools/list` definitions unchanged (names, descriptions,
-//! `inputSchema`), plus four interface tools the studio answers itself. Tool results go back
-//! framed as untrusted data, and a large result is kept as an artifact with a summary.
+//! `inputSchema`), plus four interface tools the studio answers itself. Three of them
+//! (`update_plan`, `show_in_3d`, `record_finding`) are also engine tools, for the CLI agents
+//! that only reach the engine over MCP; an API session gets the studio's own version, which
+//! acts on the session directly. Tool results go back framed as untrusted data, and a large
+//! result is kept as an artifact with a summary.
 
 use std::path::{Path, PathBuf};
 
@@ -17,12 +20,14 @@ pub const UI_TOOLS: [&str; 4] = [ASK_USER, UPDATE_PLAN, SHOW_IN_3D, RECORD_FINDI
 /// Above this many characters a result is stored in `artifacts/agent/` and summarized.
 pub const MAX_INLINE: usize = 6000;
 
-/// Exactly the `tools` array of the engine's `tools/list`.
+/// The `tools` array of the engine's `tools/list`, without the interface tools the studio
+/// answers itself.
 pub fn engine_definitions() -> Vec<ToolDef> {
     weight_surgeon::mcp::tool_definitions()
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|t| !UI_TOOLS.contains(&t["name"].as_str().unwrap_or_default()))
         .map(|t| ToolDef {
             name: t["name"].as_str().unwrap_or_default().into(),
             description: t["description"].as_str().unwrap_or_default().into(),
@@ -137,11 +142,15 @@ mod tests {
 
     #[test]
     fn engine_tools_are_the_mcp_tools_list() {
-        let mcp = weight_surgeon::mcp::tool_definitions();
-        let mcp = mcp.as_array().unwrap();
+        let all = weight_surgeon::mcp::tool_definitions();
+        let mcp = all.as_array().unwrap();
+        let engine: Vec<&Value> = mcp
+            .iter()
+            .filter(|m| !UI_TOOLS.contains(&m["name"].as_str().unwrap()))
+            .collect();
         let ours = engine_definitions();
-        assert_eq!(ours.len(), mcp.len());
-        for (t, m) in ours.iter().zip(mcp) {
+        assert_eq!(ours.len(), engine.len());
+        for (t, m) in ours.iter().zip(engine) {
             assert_eq!(t.name, m["name"].as_str().unwrap());
             assert_eq!(t.description, m["description"].as_str().unwrap());
             assert_eq!(t.schema, m["inputSchema"]);
@@ -154,8 +163,11 @@ mod tests {
         assert_eq!(&rendered, &Value::Array(mcp.clone()));
         let names: Vec<_> = all_definitions().into_iter().map(|t| t.name).collect();
         for ui in UI_TOOLS {
-            assert!(names.iter().any(|n| n == ui));
-            assert!(!mcp.iter().any(|m| m["name"] == ui), "{ui} collides");
+            assert_eq!(names.iter().filter(|n| *n == ui).count(), 1, "{ui} once");
+        }
+        // What a CLI agent reaches over MCP: the same interface tools but ask_user.
+        for shared in [UPDATE_PLAN, SHOW_IN_3D, RECORD_FINDING] {
+            assert!(mcp.iter().any(|m| m["name"] == shared), "{shared}");
         }
     }
 

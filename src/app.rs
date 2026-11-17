@@ -100,7 +100,9 @@ use crate::hardware::{
     self, BudgetPolicy, HardwareBudget, HardwareError, HardwareProbe, SystemProbe, Verdict,
 };
 use crate::kernel::{self, IoConfig, IoMeter, KernelChoice, Level};
-use crate::patch::autotune::{self, AutotuneError, AutotuneEvent, AutotuneRequest, AutotuneRun};
+use crate::patch::autotune::{
+    self, AutotuneError, AutotuneEvent, AutotuneRequest, AutotuneRun, EvalSource,
+};
 use crate::patch::gguf::{self, GgufApplyArgs, GgufApplyError, Requant};
 use crate::patch::{
     self, apply_patch, apply_patch_with, load_patch, untie, validate_patch, ApplyOptions,
@@ -366,6 +368,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Check(_) => "check",
         Commands::Inspect(_) => "inspect",
         Commands::Apply(_) => "apply",
+        Commands::Restore(_) => "restore",
         Commands::Eval(_) => "eval",
         Commands::Extract(_) => "extract",
         Commands::Schema(_) => "schema",
@@ -434,6 +437,7 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         Commands::Check(args) => core_check(args, deps, &io.ui),
         Commands::Inspect(args) => core_inspect(args, deps, &io.ui),
         Commands::Apply(args) => apply(args, deps, io),
+        Commands::Restore(args) => crate::patch::core_restore(args, deps),
         Commands::Eval(args) => eval(args, deps, &io.ui),
         Commands::Extract(cmd) => extract_cli(cmd, deps, io),
         Commands::Plugins(_) => plugins_list(&io.ui),
@@ -2859,6 +2863,18 @@ fn extract_text(ui: &Ui, report: &ExtractReport) -> String {
     if let Some(diag) = &report.method_diagnostics {
         text.push_str(&method_line(ui, diag));
     }
+    if let Some(h) = &report.holdout.stats {
+        let d_prime = h.d_prime.map_or("∞".to_owned(), |d| format!("{d:.2}"));
+        text.push_str(&format!(
+            "{} d′ {} · accuracy {} on {} + {} held-out prompts
+",
+            ui::badge(ui, "HOLDOUT"),
+            ui::metric(ui, d_prime),
+            ui::metric(ui, format!("{:.0}%", h.threshold_accuracy * 100.0)),
+            report.holdout.n_holdout_pos,
+            report.holdout.n_holdout_neg,
+        ));
+    }
     for path in report.leace_path.iter().chain(&report.sidecar_paths) {
         text.push_str(&format!(
             "{} {}
@@ -3067,6 +3083,14 @@ fn backend_cli(command: &BackendCommand, io: &mut Io) -> CoreResult {
             };
             let mut text = String::new();
             text.push_str(&format!(
+                "{} GPU : {}\n",
+                ui::badge(&ui, "BACKEND"),
+                match report.gpus.is_empty() {
+                    true => "aucun".to_owned(),
+                    false => report.gpus.join(", "),
+                }
+            ));
+            text.push_str(&format!(
                 "{} mistral.rs {}\n",
                 ui::badge(&ui, "BACKEND"),
                 report
@@ -3074,30 +3098,6 @@ fn backend_cli(command: &BackendCommand, io: &mut Io) -> CoreResult {
                     .as_ref()
                     .map_or("introuvable".into(), |m| m.binary.display().to_string())
             ));
-            match &report.llama {
-                Some(l) => {
-                    text.push_str(&format!(
-                        "{} llama-server {}\n",
-                        ui::badge(&ui, "BACKEND"),
-                        l.server.display()
-                    ));
-                    for d in &l.devices {
-                        text.push_str(&format!(
-                            "  {} {} ({} Mio)\n",
-                            ui::metric(&ui, format!("{:<8}", d.id)),
-                            d.name,
-                            d.vram_mib.map_or("?".into(), |v| v.to_string())
-                        ));
-                    }
-                    if let Some(e) = &l.error {
-                        text.push_str(&format!("  ! --list-devices : {e}\n"));
-                    }
-                }
-                None => text.push_str(&format!(
-                    "{} llama-server introuvable\n",
-                    ui::badge(&ui, "BACKEND")
-                )),
-            }
             text.push_str(&format!(
                 "{} hipfire : {}\n",
                 ui::badge(&ui, "BACKEND"),
@@ -3295,9 +3295,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 out: a.out.clone(),
                 overwrite: a.overwrite,
             };
-            let run = bench::calibration::sample(&req).map_err(invalid)?;
-            let text = bench::calibration::sample_text(&ui, &run);
-            bench_outcome(&run, false, text)
+            core_bench_judge_sample(&req, &ui)
         }
         BenchCommand::JudgeEval(a) => {
             let req = JudgeEvalRequest {
@@ -3667,6 +3665,12 @@ pub fn core_bench_refusal(
     bench_outcome(&run, fail_on_warn, bench_report::refusal_text(ui, &run))
 }
 
+/// `bench judge-sample`: the stratified sample of a refusal run to label by hand.
+pub fn core_bench_judge_sample(req: &SampleRequest, ui: &Ui) -> CoreResult {
+    let run = bench::calibration::sample(req).map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, false, bench::calibration::sample_text(ui, &run))
+}
+
 /// `bench judge-eval`: a llama.cpp judge against human labels. Writes the calibration
 /// file when the request has one.
 pub fn core_bench_judge_eval(
@@ -3765,7 +3769,7 @@ fn autotune_cli(
     let request = AutotuneRequest {
         model: args.model.clone(),
         vector: args.vector.clone(),
-        eval_dataset: args.eval_dataset.clone(),
+        eval: EvalSource::File(args.eval_dataset.clone()),
         layer_range: args.target_layer_range,
         readout_layer: args.readout_layer,
         proj: args.proj,

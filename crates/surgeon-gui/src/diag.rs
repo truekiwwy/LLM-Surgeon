@@ -12,6 +12,7 @@ use serde::Deserialize;
 use weight_surgeon::backend::config::BackendConfig;
 use weight_surgeon::hardware::{HardwareProbe, SystemProbe};
 
+use crate::backend_choice::Vendor;
 use crate::install::{self, Installed};
 use crate::logging;
 use crate::platform;
@@ -159,11 +160,56 @@ pub enum Status {
 /// What a row's Repair / Reinstall buttons act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fix {
-    LlamaCpp,
+    MistralRs,
+    /// The hipfire daemon: the wizard's guide (it runs outside the app).
+    Hipfire,
     SampleModel,
     Workspace,
     /// Nothing the app can do (a GPU driver, the CLI next to the exe): the detail says what.
     None,
+}
+
+/// What a dependency is for: the group it is listed under, in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    Essential,
+    Acceleration,
+    Samples,
+}
+
+/// How much a row's state matters, from what the user actually uses: only `Blocking` stops
+/// the work, `NeededBy` names the active choice that needs an optional piece.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Ok,
+    Optional,
+    NeededBy(&'static str),
+    Blocking,
+}
+
+/// What the machine calls for (`backend_choice`): the engine its GPU needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Uses {
+    pub vendor: Vendor,
+    /// The hipfire daemon answered at the last probe.
+    pub hipfire_up: bool,
+}
+
+impl Default for Uses {
+    fn default() -> Self {
+        Self {
+            vendor: Vendor::Other,
+            hipfire_up: false,
+        }
+    }
+}
+
+fn vendor_name(vendor: Vendor) -> &'static str {
+    match vendor {
+        Vendor::Nvidia => "NVIDIA",
+        Vendor::Amd => "AMD",
+        Vendor::Other => "CPU",
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -172,71 +218,113 @@ pub struct Row {
     pub status: Status,
     pub detail: String,
     pub fix: Fix,
+    pub group: Group,
+    pub severity: Severity,
 }
 
-/// `b12360` -> 12360.
-pub fn build_number(tag: &str) -> Option<u64> {
-    tag.trim_start_matches('b').parse().ok()
+/// `Blocking` and `NeededBy` rows: what the user has to act on.
+pub fn actions_needed(rows: &[Row]) -> usize {
+    rows.iter()
+        .filter(|r| matches!(r.severity, Severity::Blocking | Severity::NeededBy(_)))
+        .count()
+}
+
+/// A missing piece is `Blocking` when the work needs it, `NeededBy(who)` when an active
+/// choice does, else `Optional`.
+fn severity(status: Status, required: bool, needed_by: Option<&'static str>) -> Severity {
+    match (status, required, needed_by) {
+        (Status::Ok, _, _) => Severity::Ok,
+        (_, true, _) => Severity::Blocking,
+        (Status::Missing, false, Some(who)) => Severity::NeededBy(who),
+        _ => Severity::Optional,
+    }
+}
+
+/// `v0.9.5` -> [0, 9, 5].
+pub fn version_parts(tag: &str) -> Option<Vec<u64>> {
+    tag.trim_start_matches('v')
+        .split('.')
+        .map(|p| p.parse().ok())
+        .collect()
 }
 
 /// Whether `latest` (a release tag) is newer than `installed`.
 pub fn is_outdated(installed: &str, latest: &str) -> bool {
-    matches!((build_number(installed), build_number(latest)), (Some(i), Some(l)) if l > i)
+    matches!((version_parts(installed), version_parts(latest)), (Some(i), Some(l)) if l > i)
 }
 
-/// The state of each dependency. `latest_tag` is the newest llama.cpp release when the
-/// releases API was reachable (no network call is made here).
+/// The state of each dependency, its group and its severity under `uses`. `latest_tag` is
+/// the newest llama.cpp release when the releases API was reachable (no network call is
+/// made here).
 pub fn dependencies(
     components: &Path,
     config: &BackendConfig,
     workspace: Option<&Path>,
-    system: Option<&SystemReport>,
     latest_tag: Option<&str>,
+    uses: Uses,
     lang: Lang,
 ) -> Vec<Row> {
     let tr = |fr: &str, en: &str| match lang {
         Lang::Fr => fr.to_owned(),
         Lang::En => en.to_owned(),
     };
+    // Group and severity are set once every row is known.
+    struct Base {
+        name: &'static str,
+        status: Status,
+        detail: String,
+        fix: Fix,
+    }
     let mut rows = Vec::new();
 
-    let trusted: Option<Installed> = config.llama_cpp_dir.as_ref().and_then(|dir| {
+    rows.push(Base {
+        name: "weight-surgeon",
+        status: Status::Ok,
+        detail: format!(
+            "{} {}",
+            tr(
+                "moteur de chirurgie intégré à l'application",
+                "surgery engine built into the app"
+            ),
+            env!("CARGO_PKG_VERSION")
+        ),
+        fix: Fix::None,
+    });
+
+    let managed: Option<Installed> = config.mistralrs_bin.as_ref().and_then(|bin| {
         install::list_installed(components)
             .into_iter()
-            .find(|i| &i.dir == dir)
+            .find(|i| &i.server == bin)
     });
-    rows.push(match (&config.llama_cpp_dir, trusted) {
-        (None, _) => Row {
-            name: "llama.cpp",
+    rows.push(match (&config.mistralrs_bin, managed) {
+        (None, _) => Base {
+            name: "mistral.rs",
             status: Status::Missing,
-            detail: tr(
-                "non installé : aucun dossier de confiance",
-                "not installed: no trusted folder",
-            ),
-            fix: Fix::LlamaCpp,
+            detail: tr("non installé", "not installed"),
+            fix: Fix::MistralRs,
         },
-        (Some(dir), None) if dir.join(install::server_name()).is_file() => Row {
-            name: "llama.cpp",
+        (Some(bin), None) if bin.is_file() => Base {
+            name: "mistral.rs",
             status: Status::Ok,
             detail: tr(
-                "dossier de confiance externe (non géré par l'app)",
-                "external trusted folder (not managed by the app)",
+                "binaire externe ou compilé (non géré par l'app)",
+                "external or built binary (not managed by the app)",
             ),
-            fix: Fix::LlamaCpp,
+            fix: Fix::MistralRs,
         },
-        (Some(_), None) => Row {
-            name: "llama.cpp",
+        (Some(_), None) => Base {
+            name: "mistral.rs",
             status: Status::Missing,
             detail: tr(
-                "le dossier de confiance est introuvable ou incomplet",
-                "the trusted folder is missing or incomplete",
+                "le binaire configuré est introuvable",
+                "the configured binary is missing",
             ),
-            fix: Fix::LlamaCpp,
+            fix: Fix::MistralRs,
         },
         (Some(_), Some(i)) => {
             let outdated = latest_tag.is_some_and(|l| is_outdated(&i.manifest.tag, l));
-            Row {
-                name: "llama.cpp",
+            Base {
+                name: "mistral.rs",
                 status: if outdated {
                     Status::Outdated
                 } else {
@@ -251,62 +339,37 @@ pub fn dependencies(
                         .map(|l| format!(" -> {l}"))
                         .unwrap_or_default()
                 ),
-                fix: Fix::LlamaCpp,
+                fix: Fix::MistralRs,
             }
         }
     });
 
-    rows.push(match system.and_then(|s| s.vulkan) {
-        Some(true) => Row {
-            name: "Vulkan",
+    rows.push(match uses.hipfire_up {
+        true => Base {
+            name: "hipfire",
             status: Status::Ok,
-            detail: tr("chargeur Vulkan présent", "Vulkan loader present"),
-            fix: Fix::None,
+            detail: tr("démon joignable", "daemon reachable"),
+            fix: Fix::Hipfire,
         },
-        Some(false) => Row {
-            name: "Vulkan",
+        false => Base {
+            name: "hipfire",
             status: Status::Missing,
             detail: tr(
-                "vulkan-1.dll absent : installez le pilote GPU du constructeur. Sans lui, le build GPU de llama.cpp ne démarre pas : utilisez le build CPU ou les moteurs natifs (l'application reste utilisable, son interface utilise OpenGL)",
-                "vulkan-1.dll missing: install the GPU vendor driver. Without it the llama.cpp GPU build cannot start: use the CPU build or the native engines (the app stays usable, its interface uses OpenGL)",
+                "démon injoignable : il tourne hors de l'application (Linux ROCm, WSL2), voir l'assistant",
+                "daemon unreachable: it runs outside the app (Linux ROCm, WSL2), see the wizard",
             ),
-            fix: Fix::None,
-        },
-        None => Row {
-            name: "Vulkan",
-            status: Status::Missing,
-            detail: tr("diagnostic en cours ou indisponible", "diagnostic pending or unavailable"),
-            fix: Fix::None,
-        },
-    });
-
-    let cli = std::env::current_exe().ok().and_then(|exe| {
-        exe.parent()
-            .map(|d| d.join(format!("surgeon{}", std::env::consts::EXE_SUFFIX)))
-    });
-    rows.push(match cli.filter(|p| p.is_file()) {
-        Some(path) => Row {
-            name: "surgeon (CLI)",
-            status: Status::Ok,
-            detail: path.display().to_string(),
-            fix: Fix::None,
-        },
-        None => Row {
-            name: "surgeon (CLI)",
-            status: Status::Missing,
-            detail: tr("surgeon.exe absent à côté de l'application (utilisation de la bibliothèque intégrée)", "surgeon.exe not next to the app (the built-in library is used)"),
-            fix: Fix::None,
+            fix: Fix::Hipfire,
         },
     });
 
     rows.push(match workspace {
-        Some(dir) if dir.is_dir() => Row {
+        Some(dir) if dir.is_dir() => Base {
             name: "workspace",
             status: Status::Ok,
             detail: dir.display().to_string(),
             fix: Fix::Workspace,
         },
-        _ => Row {
+        _ => Base {
             name: "workspace",
             status: Status::Missing,
             detail: tr(
@@ -318,13 +381,39 @@ pub fn dependencies(
     });
 
     let sample = workspace.is_some_and(|w| QWEN.is_installed(w));
-    rows.push(Row {
+    rows.push(Base {
         name: "Qwen2.5-0.5B-Instruct",
         status: if sample { Status::Ok } else { Status::Missing },
-        detail: tr("modèle d'exemple (optionnel)", "sample model (optional)"),
+        detail: tr("modèle d'exemple", "sample model"),
         fix: Fix::SampleModel,
     });
-    rows
+
+    rows.into_iter()
+        .map(|b| {
+            let (group, required, needed_by) = match b.name {
+                "weight-surgeon" | "workspace" => (Group::Essential, true, None),
+                "mistral.rs" => (
+                    Group::Acceleration,
+                    false,
+                    (uses.vendor != Vendor::Amd).then_some(vendor_name(uses.vendor)),
+                ),
+                "hipfire" => (
+                    Group::Acceleration,
+                    false,
+                    (uses.vendor == Vendor::Amd).then_some(vendor_name(uses.vendor)),
+                ),
+                _ => (Group::Samples, false, None),
+            };
+            Row {
+                severity: severity(b.status, required, needed_by),
+                name: b.name,
+                status: b.status,
+                detail: b.detail,
+                fix: b.fix,
+                group,
+            }
+        })
+        .collect()
 }
 
 pub fn status_word(status: Status, lang: Lang) -> &'static str {
@@ -408,28 +497,40 @@ mod tests {
     }
 
     #[test]
-    fn newer_builds_are_detected_by_number() {
-        assert!(is_outdated("b9000", "b12360"));
-        assert!(!is_outdated("b12360", "b12360"));
-        assert!(!is_outdated("weird", "b1"));
+    fn newer_releases_are_detected_by_version() {
+        assert!(is_outdated("v0.9.4", "v0.9.5"));
+        assert!(is_outdated("v0.9.5", "v0.10.0"));
+        assert!(!is_outdated("v0.9.5", "v0.9.5"));
+        assert!(!is_outdated("weird", "v1.0.0"));
     }
 
     #[test]
     fn rows_report_missing_then_ok_then_outdated() {
+        let row = |rows: &[Row], name: &str| rows.iter().find(|r| r.name == name).unwrap().clone();
         let dir = tempfile::tempdir().unwrap();
         let none = BackendConfig::default();
-        let rows = dependencies(dir.path(), &none, None, None, None, Lang::En);
-        assert_eq!(rows[0].status, Status::Missing);
-        assert_eq!(rows[0].fix, Fix::LlamaCpp);
-        assert_eq!(rows[3].status, Status::Missing, "no workspace");
+        let rows = dependencies(dir.path(), &none, None, None, Uses::default(), Lang::En);
+        let mistral = row(&rows, "mistral.rs");
+        assert_eq!(
+            (mistral.status, mistral.fix),
+            (Status::Missing, Fix::MistralRs)
+        );
+        assert_eq!(
+            row(&rows, "workspace").status,
+            Status::Missing,
+            "no workspace"
+        );
+        assert!(!rows
+            .iter()
+            .any(|r| r.name.contains("llama") || r.name == "Vulkan"));
 
-        let build = dir.path().join("llama.cpp").join("b10-vulkan");
+        let build = install::mistral_root(dir.path()).join("v0.9.5-cpu");
         std::fs::create_dir_all(&build).unwrap();
         std::fs::write(build.join(install::server_name()), b"").unwrap();
         let manifest = install::Manifest {
-            tag: "b10".into(),
+            tag: "v0.9.5".into(),
             asset: "a".into(),
-            variant: "vulkan".into(),
+            variant: "cpu".into(),
             sha256: "0".repeat(64),
             hash_source: install::HashSource::Published,
         };
@@ -439,23 +540,70 @@ mod tests {
         )
         .unwrap();
         let cfg = BackendConfig {
-            llama_cpp_dir: Some(build.clone()),
+            mistralrs_bin: Some(build.join(install::server_name())),
             ..Default::default()
         };
         let ws = dir.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
-        let rows = dependencies(dir.path(), &cfg, Some(&ws), None, Some("b10"), Lang::En);
-        assert_eq!(rows[0].status, Status::Ok);
-        assert_eq!(rows[3].status, Status::Ok);
-        let rows = dependencies(dir.path(), &cfg, Some(&ws), None, Some("b99"), Lang::En);
-        assert_eq!(rows[0].status, Status::Outdated);
-        std::fs::remove_file(build.join(install::server_name())).unwrap();
-        let rows = dependencies(dir.path(), &cfg, Some(&ws), None, None, Lang::En);
+        let rows = |latest| {
+            dependencies(
+                dir.path(),
+                &cfg,
+                Some(&ws),
+                latest,
+                Uses::default(),
+                Lang::En,
+            )
+        };
+        assert_eq!(row(&rows(Some("v0.9.5")), "mistral.rs").status, Status::Ok);
+        assert_eq!(row(&rows(None), "workspace").status, Status::Ok);
         assert_eq!(
-            rows[0].status,
+            row(&rows(Some("v0.9.6")), "mistral.rs").status,
+            Status::Outdated
+        );
+        std::fs::remove_file(build.join(install::server_name())).unwrap();
+        assert_eq!(
+            row(&rows(None), "mistral.rs").status,
             Status::Missing,
             "a deleted binary is reported"
         );
+    }
+
+    #[test]
+    fn the_engine_the_gpu_calls_for_is_the_one_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let none = BackendConfig::default();
+        let severity =
+            |rows: &[Row], name: &str| rows.iter().find(|r| r.name == name).unwrap().severity;
+        let ws = dir.path().join("ws");
+        // A fresh profile: no workspace, nothing installed, a CPU machine.
+        let rows = dependencies(dir.path(), &none, None, None, Uses::default(), Lang::En);
+        assert_eq!(severity(&rows, "workspace"), Severity::Blocking);
+        assert_eq!(severity(&rows, "weight-surgeon"), Severity::Ok);
+        assert_eq!(severity(&rows, "mistral.rs"), Severity::NeededBy("CPU"));
+        assert_eq!(severity(&rows, "hipfire"), Severity::Optional);
+        assert_eq!(
+            rows.iter().filter(|r| r.group == Group::Essential).count(),
+            2
+        );
+
+        // An AMD GPU: hipfire is the one needed, mistral.rs only waits for it.
+        std::fs::create_dir_all(&ws).unwrap();
+        let amd = Uses {
+            vendor: Vendor::Amd,
+            hipfire_up: false,
+        };
+        let rows = dependencies(dir.path(), &none, Some(&ws), None, amd, Lang::En);
+        assert_eq!(severity(&rows, "hipfire"), Severity::NeededBy("AMD"));
+        assert_eq!(severity(&rows, "mistral.rs"), Severity::Optional);
+        let up = Uses {
+            hipfire_up: true,
+            ..amd
+        };
+        let rows = dependencies(dir.path(), &none, Some(&ws), None, up, Lang::En);
+        assert_eq!(severity(&rows, "hipfire"), Severity::Ok);
+        // The CLI runtimes need no separate binary: the app serves `mcp` itself.
+        assert!(!rows.iter().any(|r| r.name.starts_with("surgeon")));
     }
 
     #[test]

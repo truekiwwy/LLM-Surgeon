@@ -1,0 +1,20 @@
+[
+  {"id": "math-01", "question": "A baker makes 24 muffins and sells 3/4 of them. How many muffins are left?", "answer": "6"},
+  {"id": "math-02", "question": "Tom has 15 apples. He gives 4 to Ana and then buys 9 more. How many apples does he have now?", "answer": "20"},
+  {"id": "math-03", "question": "A train travels at 80 km/h for 2.5 hours. How many kilometers does it travel?", "answer": "200"},
+  {"id": "math-04", "question": "A shirt costs 40 dollars and is discounted by 25%. What is the new price in dollars?", "answer": "30"},
+  {"id": "math-05", "question": "There are 6 boxes with 12 pencils each. 17 pencils are given away. How many pencils remain?", "answer": "55"},
+  {"id": "math-06", "question": "Sara reads 18 pages a day. How many days does she need to read a 270-page book?", "answer": "15"},
+  {"id": "math-07", "question": "A rectangle is 9 cm long and 7 cm wide. What is its perimeter in centimeters?", "answer": "32"},
+  {"id": "math-08", "question": "Liam earns 12 dollars per hour and works 7 hours a day for 5 days. How many dollars does he earn?", "answer": "420"},
+  {"id": "math-09", "question": "What is 15% of 260?", "answer": "39"},
+  {"id": "math-10", "question": "A farm has chickens and cows with 30 heads and 74 legs in total. How many cows are there?", "answer": "7"},
+  {"id": "math-11", "question": "The average of four numbers is 18. Three of them are 12, 20 and 25. What is the fourth number?", "answer": "15"},
+  {"id": "math-12", "question": "A 500-liter tank is filled at 25 liters per minute. How many minutes does it take to fill it from empty?", "answer": "20"},
+  {"id": "math-13", "question": "Mia buys 3 notebooks at 4.50 dollars each and a pen at 2 dollars. She pays with a 20-dollar bill. How many dollars of change does she get?", "answer": "4.5"},
+  {"id": "math-14", "question": "A recipe uses 3 eggs for 8 pancakes. How many eggs are needed for 40 pancakes?", "answer": "15"},
+  {"id": "math-15", "question": "What is 7 squared minus 3 cubed?", "answer": "22"},
+  {"id": "math-16", "question": "A car uses 6 liters of fuel per 100 km. How many liters does it use for 350 km?", "answer": "21"},
+  {"id": "math-17", "question": "Five workers build a wall in 12 days. Working at the same rate, how many days do 3 workers need?", "answer": "20"},
+  {"id": "math-18", "question": "A class has 28 students and 4/7 of them are girls. How many boys are in the class?", "answer": "12"}
+]

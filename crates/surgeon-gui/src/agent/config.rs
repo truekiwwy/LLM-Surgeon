@@ -29,15 +29,21 @@ pub enum ProviderKind {
     ClaudeCode,
     /// The Codex CLI, signed in by the user.
     Codex,
+    /// The OpenCode CLI, with its own tools kept (the source model is held by the kernel lock).
+    OpenCode,
+    /// The Antigravity CLI (`agy`), in an isolated profile, its own tools kept.
+    Antigravity,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Anthropic,
         Self::OpenAi,
         Self::Compatible,
         Self::ClaudeCode,
         Self::Codex,
+        Self::OpenCode,
+        Self::Antigravity,
     ];
 
     pub fn label(self) -> &'static str {
@@ -47,15 +53,43 @@ impl ProviderKind {
             Self::Compatible => "Compatible OpenAI (URL)",
             Self::ClaudeCode => "Claude Code (CLI installée)",
             Self::Codex => "Codex CLI (installée)",
+            Self::OpenCode => "OpenCode CLI (installée)",
+            Self::Antigravity => "Antigravity CLI (installée)",
+        }
+    }
+
+    /// The product name alone, for sentences ("needed by Claude Code").
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Anthropic => "Anthropic",
+            Self::OpenAi => "OpenAI",
+            Self::Compatible => "OpenAI-compatible",
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+            Self::OpenCode => "OpenCode",
+            Self::Antigravity => "Antigravity",
         }
     }
 
     pub fn is_cli(self) -> bool {
-        matches!(self, Self::ClaudeCode | Self::Codex)
+        matches!(
+            self,
+            Self::ClaudeCode | Self::Codex | Self::OpenCode | Self::Antigravity
+        )
     }
 
     pub fn needs_key(self) -> bool {
         matches!(self, Self::Anthropic | Self::OpenAi)
+    }
+
+    /// The `--model` names of a CLI that cannot list its own, offered until a list comes
+    /// back. API connections list theirs from the provider, never from here.
+    pub fn fallback_models(self) -> &'static [&'static str] {
+        match self {
+            Self::ClaudeCode => &["sonnet", "opus", "haiku", "fable"],
+            Self::Codex => &["gpt-5-codex", "o3", "o4-mini"],
+            _ => &[],
+        }
     }
 
     pub fn default_base(self) -> &'static str {
@@ -93,6 +127,15 @@ pub struct Connection {
     /// The last list the provider's API returned.
     #[serde(default)]
     pub models: Vec<String>,
+    /// The model a project gets when it does not pick one.
+    #[serde(default)]
+    pub default_model: Option<String>,
+    /// The model last picked with this connection, picked again when a project switches to it.
+    #[serde(default)]
+    pub last_model: Option<String>,
+    /// A CLI runtime whose sign-in check passed (Tester).
+    #[serde(default)]
+    pub verified: bool,
     #[serde(default)]
     pub prices: BTreeMap<String, Prices>,
 }
@@ -103,6 +146,41 @@ impl Connection {
             "" => self.kind.default_base(),
             b => b,
         }
+    }
+
+    /// Offered to the sessions: a CLI whose sign-in check passed, an API connection whose
+    /// model list came back.
+    pub fn ready(&self) -> bool {
+        match self.kind.is_cli() {
+            true => self.verified,
+            false => !self.models.is_empty(),
+        }
+    }
+
+    /// The model a project inherits: the chosen default, else the first one listed.
+    pub fn inherited_model(&self) -> Option<&str> {
+        self.default_model
+            .as_deref()
+            .or(self.models.first().map(String::as_str))
+    }
+
+    /// The models the pickers offer: the last list, else the CLI's built-in names.
+    pub fn model_choices(&self) -> Vec<String> {
+        match self.models.is_empty() {
+            true => self
+                .kind
+                .fallback_models()
+                .iter()
+                .map(|m| (*m).to_owned())
+                .collect(),
+            false => self.models.clone(),
+        }
+    }
+
+    /// The model a switch to this connection lands on: the last one picked with it, else the
+    /// one it hands down (`None`: a CLI's own default, no `--model`).
+    pub fn preferred_model(&self) -> Option<&str> {
+        self.last_model.as_deref().or(self.inherited_model())
     }
 
     /// Whether requests stay on this machine (CLI runtimes reach their own servers).
@@ -133,7 +211,10 @@ impl Connection {
                 reach,
             )?),
             ProviderKind::Compatible => Arc::new(OpenAi::new(self.base(), key, reach)?),
-            ProviderKind::ClaudeCode | ProviderKind::Codex => {
+            ProviderKind::ClaudeCode
+            | ProviderKind::Codex
+            | ProviderKind::OpenCode
+            | ProviderKind::Antigravity => {
                 return Err(ProviderError::Blocked(
                     "un runtime CLI n'est pas un fournisseur par API".into(),
                 ))
@@ -157,9 +238,13 @@ pub struct AgentsConfig {
     pub connections: Vec<Connection>,
     #[serde(default)]
     pub consents: Vec<Consent>,
-    /// No request leaves the machine: loopback endpoints only, no CLI runtime.
-    #[serde(default)]
+    /// No request leaves the machine: loopback endpoints only, no CLI runtime. The setting
+    /// lives in `settings.json` since G6; an older file is read once for it, never written.
+    #[serde(default, skip_serializing)]
     pub local_only: bool,
+    /// The connection every project uses unless it picks another.
+    #[serde(default)]
+    pub default_connection: Option<String>,
 }
 
 impl Default for AgentsConfig {
@@ -169,6 +254,7 @@ impl Default for AgentsConfig {
             connections: Vec::new(),
             consents: Vec::new(),
             local_only: false,
+            default_connection: None,
         }
     }
 }
@@ -192,6 +278,15 @@ impl AgentsConfig {
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         write_atomic(path, &bytes)
+    }
+
+    /// Hands an older file's `local_only` to `setting` (true wins), then follows it. `true`
+    /// when the setting changed and must be saved.
+    pub fn adopt_local_only(&mut self, setting: &mut bool) -> bool {
+        let migrated = self.local_only && !*setting;
+        *setting |= self.local_only;
+        self.local_only = *setting;
+        migrated
     }
 
     pub fn connection(&self, id: &str) -> Option<&Connection> {
@@ -288,5 +383,38 @@ impl ProjectAgent {
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         write_atomic(path, &bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_only_moves_to_the_settings_once_and_is_no_longer_written_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agents.json");
+        std::fs::write(&path, r#"{"schema_version":1,"local_only":true}"#).unwrap();
+        let mut cfg = AgentsConfig::load(&path).unwrap();
+        let mut setting = false;
+        assert!(
+            cfg.adopt_local_only(&mut setting),
+            "migrated: save the settings"
+        );
+        assert!(setting && cfg.local_only);
+        cfg.save(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("local_only"));
+        let mut cfg = AgentsConfig::load(&path).unwrap();
+        assert!(
+            !cfg.adopt_local_only(&mut setting),
+            "nothing more to migrate"
+        );
+        assert!(cfg.local_only, "follows the setting");
+        setting = false;
+        let mut cfg = AgentsConfig::load(&path).unwrap();
+        cfg.adopt_local_only(&mut setting);
+        assert!(!cfg.local_only, "the setting decides once migrated");
     }
 }

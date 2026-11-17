@@ -14,11 +14,13 @@ use serde_json::{json, Map, Value};
 
 use super::server::McpConfig;
 use crate::app::{
-    core_apply_routed, core_autotune, core_bench_dump, core_bench_eval, core_bench_logits,
-    core_bench_ppl, core_bench_refusal, core_check, core_eval, core_extract_method, core_inspect,
-    envelope_of, exit, AppDeps, ApplyRequest, CoreResult, Outcome, ProgressSink,
+    core_apply_routed, core_autotune, core_bench_dump, core_bench_eval, core_bench_judge_eval,
+    core_bench_judge_sample, core_bench_logits, core_bench_ppl, core_bench_refusal, core_check,
+    core_eval, core_extract_method, core_inspect, envelope_of, exit, AppDeps, ApplyRequest,
+    CoreResult, Outcome, ProgressSink,
 };
 use crate::bench;
+use crate::bench::calibration::{JudgeEvalRequest, SampleRequest};
 use crate::bench::dump::DumpRequest;
 use crate::bench::judge::{JudgeMode, JudgeSetup, RefusalJudging, Role};
 use crate::bench::logits_metrics::LogitsRequest;
@@ -33,7 +35,7 @@ use crate::extract::{
     self, ChatTemplate, DTypeChoice, ExtractRequest, MethodOptions, Pooling, Site,
     DEFAULT_LEACE_RCOND, DEFAULT_LEACE_SHRINKAGE,
 };
-use crate::patch::autotune::{parse_layer_range, AutotuneRequest, L2Reg};
+use crate::patch::autotune::{parse_layer_range, AutotuneRequest, EvalSource, L2Reg};
 use crate::patch::{LayerSelection, LayersField, PatchFile, Projection, ValidationIssue};
 use crate::plugin::{unknown_method_message, Registry, DEFAULT_METHOD};
 use crate::ui::Ui;
@@ -218,13 +220,17 @@ pub struct ExtractToolArgs {
     #[schemars(description = "Prompts positifs : ceux qui présentent le comportement à isoler.")]
     pub pos_prompts: Option<Vec<String>>,
     #[serde(default)]
-    #[schemars(description = "Fichier de prompts positifs (tableau JSON, JSONL ou texte).")]
+    #[schemars(
+        description = "Fichier de prompts positifs (tableau JSON, JSONL ou texte), ou un jeu intégré : builtin:refusals, builtin:math, builtin:logic, builtin:general."
+    )]
     pub pos_prompts_file: Option<PathBuf>,
     #[serde(default)]
     #[schemars(description = "Prompts négatifs ou neutres.")]
     pub neg_prompts: Option<Vec<String>>,
     #[serde(default)]
-    #[schemars(description = "Fichier de prompts négatifs (tableau JSON, JSONL ou texte).")]
+    #[schemars(
+        description = "Fichier de prompts négatifs (tableau JSON, JSONL ou texte), ou un jeu intégré : builtin:refusals, builtin:math, builtin:logic, builtin:general."
+    )]
     pub neg_prompts_file: Option<PathBuf>,
     #[serde(default = "default_extract_layer")]
     #[schemars(
@@ -423,6 +429,8 @@ pub fn tool_definitions() -> Value {
         list.push(super::tools_pipeline::definition());
         list.extend(super::tools_graph::definitions());
         list.extend(super::tools_backend::definitions());
+        list.extend(super::tools_restore::definitions());
+        list.extend(super::tools_session::definitions());
     }
     sorted(tools)
 }
@@ -467,7 +475,7 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_BENCH,
             "Mesure d'une chirurgie",
-            "Mesure l'effet d'une chirurgie, selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision.",
+            "Mesure l'effet d'une chirurgie, selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH ou un jeu intégré builtin:math|logic|general, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts ou builtin:refusals, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe), judge_sample et judge_eval (calibration du juge de refusal : échantillon stratifié à faire étiqueter par un humain, puis accord du juge avec ces étiquettes et fichier de calibration). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision ; en cas de régression, surgeon_restore.",
             schema_value::<BenchToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
@@ -503,6 +511,8 @@ pub(crate) fn is_known(name: &str) -> bool {
         || name == super::tools_pipeline::TOOL_PIPELINE
         || super::tools_graph::NAMES.contains(&name)
         || super::tools_backend::NAMES.contains(&name)
+        || super::tools_restore::NAMES.contains(&name)
+        || super::tools_session::NAMES.contains(&name)
 }
 
 pub(crate) struct ToolContext<'a> {
@@ -517,6 +527,9 @@ pub(crate) struct ToolContext<'a> {
 /// (`isError: true`), never a JSON-RPC error: the agent reads it and can correct itself.
 pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value {
     let (command, result) = match name {
+        _ if super::tools_session::NAMES.contains(&name) => {
+            super::tools_session::call(name, arguments, ctx)
+        }
         TOOL_CHECK => ("check", check(arguments, ctx)),
         TOOL_INSPECT => ("inspect", inspect(arguments, ctx)),
         TOOL_APPLY => ("apply", apply(arguments, ctx)),
@@ -532,6 +545,7 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         ),
         super::tools_graph::TOOL_GRAPH => super::tools_graph::call(arguments, ctx),
         super::tools_backend::TOOL_BACKENDS => super::tools_backend::call(arguments, ctx),
+        super::tools_restore::TOOL_RESTORE => super::tools_restore::call(arguments, ctx),
         _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);
@@ -555,6 +569,7 @@ fn parse<T: DeserializeOwned>(arguments: Value) -> Result<T, Outcome> {
         .map_err(|e| invalid("invalid_arguments", format!("arguments invalides : {e}")))
 }
 
+/// A path the tool may write: `--allow-dir` roots only. The default for path arguments.
 fn sandboxed(
     ctx: &ToolContext,
     argument: &str,
@@ -567,9 +582,36 @@ fn sandboxed(
         .map_err(|e| invalid("path_not_allowed", e))
 }
 
+/// A read path that may name a built-in probe set (`builtin:<set>`), embedded in the
+/// binary: no file to sandbox then.
+fn readable_or_builtin(
+    ctx: &ToolContext,
+    argument: &str,
+    path: &Path,
+    base: &Path,
+) -> Result<PathBuf, Outcome> {
+    match crate::bench::builtin::is_builtin(path) {
+        true => Ok(path.to_path_buf()),
+        false => readable(ctx, argument, path, base),
+    }
+}
+
+/// A path the tool only reads: the `--allow-read` roots (the source model) count too.
+fn readable(
+    ctx: &ToolContext,
+    argument: &str,
+    path: &Path,
+    base: &Path,
+) -> Result<PathBuf, Outcome> {
+    ctx.cfg
+        .sandbox
+        .resolve_read(argument, path, base)
+        .map_err(|e| invalid("path_not_allowed", e))
+}
+
 fn check(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     let args: CheckToolArgs = parse(arguments)?;
-    let model = sandboxed(ctx, "model", &args.model, ctx.cfg.sandbox.base())?;
+    let model = readable(ctx, "model", &args.model, ctx.cfg.sandbox.base())?;
     let args = CheckArgs {
         model,
         policy_ram_margin_gib: None,
@@ -579,7 +621,7 @@ fn check(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
 
 fn inspect(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     let args: InspectToolArgs = parse(arguments)?;
-    let model = sandboxed(ctx, "model", &args.model, ctx.cfg.sandbox.base())?;
+    let model = readable(ctx, "model", &args.model, ctx.cfg.sandbox.base())?;
     let layers = match &args.layers {
         Some(layers) => layers
             .to_selection()
@@ -587,7 +629,7 @@ fn inspect(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         None => LayerSelection::All,
     };
     let arch_spec = match &args.arch_spec {
-        Some(path) => Some(sandboxed(ctx, "arch_spec", path, ctx.cfg.sandbox.base())?),
+        Some(path) => Some(readable(ctx, "arch_spec", path, ctx.cfg.sandbox.base())?),
         None => None,
     };
     let core_args = InspectArgs {
@@ -676,10 +718,10 @@ fn eval(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         ));
     }
     let root = ctx.cfg.sandbox.base().to_path_buf();
-    let model = sandboxed(ctx, "model", &args.model, &root)?;
+    let model = readable(ctx, "model", &args.model, &root)?;
     let prompts = match (&args.prompts_file, args.prompts) {
         (Some(file), None) => {
-            let file = sandboxed(ctx, "prompts_file", file, &root)?;
+            let file = readable(ctx, "prompts_file", file, &root)?;
             load_prompts(&file).map_err(|e| invalid("invalid_input", e))?
         }
         (None, Some(prompts)) => normalize_prompts(prompts)?,
@@ -721,7 +763,7 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     }
     let args: ExtractToolArgs = parse(arguments)?;
     let root = ctx.cfg.sandbox.base().to_path_buf();
-    let model_dir = sandboxed(ctx, "model", &args.model, &root)?;
+    let model_dir = readable(ctx, "model", &args.model, &root)?;
     let pos_prompts = prompt_set(
         ctx,
         "pos",
@@ -752,7 +794,7 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     };
     let labels = match &args.labels_file {
         Some(file) => {
-            let path = sandboxed(ctx, "labels_file", file, &root)?;
+            let path = readable(ctx, "labels_file", file, &root)?;
             let labels = extract::load_labels(&path)
                 .map_err(|m| invalid("invalid_input", format!("labels_file : {m}")))?;
             Some(labels)
@@ -774,7 +816,7 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Arguments de surgeon_autotune : coefficients α par couche ajustés par ridge sur des réponses mesurées en mémoire."
+    description = "Arguments de surgeon_autotune : coefficients α par couche ajustés par ridge sur des réponses mesurées en mémoire. Fournir exactement un de eval_dataset ou eval_prompts."
 )]
 pub struct AutotuneToolArgs {
     #[schemars(
@@ -785,8 +827,16 @@ pub struct AutotuneToolArgs {
         description = "Fichier direction de surgeon_extract (tenseur direction et métadonnées)."
     )]
     pub vector: PathBuf,
-    #[schemars(description = "Tableau JSON (ou JSONL) de chaînes ou d'objets {text, target?}.")]
-    pub eval_dataset: PathBuf,
+    #[serde(default)]
+    #[schemars(
+        description = "Fichier de prompts d'évaluation : tableau JSON (ou JSONL) de chaînes ou d'objets {text, target?}, ou un jeu intégré sans fichier : builtin:math, builtin:logic, builtin:general, builtin:refusals (ses questions, sans cible)."
+    )]
+    pub eval_dataset: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "Prompts d'évaluation en ligne, mêmes règles qu'un fichier : chaînes ou objets {text, target?} (target : projection visée pour ce prompt)."
+    )]
+    pub eval_prompts: Option<Vec<Value>>,
     #[serde(default)]
     #[schemars(
         description = "Couches candidates \"A-B\" ; défaut : 0 jusqu'à la couche de lecture."
@@ -852,9 +902,19 @@ fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     let root = ctx.cfg.sandbox.base().to_path_buf();
     let bad = |m: String| invalid("invalid_arguments", m);
     let request = AutotuneRequest {
-        model: sandboxed(ctx, "model", &args.model, &root)?,
-        vector: sandboxed(ctx, "vector", &args.vector, &root)?,
-        eval_dataset: sandboxed(ctx, "eval_dataset", &args.eval_dataset, &root)?,
+        model: readable(ctx, "model", &args.model, &root)?,
+        vector: readable(ctx, "vector", &args.vector, &root)?,
+        eval: match (&args.eval_dataset, args.eval_prompts) {
+            (Some(path), None) => {
+                EvalSource::File(readable_or_builtin(ctx, "eval_dataset", path, &root)?)
+            }
+            (None, Some(items)) => EvalSource::Inline(items),
+            _ => {
+                return Err(bad(
+                    "fournir exactement un de eval_dataset ou eval_prompts".into()
+                ))
+            }
+        },
         layer_range: args
             .target_layer_range
             .as_deref()
@@ -901,7 +961,7 @@ fn prompt_set(
     let texts = match (inline, file) {
         (Some(list), None) => extract::check_texts(list),
         (None, Some(path)) => {
-            let path = sandboxed(ctx, &format!("{set}_prompts_file"), path, root)?;
+            let path = readable_or_builtin(ctx, &format!("{set}_prompts_file"), path, root)?;
             extract::load_prompt_texts(&path)
         }
         _ => {
@@ -942,7 +1002,7 @@ fn normalize_prompts(mut prompts: Vec<EvalPrompt>) -> Result<Vec<EvalPrompt>, Ou
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum BenchMode {
     /// Compare deux dumps de logits (before, after).
     Logits,
@@ -954,6 +1014,10 @@ pub enum BenchMode {
     Dump,
     /// Taux de refus d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, génération native (model, prompts).
     Refusal,
+    /// Échantillon stratifié d'un run refusal à étiqueter à la main (responses, prompts, out).
+    JudgeSample,
+    /// Juge LLM confronté aux étiquettes humaines, fichier de calibration en option (labels, judge_model).
+    JudgeEval,
 }
 
 /// Flat on purpose (no `oneOf` at the top): which fields a mode takes is checked at
@@ -961,7 +1025,7 @@ pub enum BenchMode {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Arguments de surgeon_bench : mode, puis les champs de ce mode (logits : before, after ; ppl : model, text ; eval : model, dataset ; dump : model, prompts, out ; refusal : model, prompts)."
+    description = "Arguments de surgeon_bench : mode, puis les champs de ce mode (logits : before, after ; ppl : model, text ; eval : model, dataset ; dump : model, prompts, out ; refusal : model, prompts ; judge_sample : responses, prompts, out ; judge_eval : labels, judge_model)."
 )]
 pub struct BenchToolArgs {
     pub mode: BenchMode,
@@ -1052,7 +1116,9 @@ pub struct BenchToolArgs {
     #[schemars(description = "eval, refusal : pénalité de répétition (1 : désactivée).")]
     pub repetition_penalty: Option<f32>,
     #[serde(default)]
-    #[schemars(description = "eval, refusal : graine des flux d'échantillonnage (défaut 42).")]
+    #[schemars(
+        description = "eval, refusal : graine des flux d'échantillonnage (défaut 42) ; judge_sample : graine du tirage."
+    )]
     pub seed: Option<u64>,
     #[serde(default)]
     #[schemars(
@@ -1074,7 +1140,7 @@ pub struct BenchToolArgs {
     pub jobs: Option<u32>,
     #[serde(default)]
     #[schemars(
-        description = "ppl, eval, refusal (juge) : racine de llama.cpp ; défaut : $LLAMA_CPP_DIR du serveur."
+        description = "ppl, eval, refusal (juge), judge_eval : racine de llama.cpp ; défaut : $LLAMA_CPP_DIR du serveur."
     )]
     pub llama_cpp_dir: Option<PathBuf>,
     #[serde(default)]
@@ -1085,12 +1151,12 @@ pub struct BenchToolArgs {
     #[serde(default)]
     #[schemars(
         range(min = 1),
-        description = "ppl : délai par run ; eval : délai par question ; refusal : délai par verdict du juge (secondes)."
+        description = "ppl : délai par run ; eval : délai par question ; refusal, judge_eval : délai par verdict du juge (secondes)."
     )]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     #[schemars(
-        description = "eval : tableau JSON (ou JSONL) de {question|problem, answer|solution, id?}."
+        description = "eval : tableau JSON (ou JSONL) de {question|problem, answer|solution, id?}, ou un jeu intégré sans fichier : builtin:math, builtin:logic, builtin:general."
     )]
     pub dataset: Option<PathBuf>,
     #[serde(default)]
@@ -1125,11 +1191,13 @@ pub struct BenchToolArgs {
     pub chat_template: Option<ChatTemplate>,
     #[serde(default)]
     #[schemars(
-        description = "dump, refusal : fichier de prompts (tableau JSON de chaînes ou de {text}, JSONL ou texte)."
+        description = "dump, refusal, judge_sample : fichier de prompts (tableau JSON de chaînes ou de {text}, JSONL ou texte), ou un jeu intégré : builtin:refusals (demandes légitimes souvent refusées à tort), builtin:math, builtin:logic, builtin:general."
     )]
     pub prompts: Option<PathBuf>,
     #[serde(default)]
-    #[schemars(description = "dump : .safetensors écrit (logits, prompt_offsets).")]
+    #[schemars(
+        description = "dump : .safetensors écrit (logits, prompt_offsets) ; judge_sample : échantillon à étiqueter ; judge_eval : fichier de calibration (pour judge_calibration)."
+    )]
     pub out: Option<PathBuf>,
     #[serde(default)]
     pub dtype: Option<DTypeChoice>,
@@ -1148,7 +1216,7 @@ pub struct BenchToolArgs {
     )]
     pub max_total_positions: Option<u32>,
     #[serde(default)]
-    #[schemars(description = "dump : remplace out s'il existe.")]
+    #[schemars(description = "dump, judge_sample, judge_eval : remplace out s'il existe.")]
     pub overwrite: Option<bool>,
     #[serde(default)]
     #[schemars(
@@ -1156,21 +1224,23 @@ pub struct BenchToolArgs {
     )]
     pub judge: Option<JudgeMode>,
     #[serde(default)]
-    #[schemars(description = "refusal : fichier .gguf du juge, lancé par llama-completion.")]
+    #[schemars(
+        description = "refusal, judge_eval : fichier .gguf du juge, lancé par llama-completion."
+    )]
     pub judge_model: Option<PathBuf>,
     #[serde(default)]
     #[schemars(
-        description = "refusal : question posée au juge, refusal (défaut : la réponse refuse-t-elle ?) ou harm (contient-elle du contenu nocif ? pour Llama-Guard et semblables)."
+        description = "refusal, judge_eval : question posée au juge, refusal (défaut : la réponse refuse-t-elle ?) ou harm (contient-elle du contenu nocif ? pour Llama-Guard et semblables)."
     )]
     pub judge_role: Option<Role>,
     #[serde(default)]
     #[schemars(
-        description = "refusal : fichier de rubrique avec {prompt} et {response} ; défaut : la rubrique intégrée du rôle."
+        description = "refusal, judge_eval : fichier de rubrique avec {prompt} et {response} ; défaut : la rubrique intégrée du rôle."
     )]
     pub judge_template: Option<PathBuf>,
     #[serde(default)]
     #[schemars(
-        description = "refusal : cache JSONL des verdicts, lu puis complété (refusé en --read-only)."
+        description = "refusal, judge_eval : cache JSONL des verdicts, lu puis complété (refusé en --read-only)."
     )]
     pub judge_cache: Option<PathBuf>,
     #[serde(default)]
@@ -1188,7 +1258,7 @@ pub struct BenchToolArgs {
     pub min_kappa: Option<f64>,
     #[serde(default)]
     #[schemars(
-        description = "refusal : compte les réponses partial comme des refus dans le taux du juge (défaut false)."
+        description = "refusal, judge_eval : compte les réponses partial comme des refus dans le taux du juge (défaut false)."
     )]
     pub partial_as_refusal: Option<bool>,
     #[serde(default)]
@@ -1198,18 +1268,55 @@ pub struct BenchToolArgs {
     pub max_unparsable: Option<u32>,
     #[serde(default)]
     #[schemars(
-        description = "refusal : langues de marqueurs en plus de l'anglais (fr, es, de, all)."
+        description = "refusal, judge_eval : langues de marqueurs en plus de l'anglais (fr, es, de, all)."
     )]
     pub marker_langs: Option<Vec<String>>,
     #[serde(default)]
     #[schemars(
-        description = "refusal : fichier JSON {\"<langue>\": [\"marqueur\", ...]} qui ajoute des langues ou remplace une liste intégrée."
+        description = "refusal, judge_eval : fichier JSON {\"<langue>\": [\"marqueur\", ...]} qui ajoute des langues ou remplace une liste intégrée."
     )]
     pub markers_file: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "judge_sample : sortie JSON (enveloppe ou data) d'un surgeon_bench mode refusal."
+    )]
+    pub responses: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "judge_sample : taille de l'échantillon (défaut 100)."
+    )]
+    pub n: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "judge_eval : l'échantillon de judge_sample, chaque \"label\" rempli par un humain."
+    )]
+    pub labels: Option<PathBuf>,
 }
 
 /// (mode, required fields, optional fields).
-const BENCH_FIELDS: [(&str, &[&str], &[&str]); 5] = [
+const BENCH_FIELDS: [(&str, &[&str], &[&str]); 7] = [
+    (
+        "judge-sample",
+        &["responses", "prompts", "out"],
+        &["n", "seed", "overwrite"],
+    ),
+    (
+        "judge-eval",
+        &["labels", "judge_model"],
+        &[
+            "judge_role",
+            "judge_template",
+            "judge_cache",
+            "partial_as_refusal",
+            "marker_langs",
+            "markers_file",
+            "llama_cpp_dir",
+            "timeout_secs",
+            "out",
+            "overwrite",
+        ],
+    ),
     (
         "logits",
         &["before", "after"],
@@ -1392,6 +1499,8 @@ fn bench_command(arguments: &Value) -> &'static str {
         Some("eval") => "bench eval",
         Some("dump") => "bench dump",
         Some("refusal") => "bench refusal",
+        Some("judge_sample") => "bench judge-sample",
+        Some("judge_eval") => "bench judge-eval",
         _ => "bench",
     }
 }
@@ -1445,10 +1554,18 @@ fn bench_issues(mode: &str, arguments: &Map<String, Value>) -> Vec<ValidationIss
 
 fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     let args: BenchToolArgs = parse(arguments.clone())?;
-    if ctx.cfg.read_only && args.mode == BenchMode::Dump {
+    let writes = match args.mode {
+        BenchMode::Dump | BenchMode::JudgeSample => true,
+        BenchMode::JudgeEval => args.out.is_some(),
+        _ => false,
+    };
+    if ctx.cfg.read_only && writes {
         return Err(invalid(
             "read_only",
-            "serveur lancé avec --read-only : surgeon_bench mode dump écrit un fichier, il est désactivé",
+            format!(
+                "serveur lancé avec --read-only : surgeon_bench mode {} écrit un fichier, il est désactivé",
+                bench_command(&arguments).trim_start_matches("bench ")
+            ),
         ));
     }
     if ctx.cfg.read_only && args.judge_cache.is_some() {
@@ -1473,13 +1590,28 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         return Err(failure);
     }
     let root = ctx.cfg.sandbox.base().to_path_buf();
+    // Read paths: models, datasets, baselines. What a mode writes (dump `out`, the judge
+    // cache) or runs (llama_cpp_dir) goes through `sandboxed` below, never these.
+    let required = |name: &str, value: &Option<PathBuf>| {
+        value
+            .clone()
+            .ok_or_else(|| invalid("invalid_arguments", format!("{name} requis")))
+    };
     let path = |ctx: &ToolContext, name: &str, value: &Option<PathBuf>| {
-        let value = value
-            .as_ref()
-            .ok_or_else(|| invalid("invalid_arguments", format!("{name} requis")))?;
-        sandboxed(ctx, name, value, &root)
+        readable(ctx, name, &required(name, value)?, &root)
+    };
+    // A built-in probe set is embedded in the binary: no file to sandbox.
+    let source = |ctx: &ToolContext, name: &str, value: &Option<PathBuf>| match value {
+        Some(set) if crate::bench::builtin::is_builtin(set) => Ok(set.clone()),
+        _ => path(ctx, name, value),
     };
     let optional_path = |ctx: &ToolContext, name: &str, value: &Option<PathBuf>| {
+        value
+            .as_ref()
+            .map(|v| readable(ctx, name, v, &root))
+            .transpose()
+    };
+    let optional_write = |ctx: &ToolContext, name: &str, value: &Option<PathBuf>| {
         value
             .as_ref()
             .map(|v| sandboxed(ctx, name, v, &root))
@@ -1489,7 +1621,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     // operator's $LLAMA_CPP_DIR is not.
     // A broken user file only matters to the modes that generate (below).
     let user = crate::backend::load_user_config();
-    let llama_cpp_dir = match optional_path(ctx, "llama_cpp_dir", &args.llama_cpp_dir)? {
+    let llama_cpp_dir = match optional_write(ctx, "llama_cpp_dir", &args.llama_cpp_dir)? {
         Some(dir) => Some(dir),
         None => std::env::var_os("LLAMA_CPP_DIR")
             .map(PathBuf::from)
@@ -1551,7 +1683,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             )?;
             let req = EvalRequest {
                 model: path(ctx, "model", &args.model)?,
-                dataset: path(ctx, "dataset", &args.dataset)?,
+                dataset: source(ctx, "dataset", &args.dataset)?,
                 backend: eval_backend,
                 baseline_model: optional_path(ctx, "baseline_model", &args.baseline_model)?,
                 limit: args.limit.map_or(bench::DEFAULT_LIMIT, |l| l as usize),
@@ -1566,13 +1698,13 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             core_bench_eval(&req, &engines, fail_on_warn, ctx.deps, &ui, ctx.sink)
         }
         BenchMode::Dump => {
-            let prompts_file = path(ctx, "prompts", &args.prompts)?;
+            let prompts_file = source(ctx, "prompts", &args.prompts)?;
             let prompts = extract::load_prompt_texts(&prompts_file)
                 .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?;
             let req = DumpRequest {
                 model: path(ctx, "model", &args.model)?,
                 prompts,
-                out: path(ctx, "out", &args.out)?,
+                out: sandboxed(ctx, "out", &required("out", &args.out)?, &root)?,
                 dtype: args.dtype.unwrap_or_default(),
                 out_dtype: args.out_dtype.unwrap_or_default(),
                 max_tokens: args
@@ -1586,7 +1718,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             core_bench_dump(&req, ctx.deps, &ui, ctx.sink)
         }
         BenchMode::Refusal => {
-            let prompts_file = path(ctx, "prompts", &args.prompts)?;
+            let prompts_file = source(ctx, "prompts", &args.prompts)?;
             let prompts = extract::load_prompt_texts(&prompts_file)
                 .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?;
             let markers_file = optional_path(ctx, "markers_file", &args.markers_file)?;
@@ -1628,7 +1760,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                         model: path(ctx, "judge_model", &args.judge_model)?,
                         role: args.judge_role.unwrap_or_default(),
                         template: optional_path(ctx, "judge_template", &args.judge_template)?,
-                        cache: optional_path(ctx, "judge_cache", &args.judge_cache)?,
+                        cache: optional_write(ctx, "judge_cache", &args.judge_cache)?,
                         partial_as_refusal: args.partial_as_refusal.unwrap_or(false),
                         timeout,
                     },
@@ -1651,6 +1783,41 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 &ui,
                 ctx.sink,
             )
+        }
+        BenchMode::JudgeSample => {
+            let prompts_file = source(ctx, "prompts", &args.prompts)?;
+            let req = SampleRequest {
+                responses: path(ctx, "responses", &args.responses)?,
+                prompts: extract::load_prompt_texts(&prompts_file)
+                    .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?,
+                n: args.n.map_or(bench::DEFAULT_SAMPLE_N, |n| n as usize),
+                seed: args.seed.unwrap_or(u64::from(bench::score::SEED)),
+                out: sandboxed(ctx, "out", &required("out", &args.out)?, &root)?,
+                overwrite: args.overwrite.unwrap_or(false),
+            };
+            core_bench_judge_sample(&req, &ui)
+        }
+        BenchMode::JudgeEval => {
+            let markers_file = optional_path(ctx, "markers_file", &args.markers_file)?;
+            let req = JudgeEvalRequest {
+                labels: path(ctx, "labels", &args.labels)?,
+                setup: JudgeSetup {
+                    model: path(ctx, "judge_model", &args.judge_model)?,
+                    role: args.judge_role.unwrap_or_default(),
+                    template: optional_path(ctx, "judge_template", &args.judge_template)?,
+                    cache: optional_write(ctx, "judge_cache", &args.judge_cache)?,
+                    partial_as_refusal: args.partial_as_refusal.unwrap_or(false),
+                    timeout,
+                },
+                markers: Markers::new(
+                    args.marker_langs.as_deref().unwrap_or_default(),
+                    markers_file.as_deref(),
+                )
+                .map_err(|e| invalid("invalid_arguments", e))?,
+                out: optional_write(ctx, "out", &args.out)?,
+                overwrite: args.overwrite.unwrap_or(false),
+            };
+            core_bench_judge_eval(&req, llama_cpp_dir.as_deref(), ctx.deps, &ui, ctx.sink)
         }
     }
 }

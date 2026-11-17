@@ -7,34 +7,33 @@
 //! the CLI reads (`backend::config`).
 //!
 //! Layout of the crate (the desktop shell: [`desktop`] screens and wizard, [`actions`] what
-//! they do, [`install`] / [`extract`] / [`net`] / [`releases`] / [`sample_model`] the
+//! they do, [`install`] / [`extract`] / [`hipfire_setup`] / [`net`] / [`releases`] / [`sample_model`] the
 //! downloads, [`diag`] diagnostics, [`instance`] single instance, [`raster`] off-screen
 //! rendering, [`selftest`], [`logging`], [`settings`], [`paths`], [`platform`], [`update`]):
 //! - [`source`]: `graph.json` / NDJSON input, the stream reader thread, the replay history.
 //! - [`camera`]: orbit camera, projection and picking.
 //! - [`viewport`]: the 3D canvas.
-//! - [`canvas`]: the studio workspace (cards, wires, run plans) and its infinite canvas.
-//! - [`editor`]: the patch.json editor, live validation and 3D target preview.
 //! - [`runner`]: background jobs (CLI commands in process, backup restore).
+//! - [`backend_choice`]: the default backend from the hardware, Rust engines only.
 //! - [`backend_dialog`]: the backend setup modal.
 //! - [`studio`]: projects, the job manager and the event stream (docs/STUDIO.md).
 //! - [`app`]: the window state and what the views ask it to do.
-//! - [`ui`]: design tokens, components, the shell (title bar, tabs, status bar, palette)
-//!   and the five views; [`demo`]: the `--demo-data` workspace.
+//! - [`ui`]: design tokens, components, the shell (title bar, activity bar, palette,
+//!   settings dialog) and the two views; [`demo`]: the `--demo-data` workspace.
 #![deny(unsafe_code)]
 
 pub mod actions;
 pub mod agent;
 pub mod app;
+pub mod backend_choice;
 pub mod backend_dialog;
 pub mod camera;
-pub mod canvas;
 pub mod cli;
 pub mod demo;
 pub mod desktop;
 pub mod diag;
-pub mod editor;
 pub mod extract;
+pub mod hipfire_setup;
 pub mod install;
 pub mod instance;
 pub mod logging;
@@ -45,6 +44,7 @@ pub mod raster;
 pub mod releases;
 pub mod runner;
 pub mod sample_model;
+pub mod scene;
 pub mod selftest;
 pub mod settings;
 pub mod source;

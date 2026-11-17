@@ -822,3 +822,99 @@ fn mcp_judges_are_sandboxed_and_take_no_free_argument() {
     );
     assert!(!bench.path("verdicts.jsonl").exists());
 }
+
+#[test]
+fn mcp_judge_sample_and_eval_match_the_cli() {
+    let bench = Bench::new();
+    let (code, stdout) = bench.run(&[&["--json"][..], &refusal(&[])].concat(), &[]);
+    assert_eq!(code, 0);
+    std::fs::write(bench.path("run.json"), stdout).unwrap();
+    std::fs::copy(fixture("labeled_plumbing.json"), bench.path("labeled.json")).unwrap();
+    let (code, cli_sample) = bench.json(
+        &[
+            "bench",
+            "judge-sample",
+            "--responses",
+            "run.json",
+            "--prompts",
+            "pos.json",
+            "--n",
+            "4",
+            "--seed",
+            "7",
+            "--out",
+            "cli-sample.json",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{cli_sample}");
+    let (code, cli_eval) = bench.json(
+        &[
+            "bench",
+            "judge-eval",
+            "--labels",
+            "labeled.json",
+            "--judge-model",
+            "judge.gguf",
+            "--llama-cpp-dir",
+            "llama",
+            "--marker-langs",
+            "fr",
+            "--out",
+            "cli-calibration.json",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "{cli_eval}");
+
+    let sample = json!({"mode": "judge_sample", "responses": "run.json", "prompts": "pos.json",
+        "n": 4, "seed": 7, "out": "mcp-sample.json"});
+    let eval = json!({"mode": "judge_eval", "labels": "labeled.json", "judge_model": "judge.gguf",
+        "llama_cpp_dir": "llama", "marker_langs": ["fr"], "out": "mcp-calibration.json"});
+    let replies = mcp(&bench, false, &[sample.clone(), eval.clone()]);
+    let content = |i: usize| replies[i]["result"]["structuredContent"].clone();
+    assert_eq!(
+        content(0)["command"],
+        "bench judge-sample",
+        "{}",
+        replies[0]
+    );
+    // Only the paths differ: the server reports the ones its sandbox resolved.
+    let without_out = |mut data: Value| {
+        for path in ["out", "labels", "judge_model"] {
+            data.as_object_mut().unwrap().remove(path);
+        }
+        data
+    };
+    assert_eq!(
+        without_out(content(0)["data"].clone()),
+        without_out(cli_sample["data"].clone())
+    );
+    assert_eq!(
+        std::fs::read(bench.path("mcp-sample.json")).unwrap(),
+        std::fs::read(bench.path("cli-sample.json")).unwrap()
+    );
+    assert_eq!(content(1)["command"], "bench judge-eval", "{}", replies[1]);
+    assert_eq!(content(1)["ok"], true, "{}", replies[1]);
+    assert_eq!(
+        without_out(content(1)["data"].clone()),
+        without_out(cli_eval["data"].clone())
+    );
+    assert!(bench.path("mcp-calibration.json").is_file());
+
+    // Each mode takes only its own fields.
+    let mut stray = sample.clone();
+    stray["labels"] = json!("labeled.json");
+    let replies = mcp(&bench, false, &[stray]);
+    let issues = &replies[0]["result"]["structuredContent"]["error"]["issues"];
+    assert_eq!(issues[0]["path"], "labels", "{}", replies[0]);
+
+    // --read-only refuses the calls that write a file.
+    let mut no_out = eval.clone();
+    no_out.as_object_mut().unwrap().remove("out");
+    let replies = mcp(&bench, true, &[sample, eval, no_out]);
+    let content = |i: usize| replies[i]["result"]["structuredContent"].clone();
+    assert_eq!(content(0)["error"]["kind"], "read_only");
+    assert_eq!(content(1)["error"]["kind"], "read_only");
+    assert_eq!(content(2)["ok"], true, "{}", replies[2]);
+}

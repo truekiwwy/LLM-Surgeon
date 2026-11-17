@@ -13,6 +13,7 @@ use super::super::icons::{Icon, State};
 use super::super::layout::{self, Part, Regions};
 use super::super::theme::TOKENS as T;
 use super::{explorer, num, opt};
+use crate::agent::activity;
 use crate::app::{LayoutMode, SurgeonApp};
 use crate::camera::Orbit;
 use crate::source::Step;
@@ -37,11 +38,12 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         .title(t("panel.graph"))
         .canvas()
         .show_with(ui, parts[0], app, view_controls, |ui, app| {
-            viewport(ui, app, false)
+            viewport(ui, app)
         });
     if has_bar {
         c::Panel::new("graph-bar")
             .flush()
+            .divided()
             .show(ui, parts[1], |ui| match app.replay.is_some() {
                 true => replay_bar(ui, app),
                 false => timeline_bar(ui, app),
@@ -54,6 +56,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     c::Panel::new("chronology")
         .title(t("panel.chronology"))
         .flush()
+        .divided()
         .show(ui, right[1], |ui| chronology(ui, app));
 }
 
@@ -105,8 +108,8 @@ fn view_controls(ui: &mut Ui, app: &mut SurgeonApp) {
     );
 }
 
-/// The 3D canvas; `preview`: the Atelier's small one, with its own camera.
-pub fn viewport(ui: &mut Ui, app: &mut SurgeonApp, preview: bool) {
+/// The 3D canvas.
+fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
     let target = match app.layout {
         LayoutMode::Column => 0.0,
         LayoutMode::Constellation => 1.0,
@@ -118,21 +121,20 @@ pub fn viewport(ui: &mut Ui, app: &mut SurgeonApp, preview: bool) {
         .animate_value_with_time(egui::Id::new("layout-blend"), target, time);
     let blend = t_ * t_ * (3.0 - 2.0 * t_);
     let Some(step) = app.timeline.current() else {
-        ui.add_space(T.space.l);
-        ui.horizontal(|ui| {
-            ui.add_space(T.space.l);
-            ui.vertical(|ui| {
-                let (title, hint) = match app.feed {
-                    Some(_) => (t("graph.waiting"), t("graph.waiting.hint")),
-                    None => (t("graph.empty"), t("graph.empty.hint")),
-                };
-                c::empty(ui, title, hint);
-            });
-        });
+        let (title, hint) = match app.feed {
+            Some(_) => (t("graph.waiting"), t("graph.waiting.hint")),
+            // Why the project's graph could not be read, when it could not.
+            None => (
+                t("graph.empty"),
+                app.stream_error.as_deref().unwrap_or(t("graph.empty.hint")),
+            ),
+        };
+        c::empty(ui, Icon::Cube, title, hint);
         return;
     };
     let visible = app.visible(&step.report);
-    let targets = app.targets(&step.report);
+    // No target set: the agent points at a tensor by selecting it (show_in_3d).
+    let targets = vec![false; step.report.nodes.len()];
     let selected = app.selected_index();
     // Field by field, not run_view(): the layer is refilled while the run is borrowed.
     let run = match &app.replay {
@@ -143,6 +145,10 @@ pub fn viewport(ui: &mut Ui, app: &mut SurgeonApp, preview: bool) {
         Some(run) => app.layer.fill(run, step),
         None => app.layer = Layer::default(),
     }
+    let activity = match app.agents.busy() {
+        true => app.agents.conversation().and_then(activity::current),
+        false => None,
+    };
     let view = View {
         step,
         blend,
@@ -151,12 +157,10 @@ pub fn viewport(ui: &mut Ui, app: &mut SurgeonApp, preview: bool) {
         selected,
         targets: &targets,
         layer: run.is_some().then_some(&app.layer),
+        activity: activity.as_ref(),
+        animate: app.motion,
     };
-    let (camera, buffers) = match preview {
-        true => (&mut app.preview_camera, &mut app.preview_buffers),
-        false => (&mut app.camera, &mut app.buffers),
-    };
-    if let Some(click) = viewport::show(ui, &view, camera, buffers) {
+    if let Some(click) = viewport::show(ui, &view, &mut app.camera, &mut app.buffers) {
         app.selected = click.map(|i| step.report.nodes[i].id.clone());
     }
 }
@@ -345,7 +349,12 @@ fn chronology(ui: &mut Ui, app: &mut SurgeonApp) {
 
 pub fn inspector(ui: &mut Ui, app: &mut SurgeonApp) {
     let Some(step) = app.timeline.current() else {
-        c::empty(ui, t("inspector.empty"), t("inspector.empty.hint"));
+        c::empty(
+            ui,
+            Icon::Search,
+            t("inspector.empty"),
+            t("inspector.empty.hint"),
+        );
         return;
     };
     let run = app.run_view();
@@ -438,6 +447,10 @@ fn node_inspector(ui: &mut Ui, step: &Step, node: &NodeReport) {
     let m = &node.metrics;
     c::strong(ui, node_title(node));
     c::mono_secondary(ui, node.tensor.as_str());
+    let measured = step.report.parameters.rank > 0;
+    if !measured {
+        c::secondary(ui, t("inspector.unmeasured"));
+    }
 
     c::section(ui, t("inspector.tensor"));
     c::kv(
@@ -456,6 +469,9 @@ fn node_inspector(ui: &mut Ui, step: &Step, node: &NodeReport) {
         c::kv(ui, t("inspector.expert"), &e.to_string());
     }
     c::kv(ui, t("inspector.bytes"), &node.weight_bytes.to_string());
+    if !measured {
+        return;
+    }
 
     c::section(ui, t("inspector.spectrum"));
     let interval = |lo: Option<f64>, hi: Option<f64>| match (lo, hi) {
@@ -565,6 +581,9 @@ fn model_summary(ui: &mut Ui, report: &GraphReport) {
     let (m, g) = (&report.model, &report.global);
     c::strong(ui, m.architecture.as_str());
     c::mono_secondary(ui, m.path.as_str());
+    if report.parameters.rank == 0 {
+        c::secondary(ui, t("inspector.unmeasured"));
+    }
     c::section(ui, t("inspector.model"));
     c::kv(ui, t("inspector.format"), &m.format);
     c::kv(ui, t("inspector.layers"), &m.layers.to_string());

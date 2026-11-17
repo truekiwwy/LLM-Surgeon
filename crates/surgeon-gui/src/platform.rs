@@ -135,9 +135,84 @@ pub fn system_proxy() -> Option<String> {
     None
 }
 
+/// The system dialog, titled `title`: a folder, or a model's weights file (`.safetensors`,
+/// `.gguf`). `None` when cancelled.
+#[cfg(windows)]
+fn pick_path(folder: bool, title: &str) -> Option<std::path::PathBuf> {
+    let dialog = rfd::FileDialog::new().set_title(title);
+    match folder {
+        true => dialog.pick_folder(),
+        false => dialog
+            .add_filter("safetensors, gguf", &["safetensors", "gguf"])
+            .pick_file(),
+    }
+}
+
+// shortcut: no system dialog outside Windows (rfd needs GTK or a portal there), the path fields
+// stay; add rfd with its `xdg-portal` feature when Linux builds ship.
+#[cfg(not(windows))]
+fn pick_path(_folder: bool, _title: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// The system picker, open on its own thread so that the window keeps drawing; one at a time.
+#[derive(Default)]
+pub struct Picker {
+    rx: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+}
+
+impl Picker {
+    /// Opens the dialog (see [`pick_path`]) unless one is open; `wake` runs when it closes.
+    pub fn open(&mut self, folder: bool, title: &str, wake: impl Fn() + Send + 'static) {
+        if self.rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let title = title.to_owned();
+        std::thread::spawn(move || {
+            let _ = tx.send(pick_path(folder, &title));
+            wake();
+        });
+        self.rx = Some(rx);
+    }
+
+    pub fn busy(&self) -> bool {
+        self.rx.is_some()
+    }
+
+    /// The path picked, once, when the dialog closed on one.
+    pub fn poll(&mut self) -> Option<std::path::PathBuf> {
+        use std::sync::mpsc::TryRecvError;
+        let answer = match self.rx.as_ref()?.try_recv() {
+            Ok(picked) => picked,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => None,
+        };
+        self.rx = None;
+        answer
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picker_answers_once_then_frees_itself() {
+        let mut picker = Picker::default();
+        assert_eq!((picker.busy(), picker.poll()), (false, None));
+        let (tx, rx) = std::sync::mpsc::channel();
+        picker.rx = Some(rx);
+        assert_eq!(picker.poll(), None, "still open");
+        tx.send(Some("D:/ws".into())).unwrap();
+        assert_eq!(picker.poll(), Some("D:/ws".into()));
+        assert!(!picker.busy());
+        let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+        picker.rx = Some(rx);
+        drop(tx);
+        assert_eq!(picker.poll(), None, "a dead dialog thread frees the picker");
+        assert!(!picker.busy());
+    }
 
     #[test]
     fn reg_output_is_parsed() {

@@ -989,6 +989,13 @@
             "null"
           ]
         },
+        "labels": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "limit": {
           "default": null,
           "format": "uint32",
@@ -1122,6 +1129,18 @@
                 "refusal"
               ],
               "type": "string"
+            },
+            {
+              "enum": [
+                "judge_sample"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "judge_eval"
+              ],
+              "type": "string"
             }
           ]
         },
@@ -1129,6 +1148,15 @@
           "default": null,
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "n": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -1192,6 +1220,13 @@
           "format": "float",
           "type": [
             "number",
+            "null"
+          ]
+        },
+        "responses": {
+          "default": null,
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -1373,7 +1408,19 @@
           ]
         },
         "eval_dataset": {
-          "type": "string"
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eval_prompts": {
+          "default": null,
+          "items": true,
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "l2_reg": {
           "default": null,
@@ -1551,7 +1598,6 @@
         }
       },
       "required": [
-        "eval_dataset",
         "model",
         "vector"
       ],
@@ -2130,5 +2176,144 @@
       "type": "object"
     },
     "name": "surgeon_backends"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "backup": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "backup_dir": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from_origin": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_restore"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "metric": {
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              },
+              "value": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "run_id"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "record_finding"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object"
+    },
+    "name": "show_in_3d"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "steps": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "type": "object"
+    },
+    "name": "update_plan"
   }
 ]

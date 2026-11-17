@@ -11,7 +11,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::studio::ledger::{Entry, Verdict};
+use crate::studio::ledger::{Entry, Hashes, Verdict, Versions};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Evidence {
@@ -132,6 +132,36 @@ pub fn append(path: &Path, finding: &Finding) -> Result<(), String> {
         .map_err(|e| format!("{} : {e}", path.display()))
 }
 
+/// The runs a CLI agent made through the engine's MCP server (`chat/mcp_runs.jsonl`), as
+/// ledger entries a finding can cite: the run id the server returned, its verdict and data.
+pub fn mcp_runs(path: &Path) -> Vec<Entry> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|run| {
+            Some(Entry {
+                run_id: run["run_id"].as_str()?.to_owned(),
+                tool: run["tool"].as_str().unwrap_or_default().to_owned(),
+                label: "MCP".into(),
+                params: Value::Null,
+                resumed_from: None,
+                started_unix: run["started_unix"].as_u64().unwrap_or_default(),
+                finished_unix: run["finished_unix"].as_u64().unwrap_or_default(),
+                hashes: Hashes::default(),
+                versions: Versions::default(),
+                verdict: match run["ok"].as_bool() {
+                    Some(true) => Verdict::Ok,
+                    _ => Verdict::Failed,
+                },
+                exit_code: run["exit_code"].as_i64().unwrap_or(1) as i32,
+                result: run["data"].clone(),
+                error: None,
+            })
+        })
+        .collect()
+}
+
 pub fn read(path: &Path) -> Vec<Finding> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
@@ -203,5 +233,33 @@ mod tests {
         let f =
             finding(json!({"text": "refus 0.31", "evidence": [{"run_id": "r1", "value": 0.31}]}));
         assert!(matches!(f.status(&[]), Status::Unknown(_)));
+    }
+
+    #[test]
+    fn a_cli_finding_is_measured_by_the_runs_the_mcp_server_journaled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp_runs.jsonl");
+        // The lines the engine's MCP server writes (weight_surgeon src/mcp/tools_session.rs).
+        let runs = [
+            json!({"run_id": "mcp-1-0", "tool": "surgeon_bench", "ok": true, "exit_code": 0,
+                   "data": {"refusal_rate": 0.4}, "truncated": false,
+                   "started_unix": 1, "finished_unix": 2}),
+            json!({"run_id": "mcp-1-1", "tool": "surgeon_bench", "ok": false, "exit_code": 2,
+                   "data": null, "truncated": false, "started_unix": 3, "finished_unix": 4}),
+        ];
+        let text: String = runs.iter().map(|r| format!("{r}\n")).collect();
+        std::fs::write(&path, text + "not json\n").unwrap();
+        let ledger = mcp_runs(&path);
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(ledger[1].verdict, Verdict::Failed);
+        let f = finding(
+            json!({"text": "refus à 0.4", "evidence": [{"run_id": "mcp-1-0", "value": 0.4}]}),
+        );
+        assert!(matches!(f.status(&ledger), Status::Measured(_)));
+        let f = finding(
+            json!({"text": "refus à 0.4", "evidence": [{"run_id": "mcp-1-1", "value": 0.4}]}),
+        );
+        assert!(matches!(f.status(&ledger), Status::Unknown(_)));
+        assert!(mcp_runs(&dir.path().join("absent.jsonl")).is_empty());
     }
 }

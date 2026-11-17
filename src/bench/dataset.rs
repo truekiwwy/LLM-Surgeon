@@ -2,7 +2,8 @@
 //! `problem`), `answer` (or `solution`) and an optional `id`. The gold answer is read per
 //! format: GSM8K takes the text after the last `####`, MATH the content of the last
 //! `\boxed{...}` (nested braces handled by a parser, not a regex), raw takes the whole
-//! answer. `--limit` keeps the first N entries in file order: no random sampling.
+//! answer. `--limit` keeps the first N entries in file order: no random sampling. A
+//! `builtin:<set>` path reads a set embedded in the binary (`super::builtin`).
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -76,7 +77,10 @@ pub fn load(path: &Path, format: DatasetFormat, limit: usize) -> Result<Vec<Item
     if limit == 0 {
         return Err(BenchError::InvalidArgument("--limit doit être >= 1".into()));
     }
-    let raw = std::fs::read_to_string(path).map_err(|e| BenchError::input(path, e))?;
+    let raw = match super::builtin::dataset(path) {
+        Some(set) => set.map_err(|e| BenchError::input(path, e))?.to_owned(),
+        None => std::fs::read_to_string(path).map_err(|e| BenchError::input(path, e))?,
+    };
     let content = raw.trim_start_matches('\u{feff}').trim();
     let entries: Vec<Value> = if content.starts_with('[') {
         let all: Vec<Value> = serde_json::from_str(content)

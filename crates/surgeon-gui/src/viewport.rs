@@ -1,7 +1,10 @@
-//! The central 3D canvas: nodes at their Rust-computed positions (blended between the two
-//! layouts), coupling edges, orbit / pan / zoom, picking and a compact hover card. A run
-//! (live or replayed) draws over the nodes it reached: a glyph per state, never the color
-//! alone, and for an apply the |ΔW| of each tensor on the report's color scale.
+//! The central 3D canvas: shaded nodes colored by role at their `scene` positions (blended
+//! between the column and the helix), edges running from their source's color to their
+//! target's, layer marks, orbit / pan / zoom, picking and a compact hover card. The selected
+//! node pulses with its name and measures on a card and its edges flow; the layers of the
+//! agent's running tool ripple under a banner naming it. A run (live or replayed) draws over
+//! the nodes it reached: a glyph per state, never the color alone, and for an apply the |ΔW|
+//! of each tensor on the report's color scale.
 //!
 //! Cost per frame stays flat on large graphs: the strongest edges only (the step sorts them
 //! once), fewer of them past [`LOD_NODES`] nodes, sub-pixel edges skipped, and the per-frame
@@ -10,7 +13,7 @@
 use std::collections::HashMap;
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, PointerButton, Pos2, Rect, Sense, Shape, Stroke,
+    self, Align2, Color32, CornerRadius, Mesh, PointerButton, Pos2, Rect, Sense, Shape, Stroke,
     StrokeKind, Vec2,
 };
 use weight_surgeon::events::NodeStatus;
@@ -19,11 +22,13 @@ use weight_surgeon::graph::layout::Position;
 use weight_surgeon::graph::output::NodeReport;
 use weight_surgeon::graph::GraphRole;
 
+use crate::agent::activity::Activity;
 use crate::camera::{self, Orbit, Projected};
+use crate::scene;
 use crate::source::Step;
 use crate::studio::live::JobKind;
 use crate::studio::live::Layer;
-use crate::theme;
+use crate::theme::{self, RoleShape};
 use crate::ui::i18n::{t, tf};
 use crate::ui::{components, icons};
 
@@ -132,25 +137,12 @@ fn glyph(out: &mut Vec<Shape>, state: NodeStatus, c: Pos2, r: f32) {
     }
 }
 
-/// Δ coloring of a node: emerald when its effective rank grows, carmine when it shrinks (a
-/// rank collapse is the usual mark of a destructive edit), plain text when only its norm
-/// moved, dim when unchanged. Stronger with the relative change, full at 10 %.
-pub fn delta_color(diff: Option<&NodeDiff>) -> Color32 {
-    let Some(diff) = diff.filter(|d| d.changed) else {
-        return theme::DIM.gamma_multiply(0.6);
-    };
-    let base = match diff.effective_rank_delta {
-        d if d > 0.0 => theme::GOOD,
-        d if d < 0.0 => theme::BAD,
-        _ => theme::TEXT,
-    };
-    base.gamma_multiply(0.45 + 0.55 * (diff.relative_change.abs() / 0.1).min(1.0) as f32)
-}
-
-fn edge_delta_color(diff: &EdgeDiff) -> Color32 {
-    match diff.alignment_delta >= 0.0 {
-        true => theme::GOOD,
-        false => theme::BAD,
+/// Δ coloring of a node: coral for a small relative change up to magenta from 10 %, the
+/// role color pushed back toward the canvas when the node did not change.
+pub fn delta_color(diff: Option<&NodeDiff>, role: Color32) -> Color32 {
+    match diff.filter(|d| d.changed) {
+        Some(diff) => theme::diverge(diff.relative_change),
+        None => theme::shade(role, -0.6),
     }
 }
 
@@ -163,12 +155,12 @@ fn lerp(a: Position, b: Position, t: f32) -> Position {
 }
 
 fn node_radius(p: &Projected) -> f32 {
-    (0.02 * p.scale).clamp(2.5, 9.0)
+    (scene::NODE_RADIUS * p.scale).clamp(2.5, 11.0)
 }
 
 pub struct View<'a> {
     pub step: &'a Step,
-    /// 0: `pos_column`, 1: `pos_constellation`.
+    /// 0: the column, 1: the helix.
     pub blend: f32,
     pub diff: bool,
     /// Nodes kept by the filters; the others are drawn faint and cannot be picked.
@@ -178,19 +170,146 @@ pub struct View<'a> {
     pub targets: &'a [bool],
     /// The run drawn over the graph, filled for this step.
     pub layer: Option<&'a Layer>,
+    /// The agent's running tool: its layers pulse, its label heads the canvas.
+    pub activity: Option<&'a Activity>,
+    /// Pulses and flows move (off: `--no-motion`, captures, tests).
+    pub animate: bool,
 }
 
 /// What a frame allocates, kept between frames.
 #[derive(Default)]
 pub struct Buffers {
     projected: Vec<Option<Projected>>,
+    colors: Vec<Color32>,
+    fades: Vec<f32>,
     order: Vec<usize>,
     pickable: Vec<(usize, Pos2, f32)>,
     shapes: Vec<Shape>,
+    /// Edges drawn by the last frame.
+    pub edges_drawn: usize,
 }
 
 /// What a click did: `Some(Some(i))` picked node `i`, `Some(None)` clicked empty space.
 pub type Click = Option<Option<usize>>;
+
+/// A segment from `a` to `b` whose color runs from `ca` to `cb`, `w` wide, with a feathered
+/// pixel on each side (epaint does not antialias a mesh).
+fn gradient_segment(mesh: &mut Mesh, [a, b]: [Pos2; 2], [ca, cb]: [Color32; 2], w: f32) {
+    let d = b - a;
+    let len = d.length();
+    if len < 0.5 {
+        return;
+    }
+    let n = Vec2::new(-d.y, d.x) / len;
+    let (inner, outer) = (n * (w * 0.5), n * (w * 0.5 + 1.0));
+    let base = mesh.vertices.len() as u32;
+    for (p, c) in [(a, ca), (b, cb)] {
+        mesh.colored_vertex(p - outer, theme::TRANSPARENT);
+        mesh.colored_vertex(p - inner, c);
+        mesh.colored_vertex(p + inner, c);
+        mesh.colored_vertex(p + outer, theme::TRANSPARENT);
+    }
+    for k in 0..3 {
+        let (i, j) = (base + k, base + 4 + k);
+        mesh.add_triangle(i, i + 1, j);
+        mesh.add_triangle(i + 1, j + 1, j);
+    }
+}
+
+/// A shaded node: a soft halo, the shadowed body, the lit face and its highlight. Small
+/// nodes keep the body and the face only.
+fn ball(out: &mut Vec<Shape>, shape: RoleShape, c: Pos2, r: f32, color: Color32) {
+    let detailed = r >= 3.5;
+    if detailed {
+        out.push(Shape::circle_filled(c, 2.2 * r, color.gamma_multiply(0.09)));
+    }
+    out.push(icons::role_fill(shape, c, r, theme::shade(color, -0.5)));
+    out.push(icons::role_fill(
+        shape,
+        c + Vec2::new(-0.12, -0.14) * r,
+        0.78 * r,
+        color,
+    ));
+    if detailed {
+        let light = c + Vec2::new(-0.34, -0.38) * r;
+        out.push(Shape::circle_filled(
+            light,
+            0.3 * r,
+            theme::shade(color, 0.7),
+        ));
+    }
+}
+
+/// A line of text on a plate of the canvas color, so that it reads over the edges.
+fn plate(painter: &egui::Painter, at: Pos2, align: Align2, text: String, color: Color32) {
+    let galley = painter.layout_no_wrap(text, components::font_mono(), color);
+    let rect = align.anchor_size(at, galley.size());
+    painter.rect_filled(rect.expand2(Vec2::new(4.0, 1.0)), 3.0, theme::BG);
+    painter.galley(rect.min, galley, color);
+}
+
+/// The name of the selected node and its measures, on a card tied to it.
+fn badge(painter: &egui::Painter, rect: Rect, at: Pos2, r: f32, node: &NodeReport, measured: bool) {
+    let m = &node.metrics;
+    let second = match (measured, m.sigma1) {
+        (true, Some(s)) => format!(
+            "σ1 {s:.3} · erank {:.1}-{:.1} · κ {:.1}",
+            m.erank_energy_lower, m.erank_energy_upper, m.kurtosis
+        ),
+        _ => format!("{} × {} · {}", node.rows, node.cols, node.dtype),
+    };
+    let font = components::font_mono();
+    let first = painter.layout_no_wrap(node.id.clone(), font.clone(), theme::TEXT);
+    let second = painter.layout_no_wrap(second, font, theme::DIM);
+    let size = Vec2::new(
+        first.size().x.max(second.size().x) + 16.0,
+        first.size().y + second.size().y + 10.0,
+    );
+    let right = at.x + r + 14.0 + size.x <= rect.right() - 4.0;
+    let x = match right {
+        true => at.x + r + 14.0,
+        false => at.x - r - 14.0 - size.x,
+    };
+    let y = (at.y - size.y / 2.0).clamp(rect.top() + 4.0, rect.bottom() - size.y - 4.0);
+    let card = Rect::from_min_size(Pos2::new(x, y), size);
+    let tie = Pos2::new(
+        if right { card.left() } else { card.right() },
+        card.center().y,
+    );
+    painter.line_segment([at, tie], Stroke::new(1.0, theme::SELECTION));
+    painter.rect_filled(card, 4.0, theme::PANEL);
+    painter.rect_stroke(
+        card,
+        4.0,
+        Stroke::new(1.0, theme::SELECTION),
+        StrokeKind::Inside,
+    );
+    let h = first.size().y;
+    painter.galley(card.min + Vec2::new(8.0, 5.0), first, theme::TEXT);
+    painter.galley(card.min + Vec2::new(8.0, 5.0 + h), second, theme::DIM);
+}
+
+/// The label of the running tool at the top of the canvas, with a beating dot.
+fn activity_banner(painter: &egui::Painter, rect: Rect, label: &str, beat: f32) {
+    let galley = painter.layout_no_wrap(label.to_owned(), components::font_mono(), theme::TEXT);
+    let size = Vec2::new(galley.size().x + 36.0, 26.0);
+    let card = Rect::from_center_size(
+        Pos2::new(rect.center().x, rect.top() + 10.0 + size.y / 2.0),
+        size,
+    );
+    painter.rect_filled(card, 13.0, theme::PANEL);
+    painter.rect_stroke(
+        card,
+        13.0,
+        Stroke::new(1.0, theme::ACTIVE.gamma_multiply(0.6)),
+        StrokeKind::Inside,
+    );
+    let dot = Pos2::new(card.left() + 14.0, card.center().y);
+    painter.circle_filled(dot, 6.0, theme::ACTIVE.gamma_multiply(0.25 * beat));
+    painter.circle_filled(dot, 3.5, theme::ACTIVE);
+    let y = card.center().y - galley.size().y / 2.0;
+    painter.galley(Pos2::new(card.left() + 26.0, y), galley, theme::TEXT);
+}
 
 pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffers) -> Click {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -209,15 +328,21 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
             camera.zoom(scroll);
         }
     }
+    // The clock of pulses and flows; still frames when motion is off.
+    let time = match view.animate {
+        true => ui.input(|i| i.time) as f32,
+        false => 0.0,
+    };
+    if view.animate && (view.selected.is_some() || view.activity.is_some()) {
+        ui.ctx().request_repaint();
+    }
 
     let report = &view.step.report;
+    let scene = &view.step.scene;
+    let at = |i: usize| lerp(scene.column[i], scene.helix[i], view.blend);
     buf.projected.clear();
-    buf.projected.extend(
-        report
-            .nodes
-            .iter()
-            .map(|n| camera.project(lerp(n.pos_column, n.pos_constellation, view.blend), rect)),
-    );
+    buf.projected
+        .extend((0..report.nodes.len()).map(|i| camera.project(at(i), rect)));
     let projected = &buf.projected;
     let node_diffs: HashMap<&str, &NodeDiff> = match view.diff {
         // The baseline diff first; in a stream, the delta of the patch that made this state.
@@ -240,16 +365,92 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
             .collect(),
         false => HashMap::new(),
     };
+    let state_of = |i: usize| view.layer.and_then(|l| l.states.get(i).copied().flatten());
 
-    // Edges first, under the nodes; the step lists them structural first, then strongest.
+    // Depth of field: the far nodes step back toward the canvas, more in the helix.
+    let depths = projected.iter().flatten().map(|p| p.depth);
+    let (near, far) = depths.fold((f32::MAX, f32::MIN), |(lo, hi), d| (lo.min(d), hi.max(d)));
+    let reach = 0.3 + 0.35 * view.blend;
+    buf.fades.clear();
+    buf.fades.extend(projected.iter().map(|p| match p {
+        Some(p) if far > near => 1.0 - reach * (p.depth - near) / (far - near),
+        _ => 1.0,
+    }));
+    let fades = &buf.fades;
+
+    // Each node's color: its role, or the diff, or the run's value; then faded.
+    buf.colors.clear();
+    buf.colors
+        .extend(report.nodes.iter().enumerate().map(|(i, node)| {
+            let role = theme::role_color(node.role);
+            let color = match view.diff {
+                true => delta_color(node_diffs.get(node.id.as_str()).copied(), role),
+                false => role,
+            };
+            // A run in view: its values color the nodes they cover, unreached nodes step back.
+            let color = match view.layer {
+                Some(layer) => match (layer.colors.get(i).copied().flatten(), state_of(i)) {
+                    (Some(c), _) => c,
+                    (None, Some(_)) => color,
+                    (None, None) => theme::shade(color, -0.6),
+                },
+                None => color,
+            };
+            let color = match view.visible[i] {
+                true => color,
+                false => theme::shade(color, -0.88),
+            };
+            theme::mix(color, theme::BG, fades[i])
+        }));
+    let colors = &buf.colors;
+
     let shapes = &mut buf.shapes;
     shapes.clear();
+    // The bones of the layout: rows (column) or rings (helix), and the residual stream.
+    let guide = theme::BORDER.gamma_multiply(0.7);
+    for &(_, y) in &scene.layers {
+        let points: Vec<Pos2> = match view.blend < 0.5 {
+            true => [-0.9, 0.7]
+                .iter()
+                .filter_map(|&x| camera.project([x, y, 0.0], rect))
+                .map(|p| p.pos)
+                .collect(),
+            false => (0..=32)
+                .filter_map(|k| {
+                    let a = k as f32 * std::f32::consts::TAU / 32.0;
+                    camera.project([scene::RING * a.cos(), y, scene::RING * a.sin()], rect)
+                })
+                .map(|p| p.pos)
+                .collect(),
+        };
+        let fade = (1.0 - 2.0 * view.blend).abs();
+        shapes.push(Shape::line(
+            points,
+            Stroke::new(1.0, guide.gamma_multiply(fade)),
+        ));
+    }
+    let spine: Vec<Pos2> = scene
+        .spine
+        .iter()
+        .filter_map(|p| camera.project(*p, rect))
+        .map(|p| p.pos)
+        .collect();
+    shapes.push(Shape::line(
+        spine,
+        Stroke::new(2.0, theme::DIM.gamma_multiply(0.25)),
+    ));
+
+    // Edges under the nodes, in one mesh: the step lists them structural first, then
+    // strongest. Each runs from its source's color to its target's.
     let max_weight = report
         .edges
         .iter()
         .map(|e| e.weight.abs())
         .fold(f64::MIN_POSITIVE, f64::max);
     let budget = edge_budget(report.nodes.len());
+    let mut mesh = Mesh::default();
+    let mut flows = Vec::new();
+    buf.edges_drawn = 0;
     for (rank, &(k, a, b)) in view.step.edges.iter().enumerate() {
         let edge = &report.edges[k];
         let touches_selection = view.selected.is_some_and(|s| s == a || s == b);
@@ -259,29 +460,48 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
         let (Some(pa), Some(pb)) = (projected[a], projected[b]) else {
             continue;
         };
-        if pa.pos.distance_sq(pb.pos) < 0.25 {
-            continue;
+        let strength = (edge.weight.abs() / max_weight) as f32;
+        let (mut alpha, width) = match (touches_selection, edge.structural) {
+            (true, _) => (0.95, 2.2),
+            (false, true) => (0.35, 1.0),
+            (false, false) => (0.22 + 0.5 * strength, 1.0 + 0.8 * strength),
+        };
+        if view.selected.is_some() && !touches_selection {
+            alpha *= 0.45;
         }
-        let shown = view.visible[a] || view.visible[b];
-        let (color, width) = if touches_selection {
-            (theme::SELECTION.gamma_multiply(0.85), 1.5)
-        } else if let Some(diff) = edge_diffs.get(&(edge.source.as_str(), edge.target.as_str())) {
-            (edge_delta_color(diff).gamma_multiply(0.7), 1.2)
-        } else if edge.structural {
-            (theme::DIM.gamma_multiply(0.18), 1.0)
-        } else {
-            let strength = (edge.weight.abs() / max_weight) as f32;
-            (theme::TEXT.gamma_multiply(0.05 + 0.35 * strength), 1.0)
+        if !(view.visible[a] || view.visible[b]) {
+            alpha *= 0.2;
+        }
+        let ends = match edge_diffs.get(&(edge.source.as_str(), edge.target.as_str())) {
+            Some(diff) => [theme::diverge(diff.alignment_delta); 2],
+            None => [colors[a], colors[b]],
         };
-        let color = if shown {
-            color
-        } else {
-            color.gamma_multiply(0.2)
-        };
-        shapes.push(Shape::line_segment(
+        let alpha = alpha * (fades[a] + fades[b]) / 2.0;
+        gradient_segment(
+            &mut mesh,
             [pa.pos, pb.pos],
-            Stroke::new(width, color),
-        ));
+            ends.map(|c| c.gamma_multiply(alpha)),
+            width,
+        );
+        buf.edges_drawn += 1;
+        let active = view
+            .activity
+            .is_some_and(|act| act.covers(report.nodes[b].layer));
+        if touches_selection || active {
+            flows.push((pa.pos, pb.pos, ends[1]));
+        }
+    }
+    shapes.push(Shape::mesh(mesh));
+    // The flow: two beads per lit edge, running from the writer to the reader.
+    for (a, b, color) in flows {
+        for k in 0..2 {
+            let t = (time * 0.6 + k as f32 * 0.5).fract();
+            shapes.push(Shape::circle_filled(
+                a + (b - a) * t,
+                1.8,
+                theme::shade(color, 0.4),
+            ));
+        }
     }
 
     // Nodes far to near, so the nearest stay on top.
@@ -292,38 +512,24 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
         let depth = |i: usize| projected[i].map_or(0.0, |p| p.depth);
         depth(b).total_cmp(&depth(a))
     });
-    let state_of = |i: usize| view.layer.and_then(|l| l.states.get(i).copied().flatten());
     buf.pickable.clear();
+    let ripple = match view.animate {
+        true => (time * 1.2).fract(),
+        false => 0.3,
+    };
     for &i in &buf.order {
         let Some(p) = projected[i] else { continue };
         let node = &report.nodes[i];
         let radius = node_radius(&p);
-        let fill = match view.diff {
-            true => delta_color(node_diffs.get(node.id.as_str()).copied()),
-            false => theme::DIM,
-        };
-        // A run in view: its values color the nodes they cover, unreached nodes step back.
-        let fill = match view.layer {
-            Some(layer) => match (layer.colors.get(i).copied().flatten(), state_of(i)) {
-                (Some(color), _) => color,
-                (None, Some(_)) => fill,
-                (None, None) => fill.gamma_multiply(0.35),
-            },
-            None => fill,
-        };
-        let fill = match view.visible[i] {
-            true => fill,
-            false => fill.gamma_multiply(0.12),
-        };
-        // Wireframe: the role reads by the outline's shape, the color is data (diff, run).
         let shape = theme::role_shape(node.role);
-        shapes.push(icons::role_fill(shape, p.pos, radius, theme::BG));
-        shapes.push(icons::role_outline(
-            shape,
-            p.pos,
-            radius,
-            Stroke::new(1.25, fill),
-        ));
+        if view.visible[i] && view.activity.is_some_and(|a| a.covers(node.layer)) {
+            shapes.push(Shape::circle_stroke(
+                p.pos,
+                radius + 3.0 + 6.0 * ripple,
+                Stroke::new(1.5, theme::ACTIVE.gamma_multiply(0.85 * (1.0 - ripple))),
+            ));
+        }
+        ball(shapes, shape, p.pos, radius, colors[i]);
         if view.step.touched.contains_key(&node.id) {
             shapes.push(Shape::circle_stroke(
                 p.pos,
@@ -347,32 +553,95 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
     }
     painter.extend(shapes.drain(..));
 
+    // The layer marks at the left of each row, without overlapping one another. In the
+    // helix, left of the ring as the camera sees it (its right is (cos yaw, 0, -sin yaw)).
+    let lit = view.selected.and_then(|i| report.nodes[i].layer);
+    let mut taken: Vec<Rect> = Vec::new();
+    let side = -(scene::RING + 0.12);
+    let ring_left = [side * camera.yaw.cos(), 0.0, -side * camera.yaw.sin()];
+    for &(l, y) in &scene.layers {
+        let mark = lerp([-0.9, y, 0.0], [ring_left[0], y, ring_left[2]], view.blend);
+        let Some(p) = camera.project(mark, rect) else {
+            continue;
+        };
+        let color = match (
+            view.activity.is_some_and(|act| act.covers(Some(l))),
+            lit == Some(l),
+        ) {
+            (true, _) => theme::ACTIVE,
+            (_, true) => theme::TEXT,
+            _ => theme::DIM,
+        };
+        let galley = painter.layout_no_wrap(format!("L{l}"), components::font_meta(), color);
+        let r = Align2::RIGHT_CENTER.anchor_size(p.pos, galley.size());
+        if taken.iter().any(|t| t.expand(2.0).intersects(r)) || !rect.contains_rect(r) {
+            continue;
+        }
+        taken.push(r);
+        painter.galley(r.min, galley, color);
+    }
+
     let hovered = response
         .hover_pos()
         .and_then(|pointer| camera::pick(&buf.pickable, pointer, 3.0));
     if let Some(i) = view.selected.filter(|&i| view.visible[i]) {
         if let Some(p) = projected[i] {
             let radius = node_radius(&p);
-            let shape = theme::role_shape(report.nodes[i].role);
-            painter.add(icons::role_fill(shape, p.pos, radius, theme::SELECTION));
-            // On a canvas-colored plate, so the name reads over the edges behind it.
-            let galley = painter.layout_no_wrap(
-                node_title(&report.nodes[i]),
-                components::font_mono(),
-                theme::TEXT,
+            let beat = match view.animate {
+                true => 0.5 + 0.5 * (time * 4.0).sin(),
+                false => 0.6,
+            };
+            painter.circle_filled(p.pos, 3.0 * radius, theme::SELECTION.gamma_multiply(0.16));
+            painter.circle_stroke(
+                p.pos,
+                radius + 5.0 + 3.0 * beat,
+                Stroke::new(2.0, theme::SELECTION.gamma_multiply(1.0 - 0.6 * beat)),
             );
-            let min = p.pos + Vec2::new(radius + 8.0, -galley.size().y / 2.0);
-            let plate = Rect::from_min_size(min, galley.size()).expand2(Vec2::new(4.0, 0.0));
-            painter.rect_filled(plate, 0.0, theme::BG);
-            painter.galley(min, galley, theme::TEXT);
+            painter.circle_stroke(p.pos, radius + 2.5, Stroke::new(1.5, theme::SELECTION));
+            let node = &report.nodes[i];
+            let mut lit = Vec::new();
+            ball(
+                &mut lit,
+                theme::role_shape(node.role),
+                p.pos,
+                radius,
+                buf.colors[i],
+            );
+            painter.extend(lit);
+            badge(
+                &painter,
+                rect,
+                p.pos,
+                radius,
+                node,
+                report.parameters.rank > 0,
+            );
         }
     }
     if let (Some(i), Some(pointer)) = (hovered, response.hover_pos()) {
         if let Some(p) = projected[i] {
-            painter.circle_stroke(p.pos, node_radius(&p) + 1.5, Stroke::new(1.0, theme::TEXT));
+            let radius = node_radius(&p);
+            painter.circle_stroke(p.pos, radius + 1.5, Stroke::new(1.0, theme::TEXT));
+            if view.selected != Some(i) {
+                let above = p.pos - Vec2::new(0.0, radius + 6.0);
+                plate(
+                    &painter,
+                    above,
+                    Align2::CENTER_BOTTOM,
+                    report.nodes[i].id.clone(),
+                    theme::TEXT,
+                );
+            }
         }
         let run = view.layer.map(|l| run_line(l, i));
         hover_card(&painter, rect, pointer, &report.nodes[i], run);
+    }
+    if let Some(activity) = view.activity {
+        let beat = match view.animate {
+            true => 0.5 + 0.5 * (time * 5.0).sin(),
+            false => 1.0,
+        };
+        activity_banner(&painter, rect, &activity.label, beat);
     }
 
     let mut top = rect.left_top() + Vec2::new(10.0, 8.0);
@@ -575,19 +844,22 @@ mod tests {
     }
 
     #[test]
-    fn delta_colors_follow_the_rank_direction() {
-        let unchanged = delta_color(None);
-        assert_eq!(delta_color(Some(&diff(1.0, 0.5, false))), unchanged);
-        let hue = |c: Color32| (c.r() > c.g(), c.g() > c.r());
-        assert_eq!(hue(delta_color(Some(&diff(0.5, 0.2, true)))), (false, true));
-        assert_eq!(
-            hue(delta_color(Some(&diff(-0.5, 0.2, true)))),
-            (true, false)
+    fn changed_nodes_run_from_coral_to_magenta_with_the_change() {
+        let role = theme::ROLE_MLP;
+        let unchanged = delta_color(None, role);
+        assert_eq!(delta_color(Some(&diff(1.0, 0.5, false)), role), unchanged);
+        assert!(
+            theme::luminance(unchanged) < theme::luminance(role),
+            "stepped back"
         );
-        // Larger changes are drawn stronger.
-        let weak = delta_color(Some(&diff(-0.5, 0.001, true)));
-        let strong = delta_color(Some(&diff(-0.5, 0.2, true)));
-        assert!(strong.r() > weak.r());
+        // Warm and red in both directions of the rank; bluer (magenta) when larger.
+        let weak = delta_color(Some(&diff(-0.5, 0.001, true)), role);
+        let strong = delta_color(Some(&diff(0.5, 0.2, true)), role);
+        for c in [weak, strong] {
+            assert!(c.r() > 200 && c.g() < 130, "{c:?}");
+        }
+        assert_eq!(strong, theme::DIVERGE_HIGH);
+        assert!(strong.b() > weak.b() + 60);
     }
 
     #[test]
@@ -653,6 +925,16 @@ mod tests {
         layer: Option<&Layer>,
         selected: Option<usize>,
     ) -> (raster::Frame, usize) {
+        frame_with(step, layer, selected, None)
+    }
+
+    /// One still frame (no motion) and the number of edges it drew.
+    fn frame_with(
+        step: &Step,
+        layer: Option<&Layer>,
+        selected: Option<usize>,
+        activity: Option<&Activity>,
+    ) -> (raster::Frame, usize) {
         let n = step.report.nodes.len();
         let (visible, targets) = (vec![true; n], vec![false; n]);
         let view = View {
@@ -663,6 +945,8 @@ mod tests {
             selected,
             targets: &targets,
             layer,
+            activity,
+            animate: false,
         };
         let ctx = egui::Context::default();
         let (mut camera, mut buf) = (Orbit::default(), Buffers::default());
@@ -671,20 +955,57 @@ mod tests {
                 show(ui, &view, &mut camera, &mut buf);
             });
         });
-        // The edges drawn are the line segments under the first node.
-        let ctx = egui::Context::default();
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            egui::CentralPanel::default().show(ui, |ui| {
-                show(ui, &view, &mut camera, &mut buf);
-            });
-        });
-        output.textures_delta.clear();
-        let lines = output
-            .shapes
-            .iter()
-            .filter(|s| matches!(s.shape, Shape::LineSegment { .. }))
-            .count();
-        (frame, lines)
+        (frame, buf.edges_drawn)
+    }
+
+    /// Pixels within 24 (Chebyshev, RGB) of `color`.
+    fn pixels_near(image: &raster::Image, color: Color32) -> usize {
+        image
+            .rgba
+            .chunks_exact(4)
+            .filter(|p| {
+                [color.r(), color.g(), color.b()]
+                    .iter()
+                    .zip(p.iter())
+                    .all(|(a, b)| a.abs_diff(*b) < 24)
+            })
+            .count()
+    }
+
+    #[test]
+    fn roles_read_in_color_with_layer_marks_the_selection_badge_and_the_running_tool() {
+        crate::ui::i18n::set_lang(crate::settings::Lang::Fr);
+        let timeline = Timeline::from_report(testkit::graph(28));
+        let step = timeline.current().unwrap();
+        let activity =
+            crate::agent::activity::of("surgeon_extract", &serde_json::json!({"layer": 2}))
+                .unwrap();
+        let selected = step.index["L13.n"];
+        let (frame, edges) = frame_with(step, None, Some(selected), Some(&activity));
+        assert!(edges > 0);
+        // Depth of field darkens the far nodes: the hues are counted, not the exact colors.
+        let count = |hue: fn(i32, i32, i32) -> bool| {
+            let rgba = frame.image.rgba.chunks_exact(4);
+            rgba.filter(|p| hue(p[0].into(), p[1].into(), p[2].into()))
+                .count()
+        };
+        let indigo = count(|r, g, b| b > 140 && b > r + 50 && b > g + 50);
+        let amber = count(|r, g, b| r > 150 && g > 80 && r > g + 40 && g > b + 60);
+        assert!(
+            indigo > 150 && amber > 150,
+            "indigo {indigo}, amber {amber}"
+        );
+        assert!(
+            pixels_near(&frame.image, theme::ACTIVE) > 20,
+            "the ripple and the banner"
+        );
+        for text in ["L0", "L3", "L13.n", "Extraction L2…"] {
+            assert!(
+                frame.texts.iter().any(|t| t == text),
+                "{text}: {:?}",
+                frame.texts
+            );
+        }
     }
 
     #[test]
@@ -750,10 +1071,10 @@ mod tests {
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
         let camera = Orbit::default();
         let project = |s: &Step| -> Vec<_> {
-            s.report
-                .nodes
+            s.scene
+                .column
                 .iter()
-                .map(|n| camera.project(n.pos_column, rect))
+                .map(|p| camera.project(*p, rect))
                 .collect()
         };
         assert_eq!(project(sa), project(sb));
@@ -787,6 +1108,8 @@ mod tests {
             selected: Some(10),
             targets: &targets,
             layer: Some(&layer),
+            activity: None,
+            animate: true,
         };
         let ctx = egui::Context::default();
         let (mut camera, mut buf) = (Orbit::default(), Buffers::default());

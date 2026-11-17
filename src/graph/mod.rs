@@ -480,6 +480,45 @@ pub fn core_graph(args: &GraphArgs, deps: &AppDeps, sink: &mut dyn ProgressSink)
     core_graph_with(args, deps, sink, None)
 }
 
+/// The architecture of a model from its tensor headers alone, in about a second: every
+/// node, the adjacent edges and both layouts, with no SVD. Metrics are zero and
+/// `parameters.rank` is 0, which marks the report as unmeasured.
+pub fn skeleton(model: &Path) -> Result<GraphReport> {
+    let mut args = GraphArgs {
+        model: model.to_path_buf(),
+        out_dir: None,
+        format: vec![OutputFormat::Json],
+        layers: None,
+        matrices: Vec::new(),
+        rank: 1,
+        oversample: 0,
+        power_iters: 0,
+        seed: 0,
+        full_spectrum_max_dim: 0,
+        edges: EdgeMode::Adjacent,
+        min_alignment: 0.0,
+        edge_weight: EdgeWeight::Alignment,
+        vector: None,
+        kurtosis_threshold: 10.0,
+        color_scale: ColorScaleArg::Quantile,
+        palette: PaletteArg::Diverging,
+        max_nodes: None,
+        cache_dir: None,
+        no_cache: true,
+        resume: false,
+        estimate: false,
+        jobs: 0,
+        overwrite: false,
+        baseline: None,
+        fast_hash: true,
+    };
+    let settings = args.check()?;
+    args.rank = 0;
+    let idle = AtomicBool::new(false);
+    let mut sink = crate::app::NullSink;
+    build_report(model, &args, &settings, &idle, &mut sink, &idle, true)
+}
+
 /// Core with an optional wall-clock cap (the MCP `max_seconds` argument).
 pub fn core_graph_with(
     args: &GraphArgs,
@@ -495,15 +534,31 @@ pub fn core_graph_with(
     let watchdog = Watchdog::start(max_seconds, Arc::clone(&cancel));
     let settings = args.check()?;
     if args.estimate {
-        let model = open_model(&args.model, args, deps, sink, &cancel)?;
+        let model = open_model(&args.model, args, &deps.interrupted, sink, &cancel)?;
         return estimate(args, &settings, &model);
     }
-    let mut report = build_report(&args.model, args, &settings, deps, sink, &cancel)?;
+    let mut report = build_report(
+        &args.model,
+        args,
+        &settings,
+        &deps.interrupted,
+        sink,
+        &cancel,
+        false,
+    )?;
     let baseline = match &args.baseline {
         Some(path) => {
             let baseline = match diff::is_report_file(path) {
                 true => diff::read_report(path)?,
-                false => build_report(path, args, &settings, deps, sink, &cancel)?,
+                false => build_report(
+                    path,
+                    args,
+                    &settings,
+                    &deps.interrupted,
+                    sink,
+                    &cancel,
+                    false,
+                )?,
             };
             report.baseline_diff = Some(diff::compare(&baseline, &report, path));
             Some(baseline)
@@ -511,7 +566,7 @@ pub fn core_graph_with(
         None => None,
     };
     drop(watchdog);
-    check_cancel(deps, &cancel)?;
+    check_cancel(&deps.interrupted, &cancel)?;
 
     let outputs = match &args.out_dir {
         Some(dir) => {
@@ -534,12 +589,12 @@ pub fn core_graph_with(
 fn open_model(
     path: &Path,
     args: &GraphArgs,
-    deps: &AppDeps,
+    interrupted: &AtomicBool,
     sink: &mut dyn ProgressSink,
     cancel: &AtomicBool,
 ) -> Result<ModelData> {
     let model = ModelData::open(path, args.fast_hash)?;
-    check_cancel(deps, cancel)?;
+    check_cancel(interrupted, cancel)?;
     for warning in &model.warnings {
         sink.event(ProgressEvent::Warn(warning.clone()));
     }
@@ -547,16 +602,18 @@ fn open_model(
 }
 
 /// The complete report of one model with the command's parameters: the target, or the
-/// `--baseline` model.
+/// `--baseline` model. `structure_only`: no SVD (see [`skeleton`]).
+#[allow(clippy::too_many_arguments)]
 fn build_report(
     model_path: &Path,
     args: &GraphArgs,
     settings: &Settings,
-    deps: &AppDeps,
+    interrupted: &AtomicBool,
     sink: &mut dyn ProgressSink,
     cancel: &AtomicBool,
+    structure_only: bool,
 ) -> Result<GraphReport> {
-    let model = open_model(model_path, args, deps, sink, cancel)?;
+    let model = open_model(model_path, args, interrupted, sink, cancel)?;
     if model.tensors.is_empty() {
         return Err(GraphError::Model("aucune matrice du flux résiduel".into()));
     }
@@ -624,7 +681,7 @@ fn build_report(
         kurtosis_threshold: args.kurtosis_threshold,
         vector: vector.as_deref(),
         cancel,
-        external: Some(&deps.interrupted),
+        external: Some(interrupted),
     };
     let pool = match args.jobs {
         0 => None,
@@ -638,7 +695,7 @@ fn build_report(
     let mut computed: Vec<(NodeReport, Basis, Vec<f32>)> = Vec::with_capacity(nodes.len());
     let mut skipped_full_spectrum = 0usize;
     for (index, tensor) in nodes.iter().enumerate() {
-        check_cancel(deps, cancel)?;
+        check_cancel(interrupted, cancel)?;
         sink.event(ProgressEvent::GraphNode {
             id: node_id(tensor.role, tensor.layer, tensor.expert),
             done: index,
@@ -646,6 +703,7 @@ fn build_report(
         });
         let key = cache::key_for(&model.sha256, tensor, &options, vector_sha.clone())?;
         let analysis = match cache.get(&key) {
+            _ if structure_only => metrics::NodeAnalysis::unmeasured(tensor.m(), tensor.n()),
             Some(cached) => cached.clone(),
             None => {
                 let analysis = match &pool {
@@ -690,7 +748,7 @@ fn build_report(
         };
         computed.push((report, analysis.basis, analysis.energy_weights));
     }
-    check_cancel(deps, cancel)?;
+    check_cancel(interrupted, cancel)?;
 
     let edges = build_edges(
         &computed,
@@ -826,8 +884,8 @@ fn build_report(
     Ok(report)
 }
 
-fn check_cancel(deps: &AppDeps, cancel: &AtomicBool) -> Result<()> {
-    if deps.interrupted.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed) {
+fn check_cancel(interrupted: &AtomicBool, cancel: &AtomicBool) -> Result<()> {
+    if interrupted.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed) {
         return Err(GraphError::Cancelled);
     }
     Ok(())

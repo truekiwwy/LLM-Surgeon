@@ -34,6 +34,29 @@ pub struct Form {
     pub fields: Vec<Field>,
 }
 
+/// The settings `[SCALPING]` shows besides the required fields, per surgery tool: the ones
+/// that change the outcome most. `[ADVANCE]` shows every field.
+const KEY_FIELDS: [(&str, &[&str]); 5] = [
+    ("surgeon_apply", &["dry_run", "gguf"]),
+    ("surgeon_extract", &["method", "layer", "site"]),
+    (
+        "surgeon_autotune",
+        &["objective", "target_layer_range", "alpha_max"],
+    ),
+    ("surgeon_diff", &["rank", "include"]),
+    ("surgeon_lora", &["model", "lora", "out"]),
+];
+
+impl Form {
+    /// The field belongs to the guided form: required, or one of the tool's key settings.
+    pub fn essential(&self, field: &Field) -> bool {
+        field.required
+            || KEY_FIELDS
+                .iter()
+                .any(|(tool, keys)| *tool == self.tool && keys.contains(&field.name.as_str()))
+    }
+}
+
 /// One form per engine tool, in the engine's order.
 pub fn forms() -> Vec<Form> {
     weight_surgeon::mcp::tool_definitions()
@@ -228,6 +251,32 @@ mod tests {
             panic!("method")
         };
         assert_eq!(methods, ["mean_diff", "svd", "leace"]);
+    }
+
+    #[test]
+    fn the_guided_form_keeps_required_and_key_fields_of_existing_names() {
+        let forms = forms();
+        for (tool, keys) in KEY_FIELDS {
+            let form = forms.iter().find(|f| f.tool == tool).expect(tool);
+            for key in keys {
+                assert!(
+                    form.fields.iter().any(|f| f.name == *key),
+                    "{tool}.{key} is not in the schema"
+                );
+            }
+            let essential: Vec<&str> = form
+                .fields
+                .iter()
+                .filter(|f| form.essential(f))
+                .map(|f| f.name.as_str())
+                .collect();
+            assert!(essential.len() < form.fields.len(), "{tool}: {essential:?}");
+            assert!(form
+                .fields
+                .iter()
+                .filter(|f| f.required)
+                .all(|f| essential.contains(&f.name.as_str())));
+        }
     }
 
     #[test]

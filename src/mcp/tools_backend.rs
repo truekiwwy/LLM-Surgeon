@@ -1,6 +1,6 @@
-//! MCP tool `surgeon_backends`: the inference engines of the machine the server runs on, the
-//! user configuration and the recommendation (the first-start probe of `surgeon backend
-//! detect`, read only). It names no path and runs nothing the operator did not configure.
+//! MCP tool `surgeon_backends`: the GPUs and the Rust inference engines of the machine the
+//! server runs on, the user configuration and the recommendation (the first-start probe of
+//! `surgeon backend detect`, read only). It runs nothing the operator did not configure.
 
 use schemars::gen::SchemaSettings;
 use schemars::JsonSchema;
@@ -17,7 +17,7 @@ pub(super) const NAMES: [&str; 1] = [TOOL_BACKENDS];
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Arguments de surgeon_backends : aucun. Renvoie les moteurs d'inférence disponibles (native, mistralrs, llama-server et ses GPU, hipfire), la configuration utilisateur et le backend recommandé."
+    description = "Arguments de surgeon_backends : aucun. Renvoie les GPU, les moteurs d'inférence Rust (hipfire, mistralrs, native), la configuration utilisateur et le backend recommandé."
 )]
 pub struct BackendsToolArgs {}
 
@@ -29,7 +29,7 @@ pub(super) fn definitions() -> Vec<Value> {
         .into_root_schema_for::<BackendsToolArgs>();
     vec![json!({
         "name": TOOL_BACKENDS,
-        "description": "Liste les moteurs d'inférence de la machine : native (CPU), mistralrs (mistral.rs : dossier SafeTensors tel quel, GPU selon son build), llama-server (GPU Vulkan, CUDA, Metal : périphériques de --list-devices) et hipfire (démon AMD HIP, tout OS), la configuration utilisateur persistante et le backend recommandé. Lecture seule ; à appeler avant surgeon_bench ou surgeon_pipeline pour savoir si un GPU est utilisable.",
+        "description": "Liste les GPU de la machine et ses moteurs d'inférence Rust : hipfire (démon des GPU AMD, recommandé quand il répond), mistralrs (mistral.rs : GPU NVIDIA, Apple Silicon ou CPU, dossier SafeTensors tel quel) et native (CPU, toujours disponible, en secours), la configuration utilisateur persistante et le backend recommandé (vendor, target, recommended, reason). Lecture seule ; à appeler avant surgeon_bench ou surgeon_pipeline pour savoir quel moteur tourne.",
         "inputSchema": serde_json::to_value(schema).unwrap_or(Value::Null),
         "annotations": {
             "title": "Moteurs d'inférence",

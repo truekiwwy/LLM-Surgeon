@@ -64,6 +64,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agreement;
+pub mod builtin;
 pub mod calibration;
 pub mod dataset;
 pub mod dump;

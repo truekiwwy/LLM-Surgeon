@@ -277,21 +277,25 @@ surgeon bench logits --before before.safetensors --after after.safetensors
 
 What it means: the patch measurably changed the next-token distributions (mean KL 0.049; the top-1 token changed on 45.8 % of positions). The tool cannot tell you whether that change is the one you wanted: that is for you to judge. Add `--warn-kl 0.05 --fail-on-warn` to turn it into a gate (exit code 9).
 
-**Step 8. Roll back.** There is no `undo` command: restore the backup and check the hash.
+**Step 8. Roll back.** `restore` puts the newest backup back and checks the SHA-256 of every file before and after.
 
 ```bash
 # put the backed up shard back
-cp backups/model.safetensors.bak-* qwen2-mini/model.safetensors
-# both hashes must be identical
-sha256sum qwen2-orig/model.safetensors qwen2-mini/model.safetensors
+surgeon restore --model qwen2-mini --backup-dir backups
+# or start over from the untouched copy, byte for byte
+surgeon restore --model qwen2-mini --from-origin qwen2-orig
 ```
 
 ```text
-2f4f3e1b121db1c97307887c89c76569ec7ce3f8723cbbf8802fd63050373f88 *qwen2-orig/model.safetensors
-2f4f3e1b121db1c97307887c89c76569ec7ce3f8723cbbf8802fd63050373f88 *qwen2-mini/model.safetensors
+[RESTORE]  qwen2-mini · 1 fichier(s) · 1 réécrit(s) · SHA-256 identique à la source ✓
+           qwen2-mini\model.safetensors <- backups\model.safetensors.bak-1794868245 · 2f4f3e1b121d
+[RESTORE]  qwen2-mini · 3 fichier(s) · 0 réécrit(s) · SHA-256 identique à la source ✓
+           qwen2-mini\config.json <- qwen2-orig\config.json · 976aa80672ce
+           qwen2-mini\model.safetensors <- qwen2-orig\model.safetensors · 2f4f3e1b121d
+           qwen2-mini\tokenizer.json <- qwen2-orig\tokenizer.json · 1def5315c06f
 ```
 
-On Windows PowerShell: `Copy-Item backups\model.safetensors.bak-* qwen2-mini\model.safetensors`, then `Get-FileHash` on both files.
+What it means: the shard is again the original (`2f4f3e1b...`, the hash of `qwen2-orig`); the second command found nothing to rewrite.
 
 <a id="path-b"></a>
 ### 2.3 Path B: a real small model
@@ -413,7 +417,7 @@ surgeon bench logits --before before.safetensors --after after.safetensors --war
 [VERDICT]  avertissement : KL moyenne 0.4102 > 0.05
 ```
 
-What it means: this patch changed the model a lot on these prompts (KL 0.41 against a 0.05 threshold), so the warning is expected. In this run `bench dump` printed `f32 ne tient pas en RAM : calcul en bf16 (précision réduite)`: with little free RAM the dump is computed in bf16; on a machine with more free memory it uses f32. Next, evaluate the behaviour you care about with your own prompts, and try a smaller `alpha`. To undo, restore the backup as in path A.
+What it means: this patch changed the model a lot on these prompts (KL 0.41 against a 0.05 threshold), so the warning is expected. In this run `bench dump` printed `f32 ne tient pas en RAM : calcul en bf16 (précision réduite)`: with little free RAM the dump is computed in bf16; on a machine with more free memory it uses f32. Next, evaluate the behaviour you care about with your own prompts, and try a smaller `alpha`. To undo, run `surgeon restore` as in path A.
 
 > **For beginners**
 > If you only wanted to learn the tool, path A is enough. Path B shows that the same commands scale to a real model without changes.
@@ -421,9 +425,10 @@ What it means: this patch changed the model a lot on these prompts (KL 0.41 agai
 <a id="desktop"></a>
 ### 2.4 Desktop app (Windows)
 
-`surgeon-gui.exe` is a double-click application on top of the same engine: a home screen, a
-first-run wizard that checks your machine (GPU, Vulkan, RAM, disk) and installs llama.cpp for
-you, the card studio and the 3D weight graph. Nothing is downloaded without your explicit
+`surgeon-gui.exe` is a double-click application on top of the same engine: an AI agent you
+talk to in an IDE-like window (a full scan of the model, or one precise problem), a first-run
+wizard that checks your machine (GPU, Vulkan, RAM, disk) and installs llama.cpp for you, and
+the 3D weight graph. Nothing is downloaded without your explicit
 consent next to the URL, size and SHA-256, and nothing is sent anywhere.
 
 - **Install**: the per-user installer (no administrator rights) or the portable ZIP from the
@@ -588,6 +593,24 @@ surgeon apply [OPTIONS] --model <MODEL> --patch <PATCH>
 
 `data`: `backups`, `report` (`dry_run`, `backup_path`, per-operation tensors with `elements_modified`, `max_abs_delta`, `nan_or_inf_produced`, `rolled_back`), `io` (bytes, chunks, throughput, page faults), `warnings`; with `--gguf`, also `gguf` (fidelity per tensor). Exit codes: 2 invalid patch (nothing touched), 3 execution failed (model intact), 4 critical (rollback failed).
 
+<a id="cmd-restore"></a>
+#### `surgeon restore`
+
+Puts a model back byte for byte after an `apply`: from its backups, or from the origin model. Every file is hashed before and after; the command fails unless the final SHA-256 equals the source's. Backups and origin are only read, never removed.
+
+```text
+surgeon restore [OPTIONS] --model <MODEL>
+```
+
+| Option | Default | Role |
+| --- | --- | --- |
+| `--model` | required | File or folder to put back. |
+| `--backup` | newest backup | A backup written by `apply` (`<name>.bak-<stamp>`, listed in its `data.backups`), repeatable for a sharded model. |
+| `--backup-dir` | next to the model | Where `apply --backup-dir` put the backups, for the detection. |
+| `--from-origin` | none | Origin model (file or folder): each of its files is copied over the model. Excludes `--backup` and `--backup-dir`. |
+
+Without `--backup` nor `--from-origin`, each file of the model gets its newest `<name>.bak-*`: the state before the last `apply`. In a folder where one file has several backups (several `apply` runs), nothing tells which backups belong together: the command refuses (`ambiguous_backup`, exit code 2) rather than mix two states; name them with `--backup` or use `--from-origin`. A file already identical to its source is not rewritten. `data`: `mode` (`backup` or `origin`), `model`, `files` (`path`, `source`, `sha256_before` (null if the file was missing), `sha256_source`, `sha256_after`, `rewritten`), `identical`. Exit codes: 2 nothing to restore from or invalid arguments (nothing touched), 3 copy failed or final hash different (the message counts the files already restored; the sources are intact, run it again).
+
 <a id="cmd-eval"></a>
 #### `surgeon eval`
 
@@ -699,7 +722,8 @@ surgeon mcp [OPTIONS]
 | Option | Default | Role |
 | --- | --- | --- |
 | `--allow-dir` | `$SURGEON_MCP_ALLOW_DIRS`, else the current folder | Allowed folder, repeatable; every path must resolve under one of them. |
-| `--read-only` | off | Refuse the tools that write (`surgeon_apply`, GGUF exports...). |
+| `--allow-read` | none | Folder or file read but never written (the source model), repeatable: analyses and measures may read it, any output or `surgeon_apply` there is refused. |
+| `--read-only` | off | Refuse the tools that write (`surgeon_apply`, `surgeon_restore`, GGUF exports...). |
 | `--allow-no-backup` | off | Honor `backup: false` in patches; a backup is imposed otherwise. |
 
 <a id="cmd-schema"></a>
@@ -1659,7 +1683,7 @@ outputs:
   graph-demo\edges.csv
 ```
 
-`crates/surgeon-gui` is also the **LLM Surgery Studio**, three workspaces chosen in its top bar: `Studio (Canvas)`, `Graphe 3D` and `Split (Canvas + 3D)`. The canvas holds typed cards wired output to input: Model (`inspect`), Extract (`extract`), Patch (`apply`, dry run by default), Graph Diff (`graph --baseline`, then opened and framed in the 3D view) and Eval / Gate (`bench refusal --fail-on-warn`, GO or NO-GO). `Run` on a card runs the cards upstream first, each one exactly as this CLI with the same flags, in process and cancellable. A branch can be forked to compare two settings side by side, and the workspace is saved as `*.surgeon-studio.json`. The `patch.json` drawer validates while you type (same `validate_patch`, every issue on its line), lights the targeted tensors in 3D before anything is written, and offers `Dry-Run`, `Apply (avec backup)` and `Rollback`. A fourth workspace, `Projets`, keeps persistent projects (the source model hashed and never written, working copies, runs, an append-only ledger) and runs any MCP tool from a form generated from its schema, through a job queue that replays every run from its event file ([docs/STUDIO.md](docs/STUDIO.md)). A fifth, `Agents`, lets an AI agent (Anthropic, OpenAI or any OpenAI-compatible endpoint, or the Claude Code / Codex CLI the user is signed in to) run those same tools as jobs of the project, with approvals computed by the code, budgets and an evidence log ([docs/AGENTS.md](docs/AGENTS.md)). Details in [crates/surgeon-gui/README.md](crates/surgeon-gui/README.md).
+`crates/surgeon-gui` is also the **LLM Surgery Studio**, laid out like an IDE whose editor is an AI agent. A session starts in one of two kinds: **Advance**, where the agent inspects the whole model, builds the surgery graph and ranks the problems it finds by itself, or **Scalping**, where the user names a symptom (excessive refusals, repetitions, hallucinations, language, reasoning) and the agent goes straight to the tensors involved. The agent (Anthropic, OpenAI or any OpenAI-compatible endpoint, or the Claude Code / Codex CLI the user is signed in to) runs the engine's MCP tools as jobs of a persistent project (the source model hashed and never written, working copies, runs, an append-only ledger), every write is an approval card computed by the code, and every figure it claims is checked against the ledger ([docs/AGENTS.md](docs/AGENTS.md), [docs/STUDIO.md](docs/STUDIO.md)). The 3D view shows the graph, a run replayed over it and the tensor the agent points at. Details in [crates/surgeon-gui/README.md](crates/surgeon-gui/README.md).
 
 <a id="patch-format"></a>
 ### 3.3 `patch.json` and the `rows` / `cols` axes
@@ -2064,22 +2088,26 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 <a id="tools"></a>
 ### 4.2 Tools
 
-`surgeon mcp` serves twelve tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
+`surgeon mcp` serves sixteen tools: thirteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), and three studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
 
 | Tool | Role |
 | --- | --- |
 | `surgeon_check` | RAM and VRAM budget of a model. |
 | `surgeon_inspect` | Layers and MLP matrices, optional statistics. |
 | `surgeon_apply` | Applies a patch in place (`dry_run` to check first); `gguf: true` for a quantized GGUF. |
+| `surgeon_restore` | Puts the model back byte for byte from the newest backup, named backups or the origin model (`from_origin`, read in `--allow-read`); SHA-256 of every file before and after. The rollback after a regression measured by `surgeon_bench`. |
 | `surgeon_eval` | Loop and expectation checks, conditional GGUF export. |
 | `surgeon_extract` | Steering vector from a Qwen2, Llama/Mistral or Qwen3 layer. |
-| `surgeon_bench` | Measurement, with `mode` `dump`, `logits`, `ppl` or `eval`. |
+| `surgeon_bench` | Measurement, with `mode` `dump`, `logits`, `ppl`, `eval` or `refusal`, and the judge calibration `judge_sample`, `judge_eval`; built-in probe sets need no file: `builtin:math`, `builtin:logic`, `builtin:general` (eval) and `builtin:refusals` (refusal). |
 | `surgeon_autotune` | Per-layer coefficients by ridge regression. |
 | `surgeon_diff` | Difference of two checkpoints written to a new `.surgery`. |
 | `surgeon_lora` | `mode` `merge` (adapter folded in place) or `extract` (adapter written). |
 | `surgeon_pipeline` | Decision on a patch: `action` `plan`, `start` (background worker, returns a `job_id` at once), `status`, `cancel`, `report`, `promote_patch` ([docs/PIPELINE.md](docs/PIPELINE.md)). |
 | `surgeon_graph` | Residual-stream write/read graph with certified spectral bounds; bounded summary, or files with `out_dir`. |
-| `surgeon_backends` | Inference engines of the machine (native, mistralrs, llama-server and its GPUs, hipfire), the user configuration and the recommended backend; read only. |
+| `surgeon_backends` | GPUs and Rust inference engines of the machine (hipfire for AMD, mistralrs for NVIDIA, Apple Silicon or CPU, native as fallback), the user configuration and the recommended backend; read only. |
+| `record_finding` | Studio project only: appends a finding to the evidence log (`chat/findings.jsonl`), citing the `run_id` every other tool returns in a project. |
+| `show_in_3d` | Studio project only: selects a tensor or graph node in the studio's 3D view (`chat/focus.json`). |
+| `update_plan` | Studio project only: replaces the plan shown to the user (`chat/plan.json`). |
 
 A real session on the fake model: the client sends `initialize`, `notifications/initialized`, then a `tools/call`. The server writes one line on stderr, then answers on stdout (the `initialize` answer is left out, and the answer line is cut):
 
@@ -2100,7 +2128,7 @@ The first call (`surgeon_check` on `qwen2-mini`) succeeds; the second asks for `
 ### 4.3 Guardrails
 
 - `--allow-dir` (repeatable, else `SURGEON_MCP_ALLOW_DIRS`, else the current folder): every path is resolved by the system (symbolic links, `..`) and must fall under an allowed folder; relative paths are relative to the first one.
-- `--read-only`: refuses every tool that writes (`surgeon_apply`, `surgeon_extract`, GGUF exports, `surgeon_bench` in `dump` mode, `surgeon_autotune` with `out`, `surgeon_diff`, `surgeon_lora`, `surgeon_graph` with `out_dir` or `cache_dir`, `surgeon_pipeline` `start`, `cancel` and `promote_patch`).
+- `--read-only`: refuses every tool that writes (`surgeon_apply`, `surgeon_restore`, `surgeon_extract`, GGUF exports, `surgeon_bench` in `dump` and `judge_sample` modes or `judge_eval` with `out`, `surgeon_autotune` with `out`, `surgeon_diff`, `surgeon_lora`, `surgeon_graph` with `out_dir` or `cache_dir`, `surgeon_pipeline` `start`, `cancel` and `promote_patch`).
 - Backup imposed: a verified SHA-256 backup precedes any write, and a failed backup blocks the write. `backup: false` in a patch is honored only with `--allow-no-backup`.
 - Cancellation: `notifications/cancelled` stops the running call, rolls back a partial patch and kills the running llama.cpp process; a cancelled extraction or dump leaves no file.
 - Progress: with a `progressToken`, a `notifications/progress` is sent per tensor, prompt or chunk.
@@ -2222,7 +2250,7 @@ surgeon bench eval --model C:\models\Qwen2.5-0.5B-Instruct --dataset gsm_dev.jso
 - `apply`, `lora merge` and the MCP tools copy each touched shard to the backup folder and verify its SHA-256 before writing. The backup folder must exist.
 - On error, on a NaN or Inf in a result, or on cancellation (Ctrl-C, or `notifications/cancelled` in MCP), the original bytes are restored and the exit code is 3 (4 if the rollback itself failed, or if there was no backup and the model is partly patched).
 - GGUF: a crash marker `<model>.surgeon-inprogress` is written before the first byte and removed after commit or rollback. If it is still there (crash, power loss), `apply` refuses to run: copy the backup named in the marker over the model, compare its SHA-256 with `original_sha256`, then delete the marker.
-- There is no `undo` command: restoring is a file copy of the backup, as in [path A](#path-a). Applying the opposite `alpha` is not an exact undo, because of rounding.
+- Undo with [`surgeon restore`](#cmd-restore) (MCP: `surgeon_restore`), from the backup or the origin model, as in [path A](#path-a). Applying the opposite `alpha` is not an exact undo, because of rounding.
 
 <a id="windows-lock"></a>
 ### 5.3 Windows: `surgeon.exe` is locked by an MCP client

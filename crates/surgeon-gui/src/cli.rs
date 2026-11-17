@@ -5,13 +5,11 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
-use crate::canvas::EXTENSION;
-
 #[derive(Debug, Parser)]
 #[command(
     name = "surgeon-gui",
     version,
-    about = "Weight Surgeon : atelier de chirurgie des poids de LLM locaux (graphe 3D, analyses, agents, diagnostics)"
+    about = "Weight Surgeon : atelier de chirurgie des poids de LLM locaux (graphe 3D, analyses, agents, système)"
 )]
 pub struct Cli {
     /// graph.json, graph.ndjson (suivi en direct), `-` (NDJSON sur l'entrée standard), un
@@ -28,9 +26,10 @@ pub struct Cli {
     /// Rend l'écran courant hors écran dans ce PNG, puis quitte.
     #[arg(long, value_name = "PNG")]
     pub screenshot: Option<PathBuf>,
-    /// L'onglet ouvert : atelier (défaut), graph, analyses, agents, diagnostics, ou wizard
-    /// (l'assistant de configuration par-dessus l'Atelier).
-    #[arg(long, value_name = "SCREEN", default_value = "atelier")]
+    /// La vue ouverte : agent (défaut ; agent:advance ou agent:scalping pour le formulaire),
+    /// graph, settings (settings:providers pour une section des réglages), ou wizard:1 à
+    /// wizard:4 (une étape de l'assistant).
+    #[arg(long, value_name = "SCREEN", default_value = "agent")]
     pub screen: String,
     /// Taille de la capture en pixels, `LARGEURxHAUTEUR` (et taille de la fenêtre au lancement).
     #[arg(long, value_name = "LxH", default_value = "1440x900", value_parser = parse_size)]
@@ -76,21 +75,17 @@ pub fn parse_size(text: &str) -> Result<[u32; 2], String> {
 pub enum Item {
     /// `graph.json`, `graph.ndjson` or `-`: handled by [`crate::source::open`].
     Graph(PathBuf),
-    /// A `*.surgeon-studio.json` canvas workspace.
-    Studio(PathBuf),
     /// A folder: becomes the workspace folder.
     Folder(PathBuf),
     Unknown(PathBuf),
 }
 
 pub fn classify(path: &Path) -> Item {
-    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());
-    match (path.as_os_str() == "-", &name, &ext) {
-        (true, _, _) => Item::Graph(path.to_path_buf()),
+    match (path.as_os_str() == "-", &ext) {
+        (true, _) => Item::Graph(path.to_path_buf()),
         _ if path.is_dir() => Item::Folder(path.to_path_buf()),
-        (_, Some(n), _) if n.ends_with(EXTENSION) => Item::Studio(path.to_path_buf()),
-        (_, _, Some(e)) if e == "json" || e == "ndjson" => Item::Graph(path.to_path_buf()),
+        (_, Some(e)) if e == "json" || e == "ndjson" => Item::Graph(path.to_path_buf()),
         _ => Item::Unknown(path.to_path_buf()),
     }
 }
@@ -108,10 +103,6 @@ mod tests {
             Item::Graph(_)
         ));
         assert!(matches!(classify(Path::new("a/B.NDJSON")), Item::Graph(_)));
-        assert!(matches!(
-            classify(Path::new("x.surgeon-studio.json")),
-            Item::Studio(_)
-        ));
         assert!(matches!(classify(dir.path()), Item::Folder(_)));
         assert!(matches!(classify(Path::new("notes.txt")), Item::Unknown(_)));
     }

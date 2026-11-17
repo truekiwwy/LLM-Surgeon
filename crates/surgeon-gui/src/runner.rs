@@ -167,6 +167,19 @@ pub(crate) fn deps(interrupted: Arc<AtomicBool>) -> AppDeps {
     }
 }
 
+/// `surgeon-gui mcp …`: the engine's MCP server on this process's stdio, exactly as
+/// `surgeon mcp …` (same library, same version as the window). The CLI runtimes start it, so
+/// no separate `surgeon` binary is needed. `args` are the process arguments.
+pub fn serve_mcp(args: impl Iterator<Item = std::ffi::OsString>) -> i32 {
+    let argv = std::iter::once("surgeon".into()).chain(args.skip(1));
+    let deps = deps(Arc::new(AtomicBool::new(false)));
+    let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+    match app::parse_cli(argv, &mut out, &mut err) {
+        Ok(cli) => app::run_with(cli, &deps, &mut out, &mut err),
+        Err(code) => code,
+    }
+}
+
 fn run_cli(args: &[String], deps: &AppDeps) -> (i32, Value) {
     let argv = ["surgeon", "--json"]
         .into_iter()
