@@ -1,5 +1,6 @@
 //! hipfire (<https://github.com/warpfront/hipfire>): a Rust inference engine for AMD GPUs on
-//! HIP / ROCm, run as a daemon (`hipfire serve`) that surgeon talks to and never starts.
+//! HIP / ROCm, run as a daemon (`hipfire serve`) that the engine talks to and never starts
+//! (the desktop app starts its own, for as long as its window is open).
 //!
 //! What its README documents (read 2026-11-13): binary `hipfire` (`pull`, `run`, `chat`,
 //! `serve`, `bench`, `quantize`...); a daemon on `127.0.0.1:11435` with the OpenAI-style
@@ -18,13 +19,14 @@
 //! the name of the model given to the bench (its folder, or its file without extension): the
 //! daemon must know a model by that name.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::config::BackendConfig;
 use super::detect::HipfireDetection;
 use crate::eval::server::{serves, Dialect};
-use crate::eval::{locate_binary, EvalError};
+use crate::eval::{find_binary, EvalError};
 
 /// The daemon's documented port.
 pub const DEFAULT_PORT: u16 = 11435;
@@ -34,17 +36,32 @@ pub const CHAT_ONLY: &str = "hipfire n'expose que /v1/chat/completions, sans gra
     son gabarit de chat s'ajoute à celui du bench, les résultats ne sont ni reproductibles ni \
     comparables aux autres backends";
 
+/// `given` (the binary, or a folder holding it), then `exe_dir`, then the folders of `path`.
+fn find(given: Option<&Path>, exe_dir: Option<&Path>, path: Option<OsString>) -> Option<PathBuf> {
+    if let Some(file) = given.filter(|p| p.is_file()) {
+        return Some(file.to_path_buf());
+    }
+    let dirs: Vec<PathBuf> = given
+        .into_iter()
+        .chain(exe_dir)
+        .map(Path::to_path_buf)
+        .collect();
+    find_binary(&["hipfire"], &dirs, path)
+}
+
+/// The hipfire binary: `hipfire_bin`, the folder of this executable, then the `PATH`.
 fn binary(config: &BackendConfig) -> Option<PathBuf> {
-    let given = config.hipfire_bin.clone();
-    given
-        .clone()
-        .filter(|p| p.is_file())
-        .or_else(|| locate_binary("hipfire", given.as_deref()).ok())
+    let exe = std::env::current_exe().ok();
+    find(
+        config.hipfire_bin.as_deref(),
+        exe.as_deref().and_then(Path::parent),
+        std::env::var_os("PATH"),
+    )
 }
 
 /// `http://127.0.0.1:<port>` or `http://localhost:<port>`, a trailing `/` allowed: the
 /// client only talks to loopback.
-fn loopback_port(url: &str) -> Result<u16, String> {
+pub fn loopback_port(url: &str) -> Result<u16, String> {
     let bad = || {
         format!("hipfire_url « {url} » : http://127.0.0.1:<port> attendu (boucle locale seulement)")
     };
@@ -191,6 +208,38 @@ mod tests {
         };
         assert_eq!(binary(&config), Some(bin));
         assert_eq!(port(&config), Ok(DEFAULT_PORT));
+    }
+
+    #[test]
+    fn the_binary_is_searched_in_the_config_then_beside_the_app_then_on_the_path() {
+        let root = tempfile::tempdir().unwrap();
+        let name = format!("hipfire{}", std::env::consts::EXE_SUFFIX);
+        let [given, exe_dir, on_path, empty] = ["given", "exe", "path", "empty"].map(|d| {
+            let dir = root.path().join(d);
+            std::fs::create_dir(&dir).unwrap();
+            dir
+        });
+        for dir in [&given, &exe_dir, &on_path] {
+            std::fs::write(dir.join(&name), b"").unwrap();
+        }
+        let path = || Some(on_path.clone().into_os_string());
+        let file = given.join(&name);
+        assert_eq!(
+            find(Some(&file), Some(&exe_dir), path()),
+            Some(file.clone())
+        );
+        assert_eq!(find(Some(&given), Some(&exe_dir), path()), Some(file));
+        assert_eq!(
+            find(Some(&empty), Some(&exe_dir), path()),
+            Some(exe_dir.join(&name)),
+            "a hipfire_bin that holds nothing falls through"
+        );
+        assert_eq!(find(None, Some(&empty), path()), Some(on_path.join(&name)));
+        assert_eq!(
+            find(None, Some(&empty), None),
+            None,
+            "absent is not an error"
+        );
     }
 
     #[test]

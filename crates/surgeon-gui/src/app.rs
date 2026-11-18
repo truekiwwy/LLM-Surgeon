@@ -9,7 +9,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime};
 
 use eframe::egui::{self, Key};
-use weight_surgeon::backend::{self, config::BackendConfig, detect::BackendReport};
+use weight_surgeon::backend::{self, config::BackendConfig, detect::BackendReport, hipfire};
 use weight_surgeon::bench::score::Backend;
 use weight_surgeon::graph::output::GraphReport;
 use weight_surgeon::graph::stream::GraphPatch;
@@ -25,6 +25,8 @@ use crate::backend_dialog::BackendDialog;
 use crate::camera::Orbit;
 use crate::cli::Item;
 use crate::desktop::{Desktop, Event};
+use crate::hipfire_daemon::HipfireDaemon;
+use crate::logging;
 use crate::platform::Picker;
 use crate::source::{self, Input, Timeline};
 use crate::studio::bus::RunView;
@@ -159,6 +161,8 @@ pub struct SurgeonApp {
     pub hardware: Option<BackendReport>,
     /// The hipfire daemon answered at the last probe.
     pub hipfire_up: bool,
+    /// The hipfire daemon this window started, if any.
+    pub hipfire: HipfireDaemon,
     pub tab: Tab,
     /// The kind of session the new-session form offers first, kept between launches.
     pub mode: Mode,
@@ -230,6 +234,7 @@ impl SurgeonApp {
             probe: None,
             hardware: None,
             hipfire_up: false,
+            hipfire: HipfireDaemon::default(),
             tab,
             mode,
             studio: Studio::new(workspace),
@@ -519,6 +524,41 @@ impl SurgeonApp {
         self.probe = Some(probe);
     }
 
+    /// Brings the daemon of this window in line with the last probe: started when the machine
+    /// or the saved backend calls for hipfire and nothing answers, stopped once native is
+    /// pinned. Without a binary nothing happens and the fallback engine keeps running.
+    fn sync_hipfire(&mut self, ctx: &egui::Context) {
+        let Some(report) = &self.hardware else {
+            return;
+        };
+        let saved = self.dialog.saved();
+        let auto = self.desktop.settings.backend_auto;
+        if !backend_choice::wants_hipfire(report.target, saved.backend, auto) {
+            self.hipfire.stop();
+            return;
+        }
+        let Some(bin) = report
+            .hipfire
+            .binary
+            .as_ref()
+            .filter(|_| !report.hipfire.up)
+        else {
+            return;
+        };
+        let url = saved
+            .hipfire_url
+            .clone()
+            .unwrap_or_else(backend_choice::hipfire_url);
+        match hipfire::loopback_port(&url) {
+            Ok(port) => {
+                let wake = ctx.clone();
+                self.hipfire
+                    .start(bin, port, move || wake.request_repaint());
+            }
+            Err(e) => logging::warn(&e),
+        }
+    }
+
     /// Starts the agent on `mission`. A project with a source model and no working copy gets
     /// one first, and the session starts when it is made: the agent never has to ask for it.
     pub fn start_session(&mut self, mission: Mission) {
@@ -696,12 +736,18 @@ impl SurgeonApp {
             self.hardware = Some(report);
             self.hipfire_up = up;
             self.probe = None;
+            self.sync_hipfire(ctx);
+        }
+        // Kept for later while a probe runs: it may have looked before the port opened.
+        if self.probe.is_none() && self.hipfire.poll() {
+            self.spawn_probe(ctx);
         }
         self.auto_backend();
         if self.dialog.take_saved() {
             // Saved by hand: the user's choice from now on.
             self.desktop.settings.backend_auto = false;
             self.desktop.save_settings();
+            self.sync_hipfire(ctx);
         }
         self.picked_workspace();
         let ended = self.studio.tick(ctx);
@@ -830,6 +876,10 @@ impl SurgeonApp {
 impl eframe::App for SurgeonApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.hipfire.stop();
     }
 }
 

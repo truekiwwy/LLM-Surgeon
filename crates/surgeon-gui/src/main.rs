@@ -156,6 +156,7 @@ fn main() -> ExitCode {
                 desktop.notify(e);
             }
             let mut app = SurgeonApp::with_shell(ctx, input, desktop, workspace);
+            app.hipfire.enabled = !demo_data;
             if demo_data {
                 if let Err(e) = demo::install(ctx, &mut app) {
                     logging::warn(&e);

@@ -1926,7 +1926,7 @@ fn each_provider_offers_only_its_own_models() {
         "a listed model wins over the built-in names"
     );
     assert_eq!(
-        conn(ProviderKind::ClaudeCode, &[]).preferred_model(),
+        conn(ProviderKind::Codex, &[]).preferred_model(),
         None,
         "no pick yet: the CLI's own default"
     );
@@ -1941,6 +1941,92 @@ note: x y
         ),
         ["ollama/qwen:latest", "opencode/big-pickle"]
     );
+}
+
+#[test]
+fn claude_code_defaults_to_sonnet_and_reaches_fable_only_when_picked() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = super::view::Hub::new(
+        dir.path().join("agents.json"),
+        Box::new(SessionStore::default()),
+        Arc::new(|| {}),
+    );
+    hub.cfg.connections = vec![Connection {
+        id: "claude".into(),
+        kind: ProviderKind::ClaudeCode,
+        label: "Claude Code".into(),
+        base_url: String::new(),
+        models: Vec::new(),
+        default_model: None,
+        last_model: Some("fable".into()),
+        verified: true,
+        prices: Default::default(),
+    }];
+    hub.cfg.default_connection = Some("claude".into());
+    assert_eq!(hub.model().as_deref(), Some("sonnet"), "nothing picked");
+    let choices = hub.connection().unwrap().model_choices();
+    assert_eq!(choices.first().map(String::as_str), Some("sonnet"));
+
+    hub.pick_connection(Some("claude".into()));
+    assert_eq!(
+        hub.model().as_deref(),
+        Some("sonnet"),
+        "a remembered Fable is not carried over"
+    );
+    hub.pick_model("fable".into());
+    assert_eq!(hub.model().as_deref(), Some("fable"), "picked by hand");
+    hub.pick_model("opus".into());
+    hub.pick_connection(None);
+    hub.pick_connection(Some("claude".into()));
+    assert_eq!(hub.model().as_deref(), Some("opus"), "the last pick stays");
+}
+
+#[test]
+fn claude_code_runs_on_its_account_and_never_on_an_inherited_api_key() {
+    const KEY: &str = "ANTHROPIC_API_KEY";
+    let removed = |c: &std::process::Command| {
+        c.get_envs()
+            .any(|(name, value)| name == KEY && value.is_none())
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let surgeon = dir.path().join("surgeon.exe");
+    let scratch = dir.path().join("scratch");
+    for (kind, scrubbed) in [
+        (ProviderKind::ClaudeCode, true),
+        (ProviderKind::Codex, false),
+        (ProviderKind::OpenCode, false),
+    ] {
+        let detected = runtime::Detected {
+            kind,
+            path: dir.path().join("cli.exe"),
+            version: "1".into(),
+            missing: Vec::new(),
+        };
+        let launch = runtime::launch(&runtime::LaunchInput {
+            detected: &detected,
+            surgeon: &surgeon,
+            mode: AgentMode::Ask,
+            project: &project,
+            source_dir: None,
+            model: None,
+            prompt: "p",
+            scratch: &scratch,
+            agy: None,
+        })
+        .unwrap();
+        assert!(
+            !launch.env.iter().any(|(name, _)| name == KEY),
+            "{kind:?}: no key is ever injected"
+        );
+        assert_eq!(removed(&runtime::run_command(&launch, kind)), scrubbed);
+        assert_eq!(
+            removed(&runtime::cli_command(kind, &detected.path)),
+            scrubbed,
+            "{kind:?}: the sign-in check sees the same account as the run"
+        );
+    }
 }
 
 #[test]

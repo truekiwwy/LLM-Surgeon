@@ -47,8 +47,11 @@ Diagnostics > Repair).
    built-in native engine (CPU, Rust) runs, and an AMD machine runs mistral.rs while its
    hipfire daemon is not up. The choice follows the machine at every start until a backend
    is saved by hand in *Configurer…*; a file that still names `llama-server` is taken over.
-   - **hipfire** runs outside the app (Linux with ROCm; on Windows in WSL2) as a daemon on
-     `127.0.0.1:11435`. On Windows, *Install and start hipfire* (consent required) installs
+   - **hipfire** runs as a daemon on `127.0.0.1:11435` (Linux with ROCm; on Windows natively or
+     in WSL2). When a `hipfire` binary is found (`hipfire_bin`, the app's folder, the `PATH`) and
+     nothing answers, the app starts the daemon at launch and stops it, GPU process included, when
+     it closes; a daemon it did not start is left alone (docs/BACKENDS.md, section 7). On Windows,
+     *Install and start hipfire* (consent required) installs
      Ubuntu 24.04 in WSL2 when missing, then as root in it ROCm 7.2.1, librocdxg 1.2.2 (SHA-256
      checked), Rust and hipfire v0.4.6 (its official `install.sh --yes`), starts `hipfire serve`
      and waits for it; the backend switches as soon as it answers (`hipfire_setup.rs`). The

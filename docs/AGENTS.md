@@ -32,7 +32,7 @@ Pré-requis : le socle Studio ([STUDIO.md](STUDIO.md)) : l'agent travaille dans 
 | Anthropic | clé d'API (`x-api-key`) | `GET /v1/models` (paginé) |
 | OpenAI | clé d'API (`Authorization: Bearer`) | `GET /v1/models` |
 | Compatible OpenAI | URL de base, clé facultative | `GET {base}/models` |
-| Claude Code (CLI) | la connexion déjà faite dans l'outil | choisie dans l'outil, ou `--model` |
+| Claude Code (CLI) | le compte claude.ai connecté dans l'outil, jamais `ANTHROPIC_API_KEY` | `--model sonnet` par défaut, ou le modèle choisi |
 | Codex CLI | la connexion déjà faite dans l'outil | idem, `--model` |
 | OpenCode CLI | la connexion déjà faite dans l'outil | `--model fournisseur/modèle` |
 | Antigravity CLI (`agy`) | la connexion de l'outil, copiée dans un profil isolé le temps du run | idem, `--model` |
@@ -265,6 +265,11 @@ C'est la voie pour un compte d'abonnement : l'outil officiel, installé et conne
 l'utilisateur, est lancé en mode non interactif avec `surgeon mcp` comme serveur du moteur.
 Le studio n'implémente aucune authentification par compte et ne lit aucun identifiant, sauf
 pour Antigravity (voir plus bas).
+
+Claude Code reste sur le compte `claude.ai` (`claude auth login`) : `ANTHROPIC_API_KEY` est
+retirée de son environnement, pour `Tester` comme pour les runs. Sans choix, il reçoit
+`--model sonnet`. Fable demande des crédits d'usage : il ne tourne que s'il est choisi pour le
+projet, et un ancien choix n'est pas repris au changement de connexion.
 
 Détection : l'exécutable dans le `PATH`, `--version`, et la présence de chaque option utilisée
 dans l'aide (`claude --help`, `codex exec --help`, `opencode run --help`, `agy --help`) ; une

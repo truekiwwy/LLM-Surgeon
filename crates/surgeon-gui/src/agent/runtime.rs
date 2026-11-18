@@ -12,7 +12,8 @@
 //!
 //! The studio reads no credential, except for Antigravity: its sign-in files
 //! (`~/.gemini/oauth_creds.json`, `google_accounts.json`) are copied into the isolated
-//! profile for the run and removed with it, on the user's explicit request.
+//! profile for the run and removed with it, on the user's explicit request. Claude Code never
+//! inherits `ANTHROPIC_API_KEY`, so that it stays on the signed-in claude.ai account.
 //!
 //! Options checked against `claude --help` (2.1.x), `codex exec --help` (0.166),
 //! `opencode run --help` (2.2.7) and `agy --help` (1.4.4): a binary whose help lacks one is
@@ -149,6 +150,16 @@ fn command(program: &Path) -> Command {
     c
 }
 
+/// The process of a CLI runtime, without what would take over from its signed-in account:
+/// `claude -p` prefers `ANTHROPIC_API_KEY` to the claude.ai session whenever it is set.
+pub fn cli_command(kind: ProviderKind, program: &Path) -> Command {
+    let mut c = command(program);
+    if kind == ProviderKind::ClaudeCode {
+        c.env_remove("ANTHROPIC_API_KEY");
+    }
+    c
+}
+
 /// The CLI's own sign-in check: it spends nothing (a status, or the model list) and the
 /// studio never reads the credentials itself.
 fn status_args(kind: ProviderKind) -> &'static [&'static str] {
@@ -186,7 +197,12 @@ pub fn signed_in(kind: ProviderKind, path: Option<&OsStr>) -> Result<Vec<String>
         Some(home) => home.prepare(None, None)?,
         None => Vec::new(),
     };
-    let checked = run_short(&bin, status_args(kind), &env, Duration::from_secs(60));
+    let checked = run_short(
+        cli_command(kind, &bin),
+        status_args(kind),
+        &env,
+        Duration::from_secs(60),
+    );
     if let Some(home) = &agy {
         home.clear();
     }
@@ -227,17 +243,17 @@ fn capture(
     env: &[(OsString, OsString)],
     timeout: Duration,
 ) -> Option<String> {
-    run_short(program, args, env, timeout).map(|(_, text)| text)
+    run_short(command(program), args, env, timeout).map(|(_, text)| text)
 }
 
 /// Whether a short command succeeded, with its stdout then stderr; None past `timeout`.
 fn run_short(
-    program: &Path,
+    mut cmd: Command,
     args: &[&str],
     env: &[(OsString, OsString)],
     timeout: Duration,
 ) -> Option<(bool, String)> {
-    let mut child = command(program)
+    let mut child = cmd
         .args(args)
         .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
@@ -724,6 +740,15 @@ fn short(v: &Value) -> String {
     text.chars().take(2000).collect()
 }
 
+/// The process of a run, its pipes still to set.
+pub fn run_command(l: &Launch, kind: ProviderKind) -> Command {
+    let mut c = cli_command(kind, &l.program);
+    c.args(&l.args)
+        .envs(l.env.iter().map(|(k, v)| (k, v)))
+        .current_dir(&l.cwd);
+    c
+}
+
 /// A running CLI: events as they come, `stop` kills it.
 pub struct Run {
     pub rx: Receiver<Event>,
@@ -736,10 +761,7 @@ impl Run {
         kind: ProviderKind,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, String> {
-        let mut child = command(&l.program)
-            .args(&l.args)
-            .envs(l.env.iter().map(|(k, v)| (k, v)))
-            .current_dir(&l.cwd)
+        let mut child = run_command(l, kind)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

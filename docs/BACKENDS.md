@@ -10,7 +10,7 @@ graphique s'en sert au premier démarrage. Code : `src/backend/`.
 | --- | --- | --- | --- |
 | `mistralrs` | GPU selon le build (CUDA, Metal...) ou CPU | Un serveur [mistral.rs](https://github.com/EricLBuehler/mistral.rs) local (`mistralrs-server`, ou `mistralrs serve`) qui charge le dossier SafeTensors tel quel, sans conversion (un `.gguf` est aussi accepté). | Recommandé par `backend detect` pour NVIDIA, Apple Silicon et le CPU quand il est installé, et sur AMD tant que hipfire ne répond pas (section 4). |
 | `llama-server` | GPU (Vulkan, CUDA, Metal...) ou CPU | Un serveur `llama.cpp` local pour toute l'exécution. Un dossier SafeTensors Qwen2, Llama, Mistral, Gemma, Gemma 2 ou Phi-3 est converti par `surgeon` lui-même en GGUF (Rust pur, sans Python). | Jamais recommandé : seulement sur `--backend llama-server` ou un fichier qui le nomme. |
-| `hipfire` | GPU AMD, HIP/ROCm | Démon externe [`warpfront/hipfire`](https://github.com/warpfront/hipfire), déjà lancé. | Recommandé pour un GPU AMD dès que son démon répond ; tout système, Windows compris par WSL2 (section 7). |
+| `hipfire` | GPU AMD, HIP/ROCm | Démon externe [`warpfront/hipfire`](https://github.com/warpfront/hipfire), déjà lancé ou démarré par `surgeon-gui`. | Recommandé pour un GPU AMD dès que son démon répond ; tout système, Windows compris par WSL2 (section 7). |
 | `native` | CPU | Générateur en Rust pur de `surgeon` (Qwen2, Llama/Mistral, Qwen3 en SafeTensors). Aucun programme externe. | Repli, défaut historique de `bench refusal` et du pipeline. |
 
 Tous partagent l'interface `TextGenerator` (`src/eval/generator.rs`) : un bench ne sait pas
@@ -197,8 +197,8 @@ compris. `surgeon` ne lance pas le démon, il s'y connecte :
 
 1. **Où.** `hipfire_url` (`--hipfire-url`, boucle locale seulement : `http://127.0.0.1:<port>` ou
    `http://localhost:<port>`), sinon `127.0.0.1:11435` quand le binaire est trouvé
-   (`hipfire_bin` / `--hipfire-bin`, sinon le `PATH`). Ni l'un ni l'autre : erreur qui nomme ces
-   réglages et `--backend mistralrs, llama-server ou native`.
+   (`hipfire_bin` / `--hipfire-bin`, sinon le dossier de l'exécutable, sinon le `PATH`). Ni l'un
+   ni l'autre : erreur qui nomme ces réglages et `--backend mistralrs, llama-server ou native`.
 2. **Quoi.** Une requête vide sur `/v1/completions`, puis sur `/v1/chat/completions` : une route
    qui ne répond pas 404 ou 405 existe. Démon injoignable : « lancez `hipfire serve` ».
 3. **Comment.** `/v1/completions` garde le prompt brut. Si seul `/v1/chat/completions` existe, le
@@ -209,6 +209,16 @@ compris. `surgeon` ne lance pas le démon, il s'y connecte :
 Le champ `model` des requêtes est le nom du modèle donné au bench (son dossier, ou son fichier sans
 extension) : le démon doit connaître un modèle sous ce nom. Comme pour mistral.rs, seul un faux
 démon l'a vérifié ici.
+
+**Avec `surgeon-gui`.** Sur une machine AMD, ou quand `hipfire` est le backend enregistré, et sauf
+si `native` a été enregistré à la main, la fenêtre démarre le démon si rien ne répond sur
+`hipfire_url` et si le binaire est trouvé : `hipfire serve 127.0.0.1:<port> --no-prewarm`, sans
+console, sortie dans `hipfire.log` (dossier des journaux). Elle attend le port 5 s au plus sans
+bloquer l'interface, puis relance la détection. À la fermeture, elle arrête ce démon et son
+processus GPU, ce qui libère la VRAM ; un démon qu'elle n'a pas lancé n'est jamais touché. Sans
+binaire, rien ne change : le moteur de repli continue, et `surgeon_backends` donne
+`hipfire.binary: null`. Une fois la fenêtre fermée, un `surgeon` en ligne de commande réglé sur
+`hipfire` doit trouver un démon lancé autrement.
 
 ## 8. Pipeline
 
