@@ -140,7 +140,7 @@ pub fn binary(
                 max_new_tokens: pillar
                     .max_new_tokens
                     .unwrap_or(bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
-                chat_template: pillar.chat_template.unwrap_or(ChatTemplate::Chatml),
+                chat_template: pillar.chat_template.unwrap_or_default(),
                 markers: Markers::default(),
                 generation: options(backend),
                 backend: backend
@@ -170,6 +170,7 @@ pub fn binary(
                     .max_new_tokens
                     .unwrap_or(bench::DEFAULT_MAX_NEW_TOKENS),
                 template,
+                chat_template: pillar.chat_template.unwrap_or_default(),
                 format: pillar.format.unwrap_or_default(),
                 llama_cpp_dir: backend.and_then(|b| b.llama_cpp_dir.clone()),
                 timeout: None,
@@ -204,6 +205,7 @@ pub fn dump(
     let req = DumpRequest {
         model: model.to_path_buf(),
         prompts,
+        chat_template: ChatTemplate::Auto,
         out: out.to_path_buf(),
         dtype: DTypeChoice::Auto,
         out_dtype: OutDtype::F32,

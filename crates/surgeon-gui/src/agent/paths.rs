@@ -14,10 +14,12 @@ const PROBES: &str = "builtin:math, builtin:logic, builtin:general (surgeon_benc
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectPaths {
     pub project: PathBuf,
-    /// The source model, read only.
+    /// The folder of the source model (or the lone weights file), read only.
     pub origin: Option<PathBuf>,
     /// The newest working copy (`copies/<id>`), absolute.
     pub copy: Option<PathBuf>,
+    /// The configured folder of other models, read only.
+    pub models: Option<PathBuf>,
 }
 
 impl ProjectPaths {
@@ -27,13 +29,14 @@ impl ProjectPaths {
             .ok()
             .and_then(|text| crate::studio::project::load_manifest(&text).ok())
             .and_then(|m| m.source)
-            .map(|s| s.path);
+            .map(|s| crate::studio::copy::model_root(&s.path).to_path_buf());
         let copy = crate::studio::view::newest_copy_in(&project.join("copies"))
             .map(|id| project.join("copies").join(id));
         Self {
             project: project.to_path_buf(),
             origin,
             copy,
+            models: weight_surgeon::backend::models_dir(),
         }
     }
 
@@ -45,32 +48,54 @@ impl ProjectPaths {
             p.as_deref()
                 .map_or(none.to_owned(), |p| plain(p).display().to_string())
         };
+        let models = self.models.as_deref().map_or(String::new(), |dir| {
+            format!(
+                "- models_dir : {} (autres modèles, lecture seule : surgeon_files action list \
+                 pour les trouver, surgeon_check et surgeon_inspect pour les examiner)\n",
+                plain(dir).display()
+            )
+        });
         format!(
             "Chemins absolus du projet :\n\
              - project_dir : {project}\n\
+             - work_dir : {work} (tes fichiers de travail : surgeon_files action write y crée \
+             jeux .jsonl, scripts et rapports, et renvoie leur chemin dans data.path)\n\
              - origin_path : {origin} (modèle d'origine, verrouillé en écriture)\n\
              - working_copy_path : {copy}\n\
+             {models}\
              Lecture seule de l'origine : les outils d'analyse et de mesure lisent \
              origin_path. Pour une comparaison appariée avant / après, passe-le en baseline \
              de surgeon_graph (model = working_copy_path) et en baseline_model de \
-             surgeon_bench, ou mesure-le directement en model avec le même jeu que la copie. \
-             Toute écriture dans origin_path est refusée par le serveur : sorties, caches et \
-             corrections vont dans project_dir.\n\
+             surgeon_bench. Toute écriture dans origin_path est refusée par le serveur : \
+             sorties, caches et corrections vont dans project_dir.\n\
+             Chaîne de correction, à enchaîner toi-même : (1) jeux de prompts, intégrés ou écrits \
+             dans work_dir ; (2) surgeon_extract, out sous project_dir ; (3) surgeon_autotune \
+             sur plusieurs couches (target_layer_range, out) ; (4) surgeon_apply sur \
+             working_copy_path, dry_run puis réel ; (5) surgeon_bench avec baseline_model = \
+             origin_path ; (6) surgeon_restore en cas de régression. Le format de chat du \
+             modèle est appliqué par défaut (chat_template auto) : n'habille pas les prompts à \
+             la main, et ne mets none que pour le désactiver exprès. Garde les max_new_tokens \
+             par défaut (refusal 256, eval 512) : une réponse coupée fausse la mesure. Dans \
+             surgeon_autotune, α est le coefficient de W ∓= α·v et non un décalage \
+             d'activation ; pour borner la taille du changement par couche, passe \
+             max_delta_norm_ratio (‖ΔW‖/‖W‖, 0.01 pour 1 %) plutôt qu'un alpha_max calculé à \
+             la main.\n\
              Rollback : dès qu'une contre-mesure surgeon_bench montre une régression après un \
              surgeon_apply, remets la copie en état avec surgeon_restore (model = \
-             working_copy_path ; sans autre argument il reprend la dernière sauvegarde \
-             <nom>.bak-*, backup = les data.backups de l'apply pour en viser une, from_origin = \
-             origin_path pour repartir du modèle d'origine), puis vérifie que data.identical \
-             vaut true et que sha256_after égale sha256_source pour chaque fichier.\n\
+             working_copy_path ; sans autre argument il revient à l'état d'avant le dernier \
+             surgeon_apply, backup = les data.backups d'un apply pour viser un état précis, \
+             from_origin = origin_path pour repartir du modèle d'origine), puis vérifie que \
+             data.identical vaut true et que sha256_after égale sha256_source pour chaque \
+             fichier.\n\
              Autonomie : le projet est ouvert et tout ce qu'il faut est ci-dessus. Ne t'arrête \
              pas pour demander un chemin ni un dataset : inspecte directement \
              working_copy_path (surgeon_inspect, surgeon_graph), mesure avec le jeu intégré \
              qui correspond au symptôme, sans fichier : {PROBES}. Enchaîne les étapes sans \
-             attendre de validation ; ne pose une question que si un choix irréversible ou \
-             réellement ambigu l'exige (les écritures passent de toute façon par une \
-             approbation). Chaque outil surgeon_* renvoie un run_id : cite-le dans \
-             record_finding.",
+             attendre de validation écrite ; ne pose une question que si un choix irréversible \
+             ou réellement ambigu l'exige. Chaque outil surgeon_* renvoie un run_id : cite-le \
+             dans record_finding.",
             project = plain(&self.project).display(),
+            work = plain(&self.project.join("work")).display(),
             origin = shown(&self.origin, "aucun"),
             copy = shown(
                 &self.copy,
@@ -116,6 +141,10 @@ mod tests {
             "baseline_model de surgeon_bench".to_owned(),
             "remets la copie en état avec surgeon_restore".to_owned(),
             "from_origin = origin_path".to_owned(),
+            format!("work_dir : {}", dir.path().join("work").display()),
+            "surgeon_files".to_owned(),
+            "max_delta_norm_ratio".to_owned(),
+            "chat_template auto".to_owned(),
             "Ne t'arrête pas pour demander un chemin".to_owned(),
         ] {
             assert!(brief.contains(&needle), "{needle} in {brief}");
@@ -129,6 +158,7 @@ mod tests {
             project: PathBuf::from(r"\\?\C:\work\p"),
             origin: Some(PathBuf::from(r"\\?\C:\models\m")),
             copy: Some(PathBuf::from(r"\\?\C:\work\p\copies\copy-1")),
+            models: Some(PathBuf::from(r"\\?\C:\models")),
         };
         let brief = paths.brief();
         assert!(!brief.contains(r"\\?\"), "{brief}");

@@ -546,7 +546,7 @@ surgeon extract [OPTIONS] --model <MODEL> --pos-prompts <POS_PROMPTS> --neg-prom
 | `--out` | required | Output `.safetensors` (one 1D f32 tensor `direction`). |
 | `--pooling` | `last` | `last` (last token) or `mean` (mean over the prompt). |
 | `--site` | `resid_post` | `resid_post` (residual stream after layer L) or `mlp_out` (MLP output). |
-| `--chat-template` | `none` | `none` (raw text) or `chatml` (Qwen chat format). |
+| `--chat-template` | `auto` | `auto` (the format the model declares in `tokenizer_config.json`, `chat_template.jinja` or its GGUF metadata, default system message included; raw text if it declares none), `none` (raw text), or `chatml`, `llama3`, `inst`, `gemma`. |
 | `--max-tokens` | 512 | Prompts are truncated on the right beyond this. |
 | `--dtype` | `auto` | `auto` (f32 if it fits in RAM, else bf16), `f32`, `bf16`. |
 | `--overwrite` | off | Replace an existing `--out` and its companion files. |
@@ -605,11 +605,11 @@ surgeon restore [OPTIONS] --model <MODEL>
 | Option | Default | Role |
 | --- | --- | --- |
 | `--model` | required | File or folder to put back. |
-| `--backup` | newest backup | A backup written by `apply` (`<name>.bak-<stamp>`, listed in its `data.backups`), repeatable for a sharded model. |
+| `--backup` | the last checkpoint | A backup written by `apply` (`<name>.bak-<stamp>`, listed in its `data.backups`), repeatable for a sharded model. |
 | `--backup-dir` | next to the model | Where `apply --backup-dir` put the backups, for the detection. |
 | `--from-origin` | none | Origin model (file or folder): each of its files is copied over the model. Excludes `--backup` and `--backup-dir`. |
 
-Without `--backup` nor `--from-origin`, each file of the model gets its newest `<name>.bak-*`: the state before the last `apply`. In a folder where one file has several backups (several `apply` runs), nothing tells which backups belong together: the command refuses (`ambiguous_backup`, exit code 2) rather than mix two states; name them with `--backup` or use `--from-origin`. A file already identical to its source is not rewritten. `data`: `mode` (`backup` or `origin`), `model`, `files` (`path`, `source`, `sha256_before` (null if the file was missing), `sha256_source`, `sha256_after`, `rewritten`), `identical`. Exit codes: 2 nothing to restore from or invalid arguments (nothing touched), 3 copy failed or final hash different (the message counts the files already restored; the sources are intact, run it again).
+Without `--backup` nor `--from-origin`, the model goes back to the state before the last `apply`: all the backups of one `apply` share a checkpoint (`<name>.bak-<secs>-<n>`), so this works after any number of them, sharded or not, and running it again changes nothing. An `apply` made while the model is already in the state of the newest checkpoint reuses it instead of copying the weights again. In a folder written by an older version, a single backed up file gets its newest backup; several files, which nothing links, all go back to the state before the first `apply` (`data.checkpoint`: `last_apply` or `first_apply`). A weights file given as `--from-origin` is copied over the file of that name in a model folder. A file already identical to its source is not rewritten. `data`: `mode` (`backup` or `origin`), `checkpoint` (detection only), `model`, `files` (`path`, `source`, `sha256_before` (null if the file was missing), `sha256_source`, `sha256_after`, `rewritten`), `identical`. Exit codes: 2 nothing to restore from or invalid arguments (nothing touched), 3 copy failed or final hash different (the message counts the files already restored; the sources are intact, run it again).
 
 <a id="cmd-eval"></a>
 #### `surgeon eval`
@@ -770,7 +770,8 @@ surgeon autotune [OPTIONS] --model <MODEL> --vector <VECTOR> --eval-dataset <EVA
 | `--target-projection` | none | Target projection; required by `--objective target`. |
 | `--l2-reg` | 1e-3 | Ridge λ > 0, or `auto` (leave-one-out over 1e-6 to 1e2). |
 | `--probe-alpha` | 0.05 | Finite-difference step δ of the response measure. |
-| `--alpha-max` | 1 | Coefficients are clipped to plus or minus this value. |
+| `--alpha-max` | 1 | Coefficients are clipped to plus or minus this value (`alpha` of `W -= alpha·v`, not an activation shift). |
+| `--max-delta-norm-ratio` | none | Bound per layer on `‖ΔW‖/‖W‖` (Frobenius norms), `0.01` for 1 %, converted to a limit on each layer's coefficient; `data.alphas[].delta_norm_ratio` gives the result. |
 | `--min-alpha` | 0.0001 | Smaller coefficients are dropped. |
 | `--max-forwards` | 2000 | Refuses the run, before any computation, above this many forwards. |
 | `--max-tokens` | 256 | Prompt truncation. |
@@ -933,6 +934,7 @@ surgeon bench dump [OPTIONS] --model <MODEL> --prompts <PROMPTS> --out <OUT>
 | `--prompts` | required | JSON array of strings or `{"text": ...}`, JSONL, or plain text. |
 | `--out` | required | `.safetensors` with `logits` `[positions, vocab]` and `prompt_offsets`, plus metadata (`prompts_sha256`, `tokenizer_sha256`). |
 | `--dtype` | `auto` | Compute dtype: `auto`, `f32`, `bf16`. |
+| `--chat-template` | `auto` | Wrapping of each prompt, as in `bench eval`. Use the same value before and after a surgery. |
 | `--out-dtype` | `f32` | Stored dtype: `f32` or `f16`. Prefer f32: f16 adds rounding noise to the comparison. |
 | `--max-tokens` | 256 | Prompt truncation. |
 | `--max-total-positions` | 4096 | Refuses the dump, before any computation, above this many positions. |
@@ -1004,6 +1006,7 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | `--limit` | 50 | First N entries, in file order. |
 | `--max-new-tokens` | 512 | Generation budget per question. |
 | `--prompt-template` | built in | Template with `{question}`, or `@FILE`. |
+| `--chat-template` | `auto` | Wrapping of the rendered template: `auto` (the model's format, raw text if it declares none), `none`, `chatml`, `llama3`, `inst` or `gemma`. A template already holding chat turns is left as is. |
 | `--format` | `auto` | Reference answer: `gsm8k` (after the last `####`), `math` (last `\boxed{...}`), `auto` (per entry: `####`, else `\boxed{}`, else the raw answer). |
 | `--llama-cpp-dir` | `$LLAMA_CPP_DIR` | llama.cpp folder. |
 | `--timeout-secs` | none | Per question; a timeout counts the question wrong. |
@@ -1086,7 +1089,7 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--prompts` | required | JSON array of strings or `{"text": ...}`, JSONL, or plain text. |
 | `--baseline-model` | none | Reference model on the same prompts, generated first (paired comparison). |
 | `--max-new-tokens` | 256 | Generation budget per prompt. |
-| `--chat-template` | `chatml` | Wrapping of each prompt: `chatml` or `none`. |
+| `--chat-template` | `auto` | Wrapping of each prompt: `auto` (the model's format, ChatML if it declares none), `none`, `chatml`, `llama3`, `inst` or `gemma`. |
 | `--backend` | the user configuration, else `native` | `native` (pure Rust), `llama-server` (one local llama.cpp server for the run) or `llama-completion` (one llama.cpp process per prompt); a SafeTensors folder is then converted to a temporary GGUF. `mistralrs` (mistral.rs on the SafeTensors folder as is) and `hipfire` (a running hipfire daemon) too: see [backends](docs/BACKENDS.md). |
 | `--judge` | `rules` | `rules` (markers only), `llm` (markers and a judge model) or `both` (plus their agreement). |
 | `--marker-langs` | none | Marker languages on top of English: `fr`, `es`, `de` or `all`, comma-separated. |
@@ -2088,14 +2091,14 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 <a id="tools"></a>
 ### 4.2 Tools
 
-`surgeon mcp` serves sixteen tools: thirteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), and three studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
+`surgeon mcp` serves seventeen tools: thirteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), `surgeon_files` for an agent's working files, and three studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
 
 | Tool | Role |
 | --- | --- |
 | `surgeon_check` | RAM and VRAM budget of a model. |
 | `surgeon_inspect` | Layers and MLP matrices, optional statistics. |
 | `surgeon_apply` | Applies a patch in place (`dry_run` to check first); `gguf: true` for a quantized GGUF. |
-| `surgeon_restore` | Puts the model back byte for byte from the newest backup, named backups or the origin model (`from_origin`, read in `--allow-read`); SHA-256 of every file before and after. The rollback after a regression measured by `surgeon_bench`. |
+| `surgeon_restore` | Puts the model back byte for byte from the last checkpoint (the state before the last `surgeon_apply`), named backups or the origin model (`from_origin`, read in `--allow-read`); SHA-256 of every file before and after. The rollback after a regression measured by `surgeon_bench`. |
 | `surgeon_eval` | Loop and expectation checks, conditional GGUF export. |
 | `surgeon_extract` | Steering vector from a Qwen2, Llama/Mistral or Qwen3 layer. |
 | `surgeon_bench` | Measurement, with `mode` `dump`, `logits`, `ppl`, `eval` or `refusal`, and the judge calibration `judge_sample`, `judge_eval`; built-in probe sets need no file: `builtin:math`, `builtin:logic`, `builtin:general` (eval) and `builtin:refusals` (refusal). |
@@ -2105,6 +2108,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 | `surgeon_pipeline` | Decision on a patch: `action` `plan`, `start` (background worker, returns a `job_id` at once), `status`, `cancel`, `report`, `promote_patch` ([docs/PIPELINE.md](docs/PIPELINE.md)). |
 | `surgeon_graph` | Residual-stream write/read graph with certified spectral bounds; bounded summary, or files with `out_dir`. |
 | `surgeon_backends` | GPUs and Rust inference engines of the machine (hipfire for AMD, mistralrs for NVIDIA, Apple Silicon or CPU, native as fallback), the user configuration and the recommended backend; read only. |
+| `surgeon_files` | Working files of an agent without file tools: `list` and `read` in the allowed folders, read-only roots included, `write` of text files under `work/` only. |
 | `record_finding` | Studio project only: appends a finding to the evidence log (`chat/findings.jsonl`), citing the `run_id` every other tool returns in a project. |
 | `show_in_3d` | Studio project only: selects a tensor or graph node in the studio's 3D view (`chat/focus.json`). |
 | `update_plan` | Studio project only: replaces the plan shown to the user (`chat/plan.json`). |

@@ -470,8 +470,14 @@
       "additionalProperties": false,
       "properties": {
         "chat_template": {
-          "default": "none",
+          "default": "auto",
           "oneOf": [
+            {
+              "enum": [
+                "auto"
+              ],
+              "type": "string"
+            },
             {
               "enum": [
                 "none"
@@ -481,6 +487,24 @@
             {
               "enum": [
                 "chatml"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "llama3"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "inst"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "gemma"
               ],
               "type": "string"
             }
@@ -793,6 +817,12 @@
               "oneOf": [
                 {
                   "enum": [
+                    "auto"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
                     "none"
                   ],
                   "type": "string"
@@ -800,6 +830,24 @@
                 {
                   "enum": [
                     "chatml"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "llama3"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "inst"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "gemma"
                   ],
                   "type": "string"
                 }
@@ -1371,6 +1419,12 @@
               "oneOf": [
                 {
                   "enum": [
+                    "auto"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
                     "none"
                   ],
                   "type": "string"
@@ -1378,6 +1432,24 @@
                 {
                   "enum": [
                     "chatml"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "llama3"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "inst"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "gemma"
                   ],
                   "type": "string"
                 }
@@ -1426,6 +1498,14 @@
           "default": null,
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "max_delta_norm_ratio": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
             "null"
           ]
         },
@@ -2222,6 +2302,69 @@
       "type": "object"
     },
     "name": "surgeon_restore"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "oneOf": [
+            {
+              "enum": [
+                "list"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "read"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "write"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "append": {
+          "default": false,
+          "type": "boolean"
+        },
+        "content": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overwrite": {
+          "default": false,
+          "type": "boolean"
+        },
+        "path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_files"
   },
   {
     "annotations": {

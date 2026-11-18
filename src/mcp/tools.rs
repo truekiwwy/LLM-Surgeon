@@ -35,7 +35,7 @@ use crate::extract::{
     self, ChatTemplate, DTypeChoice, ExtractRequest, MethodOptions, Pooling, Site,
     DEFAULT_LEACE_RCOND, DEFAULT_LEACE_SHRINKAGE,
 };
-use crate::patch::autotune::{parse_layer_range, AutotuneRequest, EvalSource, L2Reg};
+use crate::patch::autotune::{self, parse_layer_range, AutotuneRequest, EvalSource, L2Reg};
 use crate::patch::{LayerSelection, LayersField, PatchFile, Projection, ValidationIssue};
 use crate::plugin::{unknown_method_message, Registry, DEFAULT_METHOD};
 use crate::ui::Ui;
@@ -58,7 +58,6 @@ const TOOLS: [&str; 7] = [
 ];
 
 const DEFAULT_MAX_TENSORS: u32 = 500;
-const DEFAULT_MAX_NEW_TOKENS: u32 = 256;
 const DEFAULT_QUANT: &str = "Q4_K_M";
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -203,7 +202,7 @@ pub struct EvalToolArgs {
 }
 
 fn default_max_new_tokens() -> u32 {
-    DEFAULT_MAX_NEW_TOKENS
+    crate::eval::DEFAULT_MAX_NEW_TOKENS
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -246,6 +245,9 @@ pub struct ExtractToolArgs {
     #[serde(default)]
     pub site: Site,
     #[serde(default)]
+    #[schemars(
+        description = "Habillage des prompts : auto (défaut, le format déclaré par le modèle dans tokenizer_config.json, système compris ; texte brut s'il n'en déclare aucun), none pour le désactiver, ou chatml, llama3, inst, gemma."
+    )]
     pub chat_template: ChatTemplate,
     #[serde(default = "default_extract_max_tokens")]
     #[schemars(
@@ -376,11 +378,11 @@ impl<'de> Deserialize<'de> for MethodId {
 }
 
 fn default_extract_layer() -> u32 {
-    20
+    extract::DEFAULT_LAYER as u32
 }
 
 fn default_extract_max_tokens() -> u32 {
-    512
+    extract::DEFAULT_MAX_TOKENS as u32
 }
 
 /// Draft-07 with every subschema inlined: many MCP clients mishandle `$ref`.
@@ -430,6 +432,7 @@ pub fn tool_definitions() -> Value {
         list.extend(super::tools_graph::definitions());
         list.extend(super::tools_backend::definitions());
         list.extend(super::tools_restore::definitions());
+        list.extend(super::tools_files::definitions());
         list.extend(super::tools_session::definitions());
     }
     sorted(tools)
@@ -475,14 +478,14 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_BENCH,
             "Mesure d'une chirurgie",
-            "Mesure l'effet d'une chirurgie, selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH ou un jeu intégré builtin:math|logic|general, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts ou builtin:refusals, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe), judge_sample et judge_eval (calibration du juge de refusal : échantillon stratifié à faire étiqueter par un humain, puis accord du juge avec ces étiquettes et fichier de calibration). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision ; en cas de régression, surgeon_restore.",
+            "Mesure l'effet d'une chirurgie ; eval, dump et refusal habillent les prompts avec le format de chat du modèle (chat_template, défaut auto). Selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH ou un jeu intégré builtin:math|logic|general, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts ou builtin:refusals, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe), judge_sample et judge_eval (calibration du juge de refusal : échantillon stratifié à faire étiqueter par un humain, puis accord du juge avec ces étiquettes et fichier de calibration). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision ; en cas de régression, surgeon_restore.",
             schema_value::<BenchToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
         tool(
             TOOL_AUTOTUNE,
             "Réglage des coefficients par couche",
-            "Mesure en mémoire la réponse de la projection d'une couche de lecture sur le vecteur quand chaque couche candidate est décalée (différences finies, arrondi au dtype comme sur disque), ajuste les α par régression ridge (λ fixe ou LOOCV), valide en appliquant tous les α ensemble, et produit un patch.json compatible surgeon_apply (écrit seulement si out est fourni). Ne mesure pas les effets secondaires : utiliser surgeon_bench ensuite.",
+            "Mesure en mémoire la réponse de la projection d'une couche de lecture sur le vecteur quand chaque couche candidate est décalée (différences finies, arrondi au dtype comme sur disque), ajuste les α par régression ridge (λ fixe ou LOOCV), valide en appliquant tous les α ensemble, et produit un patch.json compatible surgeon_apply (écrit seulement si out est fourni). Unités : target_projection et les décalages rapportés sont des projections d'activation ; α est le coefficient de W ∓= α·v ; data.alphas[].delta_norm_ratio donne ‖ΔW‖_F / ‖W‖_F par couche, borné par max_delta_norm_ratio. Ne mesure pas les effets secondaires : utiliser surgeon_bench ensuite.",
             schema_value::<AutotuneToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
@@ -512,6 +515,7 @@ pub(crate) fn is_known(name: &str) -> bool {
         || super::tools_graph::NAMES.contains(&name)
         || super::tools_backend::NAMES.contains(&name)
         || super::tools_restore::NAMES.contains(&name)
+        || super::tools_files::NAMES.contains(&name)
         || super::tools_session::NAMES.contains(&name)
 }
 
@@ -546,6 +550,7 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         super::tools_graph::TOOL_GRAPH => super::tools_graph::call(arguments, ctx),
         super::tools_backend::TOOL_BACKENDS => super::tools_backend::call(arguments, ctx),
         super::tools_restore::TOOL_RESTORE => super::tools_restore::call(arguments, ctx),
+        super::tools_files::TOOL_FILES => super::tools_files::call(arguments, ctx),
         _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);
@@ -657,13 +662,13 @@ fn inspect(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
 }
 
 fn apply(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
-    if ctx.cfg.read_only {
+    let args: ApplyToolArgs = parse(arguments)?;
+    if ctx.cfg.read_only && !args.dry_run {
         return Err(invalid(
             "read_only",
-            "serveur lancé avec --read-only : surgeon_apply est désactivé",
+            "serveur lancé avec --read-only : surgeon_apply n'accepte que dry_run",
         ));
     }
-    let args: ApplyToolArgs = parse(arguments)?;
     let root = ctx.cfg.sandbox.base().to_path_buf();
     let model = sandboxed(ctx, "model", &args.model, &root)?;
     let base_dir = match &args.base_dir {
@@ -763,7 +768,8 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     }
     let args: ExtractToolArgs = parse(arguments)?;
     let root = ctx.cfg.sandbox.base().to_path_buf();
-    let model_dir = readable(ctx, "model", &args.model, &root)?;
+    let model_dir =
+        extract::model_folder(&readable(ctx, "model", &args.model, &root)?).to_path_buf();
     let pos_prompts = prompt_set(
         ctx,
         "pos",
@@ -857,11 +863,20 @@ pub struct AutotuneToolArgs {
     #[schemars(description = "λ > 0, ou \"auto\" (LOOCV sur 1e-6..1e2) ; défaut 1e-3.")]
     pub l2_reg: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Pas δ des différences finies, défaut 0.05.")]
+    #[schemars(
+        description = "Pas δ des différences finies, dans l'unité de α (coefficient de W ∓= α·v), défaut 0.05."
+    )]
     pub probe_alpha: Option<f64>,
     #[serde(default)]
-    #[schemars(description = "Écrêtage |α| ≤ alpha_max, défaut 1.")]
+    #[schemars(
+        description = "Écrêtage |α| ≤ alpha_max, défaut 1. α est le coefficient de W ∓= α·v, pas un décalage d'activation ni un pourcentage des poids."
+    )]
     pub alpha_max: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Borne par couche de ‖ΔW‖_F / ‖W‖_F (0.01 : 1 % de la norme), convertie en |α| pour chaque couche ; data.alphas[].delta_norm_ratio donne la valeur obtenue. Absent : pas de borne."
+    )]
+    pub max_delta_norm_ratio: Option<f64>,
     #[serde(default)]
     #[schemars(description = "Couches à |α| < min_alpha retirées, défaut 1e-4.")]
     pub min_alpha: Option<f64>,
@@ -881,6 +896,9 @@ pub struct AutotuneToolArgs {
     #[serde(default)]
     pub pooling: Option<Pooling>,
     #[serde(default)]
+    #[schemars(
+        description = "Habillage des prompts ; défaut : celui de l'extraction du vecteur (système compris). auto relit le modèle, none le désactive."
+    )]
     pub chat_template: Option<ChatTemplate>,
     #[serde(default)]
     #[schemars(
@@ -902,7 +920,7 @@ fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     let root = ctx.cfg.sandbox.base().to_path_buf();
     let bad = |m: String| invalid("invalid_arguments", m);
     let request = AutotuneRequest {
-        model: readable(ctx, "model", &args.model, &root)?,
+        model: extract::model_folder(&readable(ctx, "model", &args.model, &root)?).to_path_buf(),
         vector: readable(ctx, "vector", &args.vector, &root)?,
         eval: match (&args.eval_dataset, args.eval_prompts) {
             (Some(path), None) => {
@@ -928,14 +946,19 @@ fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         l2_reg: args
             .l2_reg
             .as_deref()
-            .unwrap_or("1e-3")
+            .unwrap_or(autotune::DEFAULT_L2_REG)
             .parse::<L2Reg>()
             .map_err(&bad)?,
-        probe_alpha: args.probe_alpha.unwrap_or(0.05),
-        alpha_max: args.alpha_max.unwrap_or(1.0),
-        min_alpha: args.min_alpha.unwrap_or(1e-4),
-        max_forwards: args.max_forwards.map_or(2000, |m| m as usize),
-        max_tokens: args.max_tokens.map_or(256, |m| m as usize),
+        probe_alpha: args.probe_alpha.unwrap_or(autotune::DEFAULT_PROBE_ALPHA),
+        alpha_max: args.alpha_max.unwrap_or(autotune::DEFAULT_ALPHA_MAX),
+        max_delta_norm_ratio: args.max_delta_norm_ratio,
+        min_alpha: args.min_alpha.unwrap_or(autotune::DEFAULT_MIN_ALPHA),
+        max_forwards: args
+            .max_forwards
+            .map_or(autotune::DEFAULT_MAX_FORWARDS, |m| m as usize),
+        max_tokens: args
+            .max_tokens
+            .map_or(autotune::DEFAULT_MAX_TOKENS, |m| m as usize),
         dtype: args.dtype,
         site: args.site,
         pooling: args.pooling,
@@ -1168,11 +1191,13 @@ pub struct BenchToolArgs {
     #[serde(default)]
     #[schemars(
         range(min = 1),
-        description = "eval : tokens générés au plus par question (défaut 512) ; refusal : par prompt (défaut 256)."
+        description = "eval : tokens générés au plus par question (défaut 512) ; refusal : par prompt (défaut 256). Réduire fausse la mesure : réponses coupées avant la réponse finale ou le refus."
     )]
     pub max_new_tokens: Option<u32>,
     #[serde(default)]
-    #[schemars(description = "eval : gabarit contenant {question} (texte, jamais un chemin).")]
+    #[schemars(
+        description = "eval : gabarit contenant {question} (texte, jamais un chemin), ensuite habillé par chat_template."
+    )]
     pub prompt_template: Option<String>,
     #[serde(default)]
     pub format: Option<crate::bench::dataset::DatasetFormat>,
@@ -1186,7 +1211,7 @@ pub struct BenchToolArgs {
     pub backend: Option<crate::bench::score::Backend>,
     #[serde(default)]
     #[schemars(
-        description = "refusal : gabarit appliqué à chaque prompt, chatml (défaut) ou none."
+        description = "eval, dump, refusal : habillage de chaque prompt. auto (défaut) suit le format déclaré par le modèle (tokenizer_config.json, chat_template.jinja ou GGUF), système compris ; s'il n'en déclare aucun : texte brut, ou ChatML pour refusal. none le désactive ; chatml, llama3, inst et gemma l'imposent. Un prompt déjà habillé n'est jamais habillé deux fois."
     )]
     pub chat_template: Option<ChatTemplate>,
     #[serde(default)]
@@ -1354,6 +1379,7 @@ const BENCH_FIELDS: [(&str, &[&str], &[&str]); 7] = [
             "limit",
             "max_new_tokens",
             "prompt_template",
+            "chat_template",
             "format",
             "llama_cpp_dir",
             "timeout_secs",
@@ -1415,6 +1441,7 @@ const BENCH_FIELDS: [(&str, &[&str], &[&str]); 7] = [
         "dump",
         &["model", "prompts", "out"],
         &[
+            "chat_template",
             "dtype",
             "out_dtype",
             "max_tokens",
@@ -1689,6 +1716,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 limit: args.limit.map_or(bench::DEFAULT_LIMIT, |l| l as usize),
                 max_new_tokens: args.max_new_tokens.unwrap_or(bench::DEFAULT_MAX_NEW_TOKENS),
                 template,
+                chat_template: args.chat_template.unwrap_or_default(),
                 format: args.format.unwrap_or_default(),
                 llama_cpp_dir,
                 timeout,
@@ -1702,8 +1730,9 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             let prompts = extract::load_prompt_texts(&prompts_file)
                 .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?;
             let req = DumpRequest {
-                model: path(ctx, "model", &args.model)?,
+                model: extract::model_folder(&path(ctx, "model", &args.model)?).to_path_buf(),
                 prompts,
+                chat_template: args.chat_template.unwrap_or_default(),
                 out: sandboxed(ctx, "out", &required("out", &args.out)?, &root)?,
                 dtype: args.dtype.unwrap_or_default(),
                 out_dtype: args.out_dtype.unwrap_or_default(),
@@ -1740,7 +1769,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 max_new_tokens: args
                     .max_new_tokens
                     .unwrap_or(bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
-                chat_template: args.chat_template.unwrap_or(ChatTemplate::Chatml),
+                chat_template: args.chat_template.unwrap_or_default(),
                 markers,
                 generation: refusal_generation,
                 backend: refusal_backend.label().into(),

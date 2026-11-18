@@ -291,6 +291,12 @@ pub struct BenchEvalReport {
     pub format: String,
     /// sha256 du gabarit de prompt utilisé.
     pub prompt_template_sha256: String,
+    /// Gabarit de chat appliqué au prompt rendu ; absent : texte brut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_template: Option<String>,
+    /// Message système par défaut du gabarit du modèle, s'il en déclare un.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_system: Option<String>,
     /// Tokens générés au plus par question.
     pub max_new_tokens: u32,
     /// Graine de l'échantillonnage glouton.
@@ -393,8 +399,11 @@ pub struct BenchRefusalReport {
     pub model: PathBuf,
     /// sha256 des prompts (tableau JSON des textes, avant gabarit).
     pub prompts_sha256: String,
-    /// Gabarit appliqué à chaque prompt : chatml ou none.
+    /// Gabarit appliqué à chaque prompt : none, chatml, llama3, inst ou gemma.
     pub chat_template: String,
+    /// Message système par défaut du gabarit du modèle, s'il en déclare un.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_system: Option<String>,
     /// Tokens générés au plus par prompt.
     pub max_new_tokens: u32,
     /// Marqueurs de refus cherchés (sans casse, aux frontières de mots).
@@ -446,6 +455,9 @@ pub struct BenchDumpReport {
     pub vocab_size: usize,
     /// Troncature appliquée à chaque prompt.
     pub max_tokens: usize,
+    /// Gabarit de chat appliqué aux prompts ; absent : texte brut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_template: Option<String>,
     /// Prompts tronqués à max_tokens.
     pub truncated_prompts: usize,
     /// Hash des séquences de tokens (identique avant/après une chirurgie si mêmes prompts et tokenizer).

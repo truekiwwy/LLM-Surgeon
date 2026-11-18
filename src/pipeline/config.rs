@@ -155,7 +155,9 @@ pub struct PillarConfig {
     )]
     pub max_new_tokens: Option<u32>,
     #[serde(default)]
-    #[schemars(description = "safety, unblocking : habillage des prompts (défaut chatml).")]
+    #[schemars(
+        description = "safety, unblocking, gsm8k : habillage des prompts (défaut auto : le format déclaré par le modèle)."
+    )]
     pub chat_template: Option<ChatTemplate>,
     #[serde(default)]
     #[schemars(
@@ -371,8 +373,8 @@ pub fn validate(config: &PipelineConfig, allow_disable_safety: bool) -> Result<(
             [
                 misplaced(
                     "chat_template",
-                    p.chat_template.is_some() && !refusal,
-                    "safety, unblocking",
+                    p.chat_template.is_some() && !refusal && p.kind != PillarKind::Gsm8k,
+                    "safety, unblocking, gsm8k",
                 ),
                 misplaced(
                     "prompt_template",

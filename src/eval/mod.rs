@@ -54,6 +54,9 @@ pub mod sampling;
 pub mod server;
 
 pub(crate) use command::last_lines;
+/// Tokens generated per prompt by `surgeon eval`, on the CLI and over MCP.
+pub const DEFAULT_MAX_NEW_TOKENS: u32 = 256;
+
 pub use command::{CommandOutput, CommandRunner, StreamControl, SystemCommandRunner};
 pub use error::{EvalError, Result};
 pub(crate) use generator::find_binary;

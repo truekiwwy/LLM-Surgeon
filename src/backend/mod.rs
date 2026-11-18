@@ -20,7 +20,7 @@ pub mod hipfire;
 pub mod mistralrs;
 
 pub use config::{
-    load_from, load_user_config, resolve, save_to, user_config_path, BackendConfig,
+    load_from, load_user_config, models_dir, resolve, save_to, user_config_path, BackendConfig,
     CONFIG_PATH_ENV, NO_USER_CONFIG_ENV,
 };
 pub use detect::{detect_hardware_and_backends, BackendReport, GpuDevice};

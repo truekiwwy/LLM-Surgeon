@@ -32,6 +32,10 @@ pub trait ToolHost {
     fn project_dir(&self) -> PathBuf;
     fn copies_dir(&self) -> PathBuf;
     fn source(&self) -> Option<PathBuf>;
+    /// The configured models folder, read only.
+    fn models_dir(&self) -> Option<PathBuf> {
+        weight_surgeon::backend::models_dir()
+    }
     /// The job manager's guard for a job of this tool and these arguments.
     fn guard(&self, tool: &str, args: &Value) -> Result<(), String>;
     fn submit(&mut self, spec: JobSpec) -> Result<String, String>;
@@ -965,9 +969,13 @@ impl Session {
 
     fn system_prompt(&self) -> String {
         let mode = match self.settings.mode {
-            AgentMode::Ask => "Demander (lecture seule : check, inspect, graph, bench sur copies)",
+            AgentMode::Ask => {
+                "Demander (lecture seule : check, inspect, graph, autotune sans out, bench sur \
+                 copies, lecture de fichiers ; décris les écritures au lieu de les tenter)"
+            }
             AgentMode::Modify => {
-                "Modifier (écritures sur les copies de travail, chacune approuvée)"
+                "Modifier (tu enchaînes toi-même les écritures sur les copies de travail ; quand \
+                 une approbation est requise, le studio l'affiche et l'appel attend la décision)"
             }
         };
         format!(
@@ -976,8 +984,9 @@ impl Session {
              moteur ; chaque appel devient un run du projet (identifiant r…), journalisé.\n\
              Règles :\n\
              - Le modèle d'origine n'est jamais écrit : travaille sur la copie de travail \
-             (working_copy_path ci-dessous). Chemins limités au dossier du projet et à celui \
-             du modèle.\n\
+             (working_copy_path ci-dessous). Chemins limités au dossier du projet, à celui \
+             du modèle et au dossier des modèles configuré (ces deux derniers en lecture \
+             seule).\n\
              - La politique d'approbation est appliquée par le studio, pas par toi : un refus \
              ou une interdiction est définitif pour cet appel. La promotion d'un résultat vers \
              le modèle d'origine ou un export est une action humaine.\n\
@@ -1080,6 +1089,7 @@ fn scope<'a>(
         project_dir: project,
         copies_dir: host.copies_dir(),
         source: host.source(),
+        models_dir: host.models_dir(),
         guard,
     }
 }

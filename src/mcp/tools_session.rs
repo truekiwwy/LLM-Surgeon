@@ -198,7 +198,7 @@ pub(super) fn call(
 /// (envelope and text); nothing outside a project, for the studio tools, or when the journal
 /// cannot be written (the call itself already succeeded).
 pub(super) fn stamp(ctx: &ToolContext, tool: &str, started_unix: u64, result: &mut Value) {
-    if NAMES.contains(&tool) {
+    if NAMES.contains(&tool) || tool == super::tools_files::TOOL_FILES {
         return;
     }
     let Some(run_id) = journal(ctx, tool, started_unix, &result["structuredContent"]) else {

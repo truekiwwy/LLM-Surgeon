@@ -107,11 +107,12 @@ pub use method::{
     MethodOutput, SubspaceFit, DEFAULT_LEACE_RCOND, DEFAULT_LEACE_SHRINKAGE, MIN_HOLDOUT_PER_CLASS,
 };
 pub use output::{
-    check_output, companion_path, encode, encode_shaped, encode_tensors, leace_path, sidecar_path,
-    write_atomic, write_files_atomic, write_pair_atomic, TENSOR_NAME,
+    check_output, companion_path, encode, encode_shaped, encode_tensors, ensure_parent, leace_path,
+    sidecar_path, write_atomic, write_files_atomic, write_pair_atomic, TENSOR_NAME,
 };
 pub use prompts::{
-    check_texts, load_prompt_texts, load_tokenizer, tokenize, ChatTemplate, Tokenized,
+    check_texts, load_prompt_texts, load_tokenizer, model_folder, tokenize, ChatTemplate,
+    PromptFormat, Tokenized,
 };
 pub use stats::{
     mean_diff_direction, separation, separation_along, separation_with_projections, Separation,
@@ -132,6 +133,9 @@ use crate::plugin::{
 
 /// Fewer prompts per set make the mean, and so the direction, noisy.
 pub const MIN_RECOMMENDED_PROMPTS: usize = 8;
+/// Defaults of the CLI and of the MCP tool.
+pub const DEFAULT_LAYER: usize = 20;
+pub const DEFAULT_MAX_TOKENS: usize = 512;
 
 #[derive(
     Debug,
@@ -477,13 +481,16 @@ fn run_pipeline(
     }
 
     let tokenizer = load_tokenizer(&req.model_dir)?;
+    let format = req
+        .chat_template
+        .resolve(&req.model_dir, ChatTemplate::NoTemplate);
     let mut truncated = 0;
     let mut encode_set = |set: PromptSet, prompts: &[String]| -> Result<Vec<Vec<u32>>> {
         prompts
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let t = tokenize(&tokenizer, &req.chat_template.apply(p), req.max_tokens)?;
+                let t = tokenize(&tokenizer, &format.apply(p), req.max_tokens)?;
                 if t.ids.is_empty() {
                     return Err(ExtractError::Prompts {
                         set: set.as_str().into(),
@@ -583,7 +590,19 @@ fn run_pipeline(
     if observer.on_event(ExtractEvent::Writing).is_break() {
         return Err(ExtractError::Cancelled);
     }
-    let mut metadata = file_metadata(req, &cfg, &dtype_used, pos.len(), neg.len(), &stats);
+    let mut metadata = file_metadata(
+        req,
+        format.template,
+        &cfg,
+        &dtype_used,
+        pos.len(),
+        neg.len(),
+        &stats,
+    );
+    // Autotune replays the exact wrapping of the extraction from these two keys.
+    if let Some(system) = &format.system {
+        metadata.insert("chat_system".into(), system.clone());
+    }
     let method_meta = method_metadata(method.id(), &out.metadata)?;
     merge_metadata(&mut metadata, &method_meta)?;
     let method_diagnostics = out.diagnostics.map(|d| match d {
@@ -842,6 +861,7 @@ fn sidecar_header(
 
 fn file_metadata(
     req: &ExtractRequest,
+    template: ChatTemplate,
     cfg: &Qwen2Config,
     dtype_used: &str,
     n_pos: usize,
@@ -855,7 +875,7 @@ fn file_metadata(
         ("layer", req.layer.to_string()),
         ("site", req.site.as_str().into()),
         ("pooling", req.pooling.as_str().into()),
-        ("chat_template", req.chat_template.as_str().into()),
+        ("chat_template", template.as_str().into()),
         ("n_pos", n_pos.to_string()),
         ("n_neg", n_neg.to_string()),
         ("raw_diff_norm", stats.raw_diff_norm.to_string()),

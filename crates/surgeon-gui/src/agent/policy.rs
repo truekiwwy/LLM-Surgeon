@@ -8,7 +8,8 @@
 //!   (human only), and in "Ask" mode every tool that is not a read.
 //! - Approval: in "Modify" mode, every write, external program (llama.cpp) or job not
 //!   proven read-only. Destructive ones (in-place apply, LoRA merge, restore, pipeline
-//!   cancel) can never be allowed "always".
+//!   cancel) can never be allowed "always". A working file (`surgeon_files`, confined to
+//!   `work/` by the engine) touches no model and needs none.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -45,6 +46,8 @@ pub struct Scope<'a> {
     pub copies_dir: PathBuf,
     /// The source model (file or folder).
     pub source: Option<PathBuf>,
+    /// The configured models folder, read only.
+    pub models_dir: Option<PathBuf>,
     /// The job manager's own guard (`Manager::check`): origin never written, in-place tools
     /// on copies only, pipeline budgets.
     pub guard: &'a dyn Fn(&str, &Value) -> Result<(), String>,
@@ -59,6 +62,7 @@ impl Scope<'_> {
                 false => s.parent().unwrap_or(s),
             }));
         }
+        roots.extend(self.models_dir.iter().map(|d| canonical(d)));
         roots
     }
 
@@ -87,7 +91,7 @@ pub fn classify(tool: &str, args: &Value, mode: AgentMode, scope: &Scope) -> Dec
         return Decision::Forbidden("arguments illisibles (objet JSON attendu)".into());
     }
     let roots = scope.roots();
-    for s in strings(args) {
+    for s in path_candidates(args) {
         if looks_like_path(s) {
             let p = scope.resolve(s);
             if !roots.iter().any(|r| p.starts_with(r)) {
@@ -122,7 +126,7 @@ pub fn classify(tool: &str, args: &Value, mode: AgentMode, scope: &Scope) -> Dec
     }
     let effect = effect(tool, args);
     match (mode, &effect) {
-        (AgentMode::Modify, Effect::Read) => Decision::Safe,
+        (AgentMode::Modify, Effect::Read | Effect::WorkFile) => Decision::Safe,
         (AgentMode::Ask, Effect::Read) => {
             let on_copy = |key: &str| {
                 args[key]
@@ -150,6 +154,8 @@ pub fn classify(tool: &str, args: &Value, mode: AgentMode, scope: &Scope) -> Dec
 
 enum Effect {
     Read,
+    /// A text file under `work/`.
+    WorkFile,
     Write(Vec<String>),
     Destructive(Vec<String>),
 }
@@ -158,6 +164,7 @@ impl Effect {
     fn reasons(&self) -> Vec<String> {
         match self {
             Self::Read => Vec::new(),
+            Self::WorkFile => vec!["écrit un fichier de travail".into()],
             Self::Write(r) | Self::Destructive(r) => r.clone(),
         }
     }
@@ -171,6 +178,8 @@ fn effect(tool: &str, args: &Value) -> Effect {
     let writes = "écrit dans le projet".to_owned();
     match tool {
         "surgeon_check" | "surgeon_inspect" | "surgeon_backends" => Effect::Read,
+        "surgeon_files" if args["action"] == "write" => Effect::WorkFile,
+        "surgeon_files" => Effect::Read,
         "surgeon_graph" if !has("out_dir") && !has("cache_dir") => Effect::Read,
         "surgeon_bench"
             if args
@@ -211,6 +220,28 @@ fn effect(tool: &str, args: &Value) -> Effect {
         },
         _ => Effect::Write(vec![writes]),
     }
+}
+
+/// Arguments that hold text rather than paths: a prompt may well contain `1/2` or `a: b`.
+const FREE_TEXT: [&str; 5] = [
+    "content",
+    "prompt_template",
+    "pos_prompts",
+    "neg_prompts",
+    "eval_prompts",
+];
+
+/// The strings of the arguments that may name a file (`prompts` is one for `surgeon_bench`,
+/// and a list of texts for `surgeon_eval`).
+fn path_candidates(args: &Value) -> Vec<&str> {
+    args.as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, value)| {
+            !FREE_TEXT.contains(&key.as_str()) && !(*key == "prompts" && value.is_array())
+        })
+        .flat_map(|(_, value)| strings(value))
+        .collect()
 }
 
 /// Every string in a JSON value.

@@ -389,20 +389,24 @@ pub struct AutotuneArgs {
     #[arg(long)]
     pub target_projection: Option<f64>,
     /// Ridge λ > 0, or auto (LOOCV over 1e-6..1e2).
-    #[arg(long, default_value = "1e-3")]
+    #[arg(long, default_value = crate::patch::autotune::DEFAULT_L2_REG)]
     pub l2_reg: crate::patch::autotune::L2Reg,
-    /// Finite-difference step δ of the response measure.
-    #[arg(long, default_value_t = 0.05)]
+    /// Finite-difference step δ of the response measure (unit of alpha).
+    #[arg(long, default_value_t = crate::patch::autotune::DEFAULT_PROBE_ALPHA)]
     pub probe_alpha: f64,
-    #[arg(long, default_value_t = 1.0)]
+    /// Bound on |alpha|, the coefficient of W -= alpha·v.
+    #[arg(long, default_value_t = crate::patch::autotune::DEFAULT_ALPHA_MAX)]
     pub alpha_max: f64,
+    /// Bound per layer on ‖ΔW‖/‖W‖ (Frobenius norms), e.g. 0.01 for 1 %.
+    #[arg(long)]
+    pub max_delta_norm_ratio: Option<f64>,
     /// Coefficients smaller than this are dropped.
-    #[arg(long, default_value_t = 1e-4)]
+    #[arg(long, default_value_t = crate::patch::autotune::DEFAULT_MIN_ALPHA)]
     pub min_alpha: f64,
     /// Refuses the run, before any computation, above this many forwards.
-    #[arg(long, default_value_t = 2000)]
+    #[arg(long, default_value_t = crate::patch::autotune::DEFAULT_MAX_FORWARDS)]
     pub max_forwards: usize,
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = crate::patch::autotune::DEFAULT_MAX_TOKENS)]
     pub max_tokens: usize,
     #[arg(long, value_enum, default_value_t = DTypeChoice::Auto)]
     pub dtype: DTypeChoice,
@@ -546,6 +550,9 @@ pub struct BenchEvalArgs {
     /// Template with {question}, or @FILE.
     #[arg(long)]
     pub prompt_template: Option<String>,
+    /// Wrapping of the rendered template: auto follows the model (raw if it declares nothing).
+    #[arg(long, value_enum, default_value_t = ChatTemplate::Auto)]
+    pub chat_template: ChatTemplate,
     #[arg(long, value_enum, default_value_t = crate::bench::dataset::DatasetFormat::Auto)]
     pub format: crate::bench::dataset::DatasetFormat,
     #[arg(long, env = "LLAMA_CPP_DIR")]
@@ -646,6 +653,9 @@ pub struct BenchDumpArgs {
     /// Output .safetensors (tensors `logits` and `prompt_offsets`).
     #[arg(long)]
     pub out: PathBuf,
+    /// Wrapping of each prompt: auto follows the model (raw if it declares nothing).
+    #[arg(long, value_enum, default_value_t = ChatTemplate::Auto)]
+    pub chat_template: ChatTemplate,
     #[arg(long, value_enum, default_value_t = DTypeChoice::Auto)]
     pub dtype: DTypeChoice,
     #[arg(long, value_enum, default_value_t = crate::bench::dump::OutDtype::F32)]
@@ -674,8 +684,8 @@ pub struct BenchRefusalArgs {
     pub baseline_model: Option<PathBuf>,
     #[arg(long, default_value_t = crate::bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS)]
     pub max_new_tokens: u32,
-    /// Wrapping of each prompt before generation.
-    #[arg(long, value_enum, default_value_t = ChatTemplate::Chatml)]
+    /// Wrapping of each prompt: auto follows the model (ChatML if it declares nothing).
+    #[arg(long, value_enum, default_value_t = ChatTemplate::Auto)]
     pub chat_template: ChatTemplate,
     /// Verdict: rules (refusal markers), llm (markers and a judge model) or both (plus
     /// their agreement).
@@ -832,8 +842,8 @@ pub struct ApplyArgs {
     pub surgery: crate::surgery::cli_args::SurgeryApplyArgs,
 }
 
-/// `surgeon restore` (`patch::restore`). Without `--backup` nor `--from-origin`: the newest
-/// `<name>.bak-*` of each backed up file of the model.
+/// `surgeon restore` (`patch::restore`). Without `--backup` nor `--from-origin`: the state
+/// before the last `apply`, from its checkpoint of `<name>.bak-*` files.
 #[derive(Debug, Clone, Args)]
 pub struct RestoreArgs {
     /// File or folder to put back.
@@ -856,7 +866,7 @@ pub struct EvalArgs {
     pub model: PathBuf,
     #[arg(long)]
     pub prompts: PathBuf,
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = crate::eval::DEFAULT_MAX_NEW_TOKENS)]
     pub max_new_tokens: u32,
     #[arg(long)]
     pub export_gguf: Option<PathBuf>,
@@ -881,7 +891,7 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub neg_prompts: PathBuf,
     /// 0-based layer; must be < num_hidden_layers.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = crate::extract::DEFAULT_LAYER)]
     pub layer: usize,
     /// Output .safetensors (one 1D F32 tensor named `direction`).
     #[arg(long)]
@@ -890,10 +900,11 @@ pub struct ExtractArgs {
     pub pooling: Pooling,
     #[arg(long, value_enum, default_value_t = Site::ResidPost)]
     pub site: Site,
-    #[arg(long, value_enum, default_value_t = ChatTemplate::NoTemplate)]
+    /// Wrapping of each prompt: auto follows the model (raw if it declares nothing).
+    #[arg(long, value_enum, default_value_t = ChatTemplate::Auto)]
     pub chat_template: ChatTemplate,
     /// Prompts are truncated on the right beyond this many tokens.
-    #[arg(long, default_value_t = 512)]
+    #[arg(long, default_value_t = crate::extract::DEFAULT_MAX_TOKENS)]
     pub max_tokens: usize,
     #[arg(long, value_enum, default_value_t = DTypeChoice::Auto)]
     pub dtype: DTypeChoice,

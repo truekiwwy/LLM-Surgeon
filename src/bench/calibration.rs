@@ -37,13 +37,7 @@ const UNPARSABLE: &str = "unparsable";
 const BINARY: [&str; 3] = ["positive", "negative", UNPARSABLE];
 
 fn check_out(out: &Path, overwrite: bool) -> Result<()> {
-    let parent = match out.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    if !parent.is_dir() {
-        return Err(BenchError::input(out, "dossier de sortie inexistant"));
-    }
+    crate::extract::ensure_parent(out).map_err(|e| BenchError::input(out, e))?;
     if out.exists() && !overwrite {
         return Err(BenchError::OutputExists(out.to_path_buf()));
     }

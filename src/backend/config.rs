@@ -62,6 +62,11 @@ pub struct BackendConfig {
         description = "Type des matrices du GGUF temporaire : f16 (défaut) ou f32 (sans perte depuis bf16)."
     )]
     pub gguf_dtype: Option<WeightType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Dossier des modèles : surgeon-gui le donne en lecture seule à ses agents."
+    )]
+    pub models_dir: Option<PathBuf>,
 }
 
 impl BackendConfig {
@@ -77,6 +82,7 @@ impl BackendConfig {
             hipfire_bin: self.hipfire_bin.or(base.hipfire_bin),
             hipfire_url: self.hipfire_url.or(base.hipfire_url),
             gguf_dtype: self.gguf_dtype.or(base.gguf_dtype),
+            models_dir: self.models_dir.or(base.models_dir),
         }
     }
 
@@ -144,6 +150,14 @@ pub fn load_user_config() -> Result<BackendConfig, String> {
         Some(path) => load_from(&path),
         None => Ok(BackendConfig::default()),
     }
+}
+
+/// The configured models folder, when it exists: a missing read root would stop the server.
+pub fn models_dir() -> Option<PathBuf> {
+    load_user_config()
+        .ok()?
+        .models_dir
+        .filter(|dir| dir.is_dir())
 }
 
 /// A user file; absent, it is the empty configuration.
@@ -242,6 +256,7 @@ pub fn parse_toml(text: &str) -> Result<BackendConfig, String> {
             "mistralrs_dir" => config.mistralrs_dir = Some(text(value)?.into()),
             "mistralrs_bin" => config.mistralrs_bin = Some(text(value)?.into()),
             "hipfire_bin" => config.hipfire_bin = Some(text(value)?.into()),
+            "models_dir" => config.models_dir = Some(text(value)?.into()),
             "hipfire_url" => config.hipfire_url = Some(text(value)?),
             "gpu_layers" => {
                 config.gpu_layers = Some(
@@ -277,6 +292,7 @@ pub fn to_toml(config: &BackendConfig) -> String {
         ("mistralrs_dir", &config.mistralrs_dir),
         ("mistralrs_bin", &config.mistralrs_bin),
         ("hipfire_bin", &config.hipfire_bin),
+        ("models_dir", &config.models_dir),
     ] {
         if let Some(path) = path {
             put(key, quoted(&path.to_string_lossy()));
@@ -312,6 +328,7 @@ mod tests {
             hipfire_bin: Some("/opt/hipfire/hipfire".into()),
             hipfire_url: Some("http://127.0.0.1:11435".into()),
             gguf_dtype: Some(WeightType::F32),
+            models_dir: Some(r"C:\models".into()),
         }
     }
 

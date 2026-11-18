@@ -43,6 +43,7 @@ mod sandbox;
 mod server;
 mod tools;
 mod tools_backend;
+mod tools_files;
 mod tools_graph;
 mod tools_p13;
 mod tools_pipeline;
@@ -62,6 +63,7 @@ pub use tools::{
     BenchToolArgs, CheckToolArgs, EvalToolArgs, ExtractToolArgs, InspectToolArgs, MethodId,
     TOOL_APPLY, TOOL_AUTOTUNE, TOOL_BENCH, TOOL_CHECK, TOOL_EVAL, TOOL_EXTRACT, TOOL_INSPECT,
 };
+pub use tools_files::TOOL_FILES;
 pub use tools_pipeline::PipelineJobs;
 
 use crate::app::{exit, AppDeps, ProgressSink};

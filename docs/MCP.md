@@ -19,7 +19,7 @@ surgeon mcp --allow-dir /projet --allow-read /modeles/origine
 | --- | --- |
 | `--allow-dir <dossier>` | Dossier autorisé, répétable. Défaut : `$SURGEON_MCP_ALLOW_DIRS` (séparateur du système : `;` sous Windows, `:` ailleurs), sinon le dossier courant. |
 | `--allow-read <chemin>` | Dossier ou fichier lisible mais jamais écrit (le modèle d'origine), répétable. Les chemins que les outils d'analyse et de mesure lisent y sont acceptés : `model` de `surgeon_check`, `surgeon_inspect`, `surgeon_eval`, `surgeon_extract`, `surgeon_autotune`, `surgeon_graph` ; `baseline` et `vector` de `surgeon_graph` ; les modèles, jeux, textes, `responses`, `labels` et `baseline_model` de `surgeon_bench` ; `from_origin`, `backup` et `backup_dir` de `surgeon_restore` ; les fichiers de prompts, d'étiquettes et `arch_spec`. Tout chemin écrit ou exécuté (`out`, `out_dir`, `cache_dir`, `export_gguf`, `backup_dir` de `surgeon_apply`, `judge_cache`, `llama_cpp_dir`), le `model` de `surgeon_restore`, tout `surgeon_apply`, `surgeon_diff`, `surgeon_lora` et `surgeon_pipeline` restent limités à `--allow-dir` (`error.kind = "path_not_allowed"`, message « dossier en lecture seule »). |
-| `--read-only` | Refuse `surgeon_apply`, `surgeon_restore`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en modes `dump` et `judge_sample` (et `judge_eval` avec `out`), `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora` (les deux modes), `surgeon_graph` avec `out_dir` ou `cache_dir` et les actions `start`, `cancel`, `promote_patch` de `surgeon_pipeline` (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out` et `surgeon_graph` sans sortie restent permis. |
+| `--read-only` | Refuse `surgeon_apply` (sauf `dry_run`), `surgeon_restore`, l'action `write` de `surgeon_files`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en modes `dump` et `judge_sample` (et `judge_eval` avec `out`), `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora` (les deux modes), `surgeon_graph` avec `out_dir` ou `cache_dir` et les actions `start`, `cancel`, `promote_patch` de `surgeon_pipeline` (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out` et `surgeon_graph` sans sortie restent permis. |
 | `--allow-no-backup` | Respecte `backup: false` dans un patch. Sans cette option, la sauvegarde est imposée. |
 
 `$LLAMA_CPP_DIR`, défini par l'opérateur, sert de dossier llama.cpp par défaut pour
@@ -51,6 +51,7 @@ Claude Code, en plugin : le dossier [`plugin/`](../plugin) déclare le même ser
 | `surgeon_inspect` | Couches et matrices MLP (et `o_proj`, `embed_tokens` sur demande), statistiques en option, `max_tensors` (défaut 500), architecture détectée (`data.arch`), `arch_spec` | lecture seule |
 | `surgeon_apply` | Applique un patch en place (`dry_run` pour vérifier d'abord) ; `gguf: true` pour un GGUF quantifié | destructif |
 | `surgeon_restore` | Remet un modèle octet pour octet depuis les sauvegardes de `surgeon_apply` ou depuis le modèle d'origine (`from_origin`), SHA-256 avant et après ([rollback](#rollback-surgeon_restore)) | destructif, idempotent |
+| `surgeon_files` | Fichiers de travail d'un agent : `list`, `read` dans les dossiers autorisés, `write` de fichiers texte sous `work/` ([détail](#fichiers-de-travail-surgeon_files)) | écrit sous `work/` seulement |
 | `surgeon_eval` | Non-régression (boucles, attentes) et export GGUF conditionnel | écrit le GGUF |
 | `surgeon_extract` | Vecteur de direction depuis une couche Qwen2 (Rust pur, CPU) | écrit le `.safetensors`, idempotent |
 | `surgeon_bench` | Mesure d'une chirurgie : `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal` ; calibration du juge : `judge_sample`, `judge_eval` | non destructif, idempotent |
@@ -150,9 +151,9 @@ est une erreur JSON-RPC `-32602` (les cinq autres outils la signalent en
 | --- | --- | --- |
 | `logits` | `before`, `after` | `tensor`, `top_k` (5), `worst` (5), `warn_kl`, `warn_top1_shift`, `fail_on_warn` |
 | `ppl` | `model`, `text` | `baseline_model` ou `baseline_ppl` (+ `baseline_ppl_err`), `ctx` (512), `chunks`, `threads`, `n_gpu_layers` (0), `llama_cpp_dir`, `warn_delta` (0.2), `timeout_secs`, `fail_on_warn` |
-| `eval` | `model`, `dataset` | `backend` (`llama`, `llama-completion`, `llama-server`, `mistralrs`, `hipfire`, `native`), `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn`, options de génération |
-| `refusal` | `model`, `prompts` (fichier) | `backend` (`native`, `llama-server`, `llama-completion`, `mistralrs`, `hipfire`), `baseline_model`, `max_new_tokens` (256), `chat_template` (`chatml`, `none`), `marker_langs`, `markers_file`, `judge` (`rules`, `llm`, `both`), `judge_model`, `judge_role` (`refusal`, `harm`), `judge_template`, `judge_cache`, `judge_calibration`, `min_calibration_n` (100), `min_kappa` (0.6), `partial_as_refusal`, `max_unparsable`, `llama_cpp_dir`, `timeout_secs`, `fail_on_warn`, options de génération |
-| `dump` | `model`, `prompts` (fichier), `out` | `dtype`, `out_dtype` (`f32`, `f16`), `max_tokens` (256), `max_total_positions` (4096), `overwrite` |
+| `eval` | `model`, `dataset` | `backend` (`llama`, `llama-completion`, `llama-server`, `mistralrs`, `hipfire`, `native`), `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `chat_template` (voir ci-dessous), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn`, options de génération |
+| `refusal` | `model`, `prompts` (fichier) | `backend` (`native`, `llama-server`, `llama-completion`, `mistralrs`, `hipfire`), `baseline_model`, `max_new_tokens` (256), `chat_template` (voir ci-dessous), `marker_langs`, `markers_file`, `judge` (`rules`, `llm`, `both`), `judge_model`, `judge_role` (`refusal`, `harm`), `judge_template`, `judge_cache`, `judge_calibration`, `min_calibration_n` (100), `min_kappa` (0.6), `partial_as_refusal`, `max_unparsable`, `llama_cpp_dir`, `timeout_secs`, `fail_on_warn`, options de génération |
+| `dump` | `model`, `prompts` (fichier), `out` | `chat_template`, `dtype`, `out_dtype` (`f32`, `f16`), `max_tokens` (256), `max_total_positions` (4096), `overwrite` |
 | `judge_sample` | `responses` (sortie JSON d'un `refusal`), `prompts` (ceux de ce run), `out` | `n` (100), `seed` (42), `overwrite` |
 | `judge_eval` | `labels` (l'échantillon étiqueté), `judge_model` | `judge_role`, `judge_template`, `judge_cache`, `partial_as_refusal`, `marker_langs`, `markers_file`, `llama_cpp_dir`, `timeout_secs`, `out` (fichier de calibration), `overwrite` |
 
@@ -222,6 +223,18 @@ Recette d'un agent :
 {"name": "surgeon_bench", "arguments": {"mode": "logits", "before": "before.safetensors", "after": "after.safetensors", "warn_kl": 0.05}}
 ```
 
+### Gabarit de chat (`chat_template`)
+
+`surgeon_extract`, `surgeon_autotune` et `surgeon_bench` (`eval`, `dump`, `refusal`) habillent
+les prompts de la même façon, CLI et MCP. `auto` (défaut) suit le modèle : `chat_template` de
+`tokenizer_config.json`, `chat_template.jinja` ou métadonnée GGUF, sinon les jetons spéciaux de
+`tokenizer_config.json`. Faute de moteur Jinja, le gabarit désigne une famille (`chatml`,
+`llama3`, `inst`, `gemma`) dont les tours sont écrits par le moteur, avec le message système
+par défaut littéral d'un gabarit ChatML (Qwen). Un modèle qui ne déclare rien reste en texte brut,
+sauf `refusal` qui garde ChatML. `none` désactive l'habillage ; un prompt qui contient déjà les
+tours de la famille n'est jamais habillé deux fois. Le vecteur extrait garde le format
+(`chat_template`, `chat_system`), que `surgeon_autotune` rejoue.
+
 ## Rollback (`surgeon_restore`)
 
 Remet un fichier ou un dossier modèle octet pour octet dans un état connu, comme
@@ -231,15 +244,21 @@ sous une racine `--allow-read`, même imbriquée dans un `--allow-dir`
 
 | Argument | Source |
 | --- | --- |
-| aucun | Pour chaque fichier, sa sauvegarde `<nom>.bak-*` la plus récente à côté du modèle : l'état d'avant le dernier `surgeon_apply`. |
+| aucun | Le dernier point de restauration à côté du modèle : l'état d'avant le dernier `surgeon_apply`. |
 | `backup_dir` | Idem, dans le `backup_dir` passé à `surgeon_apply`. |
 | `backup` | Les sauvegardes nommées, par exemple `data.backups` d'un `surgeon_apply`. |
-| `from_origin` | Le modèle d'origine (fichier ou dossier, lisible en `--allow-read`) : chacun de ses fichiers est recopié sur `model`. |
+| `from_origin` | Le modèle d'origine (dossier, ou fichier de poids recopié sous son nom dans un dossier `model` ; lisible en `--allow-read`) : chacun de ses fichiers est recopié sur `model`. |
 
-Dans un dossier où un fichier a plusieurs sauvegardes (plusieurs `surgeon_apply`), la
-détection refuse (`error.kind = "ambiguous_backup"`) plutôt que de mélanger deux états :
-passer `backup` ou `from_origin`. Les sources ne sont jamais modifiées ni supprimées ; un
-fichier déjà identique à sa source n'est pas réécrit. `data` : `mode` (`backup`, `origin`),
+Toutes les sauvegardes d'un même `surgeon_apply` partagent un point de restauration
+(`<nom>.bak-<secondes>-<n>`) plus récent que tout ce que contient le dossier : sans argument,
+l'outil revient exactement à l'état d'avant le dernier apply, quel que soit leur nombre, et un
+nouvel appel ne remonte pas plus loin. Un `surgeon_apply` lancé alors que le modèle est déjà
+dans l'état du dernier point de restauration le réutilise (`data.backups` le cite) au lieu de
+recopier les poids. Dans un dossier d'une version antérieure, un seul fichier sauvegardé reprend
+sa sauvegarde la plus récente ; plusieurs fichiers, que rien ne relie, reviennent tous à l'état
+d'avant le premier apply, avec un avertissement. Les sources ne sont jamais modifiées ni
+supprimées ; un fichier déjà identique à sa source n'est pas réécrit. `data` : `mode`
+(`backup`, `origin`), `checkpoint` (détection : `last_apply`, `first_apply`),
 `model`, `files` (`path`, `source`, `sha256_before`, `sha256_source`, `sha256_after`,
 `rewritten`), `identical`. L'outil échoue (`exit_code` 3) si un `sha256_after` diffère de
 son `sha256_source`. `--read-only` le refuse.
@@ -252,6 +271,20 @@ Cycle complet, régression comprise :
 {"name": "surgeon_restore", "arguments": {"model": "copies/c1"}}
 {"name": "surgeon_restore", "arguments": {"model": "copies/c1", "from_origin": "/models/qwen2"}}
 ```
+
+## Fichiers de travail (`surgeon_files`)
+
+Pour un agent qui n'a pas d'outils de fichiers (Claude Code et Codex lancés par le studio,
+sessions API). `action` :
+
+| Action | Arguments | Effet |
+| --- | --- | --- |
+| `list` | `path` (défaut : le premier `--allow-dir`) | Entrées d'un dossier autorisé, `--allow-read` compris ; `model: true` sur un dossier de modèle. `data` donne aussi `work_dir`, `writable_roots`, `read_only_roots`. |
+| `read` | `path` | Fichier texte UTF-8, 1 Mio au plus (`data.truncated`). |
+| `write` | `path`, `content`, `append`, `overwrite` | Écrit sous `<premier --allow-dir>/work/` ; `data.path` est le chemin absolu à passer aux autres outils. Extensions : `.jsonl .json .txt .md .csv .tsv .py .ps1 .sh .js .toml .yaml .yml .tmpl .jinja`. |
+
+Hors de `work/`, l'écriture est refusée (`error.kind = "path_not_allowed"`) : ni poids, ni
+copie de travail, ni journal du projet. `--read-only` refuse `write`.
 
 ## Méthodes d'extraction, `project_out` et `surgeon_autotune`
 
@@ -343,12 +376,15 @@ est refusé avant toute écriture.
 jeu intégré `builtin:math|logic|general|refusals`, comme `surgeon autotune --eval-dataset`, ou
 `eval_prompts` : les prompts en ligne, chaînes ou `{text, target?}` ; `target_layer_range` "A-B",
 `readout_layer`, `proj`, `objective` `suppress`/`amplify`/`target`, `target_projection`,
-`l2_reg` nombre ou "auto", `probe_alpha`, `alpha_max`, `min_alpha`, `max_forwards`,
-`max_tokens`, `dtype`, `site`, `pooling`, `chat_template`, `out`, `overwrite`) mesure en
+`l2_reg` nombre ou "auto", `probe_alpha`, `alpha_max`, `max_delta_norm_ratio`,
+`min_alpha`, `max_forwards`, `max_tokens`, `dtype`, `site`, `pooling`, `chat_template`, `out`, `overwrite`) mesure en
 mémoire la réponse de la projection lue à la couche de lecture quand chaque couche candidate
 est décalée, ajuste les α par ridge (λ fixe ou LOOCV), applique tous les α ensemble pour
 vérifier, et renvoie le patch dans `data.patch` (écrit dans `out` seulement si fourni,
-validé par `validate_patch` avant). Les couches au-delà de la lecture sont exclues avec un
+validé par `validate_patch` avant). `probe_alpha`, `alpha_max` et les α sont les coefficients
+de `W ∓= α·v` ; `target_projection` et les décalages rapportés sont des projections
+d'activation ; `data.alphas[].delta_norm_ratio` donne `‖ΔW‖_F / ‖W‖_F` par couche, que
+`max_delta_norm_ratio` borne (0.01 pour 1 %). Les couches au-delà de la lecture sont exclues avec un
 avertissement ; `max_forwards` est vérifié avant tout calcul. Il ne mesure pas les effets
 secondaires : enchaîner avec `surgeon_bench` sur une copie.
 

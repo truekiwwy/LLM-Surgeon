@@ -1,8 +1,8 @@
 //! What a session is for, chosen when it starts and kept with its conversation:
 //! `Advance` (the agent scans the whole model and finds the problems itself) or `Scalping`
 //! (the user names a precise symptom and the agent goes straight to the likely tensors).
-//! The brief goes to the agent with the system prompt; the approval policy is unchanged:
-//! the scan only reads, every write is a card the user approves.
+//! The brief goes to the agent with the system prompt; the approval policy is unchanged and
+//! applied by the studio, so a brief never asks the agent to stop and wait for a validation.
 
 use serde::{Deserialize, Serialize};
 
@@ -34,8 +34,12 @@ impl Symptom {
             Symptom::Refusals => "builtin:refusals (surgeon_bench mode refusal)",
             Symptom::Reasoning => "builtin:math puis builtin:logic (surgeon_bench mode eval)",
             Symptom::Hallucination => "builtin:general (surgeon_bench mode eval)",
-            Symptom::Repetition | Symptom::Language | Symptom::Other => {
-                "builtin:general (surgeon_bench mode eval, en lisant les générations)"
+            Symptom::Repetition => {
+                "builtin:general (surgeon_bench mode eval, champ loop_detected de chaque item)"
+            }
+            Symptom::Language | Symptom::Other => {
+                "builtin:general (surgeon_bench mode eval), ou un jeu adapté écrit dans work_dir \
+                 avec surgeon_files"
             }
         }
     }
@@ -62,7 +66,10 @@ impl Symptom {
                 "raisonnement et calcul : couches MLP du milieu, écart à une référence si le \
                  projet en a une ; mesure avec surgeon_bench (eval)"
             }
-            Symptom::Other => "autre : déduis les composants probables de la description",
+            Symptom::Other => {
+                "autre : déduis les composants probables de la description et construis le jeu \
+                 de mesure qui la reproduit"
+            }
         }
     }
 }
@@ -91,8 +98,10 @@ impl Mission {
                  problème, les tenseurs en cause, la mesure (record_finding avec run_id et \
                  valeur exacte) et la correction que tu proposes. Montre le plus grave avec \
                  show_in_3d.\n\
-                 4. Ensuite seulement, propose les corrections une par une, chacune soumise \
-                 à l'approbation de l'utilisateur, et mesure avant et après."
+                 4. Ensuite seulement, traite les corrections une par une avec la chaîne de \
+                 correction, en mesurant avant et après ; restaure la copie si une mesure \
+                 régresse. L'approbation éventuelle passe par le studio : ne l'attends pas en \
+                 texte."
                 .into(),
             Mission::Scalping(symptom) => format!(
                 "Mission : scalping. L'utilisateur a signalé un problème précis ; sa \
@@ -101,8 +110,9 @@ impl Mission {
                  susceptibles de l'expliquer, mesure-les (surgeon_inspect, surgeon_graph \
                  limité à ces couches, surgeon_bench en lecture), confirme ou infirme \
                  l'hypothèse avec record_finding, montre la cible avec show_in_3d, puis \
-                 propose la correction la plus ciblée possible, soumise à approbation, et \
-                 mesure avant et après.",
+                 déroule la chaîne de correction la plus ciblée possible, en mesurant avant et \
+                 après et en restaurant la copie si une mesure régresse. L'approbation \
+                 éventuelle passe par le studio : ne l'attends pas en texte.",
                 symptom.lead(),
                 symptom.probe()
             ),

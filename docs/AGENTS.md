@@ -180,8 +180,8 @@ dépassement de budget.
 
 Rollback : le brief système (`agent/paths.rs`) dit à l'agent que, dès qu'une contre-mesure
 `surgeon_bench` montre une régression après un `surgeon_apply`, il dispose de
-`surgeon_restore` sur `working_copy_path` (dernière sauvegarde, sauvegardes nommées, ou
-`from_origin` = `origin_path`), et qu'il vérifie `data.identical` et les SHA-256 renvoyés.
+`surgeon_restore` sur `working_copy_path` (état d'avant le dernier apply, sauvegardes
+nommées, ou `from_origin` = `origin_path`), et qu'il vérifie `data.identical` et les SHA-256 renvoyés.
 Comme `surgeon_apply`, c'est un outil en place : seulement sur une copie de `copies/`, avec
 une carte d'approbation à chaque appel.
 
@@ -281,8 +281,8 @@ sinon la page donne la commande de connexion à copier (`claude auth login`, `co
 
 | | Lancement | Prompt | Outils |
 | --- | --- | --- | --- |
-| Claude Code | `claude -p --output-format stream-json --verbose --strict-mcp-config --mcp-config <fichier> --tools "" --allowedTools mcp__surgeon__… --permission-prompts none --no-session-persistence [--model]` | entrée standard | le seul serveur `surgeon`, outils intégrés désactivés |
-| Codex | `codex exec --json --ephemeral --skip-git-repo-check --sandbox read-only --cd <projet> --config approval_policy="never" --config mcp_servers.surgeon.… [--model] -` | entrée standard | le serveur `surgeon`, liste `enabled_tools` |
+| Claude Code | `claude -p --output-format stream-json --verbose --strict-mcp-config --mcp-config <fichier> --tools "" --allowedTools mcp__surgeon__… --permission-prompts none --no-session-persistence [--model]` | entrée standard | le seul serveur `surgeon`, outils intégrés désactivés ; fichiers de travail par `surgeon_files` |
+| Codex | `codex exec --json --ephemeral --skip-git-repo-check --sandbox read-only --cd <projet> --config approval_policy="never" --config mcp_servers.surgeon.… [--model] -` | entrée standard | le serveur `surgeon`, liste `enabled_tools` ; fichiers de travail par `surgeon_files` |
 | OpenCode | `opencode run --standalone --auto --format json --archived [--model]`, configuration en ligne `OPENCODE_CONFIG_CONTENT` (serveur `surgeon`, `external_directory: deny`), `OPENCODE_DISABLE_PROJECT_CONFIG=1` | entrée standard | ses outils natifs, dans le dossier du projet seulement, plus `surgeon` |
 | Antigravity | `agy --input-format stream-json --output-format stream-json [--model] -p=`, `USERPROFILE` et `HOME` sur le profil isolé | un message `{"event":"user",…}` sur l'entrée standard | ses outils natifs (`toolPermission: always-proceed`, projet de confiance), plus `surgeon` |
 
@@ -310,10 +310,12 @@ studio ne copie aucun jeton », décidée par l'utilisateur (D-36).
   d'un agent, script, Explorateur) ; la lecture reste libre. Aucune action approuvée n'écrit
   sur l'origine (la politique l'interdit), le verrou tient donc jusqu'à la fermeture du
   projet. L'état s'affiche sous la copie de travail (« Origine verrouillée (N fichier(s)) ») ;
-- le serveur `surgeon` : en mode Demander `--allow-dir <projet> --allow-dir <dossier du
-  modèle> --read-only` ; en mode Modifier `--allow-dir <projet>` seulement ;
-- pour Claude Code et Codex en plus, la liste d'outils (lecture seule en mode Demander, tout
-  sauf `surgeon_pipeline` en mode Modifier ; `record_finding`, `show_in_3d` et `update_plan`
+- le serveur `surgeon` : `--allow-dir <projet>`, `--allow-read` sur le modèle d'origine et sur
+  le `models_dir` de `config.toml` s'il existe, plus `--read-only` en mode Demander.
+  `surgeon_files` n'écrit que sous `work/` du projet ;
+- pour Claude Code et Codex en plus, la liste d'outils (lecture seule en mode Demander, avec
+  `surgeon_autotune` sans `out` et `surgeon_files` en lecture ; tout sauf `surgeon_pipeline` en
+  mode Modifier ; `record_finding`, `show_in_3d` et `update_plan`
   dans les deux modes).
 
 **Outils du studio sur MCP.** Le serveur `surgeon` sert aussi `record_finding`, `show_in_3d` et

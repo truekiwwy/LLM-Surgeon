@@ -1533,7 +1533,7 @@ fn mcp_full_session_is_pure_json_rpc() {
         .contains("sauvegarde"));
     assert_eq!(
         responses[1]["result"]["tools"].as_array().unwrap().len(),
-        16
+        17
     );
     let (is_error, env) = envelope(&responses, 3);
     assert!(!is_error, "{env}");
@@ -2168,6 +2168,7 @@ fn schema_tools_kind_equals_tools_list() {
             "surgeon_graph",
             "surgeon_backends",
             "surgeon_restore",
+            "surgeon_files",
             "record_finding",
             "show_in_3d",
             "update_plan"
@@ -2826,12 +2827,19 @@ fn extract_never_leaves_a_partial_or_clobbered_file() {
         "no output nor temporary: {names:?}"
     );
 
-    let (code, v) = run_args(&deps(), &f.args("missing/dir/out.safetensors", &[]));
+    // A missing output folder is created; a file in its place is refused.
+    let (code, v) = run_args(&deps(), &f.args("new/dir/out.safetensors", &[]));
+    assert_eq!(code, 0, "{v}");
+    assert!(f.dir.path().join("new/dir/out.safetensors").is_file());
+    let (code, v) = run_args(
+        &deps(),
+        &f.args("new/dir/out.safetensors/x.safetensors", &[]),
+    );
     assert_eq!(code, exit::INVALID_INPUT);
     assert!(v["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("inexistant"));
+        .contains("dossier de sortie"));
 
     let (code, _) = run_args(&deps(), &f.args("taken.safetensors", &["--overwrite"]));
     assert_eq!(code, 0, "--overwrite replaces it");
@@ -3101,7 +3109,7 @@ fn mcp_extract_tool_end_to_end() {
             .as_array()
             .unwrap()
             .len(),
-        16
+        17
     );
     let (is_error, env) = envelope(&responses, 2);
     assert!(!is_error, "{env}");
@@ -3172,6 +3180,16 @@ fn mcp_binary_extract_speaks_only_json_rpc() {
             .write_all(input.as_bytes())
             .unwrap();
     }
+    // Read while it runs: tools/list alone is larger than a pipe buffer.
+    fn drain(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            pipe.read_to_string(&mut text).unwrap();
+            text
+        })
+    }
+    let stdout = drain(child.stdout.take().unwrap());
+    let stderr = drain(child.stderr.take().unwrap());
     let started = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -3183,19 +3201,7 @@ fn mcp_binary_extract_speaks_only_json_rpc() {
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let (mut out, mut err) = (String::new(), String::new());
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut out)
-        .unwrap();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut err)
-        .unwrap();
+    let (out, err) = (stdout.join().unwrap(), stderr.join().unwrap());
     assert_eq!(status.code(), Some(0), "{err}");
     assert!(!out.contains('\x1b') && !err.contains('\x1b'));
     let responses: Vec<Value> = out
@@ -3207,7 +3213,7 @@ fn mcp_binary_extract_speaks_only_json_rpc() {
             .as_array()
             .unwrap()
             .len(),
-        16
+        17
     );
     assert!(!envelope(&responses, 2).0, "{out}");
     assert!(f.dir.path().join("bin.safetensors").exists());

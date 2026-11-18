@@ -144,10 +144,10 @@ fn tools_list(dir: &Path) -> Vec<Value> {
 // ------------------------------------------------------------------ tools/list and schemas
 
 #[test]
-fn tools_list_has_sixteen_tools_and_the_new_schemas_are_valid() {
+fn tools_list_has_seventeen_tools_and_the_new_schemas_are_valid() {
     let dir = tempfile::tempdir().unwrap();
     let tools = tools_list(dir.path());
-    assert_eq!(tools.len(), 16);
+    assert_eq!(tools.len(), 17);
     let by_name = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap();
     for name in ["surgeon_diff", "surgeon_lora"] {
         let tool = by_name(name);
@@ -265,6 +265,7 @@ fn schema_kind_tools_equals_tools_list_for_the_new_tools() {
             "surgeon_graph",
             "surgeon_backends",
             "surgeon_restore",
+            "surgeon_files",
             "record_finding",
             "show_in_3d",
             "update_plan"

@@ -19,8 +19,16 @@ pub fn companion_path(out: &Path) -> PathBuf {
     out.with_file_name(name)
 }
 
-/// Checked before any computation: an existing `--out` needs `--overwrite`, its directory
-/// must exist, and the engine only reads `.safetensors` directions.
+/// Creates the folder of an output file, so that a new `vectors/x.safetensors` just works.
+pub fn ensure_parent(out: &Path) -> std::io::Result<()> {
+    match out.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => std::fs::create_dir_all(dir),
+        _ => Ok(()),
+    }
+}
+
+/// Checked before any computation: an existing `--out` needs `--overwrite`, its folder is
+/// created, and the engine only reads `.safetensors` directions.
 pub fn check_output(out: &Path, overwrite: bool) -> Result<()> {
     let is_safetensors = out
         .extension()
@@ -31,16 +39,9 @@ pub fn check_output(out: &Path, overwrite: bool) -> Result<()> {
             out.display()
         )));
     }
-    let parent = match out.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    if !parent.is_dir() {
-        return Err(ExtractError::InvalidArgument(format!(
-            "dossier de sortie inexistant : {}",
-            parent.display()
-        )));
-    }
+    ensure_parent(out).map_err(|e| {
+        ExtractError::InvalidArgument(format!("dossier de sortie de {} : {e}", out.display()))
+    })?;
     if out.exists() && !overwrite {
         return Err(ExtractError::OutputExists(out.to_path_buf()));
     }
@@ -300,7 +301,10 @@ mod tests {
         assert_eq!(std::fs::read(&out).unwrap(), b"new");
         let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(leftovers, 1, "no temporary file left");
-        assert!(check_output(&dir.path().join("absent/d.safetensors"), false).is_err());
+        let nested = dir.path().join("absent/d.safetensors");
+        assert!(check_output(&nested, false).is_ok());
+        assert!(nested.parent().unwrap().is_dir(), "its folder is created");
+        assert!(check_output(&out.join("d.safetensors"), false).is_err());
         assert!(check_output(&dir.path().join("d.json"), false).is_err());
     }
 }

@@ -1369,7 +1369,7 @@
           "action": "Set",
           "aliases": null,
           "default_values": [
-            "none"
+            "auto"
           ],
           "env": null,
           "global": false,
@@ -1379,8 +1379,12 @@
           "num_args": "1",
           "positional": false,
           "possible_values": [
+            "auto",
             "none",
-            "chatml"
+            "chatml",
+            "llama3",
+            "inst",
+            "gemma"
           ],
           "required": false,
           "short": null,
@@ -3047,6 +3051,33 @@
               "env": null,
               "global": false,
               "hidden": false,
+              "id": "chat_template",
+              "long": "chat-template",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "auto",
+                "none",
+                "chatml",
+                "llama3",
+                "inst",
+                "gemma"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "CHAT_TEMPLATE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "auto"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
               "id": "format",
               "long": "format",
               "num_args": "1",
@@ -3607,6 +3638,33 @@
               "env": null,
               "global": false,
               "hidden": false,
+              "id": "chat_template",
+              "long": "chat-template",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "auto",
+                "none",
+                "chatml",
+                "llama3",
+                "inst",
+                "gemma"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "CHAT_TEMPLATE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "auto"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
               "id": "dtype",
               "long": "dtype",
               "num_args": "1",
@@ -3866,7 +3924,7 @@
               "action": "Set",
               "aliases": null,
               "default_values": [
-                "chatml"
+                "auto"
               ],
               "env": null,
               "global": false,
@@ -3876,8 +3934,12 @@
               "num_args": "1",
               "positional": false,
               "possible_values": [
+                "auto",
                 "none",
-                "chatml"
+                "chatml",
+                "llama3",
+                "inst",
+                "gemma"
               ],
               "required": false,
               "short": null,
@@ -5402,6 +5464,24 @@
         {
           "action": "Set",
           "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "max_delta_norm_ratio",
+          "long": "max-delta-norm-ratio",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "MAX_DELTA_NORM_RATIO"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
           "default_values": [
             "0.0001"
           ],
@@ -5537,8 +5617,12 @@
           "num_args": "1",
           "positional": false,
           "possible_values": [
+            "auto",
             "none",
-            "chatml"
+            "chatml",
+            "llama3",
+            "inst",
+            "gemma"
           ],
           "required": false,
           "short": null,

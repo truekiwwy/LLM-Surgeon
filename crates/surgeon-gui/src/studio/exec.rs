@@ -24,12 +24,13 @@ impl Executor for EngineExecutor {
         if spec.tool == COPY_TOOL {
             return working_copy(args, ctx, rec);
         }
-        // The source model is read only, as for the CLI runtimes (`--allow-read`): the
-        // engine itself refuses a write there, not only the policy.
+        // The source model and the models folder are read only, as for the CLI runtimes
+        // (`--allow-read`): the engine itself refuses a write there, not only the policy.
         let read: Vec<_> = ctx
             .source
             .iter()
             .map(|s| super::copy::model_root(&s.path).to_path_buf())
+            .chain(weight_surgeon::backend::models_dir())
             .collect();
         // allow_no_backup false: the apply backups are imposed, as over MCP.
         let cfg = McpConfig::new(

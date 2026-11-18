@@ -775,7 +775,7 @@ pub fn apply_gguf(
         true => None,
         false => {
             check_space(model, opts.backup_dir.as_deref(), gguf.file_len)?;
-            Some(BackupGuard::create(model, opts.backup_dir.as_deref())?)
+            Some(BackupGuard::checkpoint(model, opts.backup_dir.as_deref())?)
         }
     };
     let backup = guard.as_ref().map(|g| g.backup_path().to_path_buf());

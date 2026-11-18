@@ -3,7 +3,8 @@
 //! (`opencode run`) and Antigravity (`agy -p`), started non-interactively with `surgeon mcp`
 //! as their engine server. Their own loop and approvals are theirs, not the studio's.
 //!
-//! - Claude Code and Codex get `surgeon` as their only tool server and an explicit allow-list.
+//! - Claude Code and Codex get `surgeon` as their only tool server and an explicit allow-list;
+//!   their working files go through its `surgeon_files` tool, confined to `work/`.
 //! - OpenCode and Antigravity keep their own tools (terminal, files) so as not to limit the
 //!   model: OpenCode inside the project folder (`external_directory` denied), Antigravity in an
 //!   isolated profile that only knows `surgeon` (the user's global configuration is never read
@@ -55,12 +56,14 @@ const AGY_OPTIONS: [&str; 4] = ["--print", "--output-format", "--input-format", 
 /// The sign-in files of Antigravity, in `~/.gemini`, copied into its isolated profile.
 const AGY_SIGN_IN: [&str; 2] = ["oauth_creds.json", "google_accounts.json"];
 /// The engine tools an "Ask" runtime may call (its server also runs `--read-only`).
-const READ_TOOLS: [&str; 5] = [
+const READ_TOOLS: [&str; 7] = [
     "surgeon_check",
     "surgeon_inspect",
     "surgeon_graph",
     "surgeon_bench",
     "surgeon_backends",
+    "surgeon_autotune",
+    "surgeon_files",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -389,16 +392,16 @@ impl AgyHome {
     }
 }
 
-/// The `surgeon mcp` arguments for a mode: the project is read and written; the source
-/// model is read only (`--allow-read`), for paired before / after measures, in every mode.
-/// The server refuses any write there whatever the mode.
-pub fn mcp_args(mode: AgentMode, project: &Path, source_dir: Option<&Path>) -> Vec<String> {
+/// The `surgeon mcp` arguments for a mode: the project is read and written; `read_roots` (the
+/// source model, the configured models folder) are read only, in every mode. The server
+/// refuses any write there whatever the mode.
+pub fn mcp_args(mode: AgentMode, project: &Path, read_roots: &[PathBuf]) -> Vec<String> {
     let mut args = vec![
         "mcp".to_owned(),
         "--allow-dir".into(),
         project.display().to_string(),
     ];
-    if let Some(dir) = source_dir {
+    for dir in read_roots {
         args.extend(["--allow-read".into(), dir.display().to_string()]);
     }
     if mode == AgentMode::Ask {
@@ -430,7 +433,8 @@ pub struct LaunchInput<'a> {
     pub surgeon: &'a Path,
     pub mode: AgentMode,
     pub project: &'a Path,
-    pub source_dir: Option<&'a Path>,
+    /// Folders the engine may read but never write.
+    pub read_roots: &'a [PathBuf],
     pub model: Option<&'a str>,
     pub prompt: &'a str,
     /// Where the MCP configuration file of a Claude Code run is written.
@@ -442,7 +446,7 @@ pub struct LaunchInput<'a> {
 pub fn launch(input: &LaunchInput) -> Result<Launch, String> {
     let server = json!({
         "command": input.surgeon,
-        "args": mcp_args(input.mode, input.project, input.source_dir),
+        "args": mcp_args(input.mode, input.project, input.read_roots),
     });
     let tools = allowed_tools(input.mode);
     let mut args: Vec<OsString> = Vec::new();
@@ -451,7 +455,7 @@ pub fn launch(input: &LaunchInput) -> Result<Launch, String> {
     match input.detected.kind {
         ProviderKind::OpenCode => {
             let mut command = vec![input.surgeon.display().to_string()];
-            command.extend(mcp_args(input.mode, input.project, input.source_dir));
+            command.extend(mcp_args(input.mode, input.project, input.read_roots));
             let config = json!({
                 "mcp": { "surgeon": { "type": "local", "command": command, "enabled": true } },
                 // Its own tools stay, inside the project folder only.
@@ -528,7 +532,7 @@ pub fn launch(input: &LaunchInput) -> Result<Launch, String> {
         }
         _ => {
             let toml_list = |v: &[String]| serde_json::to_string(v).unwrap_or_default();
-            let mcp = mcp_args(input.mode, input.project, input.source_dir);
+            let mcp = mcp_args(input.mode, input.project, input.read_roots);
             for a in [
                 "exec",
                 "--json",

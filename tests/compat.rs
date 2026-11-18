@@ -71,6 +71,12 @@
 //!   `labels`. Only the tool schema hash moved; no existing option, property or output
 //!   changed. `backend detect --save` stays CLI only on purpose: an agent never rewrites the
 //!   operator's configuration.
+//! - the model's chat format and working files: `--chat-template` gains `auto`, `llama3`,
+//!   `inst` and `gemma`, reaches `bench eval` and `bench dump`, and defaults to `auto` on
+//!   `extract` and `bench refusal`: one deliberate change of default, with the same result on a
+//!   model that declares no format (extraction files and reference outputs unchanged);
+//!   `autotune --max-delta-norm-ratio`; the seventeenth tool `surgeon_files`. Only the tool
+//!   schema hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
@@ -242,7 +248,7 @@ fn mcp_tools_surface() -> Value {
 #[test]
 fn mcp_tools_surface_is_unchanged() {
     let current = mcp_tools_surface();
-    assert_eq!(current.as_array().unwrap().len(), 16, "sixteen MCP tools");
+    assert_eq!(current.as_array().unwrap().len(), 17, "seventeen MCP tools");
     let reference = read_fixture("mcp_tools_surface.json");
     assert!(
         current == reference,

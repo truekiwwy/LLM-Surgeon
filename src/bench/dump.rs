@@ -30,8 +30,8 @@ use super::report::{BenchDumpReport, BenchRun, DumpTiming};
 use super::sha256_file;
 use crate::extract::{
     check_tensors, check_texts, choose_dtype, dtype_name, forward, load_config, load_tensors,
-    load_tokenizer, model_name, plan_memory, required_tensors_full, tokenize, DTypeChoice,
-    MemoryPlan, SafetensorsDir, TensorSource,
+    load_tokenizer, model_name, plan_memory, required_tensors_full, tokenize, ChatTemplate,
+    DTypeChoice, MemoryPlan, SafetensorsDir, TensorSource,
 };
 use crate::hardware::HardwareProbe;
 
@@ -58,6 +58,7 @@ impl OutDtype {
 pub struct DumpRequest {
     pub model: PathBuf,
     pub prompts: Vec<String>,
+    pub chat_template: ChatTemplate,
     pub out: PathBuf,
     pub dtype: DTypeChoice,
     pub out_dtype: OutDtype,
@@ -97,13 +98,7 @@ fn check_output(out: &Path, overwrite: bool) -> Result<()> {
             "l'extension .safetensors est requise",
         ));
     }
-    let parent = match out.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    if !parent.is_dir() {
-        return Err(BenchError::input(out, "dossier de sortie inexistant"));
-    }
+    crate::extract::ensure_parent(out).map_err(|e| BenchError::input(out, e))?;
     if out.exists() && !overwrite {
         return Err(BenchError::OutputExists(out.to_path_buf()));
     }
@@ -196,10 +191,13 @@ pub fn run_with(
     let dtype = choose_dtype(req.dtype, plan, probe, &mut warnings)?;
 
     let tokenizer = load_tokenizer(&req.model)?;
+    let format = req
+        .chat_template
+        .resolve(&req.model, ChatTemplate::NoTemplate);
     let mut ids = Vec::with_capacity(req.prompts.len());
     let mut truncated = 0;
     for (i, prompt) in req.prompts.iter().enumerate() {
-        let t = tokenize(&tokenizer, prompt, req.max_tokens)?;
+        let t = tokenize(&tokenizer, &format.apply(prompt), req.max_tokens)?;
         if t.ids.is_empty() {
             return Err(BenchError::InvalidArgument(format!(
                 "prompt {i} : aucun token"
@@ -339,6 +337,7 @@ pub fn run_with(
             n_positions,
             vocab_size: cfg.vocab_size,
             max_tokens: req.max_tokens,
+            chat_template: format.family().map(str::to_owned),
             truncated_prompts: truncated,
             prompts_sha256,
             tokenizer_sha256,

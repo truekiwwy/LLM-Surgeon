@@ -2,6 +2,10 @@
 //!
 //! - `create` copies the original next to it (or into `backup_dir`) and only succeeds once
 //!   the copy's SHA-256 matches the original; a failed copy is deleted.
+//! - Every backup of one `apply` carries the same checkpoint, `<name>.bak-<secs>-<n>`, newer
+//!   than every backup already in its folder: the newest checkpoint is exactly the state
+//!   before the last `apply` (`patch::restore`). When the model is already byte for byte in
+//!   that state (apply, restore, apply again), the checkpoint is reused instead of copied.
 //! - `rollback` first checks the backup's own hash (never restore a corrupted copy), then
 //!   restores atomically (copy to a sibling temp file + `rename`). When `rename` is refused,
 //!   typically on Windows while the engine still maps the file, it falls back to an
@@ -14,7 +18,7 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -39,26 +43,43 @@ pub struct BackupGuard {
     state: State,
 }
 
+/// Where the backup of `original` goes.
+fn backup_folder(original: &Path, backup_dir: Option<&Path>) -> Result<PathBuf> {
+    match backup_dir {
+        Some(dir) if !dir.is_dir() => Err(PatchError::Backup(format!(
+            "dossier de backup inexistant : {}",
+            dir.display()
+        ))),
+        Some(dir) => Ok(dir.to_path_buf()),
+        None => Ok(original.parent().map(Path::to_path_buf).unwrap_or_default()),
+    }
+}
+
 impl BackupGuard {
+    /// A new backup, in a checkpoint of its own.
     pub fn create(original: &Path, backup_dir: Option<&Path>) -> Result<Self> {
+        let dir = backup_folder(original, backup_dir)?;
+        let checkpoint = next_checkpoint(std::slice::from_ref(&dir));
+        Self::create_at(original, &dir, checkpoint)
+    }
+
+    /// The backup of one file for an `apply`: see [`BackupSet::create_many_in`].
+    pub fn checkpoint(original: &Path, backup_dir: Option<&Path>) -> Result<Self> {
+        let mut set = BackupSet::create_many_in(&[original.to_path_buf()], backup_dir)?;
+        set.guards
+            .pop()
+            .ok_or_else(|| PatchError::Backup("aucune sauvegarde créée".into()))
+    }
+
+    fn create_at(original: &Path, dir: &Path, checkpoint: Checkpoint) -> Result<Self> {
         let name = original.file_name().ok_or_else(|| {
             PatchError::Backup(format!(
                 "chemin sans nom de fichier : {}",
                 original.display()
             ))
         })?;
-        let dir = match backup_dir {
-            Some(dir) if !dir.is_dir() => {
-                return Err(PatchError::Backup(format!(
-                    "dossier de backup inexistant : {}",
-                    dir.display()
-                )))
-            }
-            Some(dir) => dir.to_path_buf(),
-            None => original.parent().map(Path::to_path_buf).unwrap_or_default(),
-        };
         let sha256_original = sha256_file(original)?;
-        let (backup, mut dst) = create_unique(&dir, name)?;
+        let (backup, mut dst) = create_unique(dir, name, checkpoint)?;
 
         let copied = (|| -> Result<()> {
             let mut src = File::open(original).map_err(|e| PatchError::io(original, &e))?;
@@ -176,11 +197,21 @@ impl BackupSet {
         Self::create_many_in(paths, None)
     }
 
-    /// If one copy fails, the backups already made are deleted (nothing was modified).
+    /// One checkpoint for all `paths`, or the newest one when the model already is in the
+    /// state it holds. If one copy fails, the backups already made are deleted (nothing was
+    /// modified).
     pub fn create_many_in(paths: &[PathBuf], backup_dir: Option<&Path>) -> Result<Self> {
+        let dirs = paths
+            .iter()
+            .map(|p| backup_folder(p, backup_dir))
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(set) = Self::reuse_newest(paths, &dirs)? {
+            return Ok(set);
+        }
+        let checkpoint = next_checkpoint(&dirs);
         let mut guards = Vec::with_capacity(paths.len());
-        for path in paths {
-            match BackupGuard::create(path, backup_dir) {
+        for (path, dir) in paths.iter().zip(&dirs) {
+            match BackupGuard::create_at(path, dir, checkpoint) {
                 Ok(guard) => guards.push(guard),
                 Err(e) => {
                     guards.into_iter().for_each(BackupGuard::discard);
@@ -189,6 +220,57 @@ impl BackupSet {
             }
         }
         Ok(Self { guards })
+    }
+
+    /// The guards over the newest checkpoint, if it covers `paths` and every file it holds
+    /// is identical to the model now. Its other files must match too: restoring it has to
+    /// give back the state before this `apply`, whatever else it holds.
+    fn reuse_newest(paths: &[PathBuf], dirs: &[PathBuf]) -> Result<Option<Self>> {
+        let (Some(dir), Some(model_dir)) = (dirs.first(), paths.first().and_then(|p| p.parent()))
+        else {
+            return Ok(None);
+        };
+        if dirs.iter().any(|d| d != dir) {
+            return Ok(None);
+        }
+        let found = backups_in(dir).unwrap_or_default();
+        let Some(newest) = found.iter().map(|b| b.checkpoint).max() else {
+            return Ok(None);
+        };
+        // Older folders: the shards of an apply are not linked, nothing to rely on.
+        if newest.1 == 0 {
+            return Ok(None);
+        }
+        let group: Vec<&Backup> = found.iter().filter(|b| b.checkpoint == newest).collect();
+        let covered = |p: &PathBuf| {
+            let name = p.file_name().and_then(OsStr::to_str);
+            group.iter().any(|b| Some(b.original.as_str()) == name)
+        };
+        let same_size = |b: &&Backup| {
+            let size = |p: &Path| fs::metadata(p).map(|m| m.len()).ok();
+            let len = size(&model_dir.join(&b.original));
+            len.is_some() && len == size(&b.path)
+        };
+        if !paths.iter().all(covered) || !group.iter().all(same_size) {
+            return Ok(None);
+        }
+        let mut guards = Vec::with_capacity(paths.len());
+        for backup in group {
+            let original = model_dir.join(&backup.original);
+            let sha256_original = sha256_file(&original)?;
+            if sha256_file(&backup.path)? != sha256_original {
+                return Ok(None);
+            }
+            if paths.contains(&original) {
+                guards.push(BackupGuard {
+                    original,
+                    backup: backup.path.clone(),
+                    sha256_original,
+                    state: State::Created,
+                });
+            }
+        }
+        Ok(Some(Self { guards }))
     }
 
     pub fn guards(&self) -> &[BackupGuard] {
@@ -247,30 +329,76 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String> {
         .collect())
 }
 
-/// `<dir>/<name>.bak-<unix secs>[-n]`, created with `create_new` so an existing backup is
-/// never overwritten.
-fn create_unique(dir: &Path, name: &OsStr) -> Result<(PathBuf, File)> {
-    let stamp = SystemTime::now()
+/// (unix secs, n) of `<name>.bak-<secs>-<n>`: the order of creation, shared by the backups of
+/// one `apply`. `n = 0` (no suffix) only exists in folders written by older versions, where
+/// each file had its own stamp.
+pub(super) type Checkpoint = (u64, u32);
+
+/// `<original>.bak-<secs>[-n]` -> (original, checkpoint).
+pub(super) fn parse_backup_name(name: &str) -> Option<(&str, Checkpoint)> {
+    let at = name.rfind(".bak-")?;
+    let suffix = &name[at + ".bak-".len()..];
+    let (secs, n) = match suffix.split_once('-') {
+        Some((secs, n)) => (secs, n.parse().ok()?),
+        None => (suffix, 0),
+    };
+    let original = &name[..at];
+    (!original.is_empty()).then_some((original, (secs.parse().ok()?, n)))
+}
+
+/// A backup file found in a folder.
+pub(super) struct Backup {
+    pub original: String,
+    pub checkpoint: Checkpoint,
+    pub path: PathBuf,
+}
+
+pub(super) fn backups_in(dir: &Path) -> io::Result<Vec<Backup>> {
+    Ok(fs::read_dir(dir)?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            let (original, checkpoint) = parse_backup_name(name)?;
+            let original = original.to_owned();
+            path.is_file().then_some(Backup {
+                original,
+                checkpoint,
+                path,
+            })
+        })
+        .collect())
+}
+
+/// Strictly newer than every backup of `dirs`, even within one second or if the clock moved.
+fn next_checkpoint(dirs: &[PathBuf]) -> Checkpoint {
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
-    for n in 0..1000u32 {
-        let mut file_name = name.to_owned();
-        file_name.push(format!(".bak-{stamp}"));
-        if n > 0 {
-            file_name.push(format!("-{n}"));
-        }
-        let path = dir.join(file_name);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => return Ok((path, file)),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(PatchError::io(&path, &e)),
-        }
+    let newest = dirs
+        .iter()
+        .flat_map(|dir| backups_in(dir).unwrap_or_default())
+        .map(|b| b.checkpoint)
+        .max();
+    match newest {
+        Some((secs, n)) if secs >= now => (secs, n + 1),
+        _ => (now, 1),
     }
-    Err(PatchError::Backup(format!(
-        "trop de backups existants dans {}",
-        dir.display()
-    )))
+}
+
+/// `<dir>/<name>.bak-<secs>-<n>`, created with `create_new` so an existing backup is never
+/// overwritten.
+fn create_unique(dir: &Path, name: &OsStr, (secs, n): Checkpoint) -> Result<(PathBuf, File)> {
+    let mut file_name = name.to_owned();
+    file_name.push(format!(".bak-{secs}-{n}"));
+    let path = dir.join(file_name);
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| PatchError::io(&path, &e))?;
+    Ok((path, file))
 }
 
 pub(super) fn restore(backup: &Path, original: &Path) -> io::Result<()> {
@@ -323,6 +451,8 @@ mod tests {
         let mut guard = BackupGuard::create(&orig, None).unwrap();
         let backup = guard.backup_path().to_path_buf();
         assert_eq!(backup.parent(), Some(dir.path()));
+        let name = backup.file_name().unwrap().to_str().unwrap();
+        assert_eq!(parse_backup_name(name).unwrap().0, "m.safetensors");
         assert!(backup
             .file_name()
             .unwrap()
@@ -442,6 +572,60 @@ mod tests {
         with_missing.push(dir.path().join("absent.safetensors"));
         assert!(BackupSet::create_many_in(&with_missing, Some(backups.path())).is_err());
         assert_eq!(fs::read_dir(backups.path()).unwrap().count(), before);
+    }
+
+    #[test]
+    fn one_apply_is_one_checkpoint_and_each_is_newer() {
+        let dir = tempfile::tempdir().unwrap();
+        let shards: Vec<PathBuf> = (0..2)
+            .map(|i| file_with(dir.path(), &format!("s{i}.safetensors"), &[i; 4]))
+            .collect();
+        let stamp = |set: &BackupSet, i: usize| {
+            let name = set.guards()[i].backup_path().file_name().unwrap();
+            parse_backup_name(name.to_str().unwrap()).unwrap().1
+        };
+        let mut first = BackupSet::create_many(&shards).unwrap();
+        assert_eq!(stamp(&first, 0), stamp(&first, 1), "same checkpoint");
+        assert!(stamp(&first, 0).1 >= 1);
+        first.commit_all();
+        fs::write(&shards[0], b"changed").unwrap();
+        // Only one shard this time, and a checkpoint above the two files of the first.
+        let mut second = BackupSet::create_many(&shards[..1]).unwrap();
+        assert!(stamp(&second, 0) > stamp(&first, 0));
+        second.commit_all();
+    }
+
+    #[test]
+    fn the_same_state_is_not_copied_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let shards: Vec<PathBuf> = (0..2)
+            .map(|i| file_with(dir.path(), &format!("s{i}.bin"), &[i; 4]))
+            .collect();
+        let backups = |d: &Path| backups_in(d).unwrap().len();
+        let mut first = BackupSet::create_many(&shards).unwrap();
+        first.commit_all();
+        assert_eq!(backups(dir.path()), 2);
+        // Patched then restored: same bytes as the checkpoint, nothing new on disk.
+        let mut again = BackupSet::create_many(&shards[..1]).unwrap();
+        assert_eq!(backups(dir.path()), 2);
+        assert_eq!(
+            again.guards()[0].backup_path(),
+            first.guards()[0].backup_path()
+        );
+        // A failed apply on it rolls back from the reused file, which stays.
+        fs::write(&shards[0], b"half").unwrap();
+        again.rollback_all().unwrap();
+        assert_eq!(fs::read(&shards[0]).unwrap(), [0; 4]);
+        assert!(first.guards()[0].backup_path().is_file());
+        // A new state, or a file of the checkpoint that moved on: a new checkpoint.
+        fs::write(&shards[1], b"other").unwrap();
+        let mut moved = BackupSet::create_many(&shards[..1]).unwrap();
+        moved.commit_all();
+        assert_eq!(backups(dir.path()), 3);
+        assert_ne!(
+            moved.guards()[0].backup_path(),
+            first.guards()[0].backup_path()
+        );
     }
 
     /// The engine keeps the model mapped while the patch runs. On Windows `rename` over a

@@ -284,8 +284,8 @@ impl PreviewState {
             KeyCode::Char('0') => self.set_alpha(0.0),
             KeyCode::Char('t') => {
                 self.template = match self.template {
-                    ChatTemplate::Chatml => ChatTemplate::NoTemplate,
                     ChatTemplate::NoTemplate => ChatTemplate::Chatml,
+                    _ => ChatTemplate::NoTemplate,
                 };
                 return self.generate();
             }

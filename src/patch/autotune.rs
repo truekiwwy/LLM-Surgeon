@@ -13,6 +13,11 @@
 //!           grid 1e-6..1e2 (17 points) by closed-form LOOCV e_i / (1 − h_ii)
 //! ```
 //!
+//! Units: α and δ are the coefficients of `W ∓= α·v` (the same as a patch's `alpha`), the
+//! targets and shifts are projections of an activation on v. The size of a change relative
+//! to the weights is `‖ΔW‖_F / ‖W‖_F = |α|·‖v‖·√n / ‖W‖_F`, n being the rows or columns that
+//! receive v: reported per layer, and bounded by `--max-delta-norm-ratio`.
+//!
 //! Layers above R cannot change the readout: they are excluded with a warning. The fitted
 //! α are applied all at once in memory and the readout is measured again: the report gives
 //! the predicted and the actual shift. Side effects (KL, perplexity) are not measured here:
@@ -39,7 +44,8 @@ use crate::engine::{self, BroadcastAxis, ReadOnlyModel, ShiftOp};
 use crate::extract::{
     check_tensors, choose_dtype, companion_path, dtype_name, forward, load_config, load_tensors,
     load_tokenizer, plan_memory, pool, required_tensors, tokenize, write_atomic, ChatTemplate,
-    DTypeChoice, ExtractError, Pooling, Qwen2Config, SafetensorsDir, Site, TensorSource,
+    DTypeChoice, ExtractError, Pooling, PromptFormat, Qwen2Config, SafetensorsDir, Site,
+    TensorSource,
 };
 use crate::hardware::HardwareProbe;
 use crate::linalg::cholesky::Cholesky;
@@ -47,6 +53,13 @@ use crate::linalg::LinalgError;
 
 /// λ grid of `--l2-reg auto`: 10^(-6 + k/2), k = 0..=16.
 pub const AUTO_GRID_POINTS: usize = 17;
+/// Defaults of the CLI and of the MCP tool.
+pub const DEFAULT_L2_REG: &str = "1e-3";
+pub const DEFAULT_PROBE_ALPHA: f64 = 0.05;
+pub const DEFAULT_ALPHA_MAX: f64 = 1.0;
+pub const DEFAULT_MIN_ALPHA: f64 = 1e-4;
+pub const DEFAULT_MAX_FORWARDS: usize = 2000;
+pub const DEFAULT_MAX_TOKENS: usize = 256;
 pub const LINEARITY_TOLERANCE: f64 = 0.10;
 const LINEARITY_LAYERS: usize = 3;
 
@@ -166,6 +179,8 @@ pub struct AutotuneRequest {
     pub l2_reg: L2Reg,
     pub probe_alpha: f64,
     pub alpha_max: f64,
+    /// Per layer, `‖ΔW‖_F / ‖W‖_F` at most this much (on top of `alpha_max`).
+    pub max_delta_norm_ratio: Option<f64>,
     pub min_alpha: f64,
     pub max_forwards: usize,
     pub max_tokens: usize,
@@ -358,8 +373,11 @@ pub struct LayerAlpha {
     pub layer: usize,
     /// Coefficient issu de la régression.
     pub alpha_fitted: f64,
-    /// Coefficient écrit (après écrêtage à ±alpha_max) ; 0 si supprimé.
+    /// Coefficient écrit (après écrêtage) ; 0 si supprimé.
     pub alpha: f64,
+    /// ‖ΔW‖_F / ‖W‖_F de la matrice de cette couche avec ce coefficient.
+    pub delta_norm_ratio: f64,
+    /// Écrêté par alpha_max ou max_delta_norm_ratio.
     pub clipped: bool,
     /// |α| < min_alpha : couche retirée du patch.
     pub dropped: bool,
@@ -401,6 +419,9 @@ pub struct AutotuneReport {
     pub site: Site,
     pub pooling: Pooling,
     pub chat_template: ChatTemplate,
+    /// Message système appliqué avec le gabarit, s'il y en a un.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_system: Option<String>,
     pub proj: Projection,
     pub objective: Objective,
     pub dtype_used: String,
@@ -670,6 +691,33 @@ impl Bench<'_> {
         )
     }
 
+    /// `‖ΔW‖_F / ‖W‖_F` of `layer` for `|α| = 1`: every row or column receives `α·v`.
+    fn ratio_per_alpha(&self, layer: usize) -> Result<f64> {
+        let name = self.weight_name(layer);
+        let raw = self.source.read(&name)?;
+        let &[rows, cols] = raw.shape.as_slice() else {
+            return Err(AutotuneError::Model(format!(
+                "{name} : matrice 2D attendue"
+            )));
+        };
+        let receivers = match engine_axis(self.proj).0 {
+            BroadcastAxis::Rows => rows,
+            BroadcastAxis::Cols => cols,
+        };
+        let squared = Tensor::from_raw_buffer(
+            &raw.bytes,
+            candle_dtype(&raw.dtype)?,
+            &raw.shape,
+            &self.device,
+        )?
+        .to_dtype(DType::F64)?
+        .sqr()?
+        .sum_all()?
+        .to_scalar::<f64>()?;
+        let v_norm = self.v.iter().map(|x| x * x).sum::<f64>().sqrt();
+        Ok(v_norm * (receivers as f64).sqrt() / squared.sqrt())
+    }
+
     /// Readouts of every prompt with the given layers shifted.
     fn readouts(
         &self,
@@ -719,6 +767,12 @@ fn validate_request(req: &AutotuneRequest) -> Result<()> {
     {
         return bad("--alpha-max doit être dans ]0, 100]");
     }
+    if req
+        .max_delta_norm_ratio
+        .is_some_and(|r| !(r.is_finite() && r > 0.0))
+    {
+        return bad("--max-delta-norm-ratio doit être > 0");
+    }
     if !(req.min_alpha.is_finite() && req.min_alpha >= 0.0) {
         return bad("--min-alpha doit être >= 0");
     }
@@ -743,16 +797,10 @@ fn validate_request(req: &AutotuneRequest) -> Result<()> {
                 message: "l'extension .json est requise".into(),
             });
         }
-        let parent = match out.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => Path::new("."),
-        };
-        if !parent.is_dir() {
-            return Err(AutotuneError::Input {
-                path: out.clone(),
-                message: "dossier de sortie inexistant".into(),
-            });
-        }
+        crate::extract::ensure_parent(out).map_err(|e| AutotuneError::Input {
+            path: out.clone(),
+            message: e.to_string(),
+        })?;
         if out.exists() && !req.overwrite {
             return Err(AutotuneError::OutputExists(out.clone()));
         }
@@ -817,9 +865,17 @@ pub fn run_with(
         Some(p) => p,
         None => from_meta(&info.meta, "pooling", "--pooling", &req.vector)?,
     };
-    let chat_template = match req.chat_template {
-        Some(c) => c,
-        None => from_meta(&info.meta, "chat_template", "--chat-template", &req.vector)?,
+    // The wrapping of the extraction, which the vector records; an explicit choice wins.
+    let format = match req.chat_template {
+        Some(c) => c.resolve(&req.model, ChatTemplate::NoTemplate),
+        None => {
+            let template: ChatTemplate =
+                from_meta(&info.meta, "chat_template", "--chat-template", &req.vector)?;
+            PromptFormat {
+                template,
+                system: info.meta.get("chat_system").cloned(),
+            }
+        }
     };
     let (first, last) = req.layer_range.unwrap_or((0, readout));
     if last >= cfg.num_hidden_layers {
@@ -895,7 +951,7 @@ pub fn run_with(
         .iter()
         .enumerate()
         .map(|(i, it)| {
-            let t = tokenize(&tokenizer, &chat_template.apply(&it.text), req.max_tokens)?;
+            let t = tokenize(&tokenizer, &format.apply(&it.text), req.max_tokens)?;
             if t.ids.is_empty() {
                 return Err(AutotuneError::InvalidArgument(format!(
                     "prompt {i} : aucun token"
@@ -976,8 +1032,12 @@ pub fn run_with(
     let mut clipped_layers = Vec::new();
     for (col, &layer) in layers.iter().enumerate() {
         let fitted = fit.alpha[col];
-        let clipped = fitted.abs() > req.alpha_max;
-        let value = fitted.clamp(-req.alpha_max, req.alpha_max);
+        let ratio_per_alpha = bench.ratio_per_alpha(layer)?;
+        let limit = req
+            .max_delta_norm_ratio
+            .map_or(req.alpha_max, |r| req.alpha_max.min(r / ratio_per_alpha));
+        let clipped = fitted.abs() > limit;
+        let value = fitted.clamp(-limit, limit);
         let dropped = value.abs() < req.min_alpha;
         if clipped {
             clipped_layers.push(layer);
@@ -987,6 +1047,11 @@ pub fn run_with(
             layer,
             alpha_fitted: fitted,
             alpha: if dropped { 0.0 } else { value },
+            delta_norm_ratio: if dropped {
+                0.0
+            } else {
+                value.abs() * ratio_per_alpha
+            },
             clipped,
             dropped,
             response_rms: (column / m as f64).sqrt(),
@@ -994,8 +1059,10 @@ pub fn run_with(
     }
     if !clipped_layers.is_empty() {
         warnings.push(format!(
-            "α écrêtés à ±{} sur les couches {clipped_layers:?} : prédictions recalculées",
-            req.alpha_max
+            "α écrêtés sur les couches {clipped_layers:?} (|α| ≤ {}{}) : prédictions recalculées",
+            req.alpha_max,
+            req.max_delta_norm_ratio
+                .map_or(String::new(), |r| format!(", ‖ΔW‖/‖W‖ ≤ {r}"))
         ));
     }
     // The coefficients are written as f32: predict and validate with those exact values.
@@ -1098,7 +1165,8 @@ pub fn run_with(
             readout_layer: readout,
             site,
             pooling,
-            chat_template,
+            chat_template: format.template,
+            chat_system: format.system.clone(),
             proj: req.proj,
             objective: req.objective,
             dtype_used: dtype_name(dtype).to_owned(),

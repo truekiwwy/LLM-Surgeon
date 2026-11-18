@@ -94,7 +94,7 @@ prompts. Elles ne sont pas une recommandation.
   - génération : `max_new_tokens`. Pour `gsm8k`, le résultat du pilier compte les
     générations coupées par ce budget avant toute fin de séquence (`truncated_before`,
     `truncated_after`) : une réponse coupée est scorée telle quelle, donc souvent fausse ;
-  - `safety` et `unblocking` : `chat_template` ;
+  - `safety`, `unblocking` et `gsm8k` : `chat_template` (défaut `auto`, le format du modèle) ;
   - `gsm8k` : `prompt_template`, `format`, `limit` ;
   - `kl` et `logits` : `max_tokens`.
 
@@ -269,10 +269,10 @@ Par MCP, `surgeon_pipeline` avec `action` ∈ `plan`, `start`, `status`, `cancel
   du décodage, et la calibration (8 tokens) dépend de la charge de la machine. Sur
   Qwen2.5-0.5B, l'estimation dépassait la durée réelle de 37 à 41 % pour un job mené à son
   terme. L'estimation disque, elle, compte les positions réelles des dumps.
-- **Gabarit de chat** : `chat_template: chatml` n'ajoute pas le message système par défaut
-  que le gabarit officiel de certains modèles (Qwen) insère. Pour le reproduire, pré-rendre le
-  jeu et passer `chat_template: none` (refus), ou donner le gabarit complet par
-  `prompt_template` (GSM8K).
+- **Gabarit de chat** : `chat_template: auto` (défaut) reproduit le format déclaré par le
+  modèle, message système par défaut compris ; `chatml` l'impose sans message système et `none`
+  garde le texte brut. Une référence mesurée avant ce défaut n'est pas comparable à une mesure
+  faite avec lui : relancer les deux, ou passer `none`.
 - **Détecteur de boucles** : `bench eval` coupe et compte fausse une réponse où un groupe de
   4 mots revient plus de 4 fois, ce qui arrive à des solutions rédigées saines. Surveiller
   `loops_before` / `loops_after` du pilier `gsm8k`.

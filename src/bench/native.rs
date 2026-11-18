@@ -89,6 +89,7 @@ impl NativeGenerator {
         probe: &dyn HardwareProbe,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self> {
+        let model_dir = crate::extract::model_folder(model_dir);
         if !model_dir.is_dir() {
             return Err(BenchError::input(
                 model_dir,

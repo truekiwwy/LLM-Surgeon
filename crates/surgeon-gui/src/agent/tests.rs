@@ -864,6 +864,7 @@ fn once_always_deny_and_revocation_with_a_narrow_scope() {
         project_dir: &project,
         copies_dir: e.m.copies_dir(),
         source: e.m.source(),
+        models_dir: None,
         guard: &guard,
     };
     let c_args = json!({"model": "copies/c1", "out_dir": "copies/c1/g3"});
@@ -893,6 +894,7 @@ fn forbidden_calls_are_answered_without_running_anything() {
         project_dir: &project,
         copies_dir: e.m.copies_dir(),
         source: e.m.source(),
+        models_dir: None,
         guard: &guard,
     };
     let forbidden = |tool: &str, args: Value, mode: AgentMode| {
@@ -934,6 +936,58 @@ fn forbidden_calls_are_answered_without_running_anything() {
     ));
     assert!(forbidden("rm_rf", json!({}), m));
     assert!(forbidden("surgeon_check", json!("copies/c1"), m));
+    // Text is not a path: a prompt with a slash or a colon goes through.
+    assert!(!forbidden(
+        "surgeon_extract",
+        json!({"model": "copies/c1", "out": "d.safetensors",
+            "pos_prompts": ["../../etc/passwd ?", "C:\\Windows ?"], "neg_prompts": ["1/2"]}),
+        m
+    ));
+    assert!(forbidden(
+        "surgeon_extract",
+        json!({"model": "copies/c1", "out": outside.display().to_string(),
+            "pos_prompts": ["a"], "neg_prompts": ["b"]}),
+        m
+    ));
+    // Working files: no card in "Modify", refused in "Ask", read everywhere it may be read.
+    let write = json!({"action": "write", "path": "p.jsonl", "content": "C:\\x/../y"});
+    assert!(matches!(
+        policy::classify("surgeon_files", &write, m, &scope),
+        Decision::Safe
+    ));
+    assert!(forbidden("surgeon_files", write, AgentMode::Ask));
+    assert!(matches!(
+        policy::classify(
+            "surgeon_files",
+            &json!({"action": "read", "path": e.source.join("config.json").display().to_string()}),
+            AgentMode::Ask,
+            &scope
+        ),
+        Decision::Safe
+    ));
+    assert!(forbidden(
+        "surgeon_files",
+        json!({"action": "list", "path": outside.display().to_string()}),
+        AgentMode::Ask
+    ));
+    // The configured models folder is readable, and only that.
+    let models = e._ws.path().parent().unwrap().to_path_buf();
+    let with_models = Scope {
+        project_dir: &project,
+        copies_dir: e.m.copies_dir(),
+        source: e.m.source(),
+        models_dir: Some(models.clone()),
+        guard: &guard,
+    };
+    assert!(matches!(
+        policy::classify(
+            "surgeon_check",
+            &json!({"model": outside.display().to_string()}),
+            m,
+            &with_models
+        ),
+        Decision::Safe
+    ));
     // "Ask": reads only, and bench only on a copy.
     let a = AgentMode::Ask;
     assert!(forbidden(
@@ -1444,7 +1498,7 @@ fn cli_runtimes_are_detected_from_their_real_help_and_run_with_the_mcp_barrier()
         surgeon: &surgeon,
         mode: AgentMode::Ask,
         project: &project,
-        source_dir: Some(&source),
+        read_roots: std::slice::from_ref(&source),
         model: None,
         prompt: "inspecte",
         scratch: &dir.path().join("scratch"),
@@ -1478,13 +1532,18 @@ fn cli_runtimes_are_detected_from_their_real_help_and_run_with_the_mcp_barrier()
             .map(|(flag, _)| flag.to_owned())
             .collect::<Vec<_>>()
     };
-    let ask = runtime::mcp_args(AgentMode::Ask, &project, Some(&source));
+    let ask = runtime::mcp_args(AgentMode::Ask, &project, std::slice::from_ref(&source));
     assert_eq!(source_arg(&ask), ["--allow-read"]);
     // "Modify": no read-only server, and still no write on the source model.
-    let modify = runtime::mcp_args(AgentMode::Modify, &project, Some(&source));
+    let modify = runtime::mcp_args(AgentMode::Modify, &project, std::slice::from_ref(&source));
     assert!(!modify.contains(&"--read-only".to_owned()));
     assert_eq!(source_arg(&modify), ["--allow-read"]);
     assert!(!runtime::allowed_tools(AgentMode::Modify).contains(&"surgeon_pipeline".to_owned()));
+    // Working files in both modes (the read-only server refuses the write action); no apply.
+    for mode in [AgentMode::Ask, AgentMode::Modify] {
+        assert!(runtime::allowed_tools(mode).contains(&"surgeon_files".to_owned()));
+    }
+    assert!(!runtime::allowed_tools(AgentMode::Ask).contains(&"surgeon_apply".to_owned()));
     let codex_args = runtime::launch(&runtime::LaunchInput {
         detected: &codex,
         ..input
@@ -1539,12 +1598,13 @@ fn opencode_and_antigravity_keep_their_tools_and_meet_surgeon_only() {
         profile: dir.path().join("profiles").join("agy"),
         user: dir.path().join("user"),
     };
+    let source_roots = [dir.path().join("model")];
     let input = runtime::LaunchInput {
         detected: &opencode,
         surgeon: &dir.path().join("surgeon.exe"),
         mode: AgentMode::Modify,
         project: &project,
-        source_dir: Some(&dir.path().join("model")),
+        read_roots: &source_roots,
         model: Some("ollama/qwen"),
         prompt: "scanne",
         scratch: &dir.path().join("scratch"),
@@ -2009,7 +2069,7 @@ fn claude_code_runs_on_its_account_and_never_on_an_inherited_api_key() {
             surgeon: &surgeon,
             mode: AgentMode::Ask,
             project: &project,
-            source_dir: None,
+            read_roots: &[],
             model: None,
             prompt: "p",
             scratch: &scratch,
@@ -2062,7 +2122,7 @@ fn every_cli_runtime_gets_the_picked_model_as_its_model_flag() {
                 surgeon: &surgeon,
                 mode: AgentMode::Ask,
                 project: &project,
-                source_dir: None,
+                read_roots: &[],
                 model,
                 prompt: "p",
                 scratch: &scratch,

@@ -33,6 +33,7 @@ use crate::eval::{
     ensure_gguf_as, truncate_chars, CommandRunner, EvalError, LoopDetector, LoopDetectorConfig,
     LoopVerdict, TextGenerator, LLAMA_DIR_REQUIRED,
 };
+use crate::extract::{ChatTemplate, PromptFormat};
 
 /// Fixed seed of the greedy decoding (greedy ignores it, set anyway for reproducibility).
 pub const SEED: u32 = 42;
@@ -254,6 +255,14 @@ pub fn judge(item: &Item, output: &str, loop_detected: bool) -> ItemResult {
     }
 }
 
+/// What the model receives for each question: the template, then its chat format.
+fn render_prompts(items: &[Item], template: &Template, format: &PromptFormat) -> Vec<String> {
+    items
+        .iter()
+        .map(|item| format.apply(&template.render(&item.question)))
+        .collect()
+}
+
 /// Every question in order. A timeout fails that question only; any other generator
 /// error (process crash, missing binary) stops the suite.
 ///
@@ -263,14 +272,14 @@ pub fn judge(item: &Item, output: &str, loop_detected: bool) -> ItemResult {
 pub fn run_suite(
     generator: &mut dyn TextGenerator,
     items: &[Item],
-    template: &Template,
+    prompts: &[String],
     max_new_tokens: u32,
     generation: &GenOptions,
     cancel: &AtomicBool,
     on_question: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<ItemResult>> {
     let samples = generation.samples;
-    let jobs = generation.jobs(items.iter().map(|item| template.render(&item.question)));
+    let jobs = generation.jobs(prompts.iter().cloned());
     let total = jobs.len();
     let mut detectors: Vec<LoopDetector> = (0..total)
         .map(|_| LoopDetector::new(LoopDetectorConfig::default()))
@@ -410,6 +419,8 @@ pub struct EvalRequest {
     pub limit: usize,
     pub max_new_tokens: u32,
     pub template: Template,
+    /// Wraps the rendered template; `auto` follows each evaluated model.
+    pub chat_template: ChatTemplate,
     pub format: DatasetFormat,
     pub llama_cpp_dir: Option<PathBuf>,
     /// Per question.
@@ -478,10 +489,11 @@ pub fn run(
         };
         let mut generator = make_generator(gguf.as_ref().map_or(model, |g| g.path()))?;
         generator.configure(&req.generation.decoding(req.timeout));
+        let format = req.chat_template.resolve(model, ChatTemplate::NoTemplate);
         let results = run_suite(
             generator.as_mut(),
             &items,
-            &req.template,
+            &render_prompts(&items, &req.template, &format),
             req.max_new_tokens,
             &req.generation,
             cancel,
@@ -535,12 +547,17 @@ pub fn run(
             baseline.as_ref().map(|(_, (b, _))| hits(b)).as_deref(),
         )
     });
+    let chat = req
+        .chat_template
+        .resolve(&req.model, ChatTemplate::NoTemplate);
     let report = BenchEvalReport {
         model: req.model.clone(),
         dataset: req.dataset.clone(),
         dataset_sha256,
         format: req.format.as_str().into(),
         prompt_template_sha256: req.template.sha256(),
+        chat_template: chat.family().map(str::to_owned),
+        chat_system: chat.system,
         max_new_tokens: req.max_new_tokens,
         seed: SEED,
         score: main,
@@ -707,6 +724,7 @@ mod tests {
             limit: 50,
             max_new_tokens: 64,
             template: Template::default(),
+            chat_template: ChatTemplate::Auto,
             format: DatasetFormat::Auto,
             llama_cpp_dir: None,
             timeout: None,
@@ -762,6 +780,17 @@ mod tests {
         let run = evaluate(&req, vec![after_replies()]).unwrap();
         assert_eq!(run.report.score.truncated, 0);
         assert!(!run.warnings.iter().any(|w| w.contains("max_new_tokens")));
+    }
+
+    #[test]
+    fn the_chat_format_wraps_the_rendered_template() {
+        let (_dir, req) = fixture();
+        let items = dataset::load(&req.dataset, req.format, 1).unwrap();
+        let template = Template::new("Q: {question}").unwrap();
+        assert_eq!(
+            render_prompts(&items, &template, &ChatTemplate::Chatml.format()),
+            ["<|im_start|>user\nQ: 2+3?<|im_end|>\n<|im_start|>assistant\n"]
+        );
     }
 
     #[test]

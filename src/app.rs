@@ -171,7 +171,7 @@ pub fn real_deps() -> AppDeps {
 
 /// Prefers `llama-completion` (raw completion in recent llama.cpp), else `llama-cli`.
 /// `-no-cnv` disables chat mode on both; very old builds without it will reject it.
-fn real_generator(
+pub fn real_generator(
     gguf: &Path,
     args: &EvalArgs,
 ) -> std::result::Result<Box<dyn TextGenerator>, EvalError> {
@@ -3206,6 +3206,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 limit: a.limit,
                 max_new_tokens: a.max_new_tokens,
                 template: Template::from_cli(a.prompt_template.as_deref()).map_err(invalid)?,
+                chat_template: a.chat_template,
                 format: a.format,
                 llama_cpp_dir: a.llama_cpp_dir.clone(),
                 timeout: timeout(a.timeout_secs)?,
@@ -3225,6 +3226,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
             let req = DumpRequest {
                 model: a.model.clone(),
                 prompts,
+                chat_template: a.chat_template,
                 out: a.out.clone(),
                 dtype: a.dtype,
                 out_dtype: a.out_dtype,
@@ -3778,6 +3780,7 @@ fn autotune_cli(
         l2_reg: args.l2_reg,
         probe_alpha: args.probe_alpha,
         alpha_max: args.alpha_max,
+        max_delta_norm_ratio: args.max_delta_norm_ratio,
         min_alpha: args.min_alpha,
         max_forwards: args.max_forwards,
         max_tokens: args.max_tokens,

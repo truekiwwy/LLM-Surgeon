@@ -22,7 +22,8 @@ et les libellés des rapports. Le convertisseur GGUF est `src/eval/safetensors_g
 ## 2. Réglages et priorité
 
 `BackendConfig` (`src/backend/config.rs`) : `backend`, `gpu_layers`, `batch_size`, `llama_cpp_dir`,
-`mistralrs_dir`, `mistralrs_bin`, `hipfire_bin`, `hipfire_url`, `gguf_dtype`. Chaque champ est
+`mistralrs_dir`, `mistralrs_bin`, `hipfire_bin`, `hipfire_url`, `gguf_dtype`, `models_dir`
+(dossier de modèles que surgeon-gui ouvre en lecture seule à ses agents). Chaque champ est
 facultatif ; une couche ne dit que ce qu'elle sait.
 
 ```text
@@ -65,6 +66,7 @@ hipfire_url = "http://127.0.0.1:11435"
 gpu_layers = 99
 batch_size = 1
 gguf_dtype = "f16"
+models_dir = "C:\\models"
 ```
 
 Sous-ensemble plat de TOML (`clé = "texte"` ou `clé = 123`, commentaires `#`, chaînes `'...'`

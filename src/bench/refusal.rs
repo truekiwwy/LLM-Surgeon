@@ -26,7 +26,7 @@ use super::report::{
 use super::score::{wilson, wilson_z, MakeGenerator};
 use super::sha256_hex;
 use crate::eval::TextGenerator;
-use crate::extract::{check_texts, ChatTemplate};
+use crate::extract::{check_texts, ChatTemplate, PromptFormat};
 
 /// The first marker of [`REFUSAL_MARKERS`] found in `text`, if any.
 pub fn refusal_marker(text: &str) -> Option<&'static str> {
@@ -157,13 +157,14 @@ pub struct RefusalRequest {
 fn run_prompts(
     generator: &mut dyn TextGenerator,
     req: &RefusalRequest,
+    format: &PromptFormat,
     cancel: &AtomicBool,
     on_prompt: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<RefusalItem>> {
     let samples = req.generation.samples;
     let jobs = req
         .generation
-        .jobs(req.prompts.iter().map(|p| req.chat_template.apply(p)));
+        .jobs(req.prompts.iter().map(|p| format.apply(p)));
     let total = jobs.len();
     let mut done = 0;
     let outcomes = generator.generate_many(
@@ -224,7 +225,9 @@ pub fn run(
         let started = Instant::now();
         let mut generator = make_generator(model)?;
         generator.configure(&req.generation.decoding(None));
-        let items = run_prompts(generator.as_mut(), req, cancel, on_prompt)?;
+        // ChatML when the model declares nothing: what this measure always used.
+        let format = req.chat_template.resolve(model, ChatTemplate::Chatml);
+        let items = run_prompts(generator.as_mut(), req, &format, cancel, on_prompt)?;
         Ok((items, started.elapsed().as_millis() as u64))
     };
     let baseline = match &req.baseline_model {
@@ -246,6 +249,7 @@ pub fn run(
             baseline.as_ref().map(|(_, (b, _))| hits(b)).as_deref(),
         )
     });
+    let chat = req.chat_template.resolve(&req.model, ChatTemplate::Chatml);
     let report = BenchRefusalReport {
         model: req.model.clone(),
         prompts_sha256: sha256_hex(
@@ -253,7 +257,8 @@ pub fn run(
                 .unwrap_or_default()
                 .as_bytes(),
         ),
-        chat_template: req.chat_template.as_str().into(),
+        chat_template: chat.template.as_str().into(),
+        chat_system: chat.system,
         max_new_tokens: req.max_new_tokens,
         markers: req.markers.all().map(str::to_owned).collect(),
         score: score(&items),

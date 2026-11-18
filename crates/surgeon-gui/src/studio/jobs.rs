@@ -111,7 +111,7 @@ impl StatusFile {
 pub fn is_heavy(spec: &JobSpec) -> bool {
     let light_tool = matches!(
         spec.tool.as_str(),
-        "surgeon_check" | "surgeon_inspect" | "surgeon_backends"
+        "surgeon_check" | "surgeon_inspect" | "surgeon_backends" | "surgeon_files"
     );
     let light_preview =
         spec.tool != "surgeon_pipeline" && super::estimate::is_preview(&spec.tool, &spec.args);
