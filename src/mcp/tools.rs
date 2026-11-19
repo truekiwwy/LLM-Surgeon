@@ -28,6 +28,7 @@ use crate::bench::markers::Markers;
 use crate::bench::ppl_runner::{PplBaseline, PplRequest};
 use crate::bench::prompt::Template;
 use crate::bench::refusal::RefusalRequest;
+use crate::bench::score::Backend;
 use crate::bench::score::EvalRequest;
 use crate::cli::{CheckArgs, EvalArgs, InspectArgs, SchemaKind};
 use crate::eval::{load_prompts, EvalPrompt};
@@ -485,7 +486,7 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_AUTOTUNE,
             "Réglage des coefficients par couche",
-            "Mesure en mémoire la réponse de la projection d'une couche de lecture sur le vecteur quand chaque couche candidate est décalée (différences finies, arrondi au dtype comme sur disque), ajuste les α par régression ridge (λ fixe ou LOOCV), valide en appliquant tous les α ensemble, et produit un patch.json compatible surgeon_apply (écrit seulement si out est fourni). Unités : target_projection et les décalages rapportés sont des projections d'activation ; α est le coefficient de W ∓= α·v ; data.alphas[].delta_norm_ratio donne ‖ΔW‖_F / ‖W‖_F par couche, borné par max_delta_norm_ratio. Ne mesure pas les effets secondaires : utiliser surgeon_bench ensuite.",
+            "Mesure en mémoire la réponse de la projection d'une couche de lecture sur le vecteur quand chaque couche candidate est décalée (différences finies, arrondi au dtype comme sur disque), ajuste les α par régression ridge (λ fixe ou LOOCV), valide en appliquant tous les α ensemble, et produit un patch.json compatible surgeon_apply (écrit seulement si out est fourni). Unités : target_projection et les décalages rapportés sont des projections d'activation ; α est le coefficient de W ∓= α·v ; data.alphas[].delta_norm_ratio donne ‖ΔW‖_F / ‖W‖_F par couche, borné par max_delta_norm_ratio. Le patch ne contient que des décalages additifs de rang 1 (operation subtract) sur la seule projection proj : ce n'est pas une ablation. Pour retirer une direction (refus excessifs), utiliser surgeon_apply avec operation project_out sur o_proj et down_proj. Ne mesure pas les effets secondaires : utiliser surgeon_bench ensuite.",
             schema_value::<AutotuneToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
@@ -1320,7 +1321,7 @@ pub struct BenchToolArgs {
 }
 
 /// (mode, required fields, optional fields).
-const BENCH_FIELDS: [(&str, &[&str], &[&str]); 7] = [
+pub(super) const BENCH_FIELDS: [(&str, &[&str], &[&str]); 7] = [
     (
         "judge-sample",
         &["responses", "prompts", "out"],
@@ -1477,22 +1478,60 @@ fn generation(args: &BenchToolArgs) -> crate::bench::generation::GenOptions {
     }
 }
 
+/// The backend of `eval` and of `refusal` when neither the call nor the user configuration
+/// names one.
+pub(super) const EVAL_BACKEND: Backend = Backend::Llama;
+pub(super) const REFUSAL_BACKEND: Backend = Backend::Native;
+
+/// The warning of a bench taken off hipfire by [`bench_backend`].
+pub const HIPFIRE_SET_ASIDE: &str = "backend hipfire écarté : il sert un cache quantifié \
+     statique enregistré par nom et ignore les poids modifiés du dossier SafeTensors ; mesure \
+     faite sur native";
+
+/// The backend an eval or refusal of `model` runs on, `resolved` being the call's choice over
+/// the user configuration. hipfire answers from its own quantized copy of a model and never
+/// reads the SafeTensors folder it is given: a bench of a patched working copy would measure
+/// the old weights, so it runs on native instead (`true` then).
+pub fn bench_backend(
+    resolved: Option<Backend>,
+    default: Backend,
+    model: Option<&Path>,
+) -> (Backend, bool) {
+    let backend = resolved.unwrap_or(default);
+    match backend == Backend::Hipfire && !model.is_some_and(crate::eval::is_gguf) {
+        true => (Backend::Native, true),
+        false => (backend, false),
+    }
+}
+
+/// [`HIPFIRE_SET_ASIDE`] first among the warnings of a bench that left hipfire, failed or not.
+fn set_aside(result: CoreResult, hipfire_set_aside: bool) -> CoreResult {
+    let warn = |mut outcome: Outcome| {
+        if hipfire_set_aside {
+            outcome.warnings.insert(0, HIPFIRE_SET_ASIDE.to_owned());
+        }
+        outcome
+    };
+    result.map(warn).map_err(warn)
+}
+
 /// The backend and generation options of an eval or refusal call: the arguments over the
-/// operator's user configuration (the agent never names a binary), as the CLI resolves them.
+/// operator's user configuration (the agent never names a binary), as the CLI resolves them,
+/// then [`bench_backend`]. The `bool` says whether hipfire was set aside.
 fn effective_generation(
     args: &BenchToolArgs,
     user: &Result<crate::backend::BackendConfig, String>,
-    default: crate::bench::score::Backend,
+    default: Backend,
     llama_cpp_dir: Option<&Path>,
 ) -> Result<
     (
-        crate::bench::score::Backend,
+        Backend,
         crate::bench::generation::GenOptions,
         crate::backend::BackendConfig,
+        bool,
     ),
     Outcome,
 > {
-    use crate::bench::score::Backend;
     let user = user
         .clone()
         .map_err(|e| invalid("invalid_input", format!("configuration utilisateur : {e}")))?;
@@ -1503,7 +1542,8 @@ fn effective_generation(
         ..Default::default()
     };
     let effective = crate::backend::resolve(top, &user);
-    let backend = effective.backend.unwrap_or(default);
+    let (backend, hipfire_set_aside) =
+        bench_backend(effective.backend, default, args.model.as_deref());
     let mut options = generation(args);
     options.gpu_layers = effective.gpu_layers;
     options.batch_size = effective.batch_size.unwrap_or(options.batch_size);
@@ -1516,10 +1556,10 @@ fn effective_generation(
         llama_cpp_dir: llama_cpp_dir.map(Path::to_path_buf),
         ..effective
     };
-    Ok((backend, options, engines))
+    Ok((backend, options, engines, hipfire_set_aside))
 }
 
-fn bench_command(arguments: &Value) -> &'static str {
+pub(super) fn bench_command(arguments: &Value) -> &'static str {
     match arguments.get("mode").and_then(Value::as_str) {
         Some("logits") => "bench logits",
         Some("ppl") => "bench ppl",
@@ -1702,12 +1742,8 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 None => Ok(Template::default()),
             }
             .map_err(|e| invalid("invalid_arguments", e))?;
-            let (eval_backend, eval_generation, engines) = effective_generation(
-                &args,
-                &user,
-                crate::bench::score::Backend::Llama,
-                llama_cpp_dir.as_deref(),
-            )?;
+            let (eval_backend, eval_generation, engines, hipfire_set_aside) =
+                effective_generation(&args, &user, EVAL_BACKEND, llama_cpp_dir.as_deref())?;
             let req = EvalRequest {
                 model: path(ctx, "model", &args.model)?,
                 dataset: source(ctx, "dataset", &args.dataset)?,
@@ -1723,7 +1759,10 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 min_accuracy: args.min_accuracy,
                 generation: eval_generation,
             };
-            core_bench_eval(&req, &engines, fail_on_warn, ctx.deps, &ui, ctx.sink)
+            set_aside(
+                core_bench_eval(&req, &engines, fail_on_warn, ctx.deps, &ui, ctx.sink),
+                hipfire_set_aside,
+            )
         }
         BenchMode::Dump => {
             let prompts_file = source(ctx, "prompts", &args.prompts)?;
@@ -1756,12 +1795,8 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 markers_file.as_deref(),
             )
             .map_err(|e| invalid("invalid_arguments", e))?;
-            let (refusal_backend, refusal_generation, engines) = effective_generation(
-                &args,
-                &user,
-                crate::bench::score::Backend::Native,
-                llama_cpp_dir.as_deref(),
-            )?;
+            let (refusal_backend, refusal_generation, engines, hipfire_set_aside) =
+                effective_generation(&args, &user, REFUSAL_BACKEND, llama_cpp_dir.as_deref())?;
             let req = RefusalRequest {
                 model: path(ctx, "model", &args.model)?,
                 prompts,
@@ -1802,15 +1837,18 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                     min_kappa: args.min_kappa.unwrap_or(bench::DEFAULT_MIN_KAPPA),
                 }),
             };
-            core_bench_refusal(
-                &req,
-                refusal_backend,
-                judging.as_ref(),
-                &engines,
-                fail_on_warn,
-                ctx.deps,
-                &ui,
-                ctx.sink,
+            set_aside(
+                core_bench_refusal(
+                    &req,
+                    refusal_backend,
+                    judging.as_ref(),
+                    &engines,
+                    fail_on_warn,
+                    ctx.deps,
+                    &ui,
+                    ctx.sink,
+                ),
+                hipfire_set_aside,
             )
         }
         BenchMode::JudgeSample => {

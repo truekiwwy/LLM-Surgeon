@@ -68,18 +68,40 @@ impl ProjectPaths {
              de surgeon_graph (model = working_copy_path) et en baseline_model de \
              surgeon_bench. Toute écriture dans origin_path est refusée par le serveur : \
              sorties, caches et corrections vont dans project_dir.\n\
-             Chaîne de correction, à enchaîner toi-même : (1) jeux de prompts, intégrés ou écrits \
-             dans work_dir ; (2) surgeon_extract, out sous project_dir ; (3) surgeon_autotune \
-             sur plusieurs couches (target_layer_range, out) ; (4) surgeon_apply sur \
-             working_copy_path, dry_run puis réel ; (5) surgeon_bench avec baseline_model = \
-             origin_path ; (6) surgeon_restore en cas de régression. Le format de chat du \
-             modèle est appliqué par défaut (chat_template auto) : n'habille pas les prompts à \
-             la main, et ne mets none que pour le désactiver exprès. Garde les max_new_tokens \
-             par défaut (refusal 256, eval 512) : une réponse coupée fausse la mesure. Dans \
-             surgeon_autotune, α est le coefficient de W ∓= α·v et non un décalage \
-             d'activation ; pour borner la taille du changement par couche, passe \
-             max_delta_norm_ratio (‖ΔW‖/‖W‖, 0.01 pour 1 %) plutôt qu'un alpha_max calculé à \
-             la main.\n\
+             Protocole de correction, celui des runs CLI de référence, à enchaîner toi-même \
+             dans cet ordre sans sauter d'étape :\n\
+             (1) Extraction contrastive propre : surgeon_extract avec deux jeux du même \
+             registre, pos = les prompts qui déclenchent le comportement (builtin:refusals pour \
+             des refus excessifs), neg = des prompts neutres (builtin:general, ou un jeu écrit \
+             dans work_dir), method mean_diff, site resid_post et pooling last (les défauts), \
+             holdout_frac 0.2, out = work_dir/dir_L<couche>.safetensors.\n\
+             (2) Sonde de toutes les couches : répète cette extraction sur chaque couche (une \
+             sur deux au-delà de 32), classe-les par d_prime et threshold_accuracy hors \
+             échantillon (diagnostics de surgeon_extract) et consigne le classement avec \
+             record_finding ; la direction retenue est celle de la couche au plus fort signal. \
+             surgeon_inspect avec projections [\"o_proj\", \"down_proj\"] confirme les cibles. \
+             Ne choisis jamais une couche ni une plage sans cette sonde.\n\
+             (3) Projection orthogonale : surgeon_apply sur working_copy_path, dry_run puis \
+             réel, avec l'opération {{\"operation\": \"project_out\", \"projections\": \
+             [\"o_proj\", \"down_proj\"], \"layers\": \"all\", \"vector_file\": <direction \
+             retenue>, \"vector_tensor\": \"direction\", \"vector_tensor_b\": \"direction\", \
+             \"alpha\": α}}. Ne restreins layers à la plage à fort signal que si la sonde le \
+             justifie. Balaie α de 0.4 à 1.0 (surgeon_restore entre deux essais) et garde le \
+             plus petit α qui atteint l'objectif. add et subtract, seules sorties de \
+             surgeon_autotune, décalent les poids sans retirer la direction : ne les emploie que \
+             si l'utilisateur impose add.\n\
+             (4) Validation multi-benchmarks après chaque apply, chacun avec baseline_model = \
+             origin_path : surgeon_bench refusal sur builtin:refusals ; eval sur builtin:math, \
+             builtin:logic et builtin:general ; contrôle sécurité : refusal sur un jeu de \
+             demandes réellement dangereuses (10 au moins), écrit une fois dans work_dir puis \
+             réutilisé, dont le taux de refus ne doit pas baisser. Une baisse sur math, logic, \
+             general ou sécurité hors de l'intervalle rapporté est une régression.\n\
+             Le format de chat du modèle est appliqué par défaut (chat_template auto) : \
+             n'habille pas les prompts à la main, et ne mets none que pour le désactiver exprès. \
+             Garde les max_new_tokens par défaut (refusal 256, eval 512) : une réponse coupée \
+             fausse la mesure. Backend : une mesure de la copie (dossier SafeTensors) tourne sur \
+             native ; le serveur écarte hipfire, qui sert un cache quantifié et ignore les poids \
+             modifiés (avertissement « backend hipfire écarté »).\n\
              Rollback : dès qu'une contre-mesure surgeon_bench montre une régression après un \
              surgeon_apply, remets la copie en état avec surgeon_restore (model = \
              working_copy_path ; sans autre argument il revient à l'état d'avant le dernier \
@@ -143,7 +165,10 @@ mod tests {
             "from_origin = origin_path".to_owned(),
             format!("work_dir : {}", dir.path().join("work").display()),
             "surgeon_files".to_owned(),
-            "max_delta_norm_ratio".to_owned(),
+            r#"{"operation": "project_out", "projections": ["o_proj", "down_proj"]"#.to_owned(),
+            "Sonde de toutes les couches".to_owned(),
+            "builtin:logic et builtin:general ; contrôle sécurité".to_owned(),
+            "le serveur écarte hipfire".to_owned(),
             "chat_template auto".to_owned(),
             "Ne t'arrête pas pour demander un chemin".to_owned(),
         ] {

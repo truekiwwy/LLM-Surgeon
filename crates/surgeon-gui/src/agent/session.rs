@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use super::config::{AskMode, Prices, RunBudgets};
 use super::evidence::{self, Finding};
-use super::mission::Mission;
+use super::mission::{Forced, Mission};
 use super::paths::ProjectPaths;
 use super::policy::{self, AgentMode, Decision, Rule, Scope};
 use super::provider::{
@@ -103,6 +103,9 @@ pub struct Conversation {
     /// What the session is for; older conversations have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mission: Option<Mission>,
+    /// The patch settings forced from the advanced (CLI) panel of the form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forced: Option<Forced>,
 }
 
 impl Conversation {
@@ -998,11 +1001,7 @@ impl Session {
              - Tiens le plan à jour avec update_plan ; montre un tenseur avec show_in_3d.\n\
              {paths}{mission}",
             tag = tools::FRAME_TAG,
-            mission = self
-                .conv
-                .mission
-                .map(|m| format!("\n\n{}", m.brief()))
-                .unwrap_or_default(),
+            mission = brief(self.conv.mission, self.conv.forced.as_ref()),
             paths = self.outgoing(
                 &self
                     .dirs
@@ -1078,6 +1077,16 @@ impl Session {
     fn log_simple(&self, event: &str, detail: &str) {
         self.log("", "", &Value::Null, event, Some(detail.into()), None);
     }
+}
+
+/// The mission's brief, then the forced settings, for the end of a system or CLI prompt.
+pub fn brief(mission: Option<Mission>, forced: Option<&Forced>) -> String {
+    mission
+        .map(Mission::brief)
+        .into_iter()
+        .chain(forced.map(Forced::brief))
+        .map(|b| format!("\n\n{b}"))
+        .collect()
 }
 
 fn scope<'a>(

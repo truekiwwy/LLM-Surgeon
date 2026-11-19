@@ -1914,17 +1914,33 @@ fn a_signed_in_cli_passes_its_own_status_check() {
 
 #[test]
 fn the_mission_briefs_the_agent_and_stays_with_the_conversation() {
-    use super::mission::{Mission, Symptom};
+    use super::mission::{Forced, Mission, Operation, Symptom};
     let mut e = env(vec![mock::say("Je regarde o_proj.")], AgentMode::Ask);
     let mission = Mission::Scalping(Symptom::Refusals);
+    let forced = Forced {
+        operation: Operation::ProjectOut,
+        layers: "all".into(),
+        alpha: "0.6".into(),
+        ..Forced::default()
+    };
     e.s.conv.mission = Some(mission);
+    e.s.conv.forced = Some(forced.clone());
     e.s.send("Il refuse tout ce qui parle de serrures").unwrap();
     e.settle();
     let system = &e.mock.requests()[0].system;
     assert!(system.contains(&mission.brief()), "{system}");
+    // The forced settings come after the mission, which they override.
+    let at = |text: &str| {
+        system
+            .find(text)
+            .unwrap_or_else(|| panic!("{text} in {system}"))
+    };
+    assert!(at(&mission.brief()) < at(&forced.brief()));
+    assert!(system.contains("Protocole de correction"), "{system}");
     let path = Dirs::of(&e.m.project.dir).conversation(&e.s.conv.id);
     let saved = Conversation::load(&path).unwrap();
     assert_eq!(saved.mission, Some(mission));
+    assert_eq!(saved.forced, Some(forced));
 }
 
 #[test]

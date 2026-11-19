@@ -21,6 +21,13 @@ système (`agent/mission.rs`) :
 La mission ne change ni la politique ni le mode : en mode Demander l'agent ne peut que
 proposer, en mode Modifier chaque écriture reste une carte d'approbation.
 
+**Mode avancé (CLI).** Un interrupteur du formulaire ouvre un panneau qui impose les parties
+du patch que l'agent ne choisit plus : l'opération (`auto` = `project_out`, `project_out`,
+`add`), les tenseurs (`o_proj` et `down_proj`, ou l'un des deux), les couches (`all`, `12-15`,
+`3,5` ; vide : la sonde décide) et `alpha` (vide : balayage). Les valeurs sont vérifiées avant
+« Démarrer » (`Forced::check`), enregistrées avec la conversation (`forced`) et ajoutées au
+prompt après la mission (`Forced::brief`).
+
 Code : `crates/surgeon-gui/src/agent/` (`provider`, `anthropic`, `openai`, `http`, `mock`,
 `vault`, `runtime`, `tools`, `policy`, `evidence`, `session`, `config`, `view`, `selftest`).
 Pré-requis : le socle Studio ([STUDIO.md](STUDIO.md)) : l'agent travaille dans un projet ouvert.
@@ -239,6 +246,32 @@ Jeux intégrés (`surgeon_bench`, embarqués dans le moteur, `src/bench/builtin/
 mode `eval` ; `builtin:refusals` (18 demandes légitimes souvent refusées à tort) pour le mode
 `refusal`. Chaque symptôme du Scalping nomme le sien (`Symptom::probe`).
 
+**Protocole de correction** (`agent/paths.rs`), celui des runs CLI de référence, imposé dans
+cet ordre :
+
+1. extraction contrastive (`surgeon_extract`, `mean_diff`, `resid_post`, `last`,
+   `holdout_frac` 0.2), par exemple `builtin:refusals` contre `builtin:general` ;
+2. sonde de toutes les couches : une extraction par couche, classée par `d_prime` et
+   `threshold_accuracy`, puis `surgeon_inspect` sur `o_proj` et `down_proj` ;
+3. `surgeon_apply` avec `project_out` sur `["o_proj", "down_proj"]`, `layers: "all"` sauf si
+   la sonde justifie une plage, α balayé de 0.4 à 1.0 ; `add` (et `surgeon_autotune`, qui ne
+   produit que des décalages additifs) seulement si l'utilisateur l'impose ;
+4. validation après chaque apply contre `origin_path` : `refusal` sur `builtin:refusals`,
+   `eval` sur `builtin:math`, `builtin:logic` et `builtin:general`, et un contrôle sécurité
+   (demandes dangereuses écrites dans `work/`, taux de refus qui ne doit pas baisser).
+
+**Commande CLI équivalente.** Chaque appel d'outil du fil affiche la commande `surgeon …` qui
+le rejoue en terminal (`weight_surgeon::mcp::cli_line`) : en résumé de la ligne, puis entière
+en tête du détail. Un patch, des prompts ou des prompts d'évaluation passés en ligne deviennent
+des fichiers nommés (`patch.json`...) signalés en commentaire. `bench eval` et `bench refusal`
+écrivent toujours `--backend`, pour que la configuration du terminal ne change pas la mesure.
+
+**hipfire et les copies patchées.** hipfire sert un cache quantifié enregistré par nom et ne lit
+jamais le dossier SafeTensors : `surgeon_bench` (`eval`, `refusal`) sur un modèle qui n'est pas
+un `.gguf` passe sur `native` quand la configuration ou l'appel nomme hipfire
+(`mcp::bench_backend`), avec l'avertissement `HIPFIRE_SET_ASIDE` en tête de l'enveloppe. Le fil
+le signale sous la ligne de l'appel.
+
 « Démarrer » sur un projet qui a un modèle d'origine mais aucune copie de travail lance d'abord
 la copie (`studio_copy`), puis la session dès qu'elle est faite ; un échec de la copie
 s'affiche et laisse le formulaire tel quel.
@@ -374,4 +407,8 @@ cargo run -- --screenshot a.png --screen agent:scalping --demo-data
 - L'estimation de contexte est grossière (caractères / 4).
 - L'agent ne crée pas de copie de travail lui-même (`studio_copy` n'est pas un outil MCP) : il
   la demande avec `ask_user`.
+- Le mode avancé est une consigne du prompt : la politique ne refuse pas un `surgeon_apply`
+  qui s'en écarterait, et les runtimes CLI ne passent pas par elle.
+- La commande CLI et l'alerte hipfire du fil sont calculées avec la configuration de backend
+  du moment, pas celle de l'appel.
 - Aucune télémétrie ; aucune requête sans action de l'utilisateur dans la page.

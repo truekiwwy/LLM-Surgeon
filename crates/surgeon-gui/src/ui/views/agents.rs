@@ -16,7 +16,7 @@ use super::super::layout::Regions;
 use super::super::theme::TOKENS as T;
 use super::{age, context, left_column, project_select};
 use crate::agent::evidence::{self, Status};
-use crate::agent::mission::{Mission, Symptom};
+use crate::agent::mission::{Mission, Operation, Symptom, Tensors};
 use crate::agent::policy::AgentMode;
 use crate::agent::provider::{Block, Role};
 use crate::agent::session::{Choice, Dirs};
@@ -289,6 +289,8 @@ fn form_steps(ui: &mut Ui, app: &mut SurgeonApp, mode: Mode) {
         }
     });
     ui.add_space(T.space.xl);
+    advanced(ui, app);
+    ui.add_space(T.space.xl);
 
     ui.horizontal(|ui| {
         c::secondary(ui, t("form.allow"));
@@ -328,6 +330,92 @@ fn form_steps(ui: &mut Ui, app: &mut SurgeonApp, mode: Mode) {
     }
 }
 
+/// The advanced (CLI) panel: what the agent must write in its patch instead of choosing it,
+/// as in a `patch.json` of the CLI. Closed, the agent follows the protocol alone.
+fn advanced(ui: &mut Ui, app: &mut SurgeonApp) {
+    let hub = &mut app.agents;
+    c::switch(
+        ui,
+        Icon::Sliders,
+        t("form.advanced"),
+        &mut hub.forced_on,
+        t("form.advanced.tip"),
+    );
+    if !hub.forced_on {
+        return;
+    }
+    ui.add_space(T.space.s);
+    c::inset_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let forced = &mut hub.forced;
+        let operations = [
+            Segment {
+                value: Operation::Auto,
+                label: "auto",
+                tooltip: t("forced.auto.tip"),
+            },
+            Segment {
+                value: Operation::ProjectOut,
+                label: "project_out",
+                tooltip: t("forced.project_out.tip"),
+            },
+            Segment {
+                value: Operation::Add,
+                label: "add",
+                tooltip: t("forced.add.tip"),
+            },
+        ];
+        let tensors = [
+            Segment {
+                value: Tensors::Both,
+                label: t("forced.both"),
+                tooltip: t("forced.tensors.tip"),
+            },
+            Segment {
+                value: Tensors::OProj,
+                label: "o_proj",
+                tooltip: t("forced.tensors.tip"),
+            },
+            Segment {
+                value: Tensors::DownProj,
+                label: "down_proj",
+                tooltip: t("forced.tensors.tip"),
+            },
+        ];
+        ui.horizontal(|ui| {
+            c::secondary(ui, t("form.advanced.operation"));
+            c::segmented(ui, &mut forced.operation, &operations, c::font_body());
+        });
+        ui.add_space(T.space.s);
+        ui.horizontal(|ui| {
+            c::secondary(ui, t("form.advanced.tensors"));
+            c::segmented(ui, &mut forced.tensors, &tensors, c::font_body());
+        });
+        ui.add_space(T.space.s);
+        let width = ((ui.available_width() - T.space.l) / 2.0).floor();
+        ui.horizontal(|ui| {
+            c::secondary(ui, t("form.advanced.layers"));
+            c::field_mono(
+                ui,
+                &mut forced.layers,
+                t("form.advanced.layers.hint"),
+                width * 0.6,
+            );
+            c::secondary(ui, t("form.advanced.alpha"));
+            c::field_mono(
+                ui,
+                &mut forced.alpha,
+                t("form.advanced.alpha.hint"),
+                width * 0.6,
+            );
+        });
+        if let Err(e) = forced.check() {
+            ui.add_space(T.space.s);
+            c::message(ui, &e, true);
+        }
+    });
+}
+
 /// The working copy the agent works on, or the button that makes one.
 fn copy_line(ui: &mut Ui, app: &mut SurgeonApp) {
     let entries = app.ledger().to_vec();
@@ -358,11 +446,13 @@ fn start(ui: &mut Ui, app: &mut SurgeonApp, mode: Mode) {
     let hub = &app.agents;
     let described = mode == Mode::Advance || !hub.input.trim().is_empty();
     let copying = app.pending_start.is_some();
+    let forced_ok = !hub.forced_on || hub.forced.check().is_ok();
     let why = match (hub.connection().is_some(), hub.busy() || copying, described) {
         (false, _, _) => Some(t("agents.none")),
         (_, true, _) if copying => Some(t("form.copying")),
         (_, true, _) => Some(t("chat.busy")),
         (_, _, false) => Some(t("form.describe.why")),
+        _ if !forced_ok => Some(t("form.advanced.why")),
         _ => None,
     };
     if copying {
@@ -606,6 +696,7 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
     let Some(conv) = app.agents.conversation() else {
         return;
     };
+    let configured = app.dialog.saved().backend;
     let blocks = || conv.messages.iter().flat_map(|m| &m.blocks);
     // A result is shown inside its call's row, not as a row of its own.
     let results: HashMap<&str, (&str, bool)> = blocks()
@@ -643,11 +734,22 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
                 }
                 (Block::ToolUse { id, name, input }, _) => {
                     let result = results.get(id.as_str());
+                    // shortcut: read with today's backend configuration, not the one of the
+                    // call; record it with the call if the configuration changes mid-project.
+                    let cli = weight_surgeon::mcp::cli_line(name, input, configured);
                     let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
-                    let mut details = vec![pretty.as_str()];
+                    let mut details: Vec<&str> = cli.iter().map(|l| l.command.as_str()).collect();
+                    details.push(pretty.as_str());
                     details.extend(result.map(|(content, _)| *content));
                     let failed = result.is_some_and(|(_, error)| *error);
-                    c::tool_row(ui, row_id, name, &tool_summary(input), failed, &details);
+                    let summary = cli
+                        .as_ref()
+                        .map_or_else(|| tool_summary(input), |l| l.command.clone());
+                    c::tool_row(ui, row_id, name, &summary, failed, &details);
+                    if cli.as_ref().is_some_and(|l| l.hipfire_set_aside) {
+                        c::status(ui, State::Warn, t("bench.native"))
+                            .on_hover_text(weight_surgeon::mcp::HIPFIRE_SET_ASIDE);
+                    }
                 }
                 (
                     Block::ToolResult {

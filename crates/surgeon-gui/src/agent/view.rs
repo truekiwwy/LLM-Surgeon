@@ -12,7 +12,7 @@ use eframe::egui;
 
 use super::config::{AgentsConfig, Connection, Consent, Prices, ProjectAgent, ProviderKind};
 use super::detect::{self, EnvKey, Preset, Scan, Server};
-use super::mission::{Mission, Symptom};
+use super::mission::{Forced, Mission, Symptom};
 use super::paths::ProjectPaths;
 use super::policy::AgentMode;
 use super::provider::{Block, Message, Role};
@@ -127,6 +127,9 @@ pub struct Hub {
     pub symptom: Symptom,
     /// The mission of the next conversation, until it is created.
     pub mission: Option<Mission>,
+    /// The advanced (CLI) panel of the form: open, and what it forces on the next conversation.
+    pub forced_on: bool,
+    pub forced: Forced,
     pub answer: String,
     pub consent_for: Option<String>,
     pub consent_redact: bool,
@@ -173,6 +176,8 @@ impl Hub {
             input: String::new(),
             symptom: Symptom::Refusals,
             mission: None,
+            forced_on: false,
+            forced: Forced::default(),
             answer: String::new(),
             consent_for: None,
             consent_redact: true,
@@ -675,6 +680,11 @@ impl Hub {
         }
     }
 
+    /// What the advanced panel forces on the next conversation: nothing while it is closed.
+    pub fn forced_next(&self) -> Option<Forced> {
+        self.forced_on.then(|| self.forced.clone())
+    }
+
     /// Starts a new conversation for `mission` with the typed message (the form of a new
     /// session). On a refusal (consent, no connection) the form stays, text and mission kept.
     pub fn begin(&mut self, mission: Mission) {
@@ -808,6 +818,7 @@ impl Hub {
                 connection: conn.id.clone(),
                 model,
                 mission: self.mission,
+                forced: self.forced_next(),
                 ..Conversation::default()
             };
             self.session = Some(self.open_session(&conn, conv)?);
@@ -864,12 +875,10 @@ impl Hub {
         let surgeon = runtime::engine_server()?;
         let dirs = Dirs::of(project);
         let read_roots = self.read_roots(project);
-        let mission = self
-            .cli_conv
-            .as_ref()
-            .map_or(self.mission, |c| c.mission)
-            .map(|m| format!("\n\n{}", m.brief()))
-            .unwrap_or_default();
+        let mission = match &self.cli_conv {
+            Some(c) => super::session::brief(c.mission, c.forced.as_ref()),
+            None => super::session::brief(self.mission, self.forced_next().as_ref()),
+        };
         // OpenCode and Antigravity keep their own tools: say where they may act.
         let own_tools = match conn.kind {
             ProviderKind::OpenCode | ProviderKind::Antigravity => {
@@ -914,12 +923,14 @@ impl Hub {
         let run = runtime::Run::start(&launch, conn.kind, Arc::clone(&self.wake))?;
         let model = self.model().unwrap_or_default();
         let mission = self.mission;
+        let forced = self.forced_next();
         let conv = self.cli_conv.get_or_insert_with(|| Conversation {
             id: Session::new_id(&dirs),
             created_unix: now_unix(),
             connection: conn.id.clone(),
             model,
             mission,
+            forced,
             ..Conversation::default()
         });
         conv.messages.push(Message::user_text(text));

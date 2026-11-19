@@ -212,6 +212,12 @@ Le champ `model` des requêtes est le nom du modèle donné au bench (son dossie
 extension) : le démon doit connaître un modèle sous ce nom. Comme pour mistral.rs, seul un faux
 démon l'a vérifié ici.
 
+Le démon ne lit donc jamais les poids du dossier : une copie patchée devrait être re-quantifiée
+et réenregistrée, sinon la mesure porte sur les anciens poids. Sur MCP (agents, studio),
+`surgeon_bench` `eval` et `refusal` d'un modèle qui n'est pas un `.gguf` passent sur `native`
+quand hipfire est demandé ou configuré, avec un avertissement. La CLI garde `--backend hipfire`
+tel quel.
+
 **Avec `surgeon-gui`.** Sur une machine AMD, ou quand `hipfire` est le backend enregistré, et sauf
 si `native` a été enregistré à la main, la fenêtre démarre le démon si rien ne répond sur
 `hipfire_url` et si le binaire est trouvé : `hipfire serve 127.0.0.1:<port> --no-prewarm`, sans
