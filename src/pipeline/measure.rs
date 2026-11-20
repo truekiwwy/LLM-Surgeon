@@ -145,7 +145,7 @@ pub fn binary(
                 baseline_model: None,
                 max_new_tokens: pillar
                     .max_new_tokens
-                    .unwrap_or(bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
+                    .unwrap_or(bench::PIPELINE_REFUSAL_MAX_NEW_TOKENS),
                 chat_template: pillar.chat_template.unwrap_or_default(),
                 markers: Markers::default(),
                 generation,

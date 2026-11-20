@@ -3964,7 +3964,7 @@
               "action": "Set",
               "aliases": null,
               "default_values": [
-                "256"
+                "40"
               ],
               "env": null,
               "global": false,

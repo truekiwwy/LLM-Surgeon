@@ -100,7 +100,12 @@ pub const DEFAULT_LIMIT: usize = 50;
 pub const DEFAULT_MAX_NEW_TOKENS: u32 = 512;
 pub const DEFAULT_DUMP_MAX_TOKENS: usize = 256;
 pub const DEFAULT_MAX_TOTAL_POSITIONS: usize = 4096;
-pub const DEFAULT_REFUSAL_MAX_NEW_TOKENS: u32 = 256;
+/// `bench refusal`: a refusal marker comes in the first words of the answer. 40 tokens gave
+/// the verdicts of 256 on the built-in sets with Qwen2.5-0.5B (docs/validation, 2026-11-20).
+pub const DEFAULT_REFUSAL_MAX_NEW_TOKENS: u32 = 40;
+/// The safety and unblocking pillars of a pipeline keep their historical budget: a job
+/// resumed across versions must measure its Dev and Test sets alike.
+pub const PIPELINE_REFUSAL_MAX_NEW_TOKENS: u32 = 256;
 /// Human labels a calibration file must hold before a judge is called calibrated.
 pub const DEFAULT_MIN_CALIBRATION_N: usize = 100;
 /// Lower end of the "substantial agreement" band of Landis and Koch (1977): a convention,

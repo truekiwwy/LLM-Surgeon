@@ -467,3 +467,64 @@ Job réel sur Qwen2.5-0.5B-Instruct, sans `--llama-cpp-dir` ni option de backend
 Les piliers `kl` et `logits` restent natifs (logits). La durée n'est pas estimée par `pipeline plan` pour
 un backend GPU (la calibration mesure le CPU), et le plan le dit. `hipfire` est reconnu et refusé avec un
 message qui renvoie vers `llama-server` : il cible Linux/ROCm et n'expose qu'un endpoint de chat.
+
+## 13. Addendum du 2026-11-20 : budget des refus, lots natifs automatiques, cache des références
+
+Branche `perf/native-speed-and-probe`. Intel Core i5-12400F (6 cœurs, 12 threads), 38 Go de RAM
+libre, Windows 11, binaire release. Modèles : `Qwen2.5-0.5B-Instruct` (d'origine) et
+`Qwen2.5-0.5B-Patched` (copie patchée, autres poids). Backend natif, glouton, f32.
+
+**Lots natifs.** `bench refusal`, `builtin:refusals` (18 prompts), 40 tokens, modèle d'origine.
+
+| `--batch-size` | `--threads` | Durée | Refus |
+| --- | --- | --- | --- |
+| 1 | 12 (défaut d'avant) | 57,8 s | 3/18 |
+| 1 | 6 | 56,5 s | 3/18 |
+| 8 | 12 | 16,2 s | 3/18 |
+| 8 | 6 | 14,5 s | 3/18 |
+| 16 | 6 | 11,9 s | 3/18 |
+| 18 | 6 | 11,2 s | 3/18 |
+| 18 | 12 | 12,1 s | 3/18 |
+
+Mêmes verdicts, prompt par prompt, dans les sept réglages. Sans `--batch-size`, le backend natif
+prend désormais des lots de 16 séquences au plus (moins si la moitié de la RAM libre après
+chargement ne tient pas leurs caches KV), un thread par cœur physique, et l'écrit sur une ligne
+`[INFO]`.
+
+**Budget des refus.** Défaut de `bench refusal --max-new-tokens` : 256 puis 40. Verdicts par prompt
+comparés sur les quatre jeux intégrés, avec les lots automatiques :
+
+| Modèle | Jeu | Refus à 256 | Refus à 40 | Verdicts différents | Durée 256 / 40 |
+| --- | --- | --- | --- | --- | --- |
+| origine | `refusals` (18) | 3 | 3 | 0 | 65,6 / 11,8 s |
+| origine | `general` (18) | 0 | 0 | 0 | 18,3 / 10,6 s |
+| origine | `logic` (16) | 0 | 0 | 0 | 50,2 / 14,2 s |
+| origine | `math` (18) | 0 | 0 | 0 | 72,3 / 18,1 s |
+| patchée | `refusals` (18) | 4 | 4 | 0 | 83,3 / 14,7 s |
+| patchée | `general` (18) | 0 | 0 | 0 | 26,5 / 12,5 s |
+| patchée | `logic` (16) | 0 | 0 | 0 | 68,4 / 16,2 s |
+| patchée | `math` (18) | 0 | 0 | 0 | 74,8 / 17,5 s |
+
+140 verdicts, aucun différent. Dans les réponses de 256 tokens, chaque marqueur trouvé commence
+entre le caractère 0 et le caractère 11 (« I'm sorry, but I can't assist with that. »,
+« Sorry, but I can't assist with that. »). Temps cumulé des seize runs : 457,9 s puis 114,5 s.
+Les piliers `safety` et `unblocking` du pipeline gardent 256 tokens : un job repris doit mesurer
+ses jeux Dev et Test de la même façon. Limite : 70 prompts et un seul modèle de 0,5B ; un modèle
+qui refuse après un préambule plus long serait mesuré à tort avec 40 tokens
+(`--max-new-tokens 256` reste possible).
+
+**dtype.** `bench dump` de `builtin:refusals` (742 positions) : 5,9 s en f32, 14,4 s en bf16. Le
+repli automatique en bf16, quand f32 ne tient pas dans la RAM libre au lancement, coûte donc environ
+2,5 fois le temps ; il reste en place, mais chaque chargement écrit le dtype, la RAM libre et le
+besoin, et un repli est un avertissement qui donne les deux chiffres.
+
+**Cache des références.** Copie patchée contre l'original, deux lancements identiques, cache vide
+au départ :
+
+| Commande | 1er lancement (miss) | 2e lancement (hit) | Référence miss / hit |
+| --- | --- | --- | --- |
+| `bench refusal --prompts builtin:refusals` (40 tokens) | 28,9 s | 14,9 s | 13,7 / 0,86 s |
+| `bench eval --dataset builtin:math --max-new-tokens 256` | 178,9 s | 99,8 s | 92,1 / 0,75 s |
+
+Le hit comprend le SHA-256 des fichiers du modèle d'origine (1,26 Go). Comparaisons appariées
+identiques entre les deux lancements.

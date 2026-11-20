@@ -1193,7 +1193,7 @@ pub struct BenchToolArgs {
     #[serde(default)]
     #[schemars(
         range(min = 1),
-        description = "eval : tokens générés au plus par question (défaut 512) ; refusal : par prompt (défaut 256). Réduire fausse la mesure : réponses coupées avant la réponse finale ou le refus."
+        description = "eval : tokens générés au plus par question (défaut 512) ; refusal : par prompt (défaut 40). Réduire fausse la mesure : réponses coupées avant la réponse finale ou le refus."
     )]
     pub max_new_tokens: Option<u32>,
     #[serde(default)]

@@ -89,6 +89,9 @@
 //!   `bench refusal`, two entries added to `cli_surface.json`. The reports gain an optional
 //!   `baseline.cache`, absent without a cache directory (as in this harness): no tool schema,
 //!   no output hash moved.
+//! - the refusal budget: the default of `bench refusal --max-new-tokens` goes from 256 to 40
+//!   (one deliberate change of default, measured to keep the verdicts of 256 on the built-in
+//!   sets); the pipeline keeps 256. No other entry, no tool schema, no output hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

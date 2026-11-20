@@ -1092,7 +1092,7 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--prompts` | required | JSON array of strings or `{"text": ...}`, JSONL, or plain text. |
 | `--baseline-model` | none | Reference model on the same prompts, generated first (paired comparison). |
 | `--no-ref-cache` | off | Generate the `--baseline-model` answers again instead of reading them from the reference cache, and overwrite its entry. The cache (`%LOCALAPPDATA%\weight-surgeon\cache\ref_bench`, `~/.cache/weight-surgeon/ref_bench`, or `WEIGHT_SURGEON_CACHE_DIR`) is keyed by the SHA-256 of the reference model files, the dataset or prompts, and every option that changes the answers; `baseline.cache` says `hit` or `miss`. |
-| `--max-new-tokens` | 256 | Generation budget per prompt. |
+| `--max-new-tokens` | 40 | Generation budget per prompt: a refusal shows in the first words (40 gave the verdicts of 256 on the built-in sets). |
 | `--chat-template` | `auto` | Wrapping of each prompt: `auto` (the model's format, ChatML if it declares none), `none`, `chatml`, `llama3`, `inst` or `gemma`. |
 | `--backend` | the user configuration, else `native` | `native` (pure Rust), `llama-server` (one local llama.cpp server for the run) or `llama-completion` (one llama.cpp process per prompt); a SafeTensors folder is then converted to a temporary GGUF. `mistralrs` (mistral.rs on the SafeTensors folder as is) and `hipfire` (a running hipfire daemon) too: see [backends](docs/BACKENDS.md). |
 | `--judge` | `rules` | `rules` (markers only), `llm` (markers and a judge model) or `both` (plus their agreement). |
