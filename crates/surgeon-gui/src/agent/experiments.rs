@@ -115,15 +115,16 @@ pub fn describe(e: &Entry) -> Option<String> {
                 "sonde refusal_probe sur {model} : refus sondé {} (heuristique)",
                 rate(&r["probe_refusal_rate"])?
             ),
+            // The reports flatten their score: `refusal_rate`, `baseline.refusal_rate`.
             "refusal" => format!(
                 "bench refusal sur {model} : refus {}{}",
-                rate(&r["score"]["refusal_rate"])?,
-                rate(&r["baseline"]["score"]["refusal_rate"])
+                rate(&r["refusal_rate"])?,
+                rate(&r["baseline"]["refusal_rate"])
                     .map_or(String::new(), |b| format!(" (base {b})"))
             ),
             "eval" => {
-                let after = r["score"]["accuracy"].as_f64()?;
-                let before = r["baseline"]["score"]["accuracy"].as_f64();
+                let after = r["accuracy"].as_f64()?;
+                let before = r["baseline"]["accuracy"].as_f64();
                 format!(
                     "bench eval {} sur {model} : exactitude {after:.3}{}",
                     file_name(&p["dataset"]),
@@ -286,14 +287,14 @@ mod tests {
                 "r3",
                 "surgeon_bench",
                 json!({"mode": "refusal", "model": "copies/c1"}),
-                json!({"score": {"refusal_rate": 0.11}, "baseline": {"score": {"refusal_rate": 0.4}}}),
+                json!({"refusal_rate": 0.11, "baseline": {"refusal_rate": 0.4}}),
                 "fast-b",
             ),
             entry(
                 "r4",
                 "surgeon_bench",
                 json!({"mode": "eval", "model": "copies/c1", "dataset": "builtin:math"}),
-                json!({"score": {"accuracy": 0.35}, "baseline": {"score": {"accuracy": 0.5}}}),
+                json!({"accuracy": 0.35, "baseline": {"accuracy": 0.5}}),
                 "fast-b",
             ),
             entry(
