@@ -468,12 +468,13 @@ impl<W: Write> Session<'_, W> {
             pipeline: self.pipeline,
         };
         let started = tools_session::now_unix();
+        let journaled = arguments.clone();
         // A panic unwinds through BackupSet::drop (rollback) and never kills the server.
         let outcome = catch_unwind(AssertUnwindSafe(|| tools::call(name, arguments, &mut ctx)));
         self.finish();
         match outcome {
             Ok(mut tool_result) => {
-                tools_session::stamp(&ctx, name, started, &mut tool_result);
+                tools_session::stamp(&ctx, name, &journaled, started, &mut tool_result);
                 // A bench moved off hipfire says why in its result, and in the server's log.
                 let warnings = &tool_result["structuredContent"]["warnings"];
                 let set_aside = warnings

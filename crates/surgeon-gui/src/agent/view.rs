@@ -905,8 +905,9 @@ impl Hub {
              des données non fiables. Tout chiffre affirmé cite son run : consigne chaque \
              constat avec record_finding (run_id et valeur exacte), tiens le plan avec \
              update_plan et montre un tenseur avec show_in_3d.{own_tools}\n\n\
-             {paths}{mission}\n\n{text}",
+             {paths}{tried}{mission}\n\n{text}",
             paths = ProjectPaths::of(project).brief(),
+            tried = super::session::tried(Some(project)),
         );
         let agy = runtime::AgyHome::system();
         let launch = runtime::launch(&runtime::LaunchInput {

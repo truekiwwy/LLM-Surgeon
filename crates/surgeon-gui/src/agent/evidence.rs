@@ -164,7 +164,7 @@ pub fn mcp_runs(path: &Path) -> Vec<Entry> {
                 run_id: run["run_id"].as_str()?.to_owned(),
                 tool: run["tool"].as_str().unwrap_or_default().to_owned(),
                 label: "MCP".into(),
-                params: Value::Null,
+                params: run["arguments"].clone(),
                 resumed_from: None,
                 started_unix: run["started_unix"].as_u64().unwrap_or_default(),
                 finished_unix: run["finished_unix"].as_u64().unwrap_or_default(),

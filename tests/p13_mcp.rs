@@ -1036,6 +1036,11 @@ fn studio_tools_write_under_chat_and_runs_are_journaled_with_their_id() {
     assert_eq!(run["run_id"], run_id.as_str());
     assert_eq!(run["tool"], "surgeon_backends");
     assert_eq!(
+        run["arguments"],
+        json!({}),
+        "what the studio's summary reads"
+    );
+    assert_eq!(
         runs.lines().count(),
         1,
         "the studio tools are not journaled"

@@ -265,11 +265,42 @@ cet ordre :
 2. sonde de toutes les couches : une extraction par couche, classée par `d_prime` et
    `threshold_accuracy`, puis `surgeon_inspect` sur `o_proj` et `down_proj` ;
 3. `surgeon_apply` avec `project_out` sur `["o_proj", "down_proj"]`, `layers: "all"` sauf si
-   la sonde justifie une plage, α balayé de 0.4 à 1.0 ; `add` (et `surgeon_autotune`, qui ne
-   produit que des décalages additifs) seulement si l'utilisateur l'impose ;
-4. validation après chaque apply contre `origin_path` : `refusal` sur `builtin:refusals`,
-   `eval` sur `builtin:math`, `builtin:logic` et `builtin:general`, et un contrôle sécurité
-   (demandes dangereuses écrites dans `work/`, taux de refus qui ne doit pas baisser).
+   la sonde justifie une plage, α balayé de 0.4 à 1.0 en entonnoir : chaque α est d'abord criblé
+   par `surgeon_bench` mode `refusal_probe` (`first-token-prob`, une passe avant par prompt),
+   seuls les deux plus petits α retenus passent en génération complète ;
+   `surgeon_autotune` avec `refusal_prompts` calibre de même l'échelle d'un patch de steering ;
+   `add` et `subtract` (ses seules sorties) seulement si l'utilisateur l'impose ;
+   3 bis. pour retirer un comportement sans dégrader une capacité (maths, logique, code) :
+   direction de la capacité extraite à la même couche, puis `surgeon_compose` mode
+   `orthogonal-preserve` et son `patch_out` appliqué ;
+4. certification obligatoire par génération complète sur chaque finaliste puis sur l'état final,
+   contre `origin_path` : `refusal` sur `builtin:refusals`, `eval` sur `builtin:math`,
+   `builtin:logic` et `builtin:general`, et un contrôle sécurité (demandes dangereuses écrites
+   dans `work/`, taux de refus qui ne doit pas baisser). Un `refusal_probe` ne certifie jamais.
+
+**Essais déjà faits** (`agent/experiments.rs`). Le prompt système et celui d'un runtime CLI
+listent les 30 derniers essais réussis du projet, du ledger et du journal MCP
+(`chat/mcp_runs.jsonl`, qui garde désormais les `arguments` de chaque appel) : patchs
+(opération, couches, projections, alpha, vecteur), compositions (mode, vecteurs retirés et
+gardés), autotune (échelle retenue), sondes (refus sondé, heuristique) et mesures (refus,
+exactitude, base, `↓ rétention` quand l'exactitude baisse), avec deux consignes : ne pas
+relancer une configuration identique, ne pas augmenter alpha sur les mêmes couches après une
+baisse de rétention.
+
+**Répétition exacte.** Un appel de `surgeon_apply`, `surgeon_bench`, `surgeon_autotune`,
+`surgeon_compose` ou `surgeon_extract` dont les arguments, l'état du modèle (empreinte rapide de
+la copie, ou SHA-256 de la source) et les fichiers d'entrée lus égalent ceux d'un run réussi
+n'est pas relancé : le studio répond avec ce run (`run_id`, résultat résumé) et journalise
+l'événement `repeat`. Après un `surgeon_apply`, l'empreinte de la copie change, et la même
+mesure redevient une mesure nouvelle.
+
+**Certification.** Quand l'agent rend un tour sans appel d'outil (il conclut) alors qu'une sonde
+`refusal_probe` a servi dans l'exécution et qu'aucun `surgeon_bench` mode `refusal` ou `eval`
+n'a réussi après la dernière écriture du modèle (`surgeon_apply` réel, `surgeon_restore`,
+`surgeon_lora` merge), la boucle ajoute un rappel du studio qui demande cette génération
+complète, journalise l'événement `certify` et relance un tour, une seule fois par exécution.
+Un runtime CLI tourne hors de la boucle du studio : il reçoit la même consigne dans son prompt,
+et ses constats tirés d'une sonde restent « Heuristique » dans le journal des preuves.
 
 **Commande CLI équivalente.** Chaque appel d'outil du fil affiche la commande `surgeon …` qui
 le rejoue en terminal (`weight_surgeon::mcp::cli_line`) : en résumé de la ligne, puis entière
