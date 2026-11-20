@@ -1,6 +1,7 @@
 //! The settings dialog, the one place where the environment is configured, sections on the
 //! left: general (language, local only, projects folder, the wizard to replay), the AI
-//! providers (keys in the vault, models, prices, CLI runtimes), the engine (machine,
+//! providers (keys in the vault, models, prices, CLI runtimes), the external harnesses (the
+//! `weight-surgeon` skill and the MCP configuration of `surgeon mcp`), the engine (machine,
 //! dependencies with their repair, inference backend), the updates, and the technical log
 //! with the diagnostics report (no personal path, no secret).
 
@@ -16,6 +17,7 @@ use crate::agent::detect::{Preset, Reason};
 use crate::app::{Section, SurgeonApp};
 use crate::desktop::UpdateState;
 use crate::diag::{actions_needed, Fix, Group, Row, Severity, Status, Uses};
+use crate::integration::{self, Harness, SkillState};
 use crate::settings::Lang;
 
 /// The column of the sections.
@@ -27,6 +29,7 @@ fn section_label(section: Section) -> &'static str {
     match section {
         Section::General => t("settings.section.general"),
         Section::Providers => t("settings.section.providers"),
+        Section::Harnesses => t("settings.section.harnesses"),
         Section::Engine => t("settings.section.engine"),
         Section::Updates => t("settings.section.updates"),
         Section::Journal => t("settings.section.journal"),
@@ -37,6 +40,7 @@ fn section_icon(section: Section) -> Icon {
     match section {
         Section::General => Icon::Sliders,
         Section::Providers => Icon::Sparkle,
+        Section::Harnesses => Icon::Cube,
         Section::Engine => Icon::Chip,
         Section::Updates => Icon::Download,
         Section::Journal => Icon::List,
@@ -112,7 +116,7 @@ pub fn dialog(ctx: &egui::Context, app: &mut SurgeonApp) {
             };
             if matches!(
                 section,
-                Section::Providers | Section::Engine | Section::Journal
+                Section::Providers | Section::Harnesses | Section::Engine | Section::Journal
             ) {
                 c::vline(
                     ui.painter(),
@@ -127,6 +131,7 @@ pub fn dialog(ctx: &egui::Context, app: &mut SurgeonApp) {
                     .title(t("settings.section.general"))
                     .show(ui, body, |ui| general(ui, app)),
                 Section::Providers => providers(ui, app, &regions),
+                Section::Harnesses => harnesses(ui, app, &regions),
                 Section::Engine => machine(ui, app, &regions),
                 Section::Updates => c::Panel::new("updates")
                     .bare()
@@ -512,6 +517,105 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 c::meta(ui, tf("report.copied", &[("n", &text.lines().count())]));
             }
         });
+}
+
+// ------------------------------------------------------------------ external harnesses
+
+/// The program the MCP configuration starts, looked for once per session.
+fn surgeon_command() -> &'static std::path::Path {
+    static COMMAND: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    COMMAND.get_or_init(integration::surgeon_command)
+}
+
+/// The skill of each harness in the center, the MCP configuration on the right. A click
+/// writes; the states are read from disk on every frame.
+fn harnesses(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
+    let ctx = ui.ctx().clone();
+    let home = crate::paths::home_dir();
+    let mut note = None;
+    c::Panel::new("skill")
+        .bare()
+        .title(t("panel.skill"))
+        .show(ui, regions.center, |ui| {
+            c::secondary(ui, t("skill.explain"));
+            ui.add_space(T.space.m);
+            let Some(home) = &home else {
+                c::message(ui, t("skill.no_home"), true);
+                return;
+            };
+            for harness in Harness::ALL {
+                let dir = harness.skill_dir(home);
+                let (state, word, action) = match integration::skill_state(&dir) {
+                    SkillState::UpToDate => (State::Ok, t("skill.installed"), None),
+                    SkillState::Outdated => {
+                        (State::Warn, t("skill.outdated"), Some(t("skill.update")))
+                    }
+                    SkillState::Missing => {
+                        (State::Idle, t("skill.missing"), Some(t("skill.install")))
+                    }
+                };
+                ui.horizontal(|ui| {
+                    c::status(ui, state, harness.name());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let clicked = action.is_some_and(|text| {
+                            c::button(ui, text, ButtonKind::Secondary).clicked()
+                        });
+                        if clicked {
+                            note = Some(match integration::install_skill(&dir) {
+                                Ok(()) => (tf("skill.done", &[("path", &dir.display())]), false),
+                                Err(e) => (e, true),
+                            });
+                        }
+                        c::meta(ui, word);
+                    });
+                });
+                c::mono_secondary(ui, dir.display().to_string());
+                ui.add_space(T.space.s);
+            }
+        });
+    c::Panel::new("mcp")
+        .bare()
+        .title(t("panel.mcp"))
+        .show(ui, regions.right, |ui| {
+            c::secondary(ui, t("mcp.explain"));
+            ui.add_space(T.space.s);
+            c::meta(ui, t("mcp.command"));
+            c::mono_wrapped(ui, surgeon_command().display().to_string(), T.color.text);
+            ui.add_space(T.space.s);
+            let snippet = integration::mcp_snippet(surgeon_command());
+            let text = serde_json::to_string_pretty(&snippet).unwrap_or_default();
+            c::mono_wrapped(ui, text.as_str(), T.color.text_secondary);
+            ui.add_space(T.space.m);
+            if c::button_wide(ui, t("mcp.copy"), ButtonKind::Primary).clicked() {
+                ctx.copy_text(text.clone());
+                note = Some((t("mcp.copied").into(), false));
+            }
+            if let Some(home) = &home {
+                let file = integration::claude_config(home);
+                if c::button_wide(ui, t("mcp.add_claude"), ButtonKind::Secondary).clicked() {
+                    note = Some(
+                        match integration::merge_mcp_config(&file, surgeon_command()) {
+                            Ok(Some(bak)) => (
+                                tf(
+                                    "mcp.added",
+                                    &[("path", &file.display()), ("backup", &bak.display())],
+                                ),
+                                false,
+                            ),
+                            Ok(None) => (tf("mcp.created", &[("path", &file.display())]), false),
+                            Err(e) => (e, true),
+                        },
+                    );
+                }
+            }
+            if let Some((text, error)) = &app.harness_note {
+                ui.add_space(T.space.s);
+                c::message(ui, text, *error);
+            }
+        });
+    if note.is_some() {
+        app.harness_note = note;
+    }
 }
 
 // ------------------------------------------------------------------ AI providers

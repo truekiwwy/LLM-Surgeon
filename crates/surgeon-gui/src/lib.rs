@@ -17,6 +17,7 @@
 //! - [`backend_choice`]: the default backend from the hardware, Rust engines only.
 //! - [`backend_dialog`]: the backend setup modal.
 //! - [`hipfire_daemon`]: the hipfire daemon started and stopped with the window.
+//! - [`integration`]: the `weight-surgeon` skill and the MCP entry of external harnesses.
 //! - [`studio`]: projects, the job manager and the event stream (docs/STUDIO.md).
 //! - [`app`]: the window state and what the views ask it to do.
 //! - [`ui`]: design tokens, components, the shell (title bar, activity bar, palette,
@@ -38,6 +39,7 @@ pub mod hipfire_daemon;
 pub mod hipfire_setup;
 pub mod install;
 pub mod instance;
+pub mod integration;
 pub mod logging;
 pub mod net;
 pub mod paths;

@@ -74,15 +74,18 @@ pub use crate::settings::Mode;
 pub enum Section {
     General,
     Providers,
+    /// External harnesses: the skill and the MCP configuration.
+    Harnesses,
     Engine,
     Updates,
     Journal,
 }
 
 impl Section {
-    pub const ALL: [Section; 5] = [
+    pub const ALL: [Section; 6] = [
         Section::General,
         Section::Providers,
+        Section::Harnesses,
         Section::Engine,
         Section::Updates,
         Section::Journal,
@@ -90,7 +93,14 @@ impl Section {
 
     /// The `--screen settings:<name>` part; `machine` (before G7) is the engine.
     pub fn from_name(name: &str) -> Option<Self> {
-        let names = ["general", "providers", "engine", "updates", "journal"];
+        let names = [
+            "general",
+            "providers",
+            "harnesses",
+            "engine",
+            "updates",
+            "journal",
+        ];
         match name {
             "machine" => Some(Section::Engine),
             _ => names.iter().position(|n| *n == name).map(|k| Self::ALL[k]),
@@ -182,6 +192,8 @@ pub struct SurgeonApp {
     pub motion: bool,
     /// The settings dialog, open on this section.
     pub settings: Option<Section>,
+    /// What the last skill install or MCP configuration did (`true`: an error).
+    pub harness_note: Option<(String, bool)>,
     /// The system picker of the workspace folder (wizard, settings).
     pub workspace_picker: Picker,
     pub right: RightPane,
@@ -248,6 +260,7 @@ impl SurgeonApp {
             palette: Palette::default(),
             motion: true,
             settings: None,
+            harness_note: None,
             workspace_picker: Picker::default(),
             right: RightPane::Evidence,
             focus: None,

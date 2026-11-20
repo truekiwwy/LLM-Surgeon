@@ -82,6 +82,9 @@ fn main() -> ExitCode {
             }
         };
     }
+    if let Some(code) = integration(&cli) {
+        return code;
+    }
     if cli.reset_settings {
         match Settings::reset(&paths::settings_path()) {
             Ok(()) => println!("réglages effacés : l'assistant se relancera au prochain démarrage"),
@@ -198,6 +201,36 @@ fn main() -> ExitCode {
     }
 }
 
+/// `--mcp-config` and `--install-skill`: what Settings > External harnesses does, from a
+/// terminal. `None` when neither was asked.
+fn integration(cli: &Cli) -> Option<ExitCode> {
+    use std::io::Write;
+    use surgeon_gui::integration as i;
+    let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+    if cli.mcp_config {
+        let snippet = i::mcp_snippet(&i::surgeon_command());
+        let text = serde_json::to_string_pretty(&snippet).unwrap_or_default();
+        let _ = writeln!(out, "{text}");
+        return Some(ExitCode::SUCCESS);
+    }
+    let harness = cli.install_skill?;
+    let installed = paths::home_dir()
+        .ok_or_else(|| "dossier personnel introuvable (USERPROFILE, HOME)".to_owned())
+        .map(|home| harness.skill_dir(&home))
+        .and_then(|dir| i::install_skill(&dir).map(|()| dir));
+    Some(match installed {
+        Ok(dir) => {
+            logging::info(&format!("skill installé : {}", dir.display()));
+            let _ = writeln!(out, "{}", dir.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            let _ = writeln!(err, "{e}");
+            ExitCode::FAILURE
+        }
+    })
+}
+
 /// Relative paths would not mean the same thing to the first instance (another cwd).
 fn absolute(paths: &[PathBuf]) -> Vec<PathBuf> {
     paths
@@ -229,7 +262,9 @@ fn screenshot(cli: &Cli, png: &std::path::Path) -> Result<(), String> {
         (false, _) => None,
         (true, "") => Some(Section::General),
         (true, part) => Some(Section::from_name(part).ok_or_else(|| {
-            format!("--screen settings:{part} : general, providers, engine, updates ou journal")
+            format!(
+                "--screen settings:{part} : general, providers, harnesses, engine, updates ou journal"
+            )
         })?),
     };
     let mut settings = Settings::load(&paths::settings_path()).unwrap_or_default();
