@@ -111,8 +111,8 @@ pub use output::{
     sidecar_path, write_atomic, write_files_atomic, write_pair_atomic, TENSOR_NAME,
 };
 pub use prompts::{
-    check_texts, load_prompt_texts, load_tokenizer, model_folder, tokenize, ChatTemplate,
-    PromptFormat, Tokenized,
+    chat_messages, check_texts, load_prompt_texts, load_tokenizer, model_folder, tokenize,
+    ChatTemplate, PromptFormat, Tokenized,
 };
 pub use stats::{
     mean_diff_direction, separation, separation_along, separation_with_projections, Separation,

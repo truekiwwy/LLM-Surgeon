@@ -13,9 +13,11 @@
 //! POST /v1/completions {} -> 404/405 -> POST /v1/chat/completions {} -> 404/405 -> error
 //! ```
 //!
-//! `/v1/completions` keeps the bench's raw prompt. With the chat endpoint only, hipfire's own
-//! chat template goes on top of the bench's and no seed is documented: the run still goes,
-//! with a warning (`surgeon backend show`, bench warnings). The `model` field of a request is
+//! `/v1/completions` keeps the bench's raw prompt. With the chat endpoint only, the turns of
+//! the rendered prompt go as messages (`extract::chat_messages`), so hipfire's own template is
+//! the only one, and decoding is greedy since no seed is documented: the run goes with a
+//! warning (`surgeon backend show`, bench warnings), and sampling is refused
+//! ([`check_sampling`]). The `model` field of a request is
 //! the name of the model given to the bench (its folder, or its file without extension): the
 //! daemon must know a model by that name.
 //!
@@ -37,9 +39,22 @@ use crate::eval::{find_binary, EvalError};
 pub const DEFAULT_PORT: u16 = 11435;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const ALTERNATIVE: &str = "--backend mistralrs ou native";
-pub const CHAT_ONLY: &str = "hipfire n'expose que /v1/chat/completions, sans graine documentée : \
-    son gabarit de chat s'ajoute à celui du bench, les résultats ne sont ni reproductibles ni \
-    comparables aux autres backends";
+pub const CHAT_ONLY: &str = "hipfire n'expose que /v1/chat/completions : les tours du gabarit du \
+    bench lui sont envoyés comme messages et c'est son propre gabarit qui les écrit, en décodage \
+    glouton (aucune graine documentée) ; les scores restent à comparer sur ce seul backend";
+
+/// hipfire generates greedily only: with no documented seed, a sampled run could not be
+/// replayed, and its samples per prompt would all be the same greedy answer.
+pub fn check_sampling(sampling: &crate::eval::sampling::SamplingParams) -> Result<(), String> {
+    match sampling.is_greedy() {
+        true => Ok(()),
+        false => Err(
+            "hipfire : décodage glouton seulement (aucune graine documentée), \
+                      retirez --temperature ou mesurez sur --backend native ou mistralrs"
+                .into(),
+        ),
+    }
+}
 
 /// `given` (the binary, or a folder holding it), then `exe_dir`, then the folders of `path`.
 fn find(given: Option<&Path>, exe_dir: Option<&Path>, path: Option<OsString>) -> Option<PathBuf> {
@@ -423,6 +438,17 @@ mod tests {
         std::fs::create_dir_all(broken.join("runs")).unwrap();
         std::fs::write(broken.join(PROJECT_FILE), b"{").unwrap();
         assert!(is_working_copy(&broken.join("runs")));
+    }
+
+    #[test]
+    fn only_greedy_decoding_runs_on_hipfire() {
+        use crate::eval::sampling::SamplingParams;
+        assert_eq!(check_sampling(&SamplingParams::default()), Ok(()));
+        let drawn = SamplingParams {
+            temperature: 0.7,
+            ..SamplingParams::default()
+        };
+        assert!(check_sampling(&drawn).unwrap_err().contains("glouton"));
     }
 
     #[test]

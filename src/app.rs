@@ -3511,6 +3511,7 @@ pub(crate) fn bench_generator(
             return Ok(Box::new(server));
         }
         Backend::Hipfire => {
+            hipfire::check_sampling(&generation.sampling).map_err(BenchError::InvalidArgument)?;
             // Its warning, when let through, is the caller's to report (bench, pipeline).
             hipfire::validate_hipfire_target(
                 model,

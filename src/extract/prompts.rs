@@ -142,6 +142,48 @@ impl PromptFormat {
     }
 }
 
+/// A prompt wrapped by [`PromptFormat::apply`], back into the `(role, content)` messages it
+/// holds, for an endpoint that applies the model's template itself (`/v1/chat/completions`):
+/// the turns are then written once, by the server. The empty assistant turn that ends a
+/// rendered prompt is the server's to open. `None` when the prompt is in no family or holds
+/// text outside its turns (a leading `<bos>`, an assistant prefill).
+pub fn chat_messages(prompt: &str) -> Option<Vec<(&str, &str)>> {
+    let template = FAMILIES
+        .into_iter()
+        .find(|f| f.marker().is_some_and(|m| prompt.contains(m)))?;
+    let (open, header_end, close) = match template {
+        ChatTemplate::Chatml => ("<|im_start|>", "\n", "<|im_end|>"),
+        ChatTemplate::Llama3 => ("<|start_header_id|>", "<|end_header_id|>\n\n", "<|eot_id|>"),
+        ChatTemplate::Gemma => ("<start_of_turn>", "\n", "<end_of_turn>"),
+        _ => {
+            let user = prompt
+                .trim()
+                .strip_prefix("[INST]")?
+                .strip_suffix("[/INST]")?;
+            return (!user.contains("[INST]")).then(|| vec![("user", user.trim())]);
+        }
+    };
+    let mut turns = prompt.split(open);
+    if !turns.next()?.trim().is_empty() {
+        return None;
+    }
+    let mut messages = Vec::new();
+    let mut generation_prompt = false;
+    for turn in turns {
+        if generation_prompt {
+            return None;
+        }
+        let (role, rest) = turn.split_once(header_end).unwrap_or((turn, ""));
+        let role = if role == "model" { "assistant" } else { role };
+        match rest.split_once(close) {
+            Some((content, after)) if after.trim().is_empty() => messages.push((role, content)),
+            None if role == "assistant" && rest.is_empty() => generation_prompt = true,
+            _ => return None,
+        }
+    }
+    (!messages.is_empty()).then_some(messages)
+}
+
 /// The folder of a model given by one of its `.safetensors` files; any other path as is.
 pub fn model_folder(model: &Path) -> &Path {
     let weights = model
@@ -433,6 +475,51 @@ mod tests {
     fn a_rendered_prompt_is_not_wrapped_twice() {
         let rendered = ChatTemplate::Chatml.apply("Hi");
         assert_eq!(ChatTemplate::Chatml.apply(&rendered), rendered);
+    }
+
+    #[test]
+    fn a_rendered_prompt_goes_back_to_its_messages() {
+        let qwen = PromptFormat {
+            template: ChatTemplate::Chatml,
+            system: Some("You are Qwen.".into()),
+        };
+        assert_eq!(
+            chat_messages(&qwen.apply("17 + 25 ?\nAnswer:")),
+            Some(vec![
+                ("system", "You are Qwen."),
+                ("user", "17 + 25 ?\nAnswer:")
+            ])
+        );
+        for family in [
+            ChatTemplate::Chatml,
+            ChatTemplate::Llama3,
+            ChatTemplate::Gemma,
+            ChatTemplate::Inst,
+        ] {
+            let rendered = family.apply("Hi\nthere");
+            assert_eq!(
+                chat_messages(&rendered),
+                Some(vec![("user", "Hi\nthere")]),
+                "{family:?}"
+            );
+        }
+        // A few-shot prompt rendered by hand keeps its turns, the model's named assistant.
+        let shots = "<start_of_turn>user\n1+1<end_of_turn>\n<start_of_turn>model\n2<end_of_turn>\n\
+                     <start_of_turn>user\n2+2<end_of_turn>\n<start_of_turn>model\n";
+        assert_eq!(
+            chat_messages(shots),
+            Some(vec![("user", "1+1"), ("assistant", "2"), ("user", "2+2")])
+        );
+        // What turns cannot say: raw text, text before the first turn, a prefill.
+        for raw in [
+            "Problem: 1+1",
+            "<bos><start_of_turn>user\nHi<end_of_turn>\n",
+            "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nThe answer is",
+            "<|im_start|>user\nHi<|im_end|> tail",
+            "[INST] a [/INST] b [INST] c [/INST]",
+        ] {
+            assert_eq!(chat_messages(raw), None, "{raw}");
+        }
     }
 
     #[test]

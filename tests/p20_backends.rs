@@ -591,18 +591,20 @@ fn hipfire_runs_on_every_os_and_warns_on_a_chat_only_daemon() {
     let ws = Ws::new();
     let daemon = Daemon::start(&ws, json!({"log": ws.path("hip.jsonl")}));
     let url = daemon.url.as_str();
-    let (code, v) = ws.eval(&[
+    let hip = [
         "--model",
         "qwen2-mini",
         "--backend",
         "hipfire",
         "--hipfire-url",
         url,
-    ]);
+    ];
+    let (code, v) = ws.eval(&[&hip[..], &["--chat-template", "chatml"]].concat());
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["data"]["correct"], 2, "{v}");
     assert_eq!(v["data"]["generation"]["backend"], "hipfire");
-    // The probe's empty request, then the two questions as chat messages.
+    // The probe's empty request, then the two questions as chat messages: the bench's
+    // ChatML turns unwrapped, so hipfire's template is the only one, greedy.
     let requests = ws.requests("hip.jsonl");
     let asked: Vec<&Value> = requests
         .iter()
@@ -611,6 +613,21 @@ fn hipfire_runs_on_every_os_and_warns_on_a_chat_only_daemon() {
     assert_eq!(asked.len(), 2, "{requests:?}");
     assert_eq!(asked[0]["model"], "qwen2-mini");
     assert_eq!(asked[0]["seed"], 42);
+    assert_eq!(asked[0]["temperature"], 0.0);
+    let messages = asked[0]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0]["role"], "user");
+    let content = messages[0]["content"].as_str().unwrap();
+    assert!(
+        content.contains("1 and 2") && !content.contains("<|im_"),
+        "{content}"
+    );
+
+    // Sampling cannot be replayed without a seed: refused before any question.
+    let sampled = ws.eval(&[&hip[..], &["--temperature", "0.7"]].concat());
+    assert_eq!(sampled.0, 2, "{}", sampled.1);
+    assert!(sampled.1.to_string().contains("glouton"), "{}", sampled.1);
+    assert_eq!(ws.requests("hip.jsonl").len(), requests.len());
 
     // `backend show` says it, without failing.
     daemon.configure(&ws);

@@ -208,8 +208,9 @@ pub enum Dialect {
     LlamaCpp,
     /// OpenAI `/v1/completions`: the raw prompt, the bench's template stays the only one.
     Completions,
-    /// OpenAI `/v1/chat/completions`: the prompt as one user message, so the server's chat
-    /// template is applied on top of the bench's.
+    /// OpenAI `/v1/chat/completions` (hipfire): the turns of the rendered prompt as messages,
+    /// so the server's chat template is the only one, and greedy decoding whatever the
+    /// sampling (no documented seed).
     Chat,
 }
 
@@ -526,6 +527,9 @@ fn request_body(
     job: &GenJob,
     max_new_tokens: u32,
 ) -> String {
+    // A chat-only server documents no seed: greedy is its one reproducible decoding.
+    let greedy = SamplingParams::default();
+    let p = if dialect == Dialect::Chat { &greedy } else { p };
     let seed = match p.is_greedy() {
         true => seed,
         false => sampling::sequence_seed(p.seed, job.sequence_id),
@@ -553,7 +557,15 @@ fn request_body(
         "seed": seed,
     });
     match dialect {
-        Dialect::Chat => body["messages"] = json!([{"role": "user", "content": job.prompt}]),
+        Dialect::Chat => {
+            let turns = crate::extract::chat_messages(&job.prompt)
+                .unwrap_or_else(|| vec![("user", job.prompt.as_str())]);
+            let messages: Vec<Value> = turns
+                .into_iter()
+                .map(|(role, content)| json!({"role": role, "content": content}))
+                .collect();
+            body["messages"] = json!(messages);
+        }
         _ => body["prompt"] = json!(job.prompt),
     }
     if p.top_k != 0 {
@@ -908,6 +920,40 @@ mod tests {
         assert_eq!(drawn["min_p"], 0.25);
         assert_eq!(drawn["repetition_penalty"], 1.5);
         assert_eq!(drawn["seed"], sampling::sequence_seed(7, job().sequence_id));
+    }
+
+    #[test]
+    fn a_chat_request_carries_the_turns_once_and_decodes_greedily() {
+        let format = crate::extract::PromptFormat {
+            template: crate::extract::ChatTemplate::Chatml,
+            system: Some("You are Qwen.".into()),
+        };
+        let job = GenJob {
+            prompt: format.apply("17 + 25 ?"),
+            sequence_id: 3,
+        };
+        // The bench asked for sampling: a chat request stays greedy all the same.
+        let body: Value = serde_json::from_str(&request_body(
+            Dialect::Chat,
+            "ws-c1-0a1b2c3d",
+            &drawn(),
+            42,
+            &job,
+            9,
+        ))
+        .unwrap();
+        assert_eq!(
+            body,
+            json!({"model": "ws-c1-0a1b2c3d", "max_tokens": 9, "stream": true,
+                   "temperature": 0.0, "top_p": 1.0, "seed": 42,
+                   "messages": [{"role": "system", "content": "You are Qwen."},
+                                {"role": "user", "content": "17 + 25 ?"}]})
+        );
+        let text = body.to_string();
+        assert!(!text.contains("<|im_start|>"), "no template inside: {text}");
+        // The raw completions keep the rendered prompt and the sampling.
+        let raw = fields(Dialect::Completions, drawn(), 42);
+        assert_eq!(raw["temperature"], 0.75);
     }
 
     #[test]

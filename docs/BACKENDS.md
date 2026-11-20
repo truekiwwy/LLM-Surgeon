@@ -204,9 +204,14 @@ compris. `surgeon` ne lance pas le démon, il s'y connecte :
 2. **Quoi.** Une requête vide sur `/v1/completions`, puis sur `/v1/chat/completions` : une route
    qui ne répond pas 404 ou 405 existe. Démon injoignable : « lancez `hipfire serve` ».
 3. **Comment.** `/v1/completions` garde le prompt brut. Si seul `/v1/chat/completions` existe, le
-   run continue, avec un avertissement (`backend show` et le bench) : le gabarit de chat de
-   hipfire s'ajoute à celui du bench et aucune graine n'est documentée, donc les mesures ne sont ni
-   reproductibles ni comparables aux autres backends.
+   run continue, avec un avertissement (`backend show` et le bench) : le prompt rendu est
+   redécoupé en messages (`system`, `user`... : `extract::chat_messages`), si bien que le gabarit
+   de hipfire est le seul appliqué, et la requête part en `temperature = 0` quel que soit le
+   réglage, faute de graine documentée. Un bench hipfire avec `--temperature > 0` est refusé
+   (code 2). Un prompt hors des familles connues, ou avec du texte hors de ses tours (`<bos>`
+   en tête, réponse amorcée), part tel quel en un seul message `user`. Les scores restent à
+   comparer sur hipfire seulement : `bench eval --baseline-model` mesure les deux modèles sur
+   le même backend.
 
 Le champ `model` des requêtes est le nom du modèle donné au bench (son dossier, ou son fichier sans
 extension) : le démon doit connaître un modèle sous ce nom. Comme pour mistral.rs, seul un faux
