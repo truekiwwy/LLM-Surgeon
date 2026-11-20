@@ -199,10 +199,16 @@ fn nothing_is_configured_by_default() {
         !ws.config().exists(),
         "detect without --save writes nothing"
     );
-    let backend = &v["data"]["report"]["recommended"]["backend"];
-    // mistral.rs only when this machine has it on its PATH.
+    let report = &v["data"]["report"];
+    let backend = &report["recommended"]["backend"];
+    // mistral.rs only when this machine has it on its PATH, hipfire only on an AMD machine
+    // whose daemon answers at its default address (what `detect` probes there).
+    let amd_daemon = report["vendor"] == "amd" && report["hipfire"]["up"] == true;
     assert!(
-        backend == "native" || backend == "llama-server" || backend == "mistralrs",
+        backend == "native"
+            || backend == "llama-server"
+            || backend == "mistralrs"
+            || (amd_daemon && backend == "hipfire"),
         "{v}"
     );
 }
