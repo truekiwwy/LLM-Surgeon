@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::generation::{GenerationReport, SampledScore};
 use super::judge::{self, JudgeReport};
@@ -198,7 +198,7 @@ pub struct BenchPplReport {
 
 // ------------------------------------------------------------------ eval
 
-#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ItemResult {
     /// Identifiant (champ id, sinon item-<n> en base 1).
     pub id: String,
@@ -255,6 +255,10 @@ pub struct EvalBaseline {
     pub score: EvalScore,
     /// Résultat par question de la référence.
     pub items: Vec<ItemResult>,
+    /// Cache des références : hit (lue, pas régénérée) ou miss (générée puis enregistrée) ;
+    /// absent sans cache (--no-ref-cache, aucun dossier).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -324,7 +328,7 @@ pub struct BenchEvalReport {
 
 // ------------------------------------------------------------------ refusal
 
-#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RefusalItem {
     /// Index du prompt (base 0) dans le fichier.
     pub index: usize,
@@ -362,6 +366,10 @@ pub struct RefusalBaseline {
     pub score: RefusalScore,
     /// Résultat par prompt de la référence.
     pub items: Vec<RefusalItem>,
+    /// Cache des références : hit (lue, pas régénérée) ou miss (générée puis enregistrée) ;
+    /// absent sans cache (--no-ref-cache, aucun dossier).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -661,6 +669,15 @@ fn sampled_lines(ui: &Ui, generation: Option<&GenerationReport>) -> Vec<String> 
     lines
 }
 
+/// Where the baseline came from, when a reference cache was in use.
+fn cache_line(ui: &Ui, cache: Option<&str>) -> Option<String> {
+    let what = match cache? {
+        "hit" => "[cache hit] référence relue du cache, non régénérée",
+        _ => "[cache miss] référence générée, puis enregistrée dans le cache",
+    };
+    Some(format!("  {}", ui::dim(ui, what)))
+}
+
 pub fn eval_text(ui: &Ui, run: &BenchRun<BenchEvalReport>) -> String {
     let r = &run.report;
     let mut lines = vec![
@@ -676,6 +693,7 @@ pub fn eval_text(ui: &Ui, run: &BenchRun<BenchEvalReport>) -> String {
     lines.extend(sampled_lines(ui, r.generation.as_ref()));
     if let (Some(b), Some(p)) = (&r.baseline, &r.paired) {
         lines.push(score_line(ui, "référence ", &b.score));
+        lines.extend(cache_line(ui, b.cache.as_deref()));
         lines.push(format!(
             "  {}",
             ui::dim(
@@ -721,6 +739,7 @@ pub fn refusal_text(ui: &Ui, run: &BenchRun<BenchRefusalReport>) -> String {
     lines.extend(sampled_lines(ui, r.generation.as_ref()));
     if let (Some(b), Some(p)) = (&r.baseline, &r.paired) {
         lines.push(refusal_line(ui, "référence ", &b.score));
+        lines.extend(cache_line(ui, b.cache.as_deref()));
         lines.push(format!(
             "  {}",
             ui::dim(

@@ -1003,6 +1003,7 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | `--dataset` | required | JSON array (or JSONL) of `{question or problem, answer or solution, id?}`. No GSM8K or MATH content ships with this repository. |
 | `--backend` | the user configuration, else `llama` | `llama` or its alias `llama-completion` (one llama.cpp process per question, on a GGUF converted when needed), `llama-server` (one local llama.cpp server for the run, GPU per its build) or `native` (pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors folder; `--llama-cpp-dir` is then unused). `mistralrs` runs mistral.rs on the SafeTensors folder as is (no conversion, GPU per its build); `hipfire` talks to a running hipfire daemon, on every OS: see [backends](docs/BACKENDS.md). |
 | `--baseline-model` | none | Reference model on the same questions (paired comparison). |
+| `--no-ref-cache` | off | Generate the `--baseline-model` answers again instead of reading them from the reference cache, and overwrite its entry. The cache (`%LOCALAPPDATA%\weight-surgeon\cache\ref_bench`, `~/.cache/weight-surgeon/ref_bench`, or `WEIGHT_SURGEON_CACHE_DIR`) is keyed by the SHA-256 of the reference model files, the dataset or prompts, and every option that changes the answers; `baseline.cache` says `hit` or `miss`. |
 | `--limit` | 50 | First N entries, in file order. |
 | `--max-new-tokens` | 512 | Generation budget per question. |
 | `--prompt-template` | built in | Template with `{question}`, or `@FILE`. |
@@ -1090,6 +1091,7 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--model` | required | Qwen2, Llama/Mistral or Qwen3 folder (`config.json` `model_type` `qwen2`, `llama`, `mistral` or `qwen3`). |
 | `--prompts` | required | JSON array of strings or `{"text": ...}`, JSONL, or plain text. |
 | `--baseline-model` | none | Reference model on the same prompts, generated first (paired comparison). |
+| `--no-ref-cache` | off | Generate the `--baseline-model` answers again instead of reading them from the reference cache, and overwrite its entry. The cache (`%LOCALAPPDATA%\weight-surgeon\cache\ref_bench`, `~/.cache/weight-surgeon/ref_bench`, or `WEIGHT_SURGEON_CACHE_DIR`) is keyed by the SHA-256 of the reference model files, the dataset or prompts, and every option that changes the answers; `baseline.cache` says `hit` or `miss`. |
 | `--max-new-tokens` | 256 | Generation budget per prompt. |
 | `--chat-template` | `auto` | Wrapping of each prompt: `auto` (the model's format, ChatML if it declares none), `none`, `chatml`, `llama3`, `inst` or `gemma`. |
 | `--backend` | the user configuration, else `native` | `native` (pure Rust), `llama-server` (one local llama.cpp server for the run) or `llama-completion` (one llama.cpp process per prompt); a SafeTensors folder is then converted to a temporary GGUF. `mistralrs` (mistral.rs on the SafeTensors folder as is) and `hipfire` (a running hipfire daemon) too: see [backends](docs/BACKENDS.md). |

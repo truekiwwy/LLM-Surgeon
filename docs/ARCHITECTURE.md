@@ -39,7 +39,8 @@ enveloppe JSON (`--json`, résultats MCP).
   surgery  .surgery v1, SVD randomisée ; lora : fusion / extraction PEFT
   bench    KL et top-k entre dumps, perplexité (llama-perplexity), Pass@1 et taux de refus
            (générateur natif par lots, llama-completion ou llama-server), statistiques par
-           prompt, juge LLM optionnel et sa calibration ;
+           prompt, juge LLM optionnel et sa calibration ; ref_cache : réponses de la
+           référence gardées sur disque, clé SHA-256 du modèle et des entrées ;
            eval : llama.cpp (processus ou serveur local), échantillonnage, client HTTP local
   pipeline décision atomique sur un patch : candidats sur les jeux Dev, portes appariées,
            une consultation du Test Set ; travailleur reprenable (docs/PIPELINE.md)

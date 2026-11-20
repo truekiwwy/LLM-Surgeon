@@ -579,6 +579,10 @@ pub struct BenchEvalArgs {
     /// Exit with code 9 when the accuracy is below --min-accuracy.
     #[arg(long)]
     pub fail_on_warn: bool,
+    /// Regenerate the --baseline-model answers instead of reading them from the reference
+    /// cache (the entry is overwritten).
+    #[arg(long)]
+    pub no_ref_cache: bool,
     #[command(flatten)]
     pub generation: Box<GenerationArgs>,
 }
@@ -729,6 +733,10 @@ pub struct BenchRefusalArgs {
     /// Exit with code 9 when --max-unparsable is exceeded.
     #[arg(long)]
     pub fail_on_warn: bool,
+    /// Regenerate the --baseline-model answers instead of reading them from the reference
+    /// cache (the entry is overwritten).
+    #[arg(long)]
+    pub no_ref_cache: bool,
     /// Generator: native (pure Rust), mistralrs (mistral.rs on the SafeTensors directory as
     /// is), llama-server or llama-completion (on a GGUF, a SafeTensors model converted first;
     /// --llama-cpp-dir) or hipfire (an AMD HIP daemon). Default: the user configuration, else

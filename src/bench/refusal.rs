@@ -19,6 +19,7 @@ use super::error::{BenchError, Result};
 use super::generation::{by_prompt, GenOptions};
 pub use super::markers::REFUSAL_MARKERS;
 use super::markers::{self, Markers};
+use super::ref_cache::{self, Lookup, RefCache};
 use super::report::{
     BenchRefusalReport, BenchRun, RefusalBaseline, RefusalItem, RefusalPaired, RefusalScore,
     RefusalTiming,
@@ -149,6 +150,32 @@ pub struct RefusalRequest {
     pub generation: GenOptions,
     /// Shown in the report: native, llama-completion or llama-server.
     pub backend: String,
+    /// Where the baseline's answers are kept between runs; `None`: always generated.
+    pub ref_cache: Option<RefCache>,
+}
+
+/// What, besides the model files, changes the answers of a refusal run on `model`: the key
+/// of its baseline in the [`RefCache`].
+fn cache_inputs(req: &RefusalRequest, model: &Path) -> serde_json::Value {
+    let chat = req.chat_template.resolve(model, ChatTemplate::Chatml);
+    serde_json::json!({
+        "prompts_sha256": prompts_sha256(&req.prompts),
+        "chat_template": chat.template.as_str(),
+        "chat_system": chat.system,
+        "max_new_tokens": req.max_new_tokens,
+        "markers": req.markers.all().collect::<Vec<_>>(),
+        "backend": req.backend,
+        "generation": req.generation.answer_inputs(req.backend == "native"),
+    })
+}
+
+/// SHA-256 of the prompts as a JSON array of their texts, before any template.
+fn prompts_sha256(prompts: &[String]) -> String {
+    sha256_hex(
+        serde_json::to_string(prompts)
+            .unwrap_or_default()
+            .as_bytes(),
+    )
 }
 
 /// Every (prompt, sample), prompt by prompt, through [`TextGenerator::generate_many`]
@@ -230,8 +257,29 @@ pub fn run(
         let items = run_prompts(generator.as_mut(), req, &format, cancel, on_prompt)?;
         Ok((items, started.elapsed().as_millis() as u64))
     };
+    // The reference is not patched between experiments: read back when nothing changed.
+    let mut warnings = Vec::new();
     let baseline = match &req.baseline_model {
-        Some(model) => Some((model.clone(), evaluate(model)?)),
+        Some(model) => {
+            let started = Instant::now();
+            let key = match &req.ref_cache {
+                Some(_) => ref_cache::key(
+                    "refusal",
+                    &ref_cache::model_sha256(model)?,
+                    cache_inputs(req, model),
+                ),
+                None => String::new(),
+            };
+            let cache = req.ref_cache.as_ref();
+            let got = ref_cache::cached(cache, &key, "refusal", model, || evaluate(model))?;
+            let ms = match got.lookup {
+                Lookup::Hit => started.elapsed().as_millis() as u64,
+                Lookup::Miss => got.timing_ms,
+            };
+            warnings = got.notes;
+            let cache = cache.map(|_| got.lookup.as_str().to_owned());
+            Some((model.clone(), (got.items, ms), cache))
+        }
         None => None,
     };
     let (items, total_ms) = evaluate(&req.model)?;
@@ -240,23 +288,19 @@ pub fn run(
     let paired_cmp = baseline
         .as_ref()
         .filter(|_| samples == 1)
-        .map(|(_, (base, _))| paired(&items, base));
+        .map(|(_, (base, _), _)| paired(&items, base));
     let hits = |items: &[RefusalItem]| by_prompt(items.iter().map(|i| i.refused), samples);
     let generation = (!req.generation.is_historical(req.backend == "native")).then(|| {
         req.generation.report(
             &req.backend,
             Some(&hits(&items)),
-            baseline.as_ref().map(|(_, (b, _))| hits(b)).as_deref(),
+            baseline.as_ref().map(|(_, (b, _), _)| hits(b)).as_deref(),
         )
     });
     let chat = req.chat_template.resolve(&req.model, ChatTemplate::Chatml);
     let report = BenchRefusalReport {
         model: req.model.clone(),
-        prompts_sha256: sha256_hex(
-            serde_json::to_string(&req.prompts)
-                .unwrap_or_default()
-                .as_bytes(),
-        ),
+        prompts_sha256: prompts_sha256(&req.prompts),
         chat_template: chat.template.as_str().into(),
         chat_system: chat.system,
         max_new_tokens: req.max_new_tokens,
@@ -265,13 +309,14 @@ pub fn run(
         items,
         timing_ms: RefusalTiming {
             total: total_ms,
-            baseline: baseline.as_ref().map(|(_, (_, ms))| *ms),
+            baseline: baseline.as_ref().map(|(_, (_, ms), _)| *ms),
             judge: None,
         },
-        baseline: baseline.map(|(model, (items, _))| RefusalBaseline {
+        baseline: baseline.map(|(model, (items, _), cache)| RefusalBaseline {
             model,
             score: score(&items),
             items,
+            cache,
         }),
         paired: paired_cmp,
         judge: None,
@@ -279,7 +324,7 @@ pub fn run(
     };
     Ok(BenchRun {
         report,
-        warnings: Vec::new(),
+        warnings,
         threshold_warnings: Vec::new(),
     })
 }
@@ -374,6 +419,7 @@ mod tests {
             markers: Markers::default(),
             generation: GenOptions::default(),
             backend: "native".into(),
+            ref_cache: None,
         }
     }
 

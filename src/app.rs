@@ -3045,6 +3045,12 @@ fn bench_outcome<R: Serialize>(run: &BenchRun<R>, fail_on_warn: bool, human: Str
     Ok(outcome)
 }
 
+/// The reference cache of a CLI bench. With `--no-ref-cache` its entry is not read: the
+/// baseline is generated again and overwrites it.
+fn ref_cache(regenerate: bool) -> Option<bench::ref_cache::RefCache> {
+    bench::ref_cache::RefCache::from_env().map(|c| c.regenerating(regenerate))
+}
+
 /// The options with the GPU API of the llama-server, for the report label only.
 fn labelled(
     mut generation: bench::generation::GenOptions,
@@ -3217,6 +3223,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                     eval_backend,
                     a.llama_cpp_dir.as_deref(),
                 ),
+                ref_cache: ref_cache(a.no_ref_cache),
             };
             let engines = a.generation.engines.config(a.llama_cpp_dir.as_deref());
             core_bench_eval(&req, &engines, a.fail_on_warn, deps, &ui, &mut sink)
@@ -3254,6 +3261,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                     a.judge_args.llama_cpp_dir.as_deref(),
                 ),
                 backend: refusal_backend.label().into(),
+                ref_cache: ref_cache(a.no_ref_cache),
             };
             let judging = match a.judge {
                 JudgeMode::Rules if a.judge_args.judge_model.is_some() => {

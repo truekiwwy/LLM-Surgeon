@@ -79,6 +79,7 @@ pub mod native;
 pub mod ppl_parse;
 pub mod ppl_runner;
 pub mod prompt;
+pub mod ref_cache;
 pub mod refusal;
 pub mod report;
 pub mod score;

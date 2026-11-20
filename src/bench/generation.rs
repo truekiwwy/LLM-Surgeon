@@ -132,6 +132,21 @@ impl GenOptions {
         (threads, warnings)
     }
 
+    /// The options that change the answers, for the key of a cached baseline. Left out:
+    /// `jobs`, `threads` and the labels, and the batch of the native backend, whose batched
+    /// decoding gives the tokens of the sequential one; a server's batch can change its
+    /// reductions, so it stays in.
+    pub fn answer_inputs(&self, native: bool) -> serde_json::Value {
+        serde_json::json!({
+            "sampling": self.sampling,
+            "samples": self.samples,
+            "batch_size": (!native).then_some(self.batch_size),
+            "gpu_layers": self.gpu_layers,
+            "ctx_size": self.ctx_size,
+            "gguf_dtype": format!("{:?}", self.gguf_dtype),
+        })
+    }
+
     pub fn decoding(&self, timeout: Option<std::time::Duration>) -> Decoding {
         Decoding {
             seed: SEED,

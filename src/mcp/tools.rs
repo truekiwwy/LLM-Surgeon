@@ -1785,6 +1785,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 timeout,
                 min_accuracy: args.min_accuracy,
                 generation: eval_generation,
+                ref_cache: bench::ref_cache::RefCache::from_env(),
             };
             set_aside(
                 core_bench_eval(&req, &engines, fail_on_warn, ctx.deps, &ui, ctx.sink),
@@ -1847,6 +1848,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 markers,
                 generation: refusal_generation,
                 backend: refusal_backend.label().into(),
+                ref_cache: bench::ref_cache::RefCache::from_env(),
             };
             // Every judge path is sandboxed; nothing an agent writes reaches llama.cpp but
             // the rubric text, the prompts and the answers.

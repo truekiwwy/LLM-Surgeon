@@ -143,6 +143,79 @@ fn sampled_refusal_is_reproducible_whatever_the_batches() {
 }
 
 #[test]
+fn the_baseline_is_read_back_from_the_cache_until_an_input_changes() {
+    let dir = workspace();
+    let cache = dir.path().join("cache");
+    let run = |args: &[&str]| -> Value {
+        let output = command(dir.path())
+            .env("WEIGHT_SURGEON_CACHE_DIR", &cache)
+            .arg("--json")
+            .args(args)
+            .output()
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {envelope}");
+        envelope["data"].clone()
+    };
+    let entries = || std::fs::read_dir(&cache).map_or(0, |d| d.count());
+    let lookup = |data: &Value| data["baseline"]["cache"].as_str().unwrap().to_owned();
+
+    let first = run(&NATIVE_REFUSAL);
+    assert_eq!(lookup(&first), "miss");
+    assert_eq!(entries(), 1);
+    let second = run(&NATIVE_REFUSAL);
+    assert_eq!(lookup(&second), "hit");
+    assert_eq!(second["baseline"]["items"], first["baseline"]["items"]);
+    assert_eq!(second["paired"], first["paired"]);
+
+    // Another token budget: another entry; --no-ref-cache regenerates in place.
+    let shorter = [&NATIVE_REFUSAL[..8], &["--max-new-tokens", "5"]].concat();
+    assert_eq!(lookup(&run(&shorter)), "miss");
+    assert_eq!(lookup(&run(&shorter)), "hit");
+    assert_eq!(entries(), 2);
+    let fresh = [&NATIVE_REFUSAL[..], &["--no-ref-cache"]].concat();
+    assert_eq!(lookup(&run(&fresh)), "miss");
+    assert_eq!(entries(), 2);
+
+    // A damaged entry is replaced, never fatal.
+    for entry in std::fs::read_dir(&cache).unwrap() {
+        std::fs::write(entry.unwrap().path(), b"{\"schema\": 1, \"items\": [").unwrap();
+    }
+    assert_eq!(lookup(&run(&NATIVE_REFUSAL)), "miss");
+    assert_eq!(lookup(&run(&NATIVE_REFUSAL)), "hit");
+
+    // bench eval: the dataset is part of the key.
+    let eval = |dataset: &str| {
+        run(&[
+            "bench",
+            "eval",
+            "--backend",
+            "native",
+            "--model",
+            "qwen2-mini",
+            "--baseline-model",
+            "qwen2-mini",
+            "--dataset",
+            dataset,
+            "--max-new-tokens",
+            "8",
+        ])
+    };
+    assert_eq!(lookup(&eval("gsm.json")), "miss");
+    assert_eq!(lookup(&eval("gsm.json")), "hit");
+    let other = dir.path().join("gsm2.json");
+    std::fs::write(
+        &other,
+        r#####"[{"id":"q1","question":"1 and 3","answer":"#### 4"}]"#####,
+    )
+    .unwrap();
+    assert_eq!(lookup(&eval("gsm2.json")), "miss");
+
+    // No cache directory (the harness ignores the machine's): no `cache` key at all.
+    assert!(refusal(dir.path(), &[])["baseline"].get("cache").is_none());
+}
+
+#[test]
 fn greedy_batches_change_nothing_but_the_generation_block() {
     let dir = workspace();
     let historical = refusal(dir.path(), &[]);

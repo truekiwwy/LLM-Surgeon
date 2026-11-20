@@ -85,6 +85,10 @@
 //!   `bench eval`, `bench refusal`, `pipeline plan` and `pipeline run` (the key
 //!   `hipfire_requantize` of the user configuration). The rewrite added those four entries to
 //!   `cli_surface.json` and nothing else; no tool schema, no output hash moved.
+//! - the reference cache (`bench::ref_cache`): the option `--no-ref-cache` of `bench eval` and
+//!   `bench refusal`, two entries added to `cli_surface.json`. The reports gain an optional
+//!   `baseline.cache`, absent without a cache directory (as in this harness): no tool schema,
+//!   no output hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

@@ -151,6 +151,8 @@ pub fn binary(
                     .unwrap_or(Backend::Native)
                     .label()
                     .into(),
+                // A job measures its own baseline once; the cache is the benches' affair.
+                ref_cache: None,
             };
             let mut make = |m: &Path| generator(m, backend, &req.generation, deps);
             let run = bench::refusal::run(&req, &mut make, cancel, on_item).map_err(bench_error)?;
@@ -179,6 +181,7 @@ pub fn binary(
                 timeout: None,
                 min_accuracy: None,
                 generation,
+                ref_cache: None,
             };
             let mut make = |m: &Path| generator(m, backend, &req.generation, deps);
             let run = bench::score::run(&req, deps.runner.as_ref(), &mut make, cancel, on_item)
