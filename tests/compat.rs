@@ -81,6 +81,10 @@
 //!   `--allow-stale-hipfire` of `bench eval`, `bench refusal` and `pipeline run`, CLI only. The
 //!   rewrite added those three entries to `cli_surface.json` and nothing else; no tool schema,
 //!   no output hash moved.
+//! - requantized hipfire copies (`ws-<copy>-<sha8>`): the option `--hipfire-requantize` of
+//!   `bench eval`, `bench refusal`, `pipeline plan` and `pipeline run` (the key
+//!   `hipfire_requantize` of the user configuration). The rewrite added those four entries to
+//!   `cli_surface.json` and nothing else; no tool schema, no output hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

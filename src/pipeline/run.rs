@@ -691,10 +691,19 @@ pub fn run(job: &Job, file: JobFile, deps: &AppDeps) -> Result<Ended> {
 
 /// Every candidate is measured on a patched working copy: on hipfire, which serves its own
 /// cache of the model, that is refused before the first candidate and the first read of a
-/// Test Set, unless `--allow-stale-hipfire` (then the warning for the report).
+/// Test Set, unless `--allow-stale-hipfire` (then the warning for the report) or
+/// `hipfire_requantize = "auto"` (each candidate requantized before its measure).
 fn hipfire_guard(w: &Worker) -> Result<Option<String>> {
-    let backend = w.config().backend.as_ref().and_then(|b| b.backend);
-    if backend != Some(Backend::Hipfire) {
+    use crate::backend::config::Requantize;
+    let config = w.config().backend.as_ref();
+    if config.and_then(|b| b.backend) != Some(Backend::Hipfire) {
+        return Ok(None);
+    }
+    if config.and_then(|b| b.hipfire_requantize) == Some(Requantize::Auto) {
+        eprintln!(
+            "surgeon pipeline : hipfire_requantize = auto : chaque candidat est requantifié \
+             avant sa mesure sur hipfire"
+        );
         return Ok(None);
     }
     let candidate = w.job.work().join("model");

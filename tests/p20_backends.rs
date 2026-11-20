@@ -524,6 +524,158 @@ fn the_cli_never_measures_a_working_copy_on_hipfire_unless_told_to() {
     assert_eq!(asked(&ws, "hip.jsonl"), 2);
 }
 
+/// The models a fake daemon was asked about, question by question.
+fn served_models(ws: &Ws, log: &str) -> Vec<String> {
+    ws.requests(log)
+        .iter()
+        .filter(|r| r["prompt"].as_str().is_some_and(|p| !p.is_empty()))
+        .map(|r| r["model"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// One byte of `copy/model.safetensors` changed, its size kept.
+fn touch_weights(ws: &Ws) {
+    let weights = ws.path("copy").join("model.safetensors");
+    let mut bytes = std::fs::read(&weights).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&weights, bytes).unwrap();
+}
+
+#[test]
+fn a_requantized_copy_is_measured_by_alias_next_to_its_original() {
+    use weight_surgeon::backend::hipfire;
+    let ws = Ws::new();
+    let daemon = Daemon::start(
+        &ws,
+        json!({"completions": true, "log": ws.path("hip.jsonl")}),
+    );
+    working_copy(&ws);
+    // What `--hipfire-requantize` leaves once hipfire registered the copy.
+    let copy = ws.path("copy");
+    let sha = hipfire::weights_sha256(&copy).unwrap();
+    let alias = hipfire::alias_for("copy", &sha);
+    let record =
+        json!({"alias": alias, "weights_sha256": sha, "created_at": "2026-11-20T00:00:00Z"});
+    std::fs::write(copy.join(hipfire::ALIAS_FILE), record.to_string()).unwrap();
+
+    let hip = ["--backend", "hipfire", "--hipfire-url", daemon.url.as_str()];
+    let pair = ["--model", "copy", "--baseline-model", "qwen2-mini"];
+    let (code, v) = ws.eval(&[&pair[..], &hip].concat());
+    assert_eq!(code, 0, "{v}");
+    assert!(!v["warnings"].to_string().contains("hipfire"), "{v}");
+    // The original first, then the copy under its alias: both on the same daemon.
+    let original = "qwen2-mini".to_owned();
+    assert_eq!(
+        served_models(&ws, "hip.jsonl"),
+        [original.clone(), original, alias.clone(), alias.clone()]
+    );
+
+    // A shard rewritten after the quantization: refused before any question.
+    touch_weights(&ws);
+    let (code, v) = ws.eval(&[&pair[..], &hip].concat());
+    assert_eq!(code, 2, "{v}");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(&format!("poids modifiés depuis l'alias {alias}")),
+        "{message}"
+    );
+    assert_eq!(served_models(&ws, "hip.jsonl").len(), 4);
+}
+
+/// `--hipfire-requantize` with a fake hipfire CLI that registers aliases as hipfire 0.4.6
+/// writes them. Unix only: on Windows the requantization runs hipfire in WSL.
+#[cfg(unix)]
+#[test]
+fn hipfire_requantize_registers_a_copy_once_and_again_when_its_weights_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = Ws::new();
+    let daemon = Daemon::start(
+        &ws,
+        json!({"completions": true, "log": ws.path("hip.jsonl")}),
+    );
+    working_copy(&ws);
+    let home = ws.path("hipfire-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let cli = ws.path("hipfire-cli");
+    std::fs::write(
+        &cli,
+        "#!/bin/sh\necho \"$@\" >> \"$HIPFIRE_HOME/calls\"\n\
+         while [ \"$1\" != --register ]; do shift; done\n\
+         printf '%s = \"%s.q8f16\"\\n' \"$2\" \"$2\" >> \"$HIPFIRE_HOME/models.toml\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (url, cli) = (daemon.url.as_str(), cli.to_str().unwrap());
+    let run = |extra: &[&str]| {
+        let mut args = vec!["bench", "eval", "--dataset", "gsm.json", "--limit", "2"];
+        args.extend([
+            "--model",
+            "copy",
+            "--backend",
+            "hipfire",
+            "--hipfire-url",
+            url,
+        ]);
+        args.extend(["--hipfire-bin", cli]);
+        args.extend(extra);
+        ws.run_env(&args, &[("HIPFIRE_HOME", home.as_os_str())])
+    };
+    let calls = || {
+        std::fs::read_to_string(home.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let recorded = || -> Value {
+        let text = std::fs::read_to_string(ws.path("copy").join(".hipfire-alias.json"));
+        serde_json::from_str(&text.unwrap()).unwrap()
+    };
+
+    let (code, v) = run(&["--hipfire-requantize"]);
+    assert_eq!(code, 0, "{v}");
+    let first = recorded();
+    let alias = first["alias"].as_str().unwrap().to_owned();
+    assert!(
+        alias.starts_with("ws-copy-") && alias.len() == 16,
+        "{alias}"
+    );
+    assert_eq!(first["weights_sha256"].as_str().unwrap()[..8], alias[8..]);
+    assert_eq!(calls().len(), 1);
+    let call = &calls()[0];
+    assert!(call.starts_with("quantize "), "{call}");
+    assert!(
+        call.contains(&format!("--format q8f16 --stem {alias}")),
+        "{call}"
+    );
+    assert!(
+        call.contains(&format!("--install --register {alias}")),
+        "{call}"
+    );
+    assert!(call.contains(ws.path("copy").to_str().unwrap()), "{call}");
+    assert_eq!(
+        served_models(&ws, "hip.jsonl"),
+        [alias.clone(), alias.clone()]
+    );
+
+    // Same weights: served at once, hipfire not called again.
+    let (code, v) = run(&["--hipfire-requantize"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(calls().len(), 1);
+
+    // Weights changed: refused without the flag, requantized under a new alias with it.
+    touch_weights(&ws);
+    let (code, v) = run(&[]);
+    assert_eq!(code, 2, "{v}");
+    let (code, v) = run(&["--hipfire-requantize"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(calls().len(), 2);
+    let second = recorded()["alias"].as_str().unwrap().to_owned();
+    assert_ne!(second, alias);
+    assert_eq!(served_models(&ws, "hip.jsonl").last(), Some(&second));
+}
+
 #[test]
 fn mcp_moves_a_working_copy_off_hipfire_and_says_why() {
     use std::io::{BufRead, BufReader, Read, Write};

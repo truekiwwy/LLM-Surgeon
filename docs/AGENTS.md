@@ -278,7 +278,9 @@ de travail (`backend::hipfire::is_working_copy` : `copies/` et sorties du projet
 job, dossier patché à côté de ses sauvegardes) passe sur `native` quand la configuration ou
 l'appel nomme hipfire (`mcp::bench_backend`), avec l'avertissement `HIPFIRE_SET_ASIDE` et le
 chemin en tête de l'enveloppe ; une copie `.gguf` est refusée. Le modèle d'origine reste mesuré
-par hipfire. Le fil le signale sous la ligne de l'appel.
+par hipfire. Le fil le signale sous la ligne de l'appel. Exception : une copie requantifiée en
+ligne de commande (`--hipfire-requantize`), dont le `.hipfire-alias.json` correspond encore à
+ses poids, reste sur hipfire sous son alias `ws-<copie>-<sha8>` ; l'agent ne requantifie jamais.
 
 « Démarrer » sur un projet qui a un modèle d'origine mais aucune copie de travail lance d'abord
 la copie (`studio_copy`), puis la session dès qu'elle est faite ; un échec de la copie

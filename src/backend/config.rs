@@ -67,6 +67,21 @@ pub struct BackendConfig {
         description = "Dossier des modèles : surgeon-gui le donne en lecture seule à ses agents."
     )]
     pub models_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "hipfire : auto requantifie, avant un bench ou un pipeline, une copie de travail sans alias ws-<copie>-<sha8> pour ses poids actuels ; off (défaut) la refuse."
+    )]
+    pub hipfire_requantize: Option<Requantize>,
+}
+
+/// What a hipfire bench does with a working copy that has no alias for its current weights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Requantize {
+    /// Refused, unless `--allow-stale-hipfire`.
+    Off,
+    /// Requantized and registered under its alias, then measured.
+    Auto,
 }
 
 impl BackendConfig {
@@ -83,6 +98,7 @@ impl BackendConfig {
             hipfire_url: self.hipfire_url.or(base.hipfire_url),
             gguf_dtype: self.gguf_dtype.or(base.gguf_dtype),
             models_dir: self.models_dir.or(base.models_dir),
+            hipfire_requantize: self.hipfire_requantize.or(base.hipfire_requantize),
         }
     }
 
@@ -252,6 +268,13 @@ pub fn parse_toml(text: &str) -> Result<BackendConfig, String> {
                         .map_err(|_| at(format!("gguf_dtype « {name} » : f16 ou f32")))?,
                 );
             }
+            "hipfire_requantize" => {
+                let name = text(value)?;
+                config.hipfire_requantize = Some(
+                    Requantize::from_str(&name, true)
+                        .map_err(|_| at(format!("hipfire_requantize « {name} » : auto ou off")))?,
+                );
+            }
             "llama_cpp_dir" => config.llama_cpp_dir = Some(text(value)?.into()),
             "mistralrs_dir" => config.mistralrs_dir = Some(text(value)?.into()),
             "mistralrs_bin" => config.mistralrs_bin = Some(text(value)?.into()),
@@ -310,6 +333,12 @@ pub fn to_toml(config: &BackendConfig) -> String {
     if let Some(d) = config.gguf_dtype {
         put("gguf_dtype", quoted(&format!("{d:?}").to_lowercase()));
     }
+    if let Some(r) = config.hipfire_requantize {
+        put(
+            "hipfire_requantize",
+            quoted(&format!("{r:?}").to_lowercase()),
+        );
+    }
     out
 }
 
@@ -329,6 +358,7 @@ mod tests {
             hipfire_url: Some("http://127.0.0.1:11435".into()),
             gguf_dtype: Some(WeightType::F32),
             models_dir: Some(r"C:\models".into()),
+            hipfire_requantize: Some(Requantize::Auto),
         }
     }
 
@@ -394,6 +424,7 @@ mod tests {
             ("gpu_layers = \"many\"", "attend un entier"),
             ("llama_cpp_dir = 3", "attend un texte"),
             ("nope = 1", "clé inconnue"),
+            ("hipfire_requantize = \"always\"", "auto ou off"),
             ("[section]", "« clé = valeur »"),
             ("llama_cpp_dir = \"open", "guillemet fermant"),
         ] {

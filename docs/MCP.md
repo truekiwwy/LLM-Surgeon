@@ -182,8 +182,10 @@ sert son propre cache quantifié et ne lit pas le modèle donné : sur une copie
 (`copies/` ou sorties d'un projet surgeon-gui, `work/` d'un job pipeline, dossier à côté des
 sauvegardes d'`apply`), `eval` et `refusal` passent sur `native` et l'enveloppe commence ses
 `warnings` par « backend hipfire écarté (<chemin>) », écrit aussi sur stderr ; une copie
-`.gguf` est refusée (`invalid_input`). Le modèle d'origine reste servi par hipfire. Aucun
-argument ne lève cette règle (pas d'`--allow-stale-hipfire` côté agent). Voir la
+`.gguf` est refusée (`invalid_input`). Le modèle d'origine reste servi par hipfire, comme une
+copie déjà requantifiée en ligne de commande dont le `.hipfire-alias.json` correspond à ses
+poids (sous son alias). Aucun argument ne lève cette règle (pas d'`--allow-stale-hipfire` ni de
+requantification côté agent). Voir la
 section « Échantillonnage, lots et backends » du README.
 
 `eval` avec `backend: "native"` et `refusal` génèrent en Rust pur sur le CPU, sur un dossier

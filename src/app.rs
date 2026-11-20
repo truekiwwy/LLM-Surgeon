@@ -3421,7 +3421,7 @@ pub fn core_bench_eval(
     let sink = RefCell::new(sink);
     req.generation.validate().map_err(|e| bench_failure(&e))?;
     let models = [Some(req.model.as_path()), req.baseline_model.as_deref()];
-    let stale = hipfire_targets(req.backend, &models, &req.generation)?;
+    let stale = hipfire_targets(req.backend, &models, &req.generation, engines)?;
     let pool = generation_pool(&req.generation, req.backend, &sink)?;
     let mut make = |gguf: &Path| {
         let tag = "bench-eval";
@@ -3451,14 +3451,16 @@ pub fn core_bench_eval(
     bench_outcome(&run, fail_on_warn, bench_report::eval_text(ui, &run))
 }
 
-/// [`hipfire::validate_hipfire_target`](crate::backend::hipfire::validate_hipfire_target) on
-/// every model of a bench before its first generation: a refused working copy must not cost
-/// the baseline's run first. The warnings of `--allow-stale-hipfire` go in the report.
-/// [`bench_generator`] applies the rule again to each model it serves.
+/// [`hipfire::prepare_target`](crate::backend::hipfire::prepare_target) on every model of a
+/// bench before its first generation: a refused working copy must not cost the baseline's
+/// run first, and one to requantize (`hipfire_requantize = "auto"`) is requantized here. The
+/// warnings of `--allow-stale-hipfire` go in the report. [`bench_generator`] applies the rule
+/// again to each model it serves.
 fn hipfire_targets(
     backend: Backend,
     models: &[Option<&Path>],
     generation: &bench::generation::GenOptions,
+    engines: &crate::backend::BackendConfig,
 ) -> std::result::Result<Vec<String>, Outcome> {
     use crate::backend::hipfire;
     if backend != Backend::Hipfire {
@@ -3466,10 +3468,8 @@ fn hipfire_targets(
     }
     let mut warnings = Vec::new();
     for model in models.iter().flatten() {
-        let copy = hipfire::is_working_copy(model);
-        let decision =
-            hipfire::validate_hipfire_target(model, copy, generation.allow_stale_hipfire)
-                .map_err(|e| bench_failure(&BenchError::InvalidArgument(e)))?;
+        let decision = hipfire::prepare_target(model, engines, generation.allow_stale_hipfire)
+            .map_err(|e| bench_failure(&BenchError::InvalidArgument(e)))?;
         warnings.extend(decision.warning);
     }
     Ok(warnings)
@@ -3513,12 +3513,15 @@ pub(crate) fn bench_generator(
         Backend::Hipfire => {
             hipfire::check_sampling(&generation.sampling).map_err(BenchError::InvalidArgument)?;
             // Its warning, when let through, is the caller's to report (bench, pipeline).
-            hipfire::validate_hipfire_target(
-                model,
-                hipfire::is_working_copy(model),
-                generation.allow_stale_hipfire,
-            )
-            .map_err(BenchError::InvalidArgument)?;
+            let target = hipfire::prepare_target(model, engines, generation.allow_stale_hipfire)
+                .map_err(BenchError::InvalidArgument)?;
+            if target.model != hipfire::model_name(model) {
+                eprintln!(
+                    "surgeon hipfire : {} servie sous l'alias {} (SHA-256 des poids vérifié)",
+                    model.display(),
+                    target.model
+                );
+            }
             let endpoint = hipfire::probe(engines).map_err(BenchError::InvalidArgument)?;
             if let Some(warning) = endpoint.warning() {
                 sink.borrow_mut().event(ProgressEvent::Warn(warning.into()));
@@ -3527,7 +3530,7 @@ pub(crate) fn bench_generator(
                 "hipfire",
                 endpoint.port,
                 endpoint.dialect,
-                hipfire::model_name(model),
+                target.model,
                 generation.batch_size,
             )));
         }
@@ -3676,7 +3679,7 @@ pub fn core_bench_refusal(
         .map_err(|e| bench_failure(&e))?;
     req.generation.validate().map_err(|e| bench_failure(&e))?;
     let models = [Some(req.model.as_path()), req.baseline_model.as_deref()];
-    let stale = hipfire_targets(backend, &models, &req.generation)?;
+    let stale = hipfire_targets(backend, &models, &req.generation, engines)?;
     let pool = generation_pool(&req.generation, backend, &sink)?;
     let llama_cpp_dir = engines.llama_cpp_dir.as_deref();
     let mut make = |model: &Path| {

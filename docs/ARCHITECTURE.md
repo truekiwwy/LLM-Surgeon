@@ -45,7 +45,8 @@ enveloppe JSON (`--json`, résultats MCP).
            une consultation du Test Set ; travailleur reprenable (docs/PIPELINE.md)
   backend  moteurs d'inférence (native, mistralrs, llama-server, hipfire), configuration
            utilisateur ; hipfire::validate_hipfire_target, la règle unique qui refuse une
-           copie de travail à hipfire (CLI, pipeline, MCP)
+           copie de travail à hipfire sauf sous l'alias ws-<copie>-<sha8> de ses poids
+           actuels (CLI, pipeline, MCP), hipfire::requantize qui l'enregistre
   hardware budget RAM/VRAM ; linalg : QR, Cholesky, Jacobi, Gram
   process  kill_tree : un processus enfant et ce qu'il a lancé (taskkill /T, groupe Unix),
            pour surgeon et surgeon-gui

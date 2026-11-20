@@ -207,6 +207,10 @@ pub struct EngineArgs {
     /// hipfire: a daemon already running, http://127.0.0.1:<port> (loopback only).
     #[arg(long)]
     pub hipfire_url: Option<String>,
+    /// hipfire: requantize a working copy that has no alias for its current weights before
+    /// measuring it (`hipfire_requantize = "auto"` in the user configuration).
+    #[arg(long)]
+    pub hipfire_requantize: bool,
 }
 
 impl EngineArgs {
@@ -218,6 +222,9 @@ impl EngineArgs {
             mistralrs_bin: self.mistralrs_bin.clone(),
             hipfire_bin: self.hipfire_bin.clone(),
             hipfire_url: self.hipfire_url.clone(),
+            hipfire_requantize: self
+                .hipfire_requantize
+                .then_some(crate::backend::config::Requantize::Auto),
             ..Default::default()
         }
     }
@@ -228,6 +235,8 @@ impl EngineArgs {
         self.mistralrs_bin.clone_from(&config.mistralrs_bin);
         self.hipfire_bin.clone_from(&config.hipfire_bin);
         self.hipfire_url.clone_from(&config.hipfire_url);
+        self.hipfire_requantize =
+            config.hipfire_requantize == Some(crate::backend::config::Requantize::Auto);
     }
 }
 
