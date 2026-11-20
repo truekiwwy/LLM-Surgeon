@@ -45,7 +45,7 @@ mod command;
 mod error;
 mod generator;
 mod gguf;
-mod http;
+pub(crate) mod http;
 mod loop_detector;
 mod prompts;
 mod runner;

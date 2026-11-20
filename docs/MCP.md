@@ -51,6 +51,7 @@ Claude Code, en plugin : le dossier [`plugin/`](../plugin) déclare le même ser
 | `surgeon_inspect` | Couches et matrices MLP (et `o_proj`, `embed_tokens` sur demande), statistiques en option, `max_tensors` (défaut 500), architecture détectée (`data.arch`), `arch_spec` | lecture seule |
 | `surgeon_apply` | Applique un patch en place (`dry_run` pour vérifier d'abord) ; `gguf: true` pour un GGUF quantifié | destructif |
 | `surgeon_restore` | Remet un modèle octet pour octet depuis les sauvegardes de `surgeon_apply` ou depuis le modèle d'origine (`from_origin`), SHA-256 avant et après ([rollback](#rollback-surgeon_restore)) | destructif, idempotent |
+| `surgeon_doctor` | La machine est-elle prête : RAM libre et plus gros modèle en f32 ou bf16 (avec `model` : son besoin exact et son lot natif), cœurs et threads, cache `ref_bench`, démon hipfire (URL, `/health`, `/metrics`, mémoire GPU lue dans son log ; 0 Mo au total = démon figé) ; `data.ready` | lecture seule, idempotent |
 | `surgeon_compose` | Une direction faite de vecteurs extraits (`ablate`, poids `chemin:alpha`), orthogonale aux directions préservées (`keep`, Gram-Schmidt modifié en f64), et le patch `project_out` qui la retire avec sa recette (`composition`) ; refus nommé d'un vecteur nul, non fini, de dimension différente ou quasi colinéaire (`collinear_vectors`) | écrit des fichiers, idempotent |
 | `surgeon_files` | Fichiers de travail d'un agent : `list`, `read` dans les dossiers autorisés, `write` de fichiers texte sous `work/` ([détail](#fichiers-de-travail-surgeon_files)) | écrit sous `work/` seulement |
 | `surgeon_eval` | Non-régression (boucles, attentes) et export GGUF conditionnel | écrit le GGUF |
@@ -88,6 +89,7 @@ aucun argument libre vers llama.cpp, aucune option `--allow-*` du pipeline).
 | `apply` | `surgeon_apply` |
 | `restore` | `surgeon_restore` |
 | `compose` | `surgeon_compose` |
+| `doctor` | `surgeon_doctor` (sans `--clean-cache`, ni `--hipfire-url` ni `--hipfire-log` : ceux de la configuration) |
 | `graph` | `surgeon_graph` |
 | `bench logits`, `ppl`, `eval`, `dump`, `refusal`, `refusal-probe`, `judge-sample`, `judge-eval` | `surgeon_bench` (`mode` du même nom, `refusal_probe`, `judge_sample`, `judge_eval` ; `--method` et `--vector` de `refusal-probe` s'y nomment `probe_method` et `direction_path`) |
 | `diff` | `surgeon_diff` |

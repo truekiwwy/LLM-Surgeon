@@ -58,6 +58,7 @@ fn command(tool: &str, args: &Value) -> Option<&'static str> {
         "surgeon_graph" => "graph",
         "surgeon_restore" => "restore",
         "surgeon_compose" => "compose",
+        "surgeon_doctor" => "doctor",
         "surgeon_bench" => match bench_command(args) {
             "bench" => return None,
             sub => sub,
@@ -278,7 +279,7 @@ mod tests {
         }
         assert_eq!(
             checked,
-            9 + BENCH_FIELDS.len(),
+            10 + BENCH_FIELDS.len(),
             "every tool with a command is covered"
         );
     }

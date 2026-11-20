@@ -177,7 +177,7 @@ fn effect(tool: &str, args: &Value) -> Effect {
     let external = "exécute un programme externe de la chaîne d'outils (llama.cpp)".to_owned();
     let writes = "écrit dans le projet".to_owned();
     match tool {
-        "surgeon_check" | "surgeon_inspect" | "surgeon_backends" => Effect::Read,
+        "surgeon_check" | "surgeon_inspect" | "surgeon_backends" | "surgeon_doctor" => Effect::Read,
         "surgeon_files" if args["action"] == "write" => Effect::WorkFile,
         "surgeon_files" => Effect::Read,
         "surgeon_graph" if !has("out_dir") && !has("cache_dir") => Effect::Read,

@@ -197,6 +197,63 @@ impl RefCache {
     }
 }
 
+/// What `surgeon doctor` finds in a cache directory.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Scan {
+    /// Entries a lookup can read back.
+    pub entries: usize,
+    /// Every file of the directory, in bytes.
+    pub bytes: u64,
+    /// Unreadable, or holding another key than its name: a lookup would delete it.
+    pub corrupt: Vec<PathBuf>,
+    /// Another schema version, or a temporary file a killed run left: never read again.
+    pub obsolete: Vec<PathBuf>,
+}
+
+/// The entries of `dir` (a missing directory is an empty cache).
+pub fn scan(dir: &Path) -> Scan {
+    let mut scan = Scan::default();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        scan.bytes += meta.len();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".tmp") {
+            scan.obsolete.push(path);
+            continue;
+        }
+        let Some(stem) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let entry = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Entry<Value>>(&text).ok());
+        match entry {
+            Some(e) if e.key != stem => scan.corrupt.push(path),
+            Some(e) if e.schema != REF_CACHE_SCHEMA_VERSION => scan.obsolete.push(path),
+            Some(_) => scan.entries += 1,
+            None => scan.corrupt.push(path),
+        }
+    }
+    scan.corrupt.sort();
+    scan.obsolete.sort();
+    scan
+}
+
+/// Removes what `scan` found unreadable or obsolete; the number of files removed.
+pub fn purge(scan: &Scan) -> usize {
+    scan.corrupt
+        .iter()
+        .chain(&scan.obsolete)
+        .filter(|p| std::fs::remove_file(p).is_ok())
+        .count()
+}
+
 fn io(path: &Path, e: impl std::fmt::Display) -> BenchError {
     BenchError::Io {
         path: path.to_path_buf(),

@@ -71,6 +71,9 @@ pub enum Commands {
     /// One direction from several extracted vectors, kept orthogonal to the directions to
     /// preserve, and the patch that removes it.
     Compose(ComposeArgs),
+    /// Check in a few seconds that the machine is ready for a campaign: RAM, cores, the
+    /// reference cache and the hipfire daemon.
+    Doctor(DoctorArgs),
     /// Evaluate a model on prompts.
     Eval(EvalArgs),
     /// Extract a steering vector from a Qwen2, Llama/Mistral or Qwen3 layer (pure Rust, CPU).
@@ -930,6 +933,26 @@ pub struct ApplyArgs {
     pub backup_dir: Option<PathBuf>,
     #[command(flatten)]
     pub surgery: crate::surgery::cli_args::SurgeryApplyArgs,
+}
+
+/// `surgeon doctor` (`doctor`). Exit code 0: `data.ready` says whether a check failed.
+#[derive(Debug, Clone, Args)]
+pub struct DoctorArgs {
+    /// Model folder: its exact RAM need, the dtype it gets (f32, or the slow bf16 fallback)
+    /// and its native batch.
+    #[arg(long)]
+    pub model: Option<PathBuf>,
+    /// Remove the reference cache files that can never be read again (unreadable, another
+    /// schema, temporary files).
+    #[arg(long)]
+    pub clean_cache: bool,
+    /// hipfire daemon URL (default: the configuration's, else http://127.0.0.1:11435).
+    #[arg(long)]
+    pub hipfire_url: Option<String>,
+    /// hipfire daemon log, where it writes the GPU memory of each load (default: the one
+    /// start-hipfire.ps1 writes).
+    #[arg(long)]
+    pub hipfire_log: Option<PathBuf>,
 }
 
 /// `surgeon compose` (`patch::compose`).

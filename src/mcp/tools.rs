@@ -436,6 +436,7 @@ pub fn tool_definitions() -> Value {
         list.extend(super::tools_backend::definitions());
         list.extend(super::tools_restore::definitions());
         list.extend(super::tools_compose::definitions());
+        list.extend(super::tools_doctor::definitions());
         list.extend(super::tools_files::definitions());
         list.extend(super::tools_session::definitions());
     }
@@ -520,6 +521,7 @@ pub(crate) fn is_known(name: &str) -> bool {
         || super::tools_backend::NAMES.contains(&name)
         || super::tools_restore::NAMES.contains(&name)
         || super::tools_compose::NAMES.contains(&name)
+        || super::tools_doctor::NAMES.contains(&name)
         || super::tools_files::NAMES.contains(&name)
         || super::tools_session::NAMES.contains(&name)
 }
@@ -556,6 +558,7 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         super::tools_backend::TOOL_BACKENDS => super::tools_backend::call(arguments, ctx),
         super::tools_restore::TOOL_RESTORE => super::tools_restore::call(arguments, ctx),
         super::tools_compose::TOOL_COMPOSE => super::tools_compose::call(arguments, ctx),
+        super::tools_doctor::TOOL_DOCTOR => super::tools_doctor::call(arguments, ctx),
         super::tools_files::TOOL_FILES => super::tools_files::call(arguments, ctx),
         _ => ("extract", extract_direction(arguments, ctx)),
     };

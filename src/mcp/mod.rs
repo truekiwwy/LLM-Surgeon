@@ -45,6 +45,7 @@ mod server;
 mod tools;
 mod tools_backend;
 mod tools_compose;
+mod tools_doctor;
 mod tools_files;
 mod tools_graph;
 mod tools_p13;

@@ -371,6 +371,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Apply(_) => "apply",
         Commands::Restore(_) => "restore",
         Commands::Compose(_) => "compose",
+        Commands::Doctor(_) => "doctor",
         Commands::Eval(_) => "eval",
         Commands::Extract(_) => "extract",
         Commands::Schema(_) => "schema",
@@ -442,6 +443,16 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         Commands::Apply(args) => apply(args, deps, io),
         Commands::Restore(args) => crate::patch::core_restore(args, deps),
         Commands::Compose(args) => crate::patch::compose::core_compose(args),
+        Commands::Doctor(args) => {
+            let req = crate::doctor::DoctorRequest {
+                model: args.model.clone(),
+                clean_cache: args.clean_cache,
+                hipfire_url: args.hipfire_url.clone(),
+                hipfire_log: args.hipfire_log.clone(),
+                cache_dir: None,
+            };
+            crate::doctor::core_doctor(&req, deps.probe.as_ref(), &io.ui)
+        }
         Commands::Eval(args) => eval(args, deps, &io.ui),
         Commands::Extract(cmd) => extract_cli(cmd, deps, io),
         Commands::Plugins(_) => plugins_list(&io.ui),

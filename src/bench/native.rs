@@ -30,6 +30,16 @@ pub const MAX_PROMPT_TOKENS: usize = 2048;
 /// Context assumed by the RAM check at load time.
 pub const PLANNED_CONTEXT: usize = MAX_PROMPT_TOKENS + 1024;
 
+/// The KV cache of one sequence, K and V of every layer in f32 over the context the load
+/// plans for: what one more sequence of a native batch costs.
+pub fn kv_bytes_per_sequence(cfg: &crate::extract::Qwen2Config) -> u64 {
+    let head_dim = cfg
+        .head_dim
+        .unwrap_or(cfg.hidden_size / cfg.num_attention_heads.max(1));
+    (2 * cfg.num_hidden_layers * cfg.num_key_value_heads * head_dim * 4) as u64
+        * PLANNED_CONTEXT as u64
+}
+
 pub struct NativeGenerator {
     state: Qwen2State,
     tokenizer: Tokenizer,
@@ -146,13 +156,7 @@ impl NativeGenerator {
         jobs: usize,
         pool: Option<Arc<rayon::ThreadPool>>,
     ) -> String {
-        let cfg = self.state.config();
-        let head_dim = cfg
-            .head_dim
-            .unwrap_or(cfg.hidden_size / cfg.num_attention_heads.max(1));
-        let per_sequence = (2 * cfg.num_hidden_layers * cfg.num_key_value_heads * head_dim * 4)
-            as u64
-            * PLANNED_CONTEXT as u64;
+        let per_sequence = kv_bytes_per_sequence(self.state.config());
         let free = probe.system_ram().map_or(0, |m| m.available_bytes);
         let cores = sysinfo::System::physical_core_count().ok();
         let (batch, threads) = super::generation::auto_batching(free, per_sequence, cores);

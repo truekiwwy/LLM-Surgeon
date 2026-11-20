@@ -611,6 +611,30 @@ surgeon restore [OPTIONS] --model <MODEL>
 
 Without `--backup` nor `--from-origin`, the model goes back to the state before the last `apply`: all the backups of one `apply` share a checkpoint (`<name>.bak-<secs>-<n>`), so this works after any number of them, sharded or not, and running it again changes nothing. An `apply` made while the model is already in the state of the newest checkpoint reuses it instead of copying the weights again. In a folder written by an older version, a single backed up file gets its newest backup; several files, which nothing links, all go back to the state before the first `apply` (`data.checkpoint`: `last_apply` or `first_apply`). A weights file given as `--from-origin` is copied over the file of that name in a model folder. A file already identical to its source is not rewritten. `data`: `mode` (`backup` or `origin`), `checkpoint` (detection only), `model`, `files` (`path`, `source`, `sha256_before` (null if the file was missing), `sha256_source`, `sha256_after`, `rewritten`), `identical`. Exit codes: 2 nothing to restore from or invalid arguments (nothing touched), 3 copy failed or final hash different (the message counts the files already restored; the sources are intact, run it again).
 
+<a id="cmd-doctor"></a>
+#### `surgeon doctor`
+
+Checks in a few seconds, without loading a model, that the machine is ready for a campaign: total and free RAM and the largest weights that load in f32 or in bf16 without the slow fallback (the RAM rule of the native loader: overhead and safety margin); the physical cores and the threads of native generation; the reference cache `ref_bench` (directory, entries, size, unreadable or obsolete files); and the hipfire daemon when it is configured or answers (URL, `/health`, `/metrics`, and the GPU memory of its last load). hipfire 0.4 writes that memory only in its log, so `doctor` reads the log `start-hipfire.ps1` writes: `0 MB total` there is a daemon that lost its GPU, every load fails until it is restarted. `data.ready` is false when a check fails; the exit code stays 0. Also the MCP tool `surgeon_doctor` (read only, without `--clean-cache`).
+
+```text
+surgeon doctor [OPTIONS]
+```
+
+| Option | Default | Role |
+| --- | --- | --- |
+| `--model` | none | Model folder: its exact RAM need, the dtype it gets (f32, or the slow bf16 fallback) and its native batch. |
+| `--clean-cache` | off | Remove the reference cache files that can never be read again (unreadable, another schema, temporary files). |
+| `--hipfire-url` | configuration, else `http://127.0.0.1:11435` | hipfire daemon to check. |
+| `--hipfire-log` | the log of `start-hipfire.ps1` | Daemon log where it writes the GPU memory of each load. |
+
+```text
+[DOCTOR]   pas prêt
+[RAM]      ok · 36.9 Gio libres sur 63.9 Gio : f32 jusqu'à ~8.2 G paramètres, bf16 ~16.3 G (activations en plus) ; C:/models/Qwen2.5-0.5B-Instruct demande 5.3 Gio en f32, 3.8 Gio en bf16 (marge comprise) -> f32
+[CPU]      ok · 6 cœurs physiques : génération native sur 6 threads, lots de 16 séquences au plus
+[CACHE]    ok · %LOCALAPPDATA%\weight-surgeon\cache\ref_bench : 0 entrées, 0.0 Mio, 0 illisibles, 0 obsolètes
+[HIPFIRE]  échec · http://127.0.0.1:11435 répond (ok, en route depuis 45.9 h, 702 requêtes en échec) ; GPU gfx1100 : 0 Mo libres sur 0 Mo au dernier chargement : démon figé, sans GPU, tout chargement échoue ; arrête le démon dans WSL puis relance .\start-hipfire.ps1 (il ne relance pas un démon qui répond encore)
+```
+
 <a id="cmd-compose"></a>
 #### `surgeon compose`
 
@@ -2167,7 +2191,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 <a id="tools"></a>
 ### 4.2 Tools
 
-`surgeon mcp` serves eighteen tools: fourteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), `surgeon_files` for an agent's working files, and three studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
+`surgeon mcp` serves nineteen tools: fifteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), `surgeon_files` for an agent's working files, and three studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
 
 | Tool | Role |
 | --- | --- |
@@ -2175,6 +2199,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 | `surgeon_inspect` | Layers and MLP matrices, optional statistics. |
 | `surgeon_apply` | Applies a patch in place (`dry_run` to check first); `gguf: true` for a quantized GGUF. |
 | `surgeon_restore` | Puts the model back byte for byte from the last checkpoint (the state before the last `surgeon_apply`), named backups or the origin model (`from_origin`, read in `--allow-read`); SHA-256 of every file before and after. The rollback after a regression measured by `surgeon_bench`. |
+| `surgeon_doctor` | Whether the machine is ready for a campaign: RAM and the largest model in f32 or bf16, cores, reference cache, hipfire daemon (a GPU at 0 MB means a restart). Read only. |
 | `surgeon_compose` | One direction from several extracted vectors, orthogonal to the capability directions to preserve (modified Gram-Schmidt, f64), and the `project_out` patch that removes it with its recipe. Writes files, never a model. |
 | `surgeon_eval` | Loop and expectation checks, conditional GGUF export. |
 | `surgeon_extract` | Steering vector from a Qwen2, Llama/Mistral or Qwen3 layer. |

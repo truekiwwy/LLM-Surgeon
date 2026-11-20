@@ -112,6 +112,9 @@
 //!   `--retention-limit`, `surgeon_autotune` the same optional properties; all additive, and
 //!   without `--refusal-prompts` the report is byte for byte the one before (`selection` is
 //!   omitted). Only the tool schema hash moved.
+//! - machine readiness: the subcommand `doctor` (`--model`, `--clean-cache`, `--hipfire-url`,
+//!   `--hipfire-log`) and the nineteenth tool `surgeon_doctor` (read only, `model`), both
+//!   additive; only the tool schema hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
@@ -283,7 +286,7 @@ fn mcp_tools_surface() -> Value {
 #[test]
 fn mcp_tools_surface_is_unchanged() {
     let current = mcp_tools_surface();
-    assert_eq!(current.as_array().unwrap().len(), 18, "eighteen MCP tools");
+    assert_eq!(current.as_array().unwrap().len(), 19, "nineteen MCP tools");
     let reference = read_fixture("mcp_tools_surface.json");
     assert!(
         current == reference,
