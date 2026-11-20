@@ -18,7 +18,6 @@ use crate::{logging, paths, platform};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(200);
-const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub struct HipfireDaemon {
@@ -76,7 +75,9 @@ impl HipfireDaemon {
         self.tried = None;
         let child = lock(&self.child).take();
         if let Some(mut child) = child {
-            kill_tree(&mut child);
+            if let Err(e) = weight_surgeon::process::kill_tree(&mut child) {
+                logging::warn(&format!("arrêt de hipfire : {e}"));
+            }
         }
     }
 }
@@ -153,31 +154,6 @@ fn wait_ready(child: &Mutex<Option<Child>>, port: u16) -> bool {
         std::thread::sleep(READY_POLL);
     }
     false
-}
-
-/// The child and what it spawned. Only a live child is looked up by id: the id of a dead one
-/// may already belong to another process.
-fn kill_tree(child: &mut Child) {
-    if matches!(child.try_wait(), Ok(None)) {
-        let pid = child.id().to_string();
-        let (program, args) = match cfg!(windows) {
-            true => (
-                "taskkill",
-                vec!["/PID".to_owned(), pid, "/T".into(), "/F".into()],
-            ),
-            false => (
-                "kill",
-                vec!["-KILL".to_owned(), "--".into(), format!("-{pid}")],
-            ),
-        };
-        let mut killer = platform::command(program);
-        killer.args(args);
-        if let Err(e) = platform::run_capture(killer, KILL_TIMEOUT) {
-            logging::warn(&format!("arrêt de hipfire : {e}"));
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[cfg(test)]
@@ -326,6 +302,6 @@ mod tests {
         daemon.stop();
         drop(daemon);
         assert!(matches!(foreign.try_wait(), Ok(None)));
-        kill_tree(&mut foreign);
+        weight_surgeon::process::kill_tree(&mut foreign).unwrap();
     }
 }

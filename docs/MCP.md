@@ -650,6 +650,14 @@ Serveur lancé avec `--read-only` :
 - **Rollback automatique** sur erreur, NaN/Inf, annulation (`notifications/cancelled`,
   `error.kind = "cancelled"`) ou panic. Un panic devient une erreur `-32603` et le
   serveur continue.
+- **Arrêt quand stdin se ferme** (cycle de vie MCP sur stdio : le client ferme l'entrée du
+  serveur). L'appel en cours est annulé comme par `notifications/cancelled` (vérifié entre
+  tenseurs, prompts et tokens), les requêtes déjà lues mais pas commencées ne sont pas
+  exécutées, et `surgeon mcp` se termine (code 0) dès que l'appel a rendu la main, en le
+  notant sur stderr. S'il ne la rend pas en 3 s (`server::EXIT_GRACE`), le processus sort
+  quand même (code 1). Un client par script lit donc ses réponses avant de fermer stdin.
+  `mcp::serve` (tests, intégrations en processus) garde l'ancienne lecture : tout ce qui a
+  été lu reçoit sa réponse, puis la fin.
 - **Progression** : avec `_meta.progressToken`, une `notifications/progress` par tenseur
   (apply), par prompt (eval), ou une pour les poids puis une par prompt (extract) ; pour
   `surgeon_bench`, par prompt (`dump`), par bloc de 64 positions (`logits`), par chunk de

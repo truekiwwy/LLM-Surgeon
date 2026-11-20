@@ -150,6 +150,12 @@ dépendance réseau (`tests/deps_purity.rs`). Voir [GUI_DEPENDENCIES.md](GUI_DEP
 - `Pause` : plus de nouvelle requête ni de nouvel appel ; `Reprendre` continue. `Arrêter` :
   le flux est annulé, les jobs en cours reçoivent l'annulation du moteur (rollback d'un apply),
   les appels en attente sont répondus « arrêté par l'utilisateur ».
+- `Arrêter` un runtime CLI (et fermer le projet ou la fenêtre pendant qu'il tourne) tue son
+  arbre de processus (`weight_surgeon::process::kill_tree` : `taskkill /T` sous Windows, le
+  groupe de processus ailleurs), donc aussi les serveurs `surgeon-gui mcp` qu'il a lancés.
+  Un `surgeon_apply` en cours est alors coupé net, sans rollback : ses sauvegardes restent sur
+  la copie, et `surgeon_restore` la remet en état. Un serveur resté orphelin (CLI tombée seule)
+  voit son stdin se fermer et s'arrête de lui-même.
 
 ### Modes
 

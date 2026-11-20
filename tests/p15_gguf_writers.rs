@@ -7,7 +7,9 @@
 #[path = "support/gguf.rs"]
 mod support;
 
-use std::io::{BufRead, BufReader, Write as _};
+#[path = "support/mcp_client.rs"]
+mod mcp_client;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
@@ -1039,16 +1041,7 @@ fn mcp(dir: &Path, read_only: bool, calls: &[Value]) -> Vec<Value> {
     for (i, args) in calls.iter().enumerate() {
         lines.push(json!({"jsonrpc": "2.0", "id": i + 1, "method": "tools/call", "params": args}));
     }
-    let mut stdin = child.stdin.take().unwrap();
-    for line in &lines {
-        writeln!(stdin, "{line}").unwrap();
-    }
-    drop(stdin);
-    let replies: Vec<Value> = BufReader::new(child.stdout.take().unwrap())
-        .lines()
-        .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
-        .collect();
-    child.wait().unwrap();
+    let (replies, _) = mcp_client::exchange(&mut child, &lines);
     (1..=calls.len())
         .map(|id| {
             let reply = replies.iter().find(|r| r["id"] == id).unwrap();

@@ -120,8 +120,8 @@ impl Drop for PipelineJobs {
         while matches!(r.child.try_wait(), Ok(None)) && started.elapsed() < GRACE {
             std::thread::sleep(Duration::from_millis(50));
         }
-        let _ = r.child.kill();
-        let _ = r.child.wait();
+        // With its inference server, if it started one (llama-server, mistral.rs).
+        let _ = crate::process::kill_tree(&mut r.child);
     }
 }
 

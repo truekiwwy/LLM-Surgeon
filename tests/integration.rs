@@ -1,6 +1,9 @@
 //! End-to-end flows through `app::run_with` with fake hardware, processes and generator,
 //! plus smoke tests of the real binary.
 
+#[path = "support/mcp_client.rs"]
+mod mcp_client;
+
 use std::cell::RefCell;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -1218,7 +1221,6 @@ fn no_print_macros_outside_tests() {
 
 // ------------------------------------------------------------------ schema & MCP (prompt 7)
 
-use std::io::Read as _;
 use std::time::{Duration, Instant};
 
 use weight_surgeon::app::{core_apply, ApplyRequest, ProgressEvent, ProgressSink, RollbackOutcome};
@@ -2239,58 +2241,38 @@ fn mcp_binary_speaks_only_json_rpc_on_stdout() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let input = [
+    let lines = json_lines(&[
         init("2025-06-18"),
         INITIALIZED.to_owned(),
         rpc(json!(2), "tools/list", json!({})),
         call(3, "surgeon_check", json!({"model": "model.safetensors"})),
-    ]
-    .join("\n")
-        + "\n";
-    {
-        use std::io::Write as _;
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(input.as_bytes()).unwrap();
-    } // stdin closed: EOF ends the server
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(30) {
-            let _ = child.kill();
-            panic!("surgeon mcp did not exit within 30 s");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let (mut out, mut err) = (String::new(), String::new());
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut out)
-        .unwrap();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut err)
-        .unwrap();
+    ]);
+    let stderr = drain(child.stderr.take().unwrap());
+    // Strict JSON on every stdout line, which rules out ANSI escapes there.
+    let (responses, status) = mcp_client::exchange(&mut child, &lines);
+    let err = stderr.join().unwrap();
     assert_eq!(status.code(), Some(0), "{err}");
-    assert!(
-        !out.contains('\x1b') && !err.contains('\x1b'),
-        "no ANSI even with CLICOLOR_FORCE"
-    );
-    let responses: Vec<Value> = out
-        .lines()
-        .map(|l| {
-            let v: Value = serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l:?}"));
-            assert_eq!(v["jsonrpc"], "2.0");
-            v
-        })
-        .collect();
+    assert!(!err.contains('\x1b'), "no ANSI even with CLICOLOR_FORCE");
+    assert!(responses.iter().all(|v| v["jsonrpc"] == "2.0"));
     assert_eq!(responses.len(), 3);
     assert!(!envelope(&responses, 3).0);
+}
+
+/// Raw JSON-RPC lines as values, for [`mcp_client::exchange`].
+fn json_lines(lines: &[String]) -> Vec<Value> {
+    lines
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+/// Reads a pipe to its end on a thread (a full pipe would block the child).
+fn drain(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        pipe.read_to_string(&mut text).unwrap();
+        text
+    })
 }
 
 // ------------------------------------------------------------------ extract (prompt 8)
@@ -3164,50 +3146,21 @@ fn mcp_binary_extract_speaks_only_json_rpc() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let input = [
+    let lines = json_lines(&[
         init("2025-06-18"),
         rpc(json!(1), "tools/list", json!({})),
-        call(2, "surgeon_extract", json!({"model": "qwen2-mini", "pos_prompts_file": "pos.json", "neg_prompts_file": "neg.json", "layer": 1, "out": "bin.safetensors"})),
-    ]
-    .join("\n")
-        + "\n";
-    {
-        use std::io::Write as _;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-    }
-    // Read while it runs: tools/list alone is larger than a pipe buffer.
-    fn drain(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
-        std::thread::spawn(move || {
-            let mut text = String::new();
-            pipe.read_to_string(&mut text).unwrap();
-            text
-        })
-    }
-    let stdout = drain(child.stdout.take().unwrap());
+        call(
+            2,
+            "surgeon_extract",
+            json!({"model": "qwen2-mini", "pos_prompts_file": "pos.json", "neg_prompts_file": "neg.json", "layer": 1, "out": "bin.safetensors"}),
+        ),
+    ]);
     let stderr = drain(child.stderr.take().unwrap());
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(60) {
-            let _ = child.kill();
-            panic!("surgeon mcp did not exit within 60 s");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let (out, err) = (stdout.join().unwrap(), stderr.join().unwrap());
+    // Read while it runs: tools/list alone is larger than a pipe buffer.
+    let (responses, status) = mcp_client::exchange(&mut child, &lines);
+    let err = stderr.join().unwrap();
     assert_eq!(status.code(), Some(0), "{err}");
-    assert!(!out.contains('\x1b') && !err.contains('\x1b'));
-    let responses: Vec<Value> = out
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
-        .collect();
+    assert!(!err.contains('\x1b'));
     assert_eq!(
         reply(&responses, json!(1))["result"]["tools"]
             .as_array()
@@ -3215,7 +3168,7 @@ fn mcp_binary_extract_speaks_only_json_rpc() {
             .len(),
         17
     );
-    assert!(!envelope(&responses, 2).0, "{out}");
+    assert!(!envelope(&responses, 2).0, "{responses:?}");
     assert!(f.dir.path().join("bin.safetensors").exists());
 }
 
@@ -5147,7 +5100,7 @@ fn mcp_binary_bench_speaks_only_json_rpc() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let input = [
+    let lines = json_lines(&[
         init("2025-06-18"),
         INITIALIZED.to_owned(),
         call(
@@ -5155,22 +5108,11 @@ fn mcp_binary_bench_speaks_only_json_rpc() {
             "surgeon_bench",
             json!({"mode": "logits", "before": "before.safetensors", "after": "after.safetensors"}),
         ),
-    ]
-    .join("\n")
-        + "\n";
-    {
-        use std::io::Write as _;
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(input.as_bytes()).unwrap();
-    }
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(output.status.code(), Some(0));
-    let out = String::from_utf8(output.stdout).unwrap();
-    assert!(!out.contains('\x1b') && !String::from_utf8_lossy(&output.stderr).contains('\x1b'));
-    let responses: Vec<Value> = out
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
-        .collect();
+    ]);
+    let stderr = drain(child.stderr.take().unwrap());
+    let (responses, status) = mcp_client::exchange(&mut child, &lines);
+    assert_eq!(status.code(), Some(0));
+    assert!(!stderr.join().unwrap().contains('\x1b'));
     assert!(responses.iter().all(|r| r["jsonrpc"] == "2.0"));
     assert!(!envelope(&responses, 2).0);
 }

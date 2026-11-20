@@ -9,7 +9,9 @@ mod fake_qwen2;
 #[path = "support/fake_server.rs"]
 mod support;
 
-use std::io::{BufRead, BufReader, Write};
+#[path = "support/mcp_client.rs"]
+mod mcp_client;
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -282,16 +284,7 @@ fn mcp(dir: &Path, calls: &[Value]) -> Vec<Value> {
             "params": {"name": "surgeon_bench", "arguments": arguments}}),
         );
     }
-    let mut stdin = child.stdin.take().unwrap();
-    for line in &lines {
-        writeln!(stdin, "{line}").unwrap();
-    }
-    drop(stdin);
-    let replies: Vec<Value> = BufReader::new(child.stdout.take().unwrap())
-        .lines()
-        .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
-        .collect();
-    child.wait().unwrap();
+    let (replies, _) = mcp_client::exchange(&mut child, &lines);
     (1..=calls.len())
         .map(|id| replies.iter().find(|r| r["id"] == id).unwrap().clone())
         .collect()
