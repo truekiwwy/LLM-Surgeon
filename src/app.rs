@@ -474,7 +474,7 @@ fn pipeline_cli(command: &crate::cli::PipelineCommand, deps: &AppDeps) -> CoreRe
         C::Plan(a) => {
             let options = RunOptions {
                 allow_disable_safety: a.allow_disable_safety,
-                allow_test_reuse: false,
+                ..RunOptions::default()
             };
             front::core_plan(
                 &a.config,
@@ -490,6 +490,7 @@ fn pipeline_cli(command: &crate::cli::PipelineCommand, deps: &AppDeps) -> CoreRe
             let options = RunOptions {
                 allow_disable_safety: a.allow_disable_safety,
                 allow_test_reuse: a.allow_test_reuse,
+                allow_stale_hipfire: a.allow_stale_hipfire,
             };
             match a.detach {
                 true => front::core_detach(
@@ -3419,6 +3420,8 @@ pub fn core_bench_eval(
 ) -> CoreResult {
     let sink = RefCell::new(sink);
     req.generation.validate().map_err(|e| bench_failure(&e))?;
+    let models = [Some(req.model.as_path()), req.baseline_model.as_deref()];
+    let stale = hipfire_targets(req.backend, &models, &req.generation)?;
     let pool = generation_pool(&req.generation, req.backend, &sink)?;
     let mut make = |gguf: &Path| {
         let tag = "bench-eval";
@@ -3433,7 +3436,7 @@ pub fn core_bench_eval(
             &sink,
         )
     };
-    let run = bench::score::run(
+    let mut run = bench::score::run(
         req,
         deps.runner.as_ref(),
         &mut make,
@@ -3444,7 +3447,32 @@ pub fn core_bench_eval(
         },
     )
     .map_err(|e| bench_failure(&e))?;
+    run.warnings.extend(stale);
     bench_outcome(&run, fail_on_warn, bench_report::eval_text(ui, &run))
+}
+
+/// [`hipfire::validate_hipfire_target`](crate::backend::hipfire::validate_hipfire_target) on
+/// every model of a bench before its first generation: a refused working copy must not cost
+/// the baseline's run first. The warnings of `--allow-stale-hipfire` go in the report.
+/// [`bench_generator`] applies the rule again to each model it serves.
+fn hipfire_targets(
+    backend: Backend,
+    models: &[Option<&Path>],
+    generation: &bench::generation::GenOptions,
+) -> std::result::Result<Vec<String>, Outcome> {
+    use crate::backend::hipfire;
+    if backend != Backend::Hipfire {
+        return Ok(Vec::new());
+    }
+    let mut warnings = Vec::new();
+    for model in models.iter().flatten() {
+        let copy = hipfire::is_working_copy(model);
+        let decision =
+            hipfire::validate_hipfire_target(model, copy, generation.allow_stale_hipfire)
+                .map_err(|e| bench_failure(&BenchError::InvalidArgument(e)))?;
+        warnings.extend(decision.warning);
+    }
+    Ok(warnings)
 }
 
 /// A bench generator for `backend`: the native one on a SafeTensors folder (batches,
@@ -3483,6 +3511,13 @@ pub(crate) fn bench_generator(
             return Ok(Box::new(server));
         }
         Backend::Hipfire => {
+            // Its warning, when let through, is the caller's to report (bench, pipeline).
+            hipfire::validate_hipfire_target(
+                model,
+                hipfire::is_working_copy(model),
+                generation.allow_stale_hipfire,
+            )
+            .map_err(BenchError::InvalidArgument)?;
             let endpoint = hipfire::probe(engines).map_err(BenchError::InvalidArgument)?;
             if let Some(warning) = endpoint.warning() {
                 sink.borrow_mut().event(ProgressEvent::Warn(warning.into()));
@@ -3639,6 +3674,8 @@ pub fn core_bench_refusal(
         .transpose()
         .map_err(|e| bench_failure(&e))?;
     req.generation.validate().map_err(|e| bench_failure(&e))?;
+    let models = [Some(req.model.as_path()), req.baseline_model.as_deref()];
+    let stale = hipfire_targets(backend, &models, &req.generation)?;
     let pool = generation_pool(&req.generation, backend, &sink)?;
     let llama_cpp_dir = engines.llama_cpp_dir.as_deref();
     let mut make = |model: &Path| {
@@ -3650,6 +3687,7 @@ pub fn core_bench_refusal(
             .event(ProgressEvent::BenchRefusalPrompt { done, total })
     })
     .map_err(|e| bench_failure(&e))?;
+    run.warnings.extend(stale);
     if let Some(judging) = judging {
         bench::judge::annotate(
             &mut run,

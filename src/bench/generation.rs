@@ -43,6 +43,8 @@ pub struct GenOptions {
     pub gguf_dtype: WeightType,
     /// The GPU API of the llama-server (`Vulkan`...), only to label the report.
     pub gpu_api: Option<&'static str>,
+    /// hipfire: measure a working copy all the same (`--allow-stale-hipfire`, CLI only).
+    pub allow_stale_hipfire: bool,
 }
 
 impl Default for GenOptions {
@@ -57,6 +59,7 @@ impl Default for GenOptions {
             ctx_size: None,
             gguf_dtype: WeightType::default(),
             gpu_api: None,
+            allow_stale_hipfire: false,
         }
     }
 }

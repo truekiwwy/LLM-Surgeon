@@ -261,6 +261,10 @@ Par MCP, `surgeon_pipeline` avec `action` ∈ `plan`, `start`, `status`, `cancel
   `--hipfire-bin`, `--hipfire-url`, ou configuration utilisateur : [BACKENDS.md](BACKENDS.md). Le
   job est lié à son backend ; un moteur introuvable arrête `pipeline run` avant tout calcul ; `kl`
   et `logits` lisent des logits natifs.
+- **hipfire ne mesure pas les candidats.** Le démon sert le fichier quantifié enregistré sous le
+  nom du modèle, jamais la copie patchée : avec `hipfire`, le job échoue avant le premier candidat
+  et avant toute lecture du Test Set (`invalid_input`). `--allow-stale-hipfire` (CLI seulement)
+  passe outre pour une copie requantifiée et enregistrée ; `notes` et `report.json` le disent.
 - **Pas de juges LLM** : les piliers de refus utilisent les marqueurs de `bench refusal`, qui
   manquent les refus doux et comptent une réponse dégradée comme une acceptation.
 - **Pas de stratégie de copie en mémoire** : `copy` et `restore-from-backup` seulement.

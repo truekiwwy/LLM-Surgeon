@@ -19,6 +19,7 @@ use crate::app::{
     core_eval, core_extract_method, core_inspect, envelope_of, exit, AppDeps, ApplyRequest,
     CoreResult, Outcome, ProgressSink,
 };
+use crate::backend::hipfire;
 use crate::bench;
 use crate::bench::calibration::{JudgeEvalRequest, SampleRequest};
 use crate::bench::dump::DumpRequest;
@@ -1475,6 +1476,8 @@ fn generation(args: &BenchToolArgs) -> crate::bench::generation::GenOptions {
         ctx_size: args.ctx,
         gguf_dtype: Default::default(),
         gpu_api: None,
+        // Never over MCP: an agent cannot vouch for hipfire's cache.
+        allow_stale_hipfire: false,
     }
 }
 
@@ -1483,52 +1486,65 @@ fn generation(args: &BenchToolArgs) -> crate::bench::generation::GenOptions {
 pub(super) const EVAL_BACKEND: Backend = Backend::Llama;
 pub(super) const REFUSAL_BACKEND: Backend = Backend::Native;
 
-/// The warning of a bench taken off hipfire by [`bench_backend`].
-pub const HIPFIRE_SET_ASIDE: &str = "backend hipfire écarté : il sert un cache quantifié \
-     statique enregistré par nom et ignore les poids modifiés du dossier SafeTensors ; mesure \
-     faite sur native";
+/// The start of the warning of a bench taken off hipfire by [`bench_backend`].
+pub const HIPFIRE_SET_ASIDE: &str = "backend hipfire écarté : la cible est une copie de \
+     travail, et hipfire sert le cache quantifié enregistré sous son nom, pas ses poids \
+     modifiés ; mesure faite sur native";
 
-/// The backend an eval or refusal of `model` runs on, `resolved` being the call's choice over
-/// the user configuration. hipfire answers from its own quantized copy of a model and never
-/// reads the SafeTensors folder it is given: a bench of a patched working copy would measure
-/// the old weights, so it runs on native instead (`true` then).
+/// The backend an eval or refusal of `models` runs on, `resolved` being the call's choice
+/// over the user configuration, through [`hipfire::validate_hipfire_target`]: a SafeTensors
+/// working copy refused by hipfire runs on native instead, with the warning saying why; a
+/// GGUF one (native cannot read it) is refused. An agent has no `--allow-stale-hipfire`.
 pub fn bench_backend(
     resolved: Option<Backend>,
     default: Backend,
-    model: Option<&Path>,
-) -> (Backend, bool) {
+    models: &[&Path],
+) -> Result<(Backend, Option<String>), String> {
     let backend = resolved.unwrap_or(default);
-    match backend == Backend::Hipfire && !model.is_some_and(crate::eval::is_gguf) {
-        true => (Backend::Native, true),
-        false => (backend, false),
+    if backend != Backend::Hipfire {
+        return Ok((backend, None));
     }
+    for model in models {
+        if let Err(reason) =
+            hipfire::validate_hipfire_target(model, hipfire::is_working_copy(model), false)
+        {
+            if crate::eval::is_gguf(model) {
+                return Err(reason);
+            }
+            let warning = format!("{HIPFIRE_SET_ASIDE} ({})", model.display());
+            return Ok((Backend::Native, Some(warning)));
+        }
+    }
+    Ok((backend, None))
 }
 
-/// [`HIPFIRE_SET_ASIDE`] first among the warnings of a bench that left hipfire, failed or not.
-fn set_aside(result: CoreResult, hipfire_set_aside: bool) -> CoreResult {
+/// The warning of a bench that left hipfire first among its warnings, failed or not.
+fn set_aside(result: CoreResult, warning: Option<String>) -> CoreResult {
     let warn = |mut outcome: Outcome| {
-        if hipfire_set_aside {
-            outcome.warnings.insert(0, HIPFIRE_SET_ASIDE.to_owned());
+        if let Some(w) = &warning {
+            outcome.warnings.insert(0, w.clone());
         }
         outcome
     };
     result.map(warn).map_err(warn)
 }
 
-/// The backend and generation options of an eval or refusal call: the arguments over the
-/// operator's user configuration (the agent never names a binary), as the CLI resolves them,
-/// then [`bench_backend`]. The `bool` says whether hipfire was set aside.
+/// The backend and generation options of an eval or refusal call on `models` (resolved
+/// paths): the arguments over the operator's user configuration (the agent never names a
+/// binary), as the CLI resolves them, then [`bench_backend`], whose warning comes last (the
+/// server also writes it to stderr).
 fn effective_generation(
     args: &BenchToolArgs,
     user: &Result<crate::backend::BackendConfig, String>,
     default: Backend,
     llama_cpp_dir: Option<&Path>,
+    models: &[&Path],
 ) -> Result<
     (
         Backend,
         crate::bench::generation::GenOptions,
         crate::backend::BackendConfig,
-        bool,
+        Option<String>,
     ),
     Outcome,
 > {
@@ -1542,8 +1558,8 @@ fn effective_generation(
         ..Default::default()
     };
     let effective = crate::backend::resolve(top, &user);
-    let (backend, hipfire_set_aside) =
-        bench_backend(effective.backend, default, args.model.as_deref());
+    let (backend, set_aside) = bench_backend(effective.backend, default, models)
+        .map_err(|e| invalid("invalid_input", e))?;
     let mut options = generation(args);
     options.gpu_layers = effective.gpu_layers;
     options.batch_size = effective.batch_size.unwrap_or(options.batch_size);
@@ -1556,7 +1572,7 @@ fn effective_generation(
         llama_cpp_dir: llama_cpp_dir.map(Path::to_path_buf),
         ..effective
     };
-    Ok((backend, options, engines, hipfire_set_aside))
+    Ok((backend, options, engines, set_aside))
 }
 
 pub(super) fn bench_command(arguments: &Value) -> &'static str {
@@ -1742,13 +1758,24 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 None => Ok(Template::default()),
             }
             .map_err(|e| invalid("invalid_arguments", e))?;
-            let (eval_backend, eval_generation, engines, hipfire_set_aside) =
-                effective_generation(&args, &user, EVAL_BACKEND, llama_cpp_dir.as_deref())?;
+            let model = path(ctx, "model", &args.model)?;
+            let baseline_model = optional_path(ctx, "baseline_model", &args.baseline_model)?;
+            let models: Vec<&Path> = std::iter::once(&model)
+                .chain(&baseline_model)
+                .map(PathBuf::as_path)
+                .collect();
+            let (eval_backend, eval_generation, engines, hipfire_set_aside) = effective_generation(
+                &args,
+                &user,
+                EVAL_BACKEND,
+                llama_cpp_dir.as_deref(),
+                &models,
+            )?;
             let req = EvalRequest {
-                model: path(ctx, "model", &args.model)?,
+                model,
                 dataset: source(ctx, "dataset", &args.dataset)?,
                 backend: eval_backend,
-                baseline_model: optional_path(ctx, "baseline_model", &args.baseline_model)?,
+                baseline_model,
                 limit: args.limit.map_or(bench::DEFAULT_LIMIT, |l| l as usize),
                 max_new_tokens: args.max_new_tokens.unwrap_or(bench::DEFAULT_MAX_NEW_TOKENS),
                 template,
@@ -1795,12 +1822,24 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 markers_file.as_deref(),
             )
             .map_err(|e| invalid("invalid_arguments", e))?;
+            let model = path(ctx, "model", &args.model)?;
+            let baseline_model = optional_path(ctx, "baseline_model", &args.baseline_model)?;
+            let models: Vec<&Path> = std::iter::once(&model)
+                .chain(&baseline_model)
+                .map(PathBuf::as_path)
+                .collect();
             let (refusal_backend, refusal_generation, engines, hipfire_set_aside) =
-                effective_generation(&args, &user, REFUSAL_BACKEND, llama_cpp_dir.as_deref())?;
+                effective_generation(
+                    &args,
+                    &user,
+                    REFUSAL_BACKEND,
+                    llama_cpp_dir.as_deref(),
+                    &models,
+                )?;
             let req = RefusalRequest {
-                model: path(ctx, "model", &args.model)?,
+                model,
                 prompts,
-                baseline_model: optional_path(ctx, "baseline_model", &args.baseline_model)?,
+                baseline_model,
                 max_new_tokens: args
                     .max_new_tokens
                     .unwrap_or(bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),

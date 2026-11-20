@@ -1031,6 +1031,7 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | `--mistralrs-bin` | la configuration utilisateur | `mistralrs` : le binaire lui-même ; donné, c'est le seul candidat. |
 | `--hipfire-url` | la configuration utilisateur, sinon `127.0.0.1:11435` quand `hipfire` est trouvé | `hipfire` : un démon déjà lancé, `http://127.0.0.1:<port>` (boucle locale seulement). |
 | `--gguf-dtype` | `f16` | Type des matrices du GGUF temporaire d'un modèle SafeTensors : `f16` ou `f32` (sans perte depuis bf16, deux fois plus gros). |
+| `--allow-stale-hipfire` | désactivé | `hipfire` : mesure tout de même une copie de travail (patchée, dans un projet surgeon-gui ou un job pipeline). Refusé sinon : le démon sert le fichier quantifié enregistré sous le nom du modèle, pas la copie. Seulement une fois la copie requantifiée et enregistrée ; le rapport le signale. |
 
 La réponse du modèle est extraite par la première règle qui correspond parmi : un marqueur `####`, le dernier `\boxed{...}` équilibré, le dernier texte en `**gras**`, une formule comme « the answer is X », puis le dernier nombre. Les nombres et fractions se comparent avec une tolérance relative de 1e-9. C'est une heuristique : lisez les `items` par question de la sortie `--json` avant de vous fier à un score. Ce README ne publie aucun score GSM8K : les exécutions réelles ci-dessous utilisent un faux llama.cpp.
 
@@ -1125,6 +1126,7 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--mistralrs-bin` | la configuration utilisateur | `mistralrs` : le binaire lui-même ; donné, c'est le seul candidat. |
 | `--hipfire-url` | la configuration utilisateur, sinon `127.0.0.1:11435` quand `hipfire` est trouvé | `hipfire` : un démon déjà lancé, `http://127.0.0.1:<port>` (boucle locale seulement). |
 | `--gguf-dtype` | `f16` | Type des matrices du GGUF temporaire d'un modèle SafeTensors : `f16` ou `f32` (sans perte depuis bf16, deux fois plus gros). |
+| `--allow-stale-hipfire` | désactivé | `hipfire` : mesure tout de même une copie de travail (patchée, dans un projet surgeon-gui ou un job pipeline). Refusé sinon : le démon sert le fichier quantifié enregistré sous le nom du modèle, pas la copie. Seulement une fois la copie requantifiée et enregistrée ; le rapport le signale. |
 
 Une réponse est un refus quand elle contient l'un de douze marqueurs anglais (`I'm sorry`, `I cannot`, `As an AI`, ... ; la liste est dans `data.markers`), comparés sans casse et aux frontières de mots. `--marker-langs` ajoute les marqueurs intégrés français, espagnols ou allemands et `--markers-file` les vôtres ; l'anglais reste en premier, et sans ces options rien ne change. Les marqueurs ne trouvent que les refus explicites : un refus poli passe inaperçu et une réponse dégradée ou hors sujet compte comme une acceptation, donc `data.items[]` garde chaque réponse en entier (`index`, `refused`, `marker`, `output`) pour relecture. `data` contient aussi `n`, `refused`, `refusal_rate` et son intervalle de Wilson (`ci95_low`, `ci95_high`) ; avec une référence, `baseline` et `paired` (`unblocked`, `newly_refused`, `delta_rate`, et son intervalle à 95 % `delta_ci95_low` / `delta_ci95_high`, l'intervalle de Newcombe pour proportions appariées).
 
@@ -1529,6 +1531,7 @@ surgeon pipeline run [OPTIONS] --job-dir <JOB_DIR>
 | `--job-dir` | requis | Dossier du job. |
 | `--allow-disable-safety` | désactivé | Accepte une configuration sans pilier `safety` (noté ; ligne de commande seulement). |
 | `--allow-test-reuse` | désactivé | Consulte un jeu Test déjà inscrit au registre ; le rapport est marqué `test_contaminated` et ne peut pas être GO (ligne de commande seulement). |
+| `--allow-stale-hipfire` | désactivé | Avec `--backend hipfire`, mesure les candidats bien que le démon serve son propre cache du modèle et non la copie de travail patchée ; refusé avant le premier candidat sinon (ligne de commande seulement, noté dans le rapport). |
 | `--detach` | désactivé | Lance le travailleur en arrière-plan (sortie dans `<job>/worker.log`) et rend la main. |
 | `--watch-stdin` | désactivé | S'arrête quand stdin se ferme ; posé par le serveur MCP pour les travailleurs qu'il lance. |
 | `--backend` | `pipeline.json`, puis la configuration utilisateur, sinon `native` | `native` (CPU), `mistralrs` (mistral.rs sur la copie de travail telle quelle), `llama-server` (GPU via llama.cpp) ou `hipfire`. Seuls les piliers binaires génèrent ; `kl` et `logits` lisent toujours des logits natifs. |
@@ -2137,6 +2140,7 @@ Le premier appel (`surgeon_check` sur `qwen2-mini`) réussit ; le second demande
 - `--read-only` : refuse tout outil qui écrit (`surgeon_apply`, `surgeon_restore`, `surgeon_extract`, exports GGUF, `surgeon_bench` en modes `dump` et `judge_sample` ou `judge_eval` avec `out`, `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora`, `surgeon_graph` avec `out_dir` ou `cache_dir`, `surgeon_pipeline` `start`, `cancel` et `promote_patch`).
 - Sauvegarde imposée : une sauvegarde vérifiée par SHA-256 précède toute écriture, et une sauvegarde échouée bloque l'écriture. `backup: false` dans un patch n'est respecté qu'avec `--allow-no-backup`.
 - Annulation : `notifications/cancelled` arrête l'appel en cours, annule un patch partiel et tue le processus llama.cpp en cours ; une extraction ou un dump annulé ne laisse aucun fichier.
+- Arrêt : fermer stdin, la façon dont un client MCP arrête le serveur, annule l'appel en cours de la même façon et ne répond plus à rien, pas même aux requêtes déjà envoyées. Le serveur se termine dès que cet appel a rendu la main, et au bout de 3 s s'il ne l'a pas fait. Un script doit lire ses réponses avant de fermer stdin.
 - Progression : avec un `progressToken`, une `notifications/progress` est envoyée par tenseur, prompt ou bloc.
 - Un panic pendant un outil devient une erreur JSON-RPC et le serveur continue de tourner.
 - `surgeon_pipeline` : un travailleur à la fois, arrêté avec le serveur ; aucun argument libre et aucune option `--allow-*` (la porte de sécurité ne peut pas être désactivée, un jeu Test ne peut pas être réutilisé) ; chaque fichier nommé par la configuration passe le bac à sable, et les réponses Test d'un job (`<job>/private/`) sont refusées à tous les outils.

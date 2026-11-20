@@ -221,7 +221,8 @@ pub struct Manager {
     seq: u64,
     /// The worst end since the project last became `Running`.
     worst: Option<Transition>,
-    _lock: ProjectLock,
+    /// Shared with every job thread: the lock outlives a manager dropped mid-job.
+    lock: Arc<ProjectLock>,
 }
 
 impl Manager {
@@ -269,7 +270,7 @@ impl Manager {
             running: Vec::new(),
             seq: 0,
             worst: None,
-            _lock: lock,
+            lock: Arc::new(lock),
         })
     }
 
@@ -519,7 +520,10 @@ impl Manager {
         let exec = Arc::clone(&self.exec);
         let wake = Arc::clone(&self.wake);
         let spec = q.spec.clone();
+        // The thread is detached: it keeps the project locked until it stops writing there.
+        let lock = Arc::clone(&self.lock);
         std::thread::spawn(move || {
+            let _lock = lock;
             let source = ctx
                 .source
                 .as_ref()

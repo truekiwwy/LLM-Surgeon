@@ -143,14 +143,7 @@ pub fn detect(kind: ProviderKind, path: Option<&OsStr>) -> Option<Detected> {
 }
 
 fn command(program: &Path) -> Command {
-    let mut c = Command::new(program);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        c.creation_flags(CREATE_NO_WINDOW);
-    }
-    c
+    crate::platform::command(program)
 }
 
 /// The process of a CLI runtime, without what would take over from its signed-in account:
@@ -753,7 +746,8 @@ pub fn run_command(l: &Launch, kind: ProviderKind) -> Command {
     c
 }
 
-/// A running CLI: events as they come, `stop` kills it.
+/// A running CLI: events as they come, `stop` (or the drop) kills it with what it started,
+/// the `surgeon-gui mcp` servers first.
 pub struct Run {
     pub rx: Receiver<Event>,
     child: Arc<Mutex<Child>>,
@@ -765,7 +759,14 @@ impl Run {
         kind: ProviderKind,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, String> {
-        let mut child = run_command(l, kind)
+        let mut cmd = run_command(l, kind);
+        // A group of its own: `stop` takes the MCP servers it starts with it (kill_tree).
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -823,9 +824,24 @@ impl Run {
         Ok(Self { rx, child })
     }
 
+    #[cfg(test)]
+    pub fn pid(&self) -> u32 {
+        self.child.lock().unwrap_or_else(|e| e.into_inner()).id()
+    }
+
+    /// Kills the CLI and its process tree. Killing the CLI alone left its `surgeon-gui mcp`
+    /// servers running on Windows, a long benchmark with them.
     pub fn stop(&self) {
-        if let Ok(mut c) = self.child.lock() {
-            let _ = c.kill();
+        let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = weight_surgeon::process::kill_tree(&mut child) {
+            crate::logging::warn(&format!("arrêt du runtime : {e}"));
         }
+    }
+}
+
+impl Drop for Run {
+    /// A run dropped while its CLI still works (project closed, window closed) stops it.
+    fn drop(&mut self) {
+        self.stop();
     }
 }

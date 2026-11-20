@@ -2160,3 +2160,59 @@ fn every_cli_runtime_gets_the_picked_model_as_its_model_flag() {
         );
     }
 }
+
+/// A CLI that started a process of its own (as Claude Code starts `surgeon-gui mcp`): `stop`,
+/// and the drop of a run still working, leave neither behind.
+#[test]
+fn stopping_or_dropping_a_run_kills_the_servers_its_cli_started() {
+    use sysinfo::{Pid, ProcessStatus, ProcessesToUpdate, System};
+
+    let alive = |pid: u32| {
+        let pid = Pid::from_u32(pid);
+        let mut system = System::new().unwrap();
+        system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+        system
+            .process(pid)
+            .is_some_and(|p| p.status() != ProcessStatus::Zombie)
+    };
+    let started_by = |parent: u32| {
+        let mut system = System::new().unwrap();
+        system.refresh_processes(ProcessesToUpdate::All, true);
+        let parent = Pid::from_u32(parent);
+        system
+            .processes()
+            .iter()
+            .find(|(_, p)| p.parent() == Some(parent))
+            .map(|(pid, _)| pid.as_u32())
+    };
+    let eventually = |done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        done()
+    };
+    let (shell, flag, script) = match cfg!(windows) {
+        true => ("cmd", "/C", "ping -n 60 127.0.0.1 >NUL"),
+        false => ("sh", "-c", "sleep 60; true"),
+    };
+    let launch = runtime::Launch {
+        program: PathBuf::from(shell),
+        args: vec![flag.into(), script.into()],
+        cwd: std::env::temp_dir(),
+        stdin: String::new(),
+        env: Vec::new(),
+    };
+    for drop_it in [false, true] {
+        let run = runtime::Run::start(&launch, ProviderKind::Codex, Arc::new(|| {})).unwrap();
+        let cli = run.pid();
+        assert!(eventually(&|| started_by(cli).is_some()), "the CLI's child");
+        let server = started_by(cli).unwrap();
+        match drop_it {
+            false => run.stop(),
+            true => drop(run),
+        }
+        assert!(eventually(&|| !alive(cli)), "the CLI");
+        assert!(eventually(&|| !alive(server)), "what it started");
+    }
+}

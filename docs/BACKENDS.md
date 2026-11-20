@@ -212,11 +212,22 @@ Le champ `model` des requêtes est le nom du modèle donné au bench (son dossie
 extension) : le démon doit connaître un modèle sous ce nom. Comme pour mistral.rs, seul un faux
 démon l'a vérifié ici.
 
-Le démon ne lit donc jamais les poids du dossier : une copie patchée devrait être re-quantifiée
-et réenregistrée, sinon la mesure porte sur les anciens poids. Sur MCP (agents, studio),
-`surgeon_bench` `eval` et `refusal` d'un modèle qui n'est pas un `.gguf` passent sur `native`
-quand hipfire est demandé ou configuré, avec un avertissement. La CLI garde `--backend hipfire`
-tel quel.
+Le démon ne lit donc jamais les poids du dossier, GGUF compris : une copie patchée devrait être
+re-quantifiée et réenregistrée, sinon la mesure porte sur les anciens poids. Une seule règle
+(`backend::hipfire::validate_hipfire_target`) vaut pour la CLI, le pipeline et MCP : le modèle
+d'origine passe, une copie de travail est refusée. Est une copie de travail un chemin d'un projet
+surgeon-gui autre que la source de son manifeste (`copies/`, sorties des runs), le `work/` d'un
+job pipeline, ou un dossier à côté des sauvegardes d'`apply` (`<fichier>.bak-<s>-<n>`).
+
+- **CLI.** `bench eval` et `bench refusal` refusent avant la première génération (modèle et
+  `--baseline-model`), code 2 ; `--allow-stale-hipfire` laisse passer, avec un avertissement dans
+  le rapport, une copie requantifiée et enregistrée sous son nom.
+- **Pipeline.** Les candidats sont toujours mesurés sur la copie de travail : le job échoue avant
+  le premier candidat et avant toute lecture du Test Set ; `pipeline run --allow-stale-hipfire`
+  (ligne de commande seulement) passe outre et l'écrit dans `notes` et `report.json`.
+- **MCP (agents, studio).** `surgeon_bench` `eval` et `refusal` d'une copie SafeTensors passent
+  sur `native` avec l'avertissement « backend hipfire écarté (<chemin>) » ; une copie `.gguf` est
+  refusée. Aucune dérogation côté agent.
 
 **Avec `surgeon-gui`.** Sur une machine AMD, ou quand `hipfire` est le backend enregistré, et sauf
 si `native` a été enregistré à la main, la fenêtre démarre le démon si rien ne répond sur

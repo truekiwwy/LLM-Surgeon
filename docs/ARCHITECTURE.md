@@ -11,8 +11,8 @@ Ces termes ont le même sens dans tout le dépôt (aide du CLI, serveur MCP, doc
 | --- | --- | --- |
 | **Surgery Engine** | La bibliothèque Rust `weight_surgeon` (paquet `weight-surgeon`) : moteur mmap, noyaux, formats, extraction, patch, LoRA, diff de faible rang, mesure, évaluation. | `src/lib.rs` et les modules ci-dessous |
 | **CLI front-end** | Le binaire `surgeon` : analyse des arguments, rendu terminal, tableau de bord. | `src/main.rs`, `src/cli.rs`, `src/app.rs`, `src/ui.rs`, `src/tui/` |
-| **Native viewer** | Le binaire `surgeon-gui` (crate autonome, egui) : graphe des poids en 3D, diff, flux `GraphPatch`, réglage du backend. Il ne fait que lire `weight_surgeon` ; son `Cargo.lock` est séparé. | `crates/surgeon-gui/`, [docs/GRAPH.md](GRAPH.md) section 7.3 |
-| **Agent extension (MCP)** | Le serveur `surgeon mcp` : neuf outils typés en JSON-RPC sur stdio, dossiers autorisés, sauvegarde imposée. | `src/mcp/`, [docs/MCP.md](MCP.md) |
+| **Native viewer** | Le binaire `surgeon-gui` (egui) : graphe des poids en 3D, diff, flux `GraphPatch`, studio (projets, jobs, journal), agents, réglage du backend. Il utilise `weight_surgeon` comme bibliothèque. Membre du workspace Cargo racine avec `crates/surgeon-tui` : un seul `Cargo.lock`, et `tests/deps_purity.rs` vérifie l'arbre propre du moteur (`cargo tree -p weight-surgeon`), où la pile GUI n'entre pas. | `crates/surgeon-gui/`, [docs/GRAPH.md](GRAPH.md) section 7.3 |
+| **Agent extension (MCP)** | Le serveur `surgeon mcp` : dix-sept outils typés en JSON-RPC sur stdio (quatorze du moteur, trois de session, voir [Outils MCP](#outils-mcp)), dossiers autorisés, sauvegarde imposée. | `src/mcp/`, [docs/MCP.md](MCP.md) |
 | **Extension point** | Un trait Rust public, versionné, qu'un tiers implémente et enregistre. Un seul aujourd'hui : `ExtractionMethod`. | `src/plugin/` |
 | **Plugin** | Soit une implémentation d'un extension point compilée avec la bibliothèque, soit l'empaquetage `plugin/` pour Claude Code. Rien d'autre. | [docs/PLUGINS.md](PLUGINS.md) |
 
@@ -23,7 +23,7 @@ enveloppe JSON (`--json`, résultats MCP).
 ## Vue d'ensemble
 
 ```text
-   surgeon (CLI front-end)                       surgeon mcp (Agent extension, 10 outils)
+   surgeon (CLI front-end)                       surgeon mcp (Agent extension, 17 outils)
    cli.rs -> app::dispatch, ui.rs, tui/          mcp/ : sandbox, protocole, tools.rs
                  \                                  /
                   app::core_* -> Outcome -> envelope_of (JSON partagé)
@@ -43,7 +43,12 @@ enveloppe JSON (`--json`, résultats MCP).
            eval : llama.cpp (processus ou serveur local), échantillonnage, client HTTP local
   pipeline décision atomique sur un patch : candidats sur les jeux Dev, portes appariées,
            une consultation du Test Set ; travailleur reprenable (docs/PIPELINE.md)
+  backend  moteurs d'inférence (native, mistralrs, llama-server, hipfire), configuration
+           utilisateur ; hipfire::validate_hipfire_target, la règle unique qui refuse une
+           copie de travail à hipfire (CLI, pipeline, MCP)
   hardware budget RAM/VRAM ; linalg : QR, Cholesky, Jacobi, Gram
+  process  kill_tree : un processus enfant et ce qu'il a lancé (taskkill /T, groupe Unix),
+           pour surgeon et surgeon-gui
 ```
 
 Dépendances entre modules mesurées par graphify (graphe AST de `src/`, 3147 nœuds, arêtes
@@ -59,7 +64,7 @@ comptées entre fichiers de modules différents) : `app -> patch` 64, `mcp -> ap
 | --- | --- | --- | --- | --- |
 | Méthodes d'extraction | `plugin`, `extract` | Direction (vecteur unitaire) depuis les activations poolées de deux ensembles de prompts | **Oui** (API `v0`, instable) | `impl ExtractionMethod`, `Registry::register`, `extract::run_extraction_plugin` ; voir [docs/PLUGINS.md](PLUGINS.md) |
 | CLI front-end | `cli`, `app`, `ui`, `tui` | Commandes, rendu, codes de sortie | Non | `--method` accepte les identifiants du registre intégré |
-| Agent extension (MCP) | `mcp` | 10 outils typés, sandbox de chemins | Non | Schémas figés, vérifiés par `tests/compat.rs` ; `method` accepte les identifiants du registre intégré |
+| Agent extension (MCP) | `mcp` | 17 outils typés ([table](#outils-mcp)), sandbox de chemins, arrêt sur fermeture de stdin | Non | Schémas figés, vérifiés par `tests/compat.rs` ; `method` accepte les identifiants du registre intégré |
 | Architectures | `arch` | Rôles des tenseurs (écrivains, lecteurs, routeur), orientation, noms GGUF, détection, exactitude de `project_out` | **Oui**, par données : une `ArchSpec` JSON (`--arch-spec`, `surgeon schema --kind arch`) | Fichier JSON validé par schéma ; les intégrées sont dans `src/arch/builtin.rs` |
 | Forward et capture | `extract` | Activations d'une couche (site, pooling), logits, génération avec cache KV et injection, derrière le trait `ResidualForward` (Qwen2, Llama/Mistral, Qwen3) | Non : interne, une nouvelle architecture est une implémentation du trait vérifiée contre candle | aucun |
 | Moteur mmap et décalages | `engine` | Lecture et écriture en place des SafeTensors | Non : interne, non remplaçable par un tiers à ce jour | aucun |
@@ -122,14 +127,51 @@ Codes de sortie : une `PluginError` devient une `ExtractError` et prend les code
 `surgeon extract` (2 paramètres invalides, 1 annulation, 7 échec de calcul ou sortie
 refusée).
 
+## Outils MCP
+
+Liste tenue par `mcp::tool_definitions()` (`src/mcp/tools.rs` et ses voisins `tools_*.rs`),
+publiée telle quelle par `tools/list` et `surgeon schema --kind tools`. Dix-sept outils :
+quatorze outils du moteur et trois outils de session. Les schémas sont figés par
+`tests/compat.rs` ; [docs/MCP.md](MCP.md) détaille chaque paramètre.
+
+| Outil | Rôle | Paramètres clés |
+| --- | --- | --- |
+| `surgeon_check` | Budget matériel : taille, RAM et VRAM nécessaires et disponibles, verdict. Lecture seule. | `model` |
+| `surgeon_inspect` | Matrices MLP par couche, et sur demande `o_proj` et `embed_tokens` : dtype, forme, statistiques. Lecture seule. | `model`, `layers`, `projections`, `show_stats`, `arch_spec` |
+| `surgeon_apply` | Applique un patch (décalage, `project_out`) en place sur SafeTensors ou GGUF ; sauvegarde vérifiée, rollback. | `model`, `patch`, `dry_run`, `gguf`, `backup_dir`, `arch_spec` |
+| `surgeon_restore` | Remet un modèle octet pour octet depuis les sauvegardes d'`apply` ou depuis l'origine, SHA-256 vérifié. | `model`, `backup`, `backup_dir`, `from_origin` |
+| `surgeon_eval` | Non-régression par génération llama.cpp (boucles, attentes non tenues), export GGUF si le modèle est sain. | `model`, `prompts` ou `prompts_file`, `max_new_tokens`, `export_gguf`, `quant` |
+| `surgeon_extract` | Vecteur de direction depuis les activations d'une couche, avec une méthode du registre. | `model`, `out`, `layer`, `method`, `pos_prompts` / `neg_prompts` (ou `*_file`), `rank`, `site`, `pooling` |
+| `surgeon_bench` | Mesure d'une chirurgie selon `mode` : `dump`, `logits`, `ppl`, `eval`, `refusal`, `judge_sample`, `judge_eval`. hipfire n'y mesure jamais une copie de travail. | `mode`, `model`, `baseline_model`, `dataset` ou `prompts`, `backend`, `max_new_tokens`, `temperature`, `samples`, `judge` |
+| `surgeon_autotune` | Coefficients par couche ajustés par ridge sur la réponse d'une couche de lecture ; `patch.json` en sortie. | `model`, `vector`, `target_layer_range`, `readout_layer`, `objective`, `out` |
+| `surgeon_diff` | Patch `.surgery` de faible rang (SVD randomisée) entre un checkpoint et sa version affinée. | `base`, `tuned`, `out`, `rank`, `include` / `exclude` |
+| `surgeon_lora` | `merge` : fusion d'un adaptateur LoRA PEFT en place ; `extract` : adaptateur de rang r depuis deux checkpoints. | `mode`, `model` ou `base` / `patched`, `lora`, `rank`, `out`, `dry_run` |
+| `surgeon_graph` | Graphe orienté du flux résiduel (écritures vers lectures), `graph.json` / `graph.ndjson`, diff contre une référence. | `model`, `out_dir`, `rank`, `layers`, `baseline`, `format`, `max_seconds` |
+| `surgeon_pipeline` | Décision atomique sur un patch : candidats sur une copie, portes Dev, une seule consultation du Test Set, travailleur en arrière-plan. | `action` (`plan`, `start`, `status`, `cancel`, `report`, `promote_patch`), `job_dir`, `config` |
+| `surgeon_backends` | GPU et moteurs d'inférence de la machine, configuration utilisateur, backend recommandé. Lecture seule. | aucun |
+| `surgeon_files` | Fichiers de travail de l'agent dans les dossiers autorisés : `list`, `read`, `write` (sous `work/` seulement). | `action`, `path`, `content`, `append`, `overwrite` |
+
+Outils de session (`src/mcp/tools_session.rs`), toujours listés, actifs quand le premier
+dossier autorisé est un projet surgeon-gui (`project.surgeon.json`) :
+
+| Outil | Rôle | Paramètres clés |
+| --- | --- | --- |
+| `record_finding` | Consigne un constat dans le journal des preuves du projet ; chaque chiffre cite le `run_id` qui l'a mesuré. | `text`, `evidence`, `reasoning` |
+| `show_in_3d` | Sélectionne un nœud de la vue 3D : nom de tenseur ou identifiant de nœud du graphe. | `target` |
+| `update_plan` | Remplace le plan affiché à l'utilisateur. | `steps` |
+
+Sur stdio, la fermeture de stdin est l'arrêt du client : l'appel en cours est annulé par le
+drapeau partagé `AppDeps::interrupted`, rien de plus n'est exécuté, et `surgeon mcp` sort au
+plus tard 3 s après (`mcp::server::EXIT_GRACE`).
+
 ## Compatibilité
 
-`tests/compat.rs` compare l'état courant à trois références générées avant l'API `v0`
-(`tests/fixtures/compat/`) : l'arbre complet des sous-commandes et options du CLI, les
-schémas d'entrée des neuf outils MCP sans leurs textes (`description`, `title`), et les
-SHA-256 des sorties `--json` normalisées de `check`, `inspect`, `apply --dry-run`, `schema`,
-`schema --kind tools` et `extract` (enveloppe et fichiers) pour chaque méthode intégrée.
-Seule addition déclarée : la sous-commande `surgeon plugins list`.
+`tests/compat.rs` compare l'état courant à trois références (`tests/fixtures/compat/`) :
+l'arbre complet des sous-commandes et options du CLI, les schémas d'entrée des dix-sept outils
+MCP sans leurs textes (`description`, `title`), et les SHA-256 des sorties `--json`
+normalisées de `check`, `inspect`, `apply --dry-run`, `schema`, `schema --kind tools` et
+`extract` (enveloppe et fichiers) pour chaque méthode intégrée. Chaque réécriture des
+références, toujours une addition décidée, est consignée en tête de `tests/compat.rs`.
 
 ## Feuille de route (non implémenté)
 

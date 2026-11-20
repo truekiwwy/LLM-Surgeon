@@ -885,6 +885,63 @@ mod tests {
         assert_eq!(json(&run), json(&again));
     }
 
+    /// The flag raised while the second question generates (a closed MCP stdin, Ctrl-C): that
+    /// generation stops at its next token, no later question starts, and the run is a
+    /// cancellation, not a score.
+    #[test]
+    fn a_raised_flag_stops_the_suite_between_tokens_and_questions() {
+        struct Cancelling<'a> {
+            flag: &'a AtomicBool,
+            asked: &'a std::cell::Cell<usize>,
+        }
+        impl TextGenerator for Cancelling<'_> {
+            fn generate(
+                &mut self,
+                _prompt: &str,
+                _max_new_tokens: u32,
+                on_chunk: &mut dyn FnMut(&str) -> ControlFlow<()>,
+            ) -> crate::eval::Result<GenerationOutcome> {
+                self.asked.set(self.asked.get() + 1);
+                if self.asked.get() == 2 {
+                    self.flag.store(true, Ordering::SeqCst);
+                }
+                let mut text = String::new();
+                for token in ["#### ", "5", " and", " more"] {
+                    if on_chunk(token).is_break() {
+                        break;
+                    }
+                    text.push_str(token);
+                }
+                Ok(GenerationOutcome {
+                    text,
+                    stopped_early: false,
+                    truncated: false,
+                    duration_ms: 0,
+                })
+            }
+        }
+        let (_dir, req) = fixture();
+        let items = dataset::load(&req.dataset, req.format, req.limit).unwrap();
+        let prompts = render_prompts(&items, &req.template, &ChatTemplate::NoTemplate.format());
+        let flag = AtomicBool::new(false);
+        let asked = std::cell::Cell::new(0);
+        let mut generator = Cancelling {
+            flag: &flag,
+            asked: &asked,
+        };
+        let result = run_suite(
+            &mut generator,
+            &items,
+            &prompts,
+            64,
+            &GenOptions::default(),
+            &flag,
+            &mut |_, _| {},
+        );
+        assert!(matches!(result, Err(BenchError::Cancelled)), "{result:?}");
+        assert_eq!(asked.get(), 2, "no question after the flag");
+    }
+
     #[test]
     fn broken_generator_stops_and_inputs_are_checked() {
         let (_dir, req) = fixture();

@@ -7,8 +7,10 @@
 #[allow(dead_code)]
 mod example;
 
+#[path = "support/mcp_client.rs"]
+mod mcp_client;
+
 use std::collections::BTreeMap;
-use std::io::Write as _;
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -254,17 +256,7 @@ fn an_unknown_mcp_method_is_a_tool_error_with_code_2() {
         json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         call,
     ];
-    let mut stdin = child.stdin.take().unwrap();
-    for line in lines {
-        writeln!(stdin, "{line}").unwrap();
-    }
-    drop(stdin);
-    let out = child.wait_with_output().unwrap();
-    let responses: Vec<Value> = String::from_utf8(out.stdout)
-        .unwrap()
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
+    let (responses, _) = mcp_client::exchange(&mut child, &lines);
     let result = &responses.iter().find(|r| r["id"] == 2).unwrap()["result"];
     assert_eq!(result["isError"], true);
     let envelope = &result["structuredContent"];

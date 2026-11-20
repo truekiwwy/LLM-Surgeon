@@ -31,10 +31,6 @@ jobs:
           toolchain: "1.97"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            .
-            crates/surgeon-gui
 
       - name: Tag matches the crate version
         shell: pwsh
@@ -47,11 +43,10 @@ jobs:
         run: cargo test --locked --test deps_purity
 
       - name: GUI format, lint and tests
-        working-directory: crates/surgeon-gui
         run: |
-          cargo fmt --check
-          cargo clippy --all-targets --locked -- -D warnings
-          cargo test --locked
+          cargo fmt -p surgeon-gui --check
+          cargo clippy -p surgeon-gui --all-targets --locked -- -D warnings
+          cargo test -p surgeon-gui --locked
 
       - name: NSIS
         shell: pwsh
@@ -72,7 +67,7 @@ jobs:
         shell: pwsh
         continue-on-error: true
         run: |
-          $out = & ./crates/surgeon-gui/target/release/surgeon-gui.exe --self-test | Out-String
+          $out = & ./target/dist/surgeon-gui.exe --self-test | Out-String
           Write-Host $out
           if ($LASTEXITCODE -ne 0) { throw "self-test failed" }
 

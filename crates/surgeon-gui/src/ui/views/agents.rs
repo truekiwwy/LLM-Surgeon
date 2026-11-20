@@ -736,7 +736,8 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
                     let result = results.get(id.as_str());
                     // shortcut: read with today's backend configuration, not the one of the
                     // call; record it with the call if the configuration changes mid-project.
-                    let cli = weight_surgeon::mcp::cli_line(name, input, configured);
+                    let project = app.agents.project.as_deref();
+                    let cli = weight_surgeon::mcp::cli_line(name, input, configured, project);
                     let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
                     let mut details: Vec<&str> = cli.iter().map(|l| l.command.as_str()).collect();
                     details.push(pretty.as_str());

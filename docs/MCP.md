@@ -178,9 +178,12 @@ de sa liste blanche (`-m`, `--host 127.0.0.1`, `--port`, `--api-key` aléatoire,
 (`additionalProperties: false`), et `llama_cpp_dir` passe par le bac à sable. `mistralrs`
 lance mistral.rs sur le dossier SafeTensors tel quel, `hipfire` interroge un démon déjà lancé ;
 leurs emplacements viennent de la configuration de l'opérateur, jamais d'un argument. hipfire
-sert son propre cache quantifié et ne lit pas le modèle donné : sur un modèle qui n'est pas un
-`.gguf` (une copie SafeTensors patchée), `eval` et `refusal` passent sur `native` et
-l'enveloppe commence ses `warnings` par « backend hipfire écarté ». Voir la
+sert son propre cache quantifié et ne lit pas le modèle donné : sur une copie de travail
+(`copies/` ou sorties d'un projet surgeon-gui, `work/` d'un job pipeline, dossier à côté des
+sauvegardes d'`apply`), `eval` et `refusal` passent sur `native` et l'enveloppe commence ses
+`warnings` par « backend hipfire écarté (<chemin>) », écrit aussi sur stderr ; une copie
+`.gguf` est refusée (`invalid_input`). Le modèle d'origine reste servi par hipfire. Aucun
+argument ne lève cette règle (pas d'`--allow-stale-hipfire` côté agent). Voir la
 section « Échantillonnage, lots et backends » du README.
 
 `eval` avec `backend: "native"` et `refusal` génèrent en Rust pur sur le CPU, sur un dossier
@@ -647,6 +650,14 @@ Serveur lancé avec `--read-only` :
 - **Rollback automatique** sur erreur, NaN/Inf, annulation (`notifications/cancelled`,
   `error.kind = "cancelled"`) ou panic. Un panic devient une erreur `-32603` et le
   serveur continue.
+- **Arrêt quand stdin se ferme** (cycle de vie MCP sur stdio : le client ferme l'entrée du
+  serveur). L'appel en cours est annulé comme par `notifications/cancelled` (vérifié entre
+  tenseurs, prompts et tokens), les requêtes déjà lues mais pas commencées ne sont pas
+  exécutées, et `surgeon mcp` se termine (code 0) dès que l'appel a rendu la main, en le
+  notant sur stderr. S'il ne la rend pas en 3 s (`server::EXIT_GRACE`), le processus sort
+  quand même (code 1). Un client par script lit donc ses réponses avant de fermer stdin.
+  `mcp::serve` (tests, intégrations en processus) garde l'ancienne lecture : tout ce qui a
+  été lu reçoit sa réponse, puis la fin.
 - **Progression** : avec `_meta.progressToken`, une `notifications/progress` par tenseur
   (apply), par prompt (eval), ou une pour les poids puis une par prompt (extract) ; pour
   `surgeon_bench`, par prompt (`dump`), par bloc de 64 positions (`logits`), par chunk de

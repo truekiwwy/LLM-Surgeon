@@ -77,6 +77,10 @@
 //!   model that declares no format (extraction files and reference outputs unchanged);
 //!   `autotune --max-delta-norm-ratio`; the seventeenth tool `surgeon_files`. Only the tool
 //!   schema hash moved.
+//! - the hipfire guard (a working copy is never measured on hipfire's own cache): the option
+//!   `--allow-stale-hipfire` of `bench eval`, `bench refusal` and `pipeline run`, CLI only. The
+//!   rewrite added those three entries to `cli_surface.json` and nothing else; no tool schema,
+//!   no output hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

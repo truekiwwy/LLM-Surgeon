@@ -18,6 +18,11 @@
 //! with a warning (`surgeon backend show`, bench warnings). The `model` field of a request is
 //! the name of the model given to the bench (its folder, or its file without extension): the
 //! daemon must know a model by that name.
+//!
+//! The daemon answers from the quantized file it registered under that name and never reads
+//! the files it is given, GGUF included: a patched working copy would be measured with the
+//! old weights. [`validate_hipfire_target`] is the one rule every front-end applies (bench,
+//! pipeline, MCP); [`is_working_copy`] tells a working copy from the original.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -132,6 +137,85 @@ pub fn model_name(model: &Path) -> String {
         false => model.file_name(),
     };
     name.unwrap_or_default().to_string_lossy().into_owned()
+}
+
+/// The manifest at the root of a surgeon-gui project (its `copies/`, `runs/`, `artifacts/`).
+const PROJECT_FILE: &str = "project.surgeon.json";
+/// The binding of a pipeline job directory (its `work/` holds the patched candidate).
+const JOB_FILE: &str = "job.json";
+
+/// What [`validate_hipfire_target`] lets through.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HipfireGuardDecision {
+    /// A working copy let through by `--allow-stale-hipfire`: for the report and the logs.
+    pub warning: Option<String>,
+}
+
+/// Whether hipfire may measure `model`. The original is served from the daemon's own
+/// quantized copy of it; a working copy (`is_working_copy`, GGUF included) is refused, since
+/// the daemon would answer with the weights registered under its name, unless `allow_stale`
+/// (the operator requantized and registered it): it then passes with a warning.
+pub fn validate_hipfire_target(
+    model: &Path,
+    is_working_copy: bool,
+    allow_stale: bool,
+) -> Result<HipfireGuardDecision, String> {
+    if !is_working_copy {
+        return Ok(HipfireGuardDecision::default());
+    }
+    let reason = format!(
+        "{} est une copie de travail : hipfire sert le cache quantifié enregistré sous « {} », \
+         pas ces poids",
+        model.display(),
+        model_name(model)
+    );
+    match allow_stale {
+        true => Ok(HipfireGuardDecision {
+            warning: Some(format!(
+                "--allow-stale-hipfire : {reason} ; la mesure ne vaut que si cette copie a été \
+                 requantifiée et enregistrée sous ce nom"
+            )),
+        }),
+        false => Err(format!(
+            "{reason}. Mesurez-la avec --backend native ou mistralrs, ou requantifiez-la, \
+             enregistrez-la dans hipfire et passez --allow-stale-hipfire"
+        )),
+    }
+}
+
+/// Whether `model` holds weights surgery wrote, which hipfire's cache does not have: a path
+/// inside a surgeon-gui project that is not the source its manifest records (`copies/`, run
+/// outputs), the `work/` of a pipeline job, or a folder beside the backups `surgeon apply`
+/// leaves (`<file>.bak-<secs>-<n>`).
+pub fn is_working_copy(model: &Path) -> bool {
+    let Ok(model) = std::path::absolute(model) else {
+        return false;
+    };
+    let folder = match model.is_dir() {
+        true => model.as_path(),
+        false => model.parent().unwrap_or(&model),
+    };
+    let patched = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| crate::patch::is_backup_name(&e.file_name().to_string_lossy()));
+    patched
+        || model.ancestors().skip(1).any(|dir| {
+            (dir.join(JOB_FILE).is_file() && model.starts_with(dir.join("work")))
+                || (dir.join(PROJECT_FILE).is_file() && !is_project_source(dir, &model))
+        })
+}
+
+/// Whether `model` is the source the manifest of `project` records. An unreadable manifest
+/// says no: inside a project, what cannot be told from a copy is treated as one.
+fn is_project_source(project: &Path, model: &Path) -> bool {
+    let source = std::fs::read_to_string(project.join(PROJECT_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|m| m["source"]["path"].as_str().map(PathBuf::from));
+    let canonical = |p: &Path| std::fs::canonicalize(p).ok();
+    source.is_some_and(|s| canonical(&s).is_some() && canonical(&s) == canonical(model))
 }
 
 pub fn detect(config: &BackendConfig) -> HipfireDetection {
@@ -256,6 +340,89 @@ mod tests {
         let err = probe(&config).unwrap_err();
         assert!(err.contains("hipfire serve"), "{err}");
         assert!(detect(&config).note.contains("hipfire serve"));
+    }
+
+    /// `<root>/source/` (a SafeTensors model) and a surgeon-gui project naming it, with a
+    /// SafeTensors working copy and a GGUF one.
+    fn studio(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("model.safetensors"), b"weights").unwrap();
+        let project = root.join("projects").join("p");
+        std::fs::create_dir_all(project.join("copies").join("c1")).unwrap();
+        let manifest = serde_json::json!({"schema_version": 1, "source": {"path": source}});
+        std::fs::write(project.join(PROJECT_FILE), manifest.to_string()).unwrap();
+        let copy = project.join("copies").join("c1");
+        std::fs::write(copy.join("model.safetensors"), b"patched").unwrap();
+        let gguf = project.join("copies").join("c2").join("m.gguf");
+        std::fs::create_dir_all(gguf.parent().unwrap()).unwrap();
+        std::fs::write(&gguf, b"GGUF").unwrap();
+        (source, copy, gguf)
+    }
+
+    #[test]
+    fn the_original_model_is_served_and_a_working_copy_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (source, copy, gguf) = studio(dir.path());
+        let original = validate_hipfire_target(&source, is_working_copy(&source), false);
+        assert_eq!(original, Ok(HipfireGuardDecision::default()));
+        assert!(!is_working_copy(&source.join("model.safetensors")));
+
+        assert!(is_working_copy(&copy));
+        let err = validate_hipfire_target(&copy, is_working_copy(&copy), false).unwrap_err();
+        assert!(
+            err.contains("copie de travail") && err.contains("« c1 »"),
+            "{err}"
+        );
+        assert!(
+            err.contains("--allow-stale-hipfire"),
+            "the way out is named: {err}"
+        );
+        // A GGUF is served by name too: a GGUF copy is refused the same way.
+        assert!(is_working_copy(&gguf));
+        let err = validate_hipfire_target(&gguf, is_working_copy(&gguf), false).unwrap_err();
+        assert!(err.contains("« m »"), "{err}");
+    }
+
+    #[test]
+    fn an_explicit_override_lets_a_working_copy_through_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, copy, gguf) = studio(dir.path());
+        for model in [&copy, &gguf] {
+            let decision = validate_hipfire_target(model, true, true).unwrap();
+            let warning = decision.warning.unwrap();
+            assert!(warning.starts_with("--allow-stale-hipfire"), "{warning}");
+        }
+        assert_eq!(
+            validate_hipfire_target(&copy, false, true),
+            Ok(HipfireGuardDecision::default()),
+            "nothing to warn about on the original"
+        );
+    }
+
+    #[test]
+    fn working_copies_are_told_by_layout_manifest_and_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        // A plain folder: the original.
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("model.safetensors"), b"w").unwrap();
+        assert!(!is_working_copy(&plain));
+        // Patched in place by `surgeon apply`: its backups sit beside the weights.
+        std::fs::write(plain.join("model.safetensors.bak-1700000000-1"), b"w").unwrap();
+        assert!(is_working_copy(&plain));
+        assert!(is_working_copy(&plain.join("model.safetensors")));
+        // The candidate of a pipeline job, not the job's other files.
+        let job = dir.path().join("job");
+        std::fs::create_dir_all(job.join("work").join("model")).unwrap();
+        std::fs::write(job.join(JOB_FILE), b"{}").unwrap();
+        assert!(is_working_copy(&job.join("work").join("model")));
+        assert!(!is_working_copy(&job.join("checkpoints")));
+        // Inside a project whose manifest cannot be read: treated as a copy.
+        let broken = dir.path().join("broken");
+        std::fs::create_dir_all(broken.join("runs")).unwrap();
+        std::fs::write(broken.join(PROJECT_FILE), b"{").unwrap();
+        assert!(is_working_copy(&broken.join("runs")));
     }
 
     #[test]

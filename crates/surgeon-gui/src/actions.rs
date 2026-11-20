@@ -146,7 +146,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = env(dir.path());
         let name = "mistralrs-cpu-x86_64-pc-windows-msvc.zip";
-        let fake = FakeReleases::serve(name, archive(&[("mistralrs.exe", b"MZ")]), true);
+        let fake = FakeReleases::serve(name, archive(&[(install::server_name(), b"MZ")]), true);
         let fetcher = Fetcher::new(Policy::loopback());
         let target = Target {
             triple: "x86_64-pc-windows-msvc",
@@ -181,7 +181,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = env(dir.path());
         let name = "mistralrs-cpu-x86_64-pc-windows-msvc.zip";
-        let fake = FakeReleases::serve(name, archive(&[("mistralrs.exe", b"MZ")]), true);
+        let fake = FakeReleases::serve(name, archive(&[(install::server_name(), b"MZ")]), true);
         let fetcher = Fetcher::new(Policy::loopback());
         let target = Target {
             triple: "x86_64-pc-windows-msvc",

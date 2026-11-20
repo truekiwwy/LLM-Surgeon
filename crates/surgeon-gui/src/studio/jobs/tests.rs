@@ -301,6 +301,30 @@ fn a_crash_leaves_an_interrupted_project_that_resumes() {
 }
 
 #[test]
+fn the_project_lock_is_held_while_a_job_thread_still_runs() {
+    let (_ws, dir) = project();
+    let script = Arc::new(Script::default());
+    let mut m = open(&dir, script.clone());
+    m.submit(spec("surgeon_graph", "long", json!({"behave": "block"})))
+        .unwrap();
+    m.tick(Instant::now());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while script.active.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the job never started");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // The manager goes (the window closes): its detached thread still writes in the project.
+    drop(m);
+    assert!(dir.join(LOCK).exists(), "held by the running job");
+    script.release.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while dir.join(LOCK).exists() {
+        assert!(Instant::now() < deadline, "released once the job ends");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
 fn a_project_open_in_a_live_process_is_refused_and_a_dead_lock_taken_over() {
     let (_ws, dir) = project();
     let mut system = sysinfo::System::new().unwrap();

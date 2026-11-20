@@ -3499,6 +3499,26 @@
                 "false"
               ],
               "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "allow_stale_hipfire",
+              "long": "allow-stale-hipfire",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "ALLOW_STALE_HIPFIRE"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
               "global": true,
               "hidden": false,
               "id": "json",
@@ -4584,6 +4604,26 @@
               "short": null,
               "value_names": [
                 "GGUF_DTYPE"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "allow_stale_hipfire",
+              "long": "allow-stale-hipfire",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "ALLOW_STALE_HIPFIRE"
               ]
             },
             {
@@ -7696,6 +7736,26 @@
               "short": null,
               "value_names": [
                 "ALLOW_TEST_REUSE"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "allow_stale_hipfire",
+              "long": "allow-stale-hipfire",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "ALLOW_STALE_HIPFIRE"
               ]
             },
             {

@@ -154,8 +154,9 @@ Your models and workspaces are never touched.
 ./packaging/build-windows.ps1 -DryRun         # placeholder binaries: only checks the installer script (needs NSIS)
 ```
 
-Release binaries use fat LTO, `strip` and the static CRT (`crates/surgeon-gui/.cargo/config.toml`,
-which applies when cargo runs from that folder). `.github/workflows/release.yml` does this on a
+Release binaries use `strip` and the static CRT (`crates/surgeon-gui/.cargo/config.toml`,
+which applies when cargo runs from that folder); `surgeon-gui` is built with the workspace's
+`dist` profile (fat LTO, `target/dist/`), `surgeon` with `release` (thin LTO). `.github/workflows/release.yml` does this on a
 `v*` tag and attaches everything to a **draft** release.
 
 ## Manual test checklist (before announcing a release)

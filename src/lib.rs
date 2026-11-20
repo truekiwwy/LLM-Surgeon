@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod patch;
 pub mod pipeline;
 pub mod plugin;
+pub mod process;
 pub mod tui;
 pub mod ui;
 

@@ -296,8 +296,10 @@ impl SurgeonApp {
         self.desktop.save_settings();
     }
 
-    /// Makes `dir` the projects folder (created, checked writable) and opens it.
+    /// Makes `dir` the projects folder (created, checked writable) and opens it, unless the
+    /// open project cannot be left ([`Studio::can_switch`]): nothing changes then.
     pub fn use_workspace(&mut self, dir: PathBuf) -> Result<(), String> {
+        self.studio.can_switch()?;
         self.desktop.use_workspace(&dir)?;
         self.studio = Studio::new(dir);
         Ok(())
@@ -663,10 +665,7 @@ impl SurgeonApp {
                 self.set_input(ctx, input);
                 self.tab = Tab::Graph;
             }
-            Item::Folder(dir) => {
-                self.desktop.use_workspace(&dir)?;
-                self.studio = Studio::new(dir);
-            }
+            Item::Folder(dir) => self.use_workspace(dir)?,
             Item::Unknown(path) => {
                 return Err(i18n::tf("open.unknown", &[("path", &path.display())]))
             }
@@ -1178,5 +1177,58 @@ mod tests {
         // A copy exists now: the next start does not make another.
         app.start_session(Mission::Advance);
         assert!(app.pending_start.is_none());
+    }
+
+    /// A job of the open project still writes there: neither another project nor another
+    /// workspace replaces the studio until it ends; then every switch goes through.
+    #[test]
+    fn no_project_or_workspace_switch_while_a_job_runs() {
+        use crate::studio::jobs::{Budgets, JobSpec};
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("model");
+        write_model(&source);
+        let (ctx, mut app, project) = app_on(dir.path(), &source);
+        let workspace = app.studio.workspace.clone();
+        let second = crate::studio::project::Project::create(&workspace, "q", None)
+            .unwrap()
+            .dir;
+        // Outside the app's data folder (`dir`), which a workspace may not be in.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let other = elsewhere.path().join("other");
+        let job = JobSpec {
+            tool: "surgeon_check".into(),
+            label: "check".into(),
+            args: serde_json::json!({}),
+            priority: 0,
+            budgets: Budgets::default(),
+            resumed_from: None,
+            read_only: false,
+        };
+        // Queued and not started (no frame ran): the manager is busy all the same.
+        let id = app.studio.manager.as_mut().unwrap().submit(job).unwrap();
+        let open = |app: &SurgeonApp| app.studio.manager.as_ref().map(|m| m.project.dir.clone());
+
+        let refused = app.use_workspace(other.clone()).unwrap_err();
+        assert!(refused.contains("job"), "{refused}");
+        let refused = app
+            .open_item(&ctx, Item::Folder(other.clone()))
+            .unwrap_err();
+        assert!(refused.contains("job"), "{refused}");
+        app.studio.open_project(&ctx, &second);
+        let (message, error) = app.studio.message.clone().unwrap();
+        assert!(error && message.contains("job"), "{message}");
+        assert_eq!(open(&app), Some(project.clone()), "the same project");
+        assert_eq!(app.studio.workspace, workspace, "the same workspace");
+        assert_ne!(app.desktop.settings.workspace.as_ref(), Some(&other));
+
+        app.studio.manager.as_mut().unwrap().cancel(&id).unwrap();
+        app.studio.open_project(&ctx, &second);
+        assert_eq!(open(&app), Some(second));
+        app.open_item(&ctx, Item::Folder(other.clone())).unwrap();
+        assert_eq!(app.studio.workspace, other);
+        let third = elsewhere.path().join("third");
+        app.use_workspace(third.clone()).unwrap();
+        assert_eq!(app.studio.workspace, third);
     }
 }

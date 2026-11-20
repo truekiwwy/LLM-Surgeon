@@ -51,7 +51,7 @@ mod tools_pipeline;
 mod tools_restore;
 mod tools_session;
 
-use std::io::{BufReader, Write};
+use std::io::Write;
 
 pub use cli_line::{cli_line, CliLine};
 pub use protocol::{
@@ -121,5 +121,5 @@ pub fn run_stdio(args: &McpArgs, deps: &AppDeps, out: &mut dyn Write, err: &mut 
         cfg.sandbox.read_roots().len(),
         if cfg.read_only { ", lecture seule" } else { "" }
     );
-    serve(BufReader::new(std::io::stdin()), out, err, deps, &cfg)
+    server::serve_stdio(out, err, deps, &cfg)
 }

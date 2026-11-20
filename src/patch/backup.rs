@@ -334,6 +334,11 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String> {
 /// each file had its own stamp.
 pub(super) type Checkpoint = (u64, u32);
 
+/// Whether `name` is a backup `apply` writes: its folder holds a patched model.
+pub fn is_backup_name(name: &str) -> bool {
+    parse_backup_name(name).is_some()
+}
+
 /// `<original>.bak-<secs>[-n]` -> (original, checkpoint).
 pub(super) fn parse_backup_name(name: &str) -> Option<(&str, Checkpoint)> {
     let at = name.rfind(".bak-")?;

@@ -230,7 +230,8 @@ impl Studio {
                 self.creating = None;
                 match result {
                     Ok(p) => {
-                        self.open(ctx, &p.dir);
+                        // Not over a running job: the new project is then listed, not opened.
+                        self.open_project(ctx, &p.dir);
                         self.refresh();
                     }
                     Err(e) => self.message = Some((e, true)),
@@ -276,12 +277,24 @@ impl Studio {
             .map(|r| &r.view)
     }
 
-    /// Opens the project of `dir`, unless a job of the current one still runs.
-    pub fn open_project(&mut self, ctx: &egui::Context, dir: &Path) {
+    /// Whether this studio may be left for another project or workspace: not while a job of
+    /// the open project runs or waits (its thread still writes in the project), nor while a
+    /// project is being created (its result would be lost).
+    pub fn can_switch(&self) -> Result<(), String> {
         if self.manager.as_ref().is_some_and(Manager::busy) {
-            self.message = Some(("un job tourne : attendez ou annulez-le".into(), true));
-        } else {
-            self.open(ctx, dir);
+            return Err("un job tourne : attendez ou annulez-le avant de changer de projet".into());
+        }
+        if self.creating() {
+            return Err("un projet est en cours de création : attendez qu'il soit prêt".into());
+        }
+        Ok(())
+    }
+
+    /// Opens the project of `dir`, unless [`Self::can_switch`] says no (shown in the banner).
+    pub fn open_project(&mut self, ctx: &egui::Context, dir: &Path) {
+        match self.can_switch() {
+            Ok(()) => self.open(ctx, dir),
+            Err(e) => self.message = Some((e, true)),
         }
     }
 

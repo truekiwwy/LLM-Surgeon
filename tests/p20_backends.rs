@@ -199,10 +199,16 @@ fn nothing_is_configured_by_default() {
         !ws.config().exists(),
         "detect without --save writes nothing"
     );
-    let backend = &v["data"]["report"]["recommended"]["backend"];
-    // mistral.rs only when this machine has it on its PATH.
+    let report = &v["data"]["report"];
+    let backend = &report["recommended"]["backend"];
+    // mistral.rs only when this machine has it on its PATH, hipfire only on an AMD machine
+    // whose daemon answers at its default address (what `detect` probes there).
+    let amd_daemon = report["vendor"] == "amd" && report["hipfire"]["up"] == true;
     assert!(
-        backend == "native" || backend == "llama-server" || backend == "mistralrs",
+        backend == "native"
+            || backend == "llama-server"
+            || backend == "mistralrs"
+            || (amd_daemon && backend == "hipfire"),
         "{v}"
     );
 }
@@ -460,6 +466,124 @@ impl Drop for Daemon {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// `copy/`: the mini model patched in place, the backup `surgeon apply` left beside it.
+fn working_copy(ws: &Ws) {
+    let copy = ws.path("copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    for entry in std::fs::read_dir(ws.path("qwen2-mini")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), copy.join(entry.file_name())).unwrap();
+    }
+    let weights = copy.join("model.safetensors");
+    std::fs::copy(&weights, copy.join("model.safetensors.bak-1700000000-1")).unwrap();
+}
+
+/// The questions a fake daemon was asked (the probe's empty request is not one).
+fn asked(ws: &Ws, log: &str) -> usize {
+    match ws.path(log).exists() {
+        true => ws
+            .requests(log)
+            .iter()
+            .filter(|r| r["prompt"].as_str().is_some_and(|p| !p.is_empty()))
+            .count(),
+        false => 0,
+    }
+}
+
+#[test]
+fn the_cli_never_measures_a_working_copy_on_hipfire_unless_told_to() {
+    let ws = Ws::new();
+    let daemon = Daemon::start(
+        &ws,
+        json!({"completions": true, "log": ws.path("hip.jsonl")}),
+    );
+    working_copy(&ws);
+    let hip = ["--backend", "hipfire", "--hipfire-url", daemon.url.as_str()];
+    let (code, v) = ws.eval(&[&["--model", "copy"][..], &hip].concat());
+    assert_eq!(code, 2, "{v}");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(message.contains("copie de travail"), "{message}");
+    assert_eq!(asked(&ws, "hip.jsonl"), 0, "refused before any question");
+    // A working copy as the baseline is refused the same way, before the original runs.
+    let baseline = ["--model", "qwen2-mini", "--baseline-model", "copy"];
+    let (code, v) = ws.eval(&[&baseline[..], &hip].concat());
+    assert_eq!(code, 2, "{v}");
+    assert_eq!(asked(&ws, "hip.jsonl"), 0);
+
+    // Told to (requantized and registered): measured, and the report says so.
+    let allow = ["--model", "copy", "--allow-stale-hipfire"];
+    let (code, v) = ws.eval(&[&allow[..], &hip].concat());
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["data"]["generation"]["backend"], "hipfire");
+    assert!(
+        v["warnings"].to_string().contains("--allow-stale-hipfire"),
+        "{v}"
+    );
+    assert_eq!(asked(&ws, "hip.jsonl"), 2);
+}
+
+#[test]
+fn mcp_moves_a_working_copy_off_hipfire_and_says_why() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let ws = Ws::new();
+    let daemon = Daemon::start(
+        &ws,
+        json!({"completions": true, "log": ws.path("hip.jsonl")}),
+    );
+    daemon.configure(&ws);
+    working_copy(&ws);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_surgeon"))
+        .args(["mcp", "--allow-dir", ws.dir.path().to_str().unwrap()])
+        .current_dir(ws.dir.path())
+        .env("WEIGHT_SURGEON_CONFIG", ws.config())
+        .env_remove("LLAMA_CPP_DIR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for line in [
+        json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "p20", "version": "0"}}}),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "name": "surgeon_bench", "arguments": {"mode": "refusal", "model": "copy",
+            "prompts": "builtin:refusals", "max_new_tokens": 2}}}),
+    ] {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    stdin.flush().unwrap();
+    let mut reply = Value::Null;
+    for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+        let value: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        if value["id"] == 1 {
+            reply = value;
+            break;
+        }
+    }
+    drop(stdin);
+    child.wait().unwrap();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    let result = &reply["result"]["structuredContent"];
+    assert_eq!(result["ok"], true, "{reply}");
+    let first = result["warnings"][0].as_str().unwrap();
+    assert!(first.starts_with("backend hipfire écarté"), "{first}");
+    assert!(first.contains("copy"), "the reason names the copy: {first}");
+    assert!(
+        stderr.contains("backend hipfire écarté"),
+        "logged: {stderr}"
+    );
+    assert_eq!(asked(&ws, "hip.jsonl"), 0, "measured on native");
 }
 
 #[test]
