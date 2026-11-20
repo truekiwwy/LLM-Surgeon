@@ -276,6 +276,9 @@ binaire, rien ne change : le moteur de repli continue, et `surgeon_backends` don
 `hipfire.binary: null`. Une fois la fenêtre fermée, un `surgeon` en ligne de commande réglé sur
 `hipfire` doit trouver un démon lancé autrement.
 
+hipfire sous WSL2 comparé à `llama-server` Vulkan sur une RX 7600 XT, et la recommandation qui en
+découle : [GPU_AMD_WINDOWS_EVAL.md](GPU_AMD_WINDOWS_EVAL.md).
+
 ## 8. Pipeline
 
 `pipeline.json` accepte un bloc `backend` (mêmes champs que `config.toml`) ; les options de
