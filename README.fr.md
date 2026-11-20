@@ -1297,7 +1297,7 @@ Sur cette machine et ce modèle : un lot de 8 a donné 4,1 fois le total d'une s
 <a id="cmd-bench-refusal-probe"></a>
 #### `surgeon bench refusal-probe`
 
-Estime les refus de `bench refusal` sans générer : une passe avant par prompt, enveloppé comme le fait `bench refusal`. Une heuristique rapide pour explorer (un agent, un balayage de patchs) ; le rapport et le texte rappellent toujours que seule la génération complète prouve un refus. Deux méthodes :
+Estime les refus de `bench refusal` sans générer : une passe avant par prompt, enveloppé comme le fait `bench refusal`. Une heuristique rapide pour explorer (un agent, un balayage de patchs) : le rapport indique toujours `is_heuristic: true` et `evidence_level: "heuristic_screening"`, et ses avertissements rappellent que seule une génération complète (`bench refusal` ou `bench eval`) est une preuve finale. Par MCP, c'est `surgeon_bench` en mode `refusal_probe` (`probe_method`, `direction_path`, `threshold`), dont le studio n'affiche jamais les résultats comme mesurés. Deux méthodes :
 
 - `first-token-prob` : la probabilité, sous les logits de la dernière position du prompt, que le premier token de réponse soit le premier token d'un mot de `--prefixes` (résolu par le tokenizer du modèle). Refus au-dessus de `--threshold` (0.5).
 - `direction-projection` : le flux résiduel après la couche d'une direction de `surgeon extract` (`resid_post` seulement), réduit comme à l'extraction et projeté dessus ; refus au-dessus du seuil calibré par l'extraction (`<fichier>.stats.json`, sinon le milieu des deux projections moyennes). Les prompts sont enveloppés comme à l'extraction, le seul enveloppage pour lequel ce seuil vaut. Elle mesure à quel point le modèle juge un prompt nuisible, ce qui n'est pas toujours un refus.
@@ -2169,7 +2169,7 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 | `surgeon_compose` | Une direction faite de plusieurs vecteurs extraits, orthogonale aux directions de capacité à préserver (Gram-Schmidt modifié, f64), et le patch `project_out` qui la retire avec sa recette. Écrit des fichiers, jamais un modèle. |
 | `surgeon_eval` | Contrôles de boucles et d'attentes, export GGUF conditionnel. |
 | `surgeon_extract` | Vecteur de steering depuis une couche Qwen2, Llama/Mistral ou Qwen3. |
-| `surgeon_bench` | Mesure, avec `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal`, et la calibration du juge `judge_sample`, `judge_eval` ; les jeux de sondes intégrés se passent de fichier : `builtin:math`, `builtin:logic`, `builtin:general` (eval) et `builtin:refusals` (refusal). |
+| `surgeon_bench` | Mesure, avec `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal`, la sonde heuristique `refusal_probe` (sans génération, jamais une preuve finale), et la calibration du juge `judge_sample`, `judge_eval` ; les jeux de sondes intégrés se passent de fichier : `builtin:math`, `builtin:logic`, `builtin:general` (eval) et `builtin:refusals` (refusal). |
 | `surgeon_autotune` | Coefficients par couche par régression ridge. |
 | `surgeon_diff` | Différence de deux checkpoints écrite dans un nouveau `.surgery`. |
 | `surgeon_lora` | `mode` `merge` (adaptateur fusionné en place) ou `extract` (adaptateur écrit). |

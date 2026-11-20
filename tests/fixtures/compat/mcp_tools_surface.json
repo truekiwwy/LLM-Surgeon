@@ -1022,6 +1022,13 @@
             "null"
           ]
         },
+        "direction_path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "dtype": {
           "anyOf": [
             {
@@ -1318,6 +1325,12 @@
             },
             {
               "enum": [
+                "refusal_probe"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
                 "judge_sample"
               ],
               "type": "string"
@@ -1386,6 +1399,30 @@
             "boolean",
             "null"
           ]
+        },
+        "probe_method": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "first-token-prob"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "direction-projection"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "prompt_template": {
           "default": null,
@@ -1462,6 +1499,14 @@
           "minimum": 1.0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "threshold": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
             "null"
           ]
         },

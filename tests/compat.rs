@@ -101,6 +101,12 @@
 //!   tool `surgeon_compose`, both additive; the optional `composition` of `patch.json` (absent
 //!   from every older patch). Only the `schema` hash (the patch schema) and the tool schema
 //!   hash moved; no option, property or output of an existing command changed.
+//! - refusal probe over MCP: `surgeon_bench` gains the mode `refusal_probe` and the optional
+//!   properties `probe_method`, `direction_path` and `threshold`, all additive; only the tool
+//!   schema hash moved. The report of `bench refusal-probe` (not released yet) now names its
+//!   fields for the agent (`prompt_count`, `probe_refusal_rate`, `mean_refusal_prob`,
+//!   `duration_ms`), says `is_heuristic: true` and `evidence_level: heuristic_screening`, and
+//!   writes its method in kebab-case like the CLI value.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

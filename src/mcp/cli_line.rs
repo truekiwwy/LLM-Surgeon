@@ -18,7 +18,9 @@ pub struct CliLine {
 }
 
 /// Arguments whose CLI option has another name: (command, argument, option).
-const RENAMED: [(&str, &str, &str); 8] = [
+const RENAMED: [(&str, &str, &str); 10] = [
+    ("bench refusal-probe", "probe_method", "method"),
+    ("bench refusal-probe", "direction_path", "vector"),
     ("inspect", "projections", "proj"),
     ("extract", "pos_prompts_file", "pos-prompts"),
     ("extract", "neg_prompts_file", "neg-prompts"),

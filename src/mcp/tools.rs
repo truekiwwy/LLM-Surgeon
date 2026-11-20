@@ -481,7 +481,7 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_BENCH,
             "Mesure d'une chirurgie",
-            "Mesure l'effet d'une chirurgie ; eval, dump et refusal habillent les prompts avec le format de chat du modèle (chat_template, défaut auto). Selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH ou un jeu intégré builtin:math|logic|general, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts ou builtin:refusals, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe), judge_sample et judge_eval (calibration du juge de refusal : échantillon stratifié à faire étiqueter par un humain, puis accord du juge avec ces étiquettes et fichier de calibration). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision ; en cas de régression, surgeon_restore.",
+            "Mesure l'effet d'une chirurgie ; eval, dump et refusal habillent les prompts avec le format de chat du modèle (chat_template, défaut auto). Selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH ou un jeu intégré builtin:math|logic|general, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts ou builtin:refusals, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe), refusal_probe (refus estimé sans générer, une passe avant par prompt : first-token-prob ou direction-projection ; réponse marquée is_heuristic: true et evidence_level heuristic_screening, à confirmer par le mode refusal ou eval, jamais une preuve finale), judge_sample et judge_eval (calibration du juge de refusal : échantillon stratifié à faire étiqueter par un humain, puis accord du juge avec ces étiquettes et fichier de calibration). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision ; en cas de régression, surgeon_restore.",
             schema_value::<BenchToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
@@ -1042,6 +1042,8 @@ pub enum BenchMode {
     Dump,
     /// Taux de refus d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, génération native (model, prompts).
     Refusal,
+    /// Refus estimé sans générer, une passe avant par prompt (model, prompts) : heuristique d'exploration, jamais une preuve.
+    RefusalProbe,
     /// Échantillon stratifié d'un run refusal à étiqueter à la main (responses, prompts, out).
     JudgeSample,
     /// Juge LLM confronté aux étiquettes humaines, fichier de calibration en option (labels, judge_model).
@@ -1053,7 +1055,7 @@ pub enum BenchMode {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Arguments de surgeon_bench : mode, puis les champs de ce mode (logits : before, after ; ppl : model, text ; eval : model, dataset ; dump : model, prompts, out ; refusal : model, prompts ; judge_sample : responses, prompts, out ; judge_eval : labels, judge_model)."
+    description = "Arguments de surgeon_bench : mode, puis les champs de ce mode (logits : before, after ; ppl : model, text ; eval : model, dataset ; dump : model, prompts, out ; refusal : model, prompts ; refusal_probe : model, prompts ; judge_sample : responses, prompts, out ; judge_eval : labels, judge_model)."
 )]
 pub struct BenchToolArgs {
     pub mode: BenchMode,
@@ -1308,6 +1310,21 @@ pub struct BenchToolArgs {
     pub markers_file: Option<PathBuf>,
     #[serde(default)]
     #[schemars(
+        description = "refusal_probe : first-token-prob (défaut : probabilité que le premier token de réponse ouvre un refus) ou direction-projection (projection du flux résiduel sur direction_path, contre son seuil calibré)."
+    )]
+    pub probe_method: Option<crate::bench::refusal::RefusalProbeMode>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal_probe en direction-projection : fichier de direction de surgeon_extract (resid_post), avec son .stats.json."
+    )]
+    pub direction_path: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal_probe : seuil de décision du score (défaut 0.5 en first-token-prob, le seuil calibré de la direction en direction-projection)."
+    )]
+    pub threshold: Option<f64>,
+    #[serde(default)]
+    #[schemars(
         description = "judge_sample : sortie JSON (enveloppe ou data) d'un surgeon_bench mode refusal."
     )]
     pub responses: Option<PathBuf>,
@@ -1325,7 +1342,17 @@ pub struct BenchToolArgs {
 }
 
 /// (mode, required fields, optional fields).
-pub(super) const BENCH_FIELDS: [(&str, &[&str], &[&str]); 7] = [
+pub(super) const BENCH_FIELDS: [(&str, &[&str], &[&str]); 8] = [
+    (
+        "refusal-probe",
+        &["model", "prompts"],
+        &[
+            "probe_method",
+            "direction_path",
+            "threshold",
+            "chat_template",
+        ],
+    ),
     (
         "judge-sample",
         &["responses", "prompts", "out"],
@@ -1586,6 +1613,7 @@ pub(super) fn bench_command(arguments: &Value) -> &'static str {
         Some("eval") => "bench eval",
         Some("dump") => "bench dump",
         Some("refusal") => "bench refusal",
+        Some("refusal_probe") => "bench refusal-probe",
         Some("judge_sample") => "bench judge-sample",
         Some("judge_eval") => "bench judge-eval",
         _ => "bench",
@@ -1895,6 +1923,24 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 ),
                 hipfire_set_aside,
             )
+        }
+        BenchMode::RefusalProbe => {
+            let prompts_file = source(ctx, "prompts", &args.prompts)?;
+            let req = crate::bench::refusal::ProbeRequest {
+                model: path(ctx, "model", &args.model)?,
+                prompts: extract::load_prompt_texts(&prompts_file)
+                    .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?,
+                mode: args.probe_method.unwrap_or_default(),
+                chat_template: args.chat_template.unwrap_or_default(),
+                prefixes: crate::bench::refusal::DEFAULT_PROBE_PREFIXES
+                    .map(String::from)
+                    .to_vec(),
+                vector: optional_path(ctx, "direction_path", &args.direction_path)?,
+                threshold: args.threshold,
+                // The full generation is mode refusal: the probe stays a probe here.
+                compare_generation: false,
+            };
+            crate::app::core_bench_refusal_probe(&req, ctx.deps, &ui, ctx.sink)
         }
         BenchMode::JudgeSample => {
             let prompts_file = source(ctx, "prompts", &args.prompts)?;

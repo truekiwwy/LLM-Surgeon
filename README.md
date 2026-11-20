@@ -1295,7 +1295,7 @@ On this machine and this model: a batch of 8 gave 4.1 times the total of one seq
 <a id="cmd-bench-refusal-probe"></a>
 #### `surgeon bench refusal-probe`
 
-Estimates the refusals of `bench refusal` without generating: one forward pass per prompt, wrapped as `bench refusal` wraps it. A fast heuristic to explore with (an agent, a sweep of patches); the report and the text always say that only the full generation proves a refusal. Two methods:
+Estimates the refusals of `bench refusal` without generating: one forward pass per prompt, wrapped as `bench refusal` wraps it. A fast heuristic to explore with (an agent, a sweep of patches): the report always says `is_heuristic: true` and `evidence_level: "heuristic_screening"`, and its warnings that only a full generation (`bench refusal` or `bench eval`) is a final proof. Over MCP it is `surgeon_bench` mode `refusal_probe` (`probe_method`, `direction_path`, `threshold`), whose results the studio never shows as measured. Two methods:
 
 - `first-token-prob`: the probability, under the logits of the last prompt position, that the first answer token is the first token of one of `--prefixes` (resolved by the model's tokenizer). Refused above `--threshold` (0.5).
 - `direction-projection`: the residual stream after the layer of a `surgeon extract` direction (`resid_post` only), pooled as at extraction and projected on it; refused above the threshold the extraction calibrated (`<file>.stats.json`, else the midpoint of the two mean projections). The prompts are wrapped as at extraction, the wrapping that threshold holds for. It measures how harmful the model finds a prompt, which is not always a refusal.
@@ -2167,7 +2167,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 | `surgeon_compose` | One direction from several extracted vectors, orthogonal to the capability directions to preserve (modified Gram-Schmidt, f64), and the `project_out` patch that removes it with its recipe. Writes files, never a model. |
 | `surgeon_eval` | Loop and expectation checks, conditional GGUF export. |
 | `surgeon_extract` | Steering vector from a Qwen2, Llama/Mistral or Qwen3 layer. |
-| `surgeon_bench` | Measurement, with `mode` `dump`, `logits`, `ppl`, `eval` or `refusal`, and the judge calibration `judge_sample`, `judge_eval`; built-in probe sets need no file: `builtin:math`, `builtin:logic`, `builtin:general` (eval) and `builtin:refusals` (refusal). |
+| `surgeon_bench` | Measurement, with `mode` `dump`, `logits`, `ppl`, `eval` or `refusal`, the heuristic `refusal_probe` (no generation, never a final proof), and the judge calibration `judge_sample`, `judge_eval`; built-in probe sets need no file: `builtin:math`, `builtin:logic`, `builtin:general` (eval) and `builtin:refusals` (refusal). |
 | `surgeon_autotune` | Per-layer coefficients by ridge regression. |
 | `surgeon_diff` | Difference of two checkpoints written to a new `.surgery`. |
 | `surgeon_lora` | `mode` `merge` (adapter folded in place) or `extract` (adapter written). |

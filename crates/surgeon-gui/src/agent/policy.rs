@@ -189,7 +189,8 @@ fn effect(tool: &str, args: &Value) -> Effect {
             Effect::Write(vec![external])
         }
         "surgeon_bench" => match mode {
-            "logits" | "refusal" => Effect::Read,
+            // refusal_probe: one native forward pass per prompt, nothing written.
+            "logits" | "refusal" | "refusal_probe" => Effect::Read,
             "eval" if args["backend"] == "native" => Effect::Read,
             "dump" | "judge_sample" => Effect::Write(vec![writes]),
             _ => Effect::Write(vec![external]),

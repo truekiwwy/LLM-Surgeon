@@ -1014,6 +1014,16 @@ fn forbidden_calls_are_answered_without_running_anything() {
         ),
         Decision::Safe
     ));
+    // The refusal probe reads like the full measure: a native pass, nothing written.
+    assert!(matches!(
+        policy::classify(
+            "surgeon_bench",
+            &json!({"mode": "refusal_probe", "model": "copies/c1", "prompts": "p.txt"}),
+            a,
+            &scope
+        ),
+        Decision::Safe
+    ));
     assert!(matches!(
         policy::classify(
             "surgeon_inspect",

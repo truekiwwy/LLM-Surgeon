@@ -55,7 +55,7 @@ Claude Code, en plugin : le dossier [`plugin/`](../plugin) déclare le même ser
 | `surgeon_files` | Fichiers de travail d'un agent : `list`, `read` dans les dossiers autorisés, `write` de fichiers texte sous `work/` ([détail](#fichiers-de-travail-surgeon_files)) | écrit sous `work/` seulement |
 | `surgeon_eval` | Non-régression (boucles, attentes) et export GGUF conditionnel | écrit le GGUF |
 | `surgeon_extract` | Vecteur de direction depuis une couche Qwen2 (Rust pur, CPU) | écrit le `.safetensors`, idempotent |
-| `surgeon_bench` | Mesure d'une chirurgie : `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal` ; calibration du juge : `judge_sample`, `judge_eval` | non destructif, idempotent |
+| `surgeon_bench` | Mesure d'une chirurgie : `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal` ; sonde heuristique `refusal_probe` ; calibration du juge : `judge_sample`, `judge_eval` | non destructif, idempotent |
 | `surgeon_autotune` | Coefficients α par couche ajustés par ridge, patch.json en sortie | non destructif, idempotent ; écrit `out` seulement s'il est fourni |
 | `surgeon_diff` | Différence de deux checkpoints, approximée à rang `r`, écrite dans un `.surgery` neuf | écrit un fichier, non destructif, idempotent |
 | `surgeon_lora` | `mode` `merge` (fusionne un adaptateur LoRA en place) ou `extract` (écrit un adaptateur) | destructif |
@@ -89,7 +89,7 @@ aucun argument libre vers llama.cpp, aucune option `--allow-*` du pipeline).
 | `restore` | `surgeon_restore` |
 | `compose` | `surgeon_compose` |
 | `graph` | `surgeon_graph` |
-| `bench logits`, `ppl`, `eval`, `dump`, `refusal`, `judge-sample`, `judge-eval` | `surgeon_bench` (`mode` du même nom, `judge_sample`, `judge_eval`) |
+| `bench logits`, `ppl`, `eval`, `dump`, `refusal`, `refusal-probe`, `judge-sample`, `judge-eval` | `surgeon_bench` (`mode` du même nom, `refusal_probe`, `judge_sample`, `judge_eval` ; `--method` et `--vector` de `refusal-probe` s'y nomment `probe_method` et `direction_path`) |
 | `diff` | `surgeon_diff` |
 | `lora merge`, `lora extract` | `surgeon_lora` (`mode`) |
 | `pipeline plan`, `run`, `status`, `cancel`, `report`, `promote` | `surgeon_pipeline` (`action`) |
@@ -155,17 +155,25 @@ est une erreur JSON-RPC `-32602` (les cinq autres outils la signalent en
 | `ppl` | `model`, `text` | `baseline_model` ou `baseline_ppl` (+ `baseline_ppl_err`), `ctx` (512), `chunks`, `threads`, `n_gpu_layers` (0), `llama_cpp_dir`, `warn_delta` (0.2), `timeout_secs`, `fail_on_warn` |
 | `eval` | `model`, `dataset` | `backend` (`llama`, `llama-completion`, `llama-server`, `mistralrs`, `hipfire`, `native`), `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `chat_template` (voir ci-dessous), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn`, options de génération |
 | `refusal` | `model`, `prompts` (fichier) | `backend` (`native`, `llama-server`, `llama-completion`, `mistralrs`, `hipfire`), `baseline_model`, `max_new_tokens` (40), `chat_template` (voir ci-dessous), `marker_langs`, `markers_file`, `judge` (`rules`, `llm`, `both`), `judge_model`, `judge_role` (`refusal`, `harm`), `judge_template`, `judge_cache`, `judge_calibration`, `min_calibration_n` (100), `min_kappa` (0.6), `partial_as_refusal`, `max_unparsable`, `llama_cpp_dir`, `timeout_secs`, `fail_on_warn`, options de génération |
+| `refusal_probe` | `model`, `prompts` (fichier) | `probe_method` (`first-token-prob` par défaut, `direction-projection`), `direction_path` (direction de `surgeon_extract`, requis en `direction-projection`), `threshold` (0.5, ou celui de la direction), `chat_template` |
 | `dump` | `model`, `prompts` (fichier), `out` | `chat_template`, `dtype`, `out_dtype` (`f32`, `f16`), `max_tokens` (256), `max_total_positions` (4096), `overwrite` |
 | `judge_sample` | `responses` (sortie JSON d'un `refusal`), `prompts` (ceux de ce run), `out` | `n` (100), `seed` (42), `overwrite` |
 | `judge_eval` | `labels` (l'échantillon étiqueté), `judge_model` | `judge_role`, `judge_template`, `judge_cache`, `partial_as_refusal`, `marker_langs`, `markers_file`, `llama_cpp_dir`, `timeout_secs`, `out` (fichier de calibration), `overwrite` |
 
 `data` reçoit le rapport (`BenchLogitsReport`, `BenchPplReport`, `BenchEvalReport`,
-`BenchRefusalReport`, `BenchDumpReport`), identique à `surgeon --json bench <mode>` ; les durées sont dans
-`data.timing_ms`. Un seuil dépassé avec `fail_on_warn: true` donne `exit_code` 9 et
+`BenchRefusalReport`, `BenchDumpReport`, `ProbeReport`), identique à `surgeon --json bench <mode>` ; les durées sont dans
+`data.timing_ms`.
+
+`refusal_probe` estime les refus sans générer, une passe avant par prompt (natif, CPU). Sa
+réponse donne `probe_refusal_rate`, `mean_refusal_prob` (`first-token-prob` seulement),
+`prompt_count`, `duration_ms` et le détail par prompt (`items`), et porte toujours
+`is_heuristic: true`, `evidence_level: "heuristic_screening"` et un avertissement : c'est un
+criblage, et seule une génération complète (`mode` `refusal` ou `eval`) est une preuve finale.
+Un constat qui cite un tel run reste « Heuristique » dans le studio, jamais « Mesuré ». Un seuil dépassé avec `fail_on_warn: true` donne `exit_code` 9 et
 `isError: true`, le rapport restant dans `data`. Aucun argument libre n'atteint llama.cpp
 par MCP (l'option `--llama-arg` n'existe qu'en ligne de commande, sur liste blanche).
 `--read-only` refuse les modes `dump` et `judge_sample`, `judge_eval` avec `out` et le champ
-`judge_cache` (ils écrivent un fichier) mais laisse `logits`, `ppl`, `eval`, `refusal` et
+`judge_cache` (ils écrivent un fichier) mais laisse `logits`, `ppl`, `eval`, `refusal`, `refusal_probe` et
 `judge_eval` sans `out`, juge compris.
 
 Options de génération de `eval` et `refusal`, toutes structurées et bornées comme en ligne

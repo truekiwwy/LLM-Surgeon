@@ -751,6 +751,10 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
                         c::status(ui, State::Warn, t("bench.native"))
                             .on_hover_text(weight_surgeon::mcp::HIPFIRE_SET_ASIDE);
                     }
+                    if name == "surgeon_bench" && input["mode"] == "refusal_probe" {
+                        c::status(ui, State::Warn, t("bench.heuristic"))
+                            .on_hover_text(weight_surgeon::bench::refusal::PROBE_CAVEAT);
+                    }
                 }
                 (
                     Block::ToolResult {
@@ -942,6 +946,7 @@ fn evidence_log(ui: &mut Ui, app: &mut SurgeonApp) {
             for f in findings.iter().rev() {
                 let (state, word) = match f.status(&entries) {
                     Status::Measured(_) => (State::Ok, t("finding.measured")),
+                    Status::Heuristic(_) => (State::Warn, t("finding.heuristic")),
                     Status::Inferred(_) => (State::Idle, t("finding.inferred")),
                     Status::Unknown(_) => (State::Warn, t("finding.unknown")),
                 };

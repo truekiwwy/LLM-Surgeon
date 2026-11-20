@@ -3,6 +3,9 @@
 //!
 //! - Measured: it cites runs that exist and succeeded, and each cited value appears in that
 //!   run's result. A finding with figures must link at least one value.
+//! - Heuristic: the same, but one of its runs is an exploration heuristic (its result says
+//!   `is_heuristic: true`: `surgeon_bench` mode `refusal_probe`). It points somewhere; a
+//!   full generation (mode `refusal` or `eval`) has yet to prove it.
 //! - Inferred: no run backs it, but the agent gave its reasoning (shown).
 //! - Unknown: anything else, with the reason.
 
@@ -37,6 +40,8 @@ pub struct Finding {
 pub enum Status {
     /// `(run id, model hash)` of every cited run.
     Measured(Vec<(String, Option<String>)>),
+    /// Backed like `Measured`, by at least one heuristic run: never a final proof.
+    Heuristic(Vec<(String, Option<String>)>),
     Inferred(String),
     Unknown(String),
 }
@@ -45,6 +50,7 @@ impl Status {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Measured(_) => "Mesuré",
+            Self::Heuristic(_) => "Heuristique",
             Self::Inferred(_) => "Déduit",
             Self::Unknown(_) => "Inconnu",
         }
@@ -105,8 +111,22 @@ impl Finding {
         if figures && self.evidence.iter().all(|e| e.value.is_none()) {
             return Status::Unknown("chiffre sans valeur liée à un run".into());
         }
-        Status::Measured(runs)
+        let heuristic = self.evidence.iter().any(|ev| {
+            ledger
+                .iter()
+                .find(|e| e.run_id == ev.run_id)
+                .is_some_and(|e| is_heuristic(&e.result))
+        });
+        match heuristic {
+            true => Status::Heuristic(runs),
+            false => Status::Measured(runs),
+        }
     }
+}
+
+/// What the engine says of a result that is a screening, not a proof.
+fn is_heuristic(result: &Value) -> bool {
+    result["is_heuristic"] == true || result["evidence_level"] == "heuristic_screening"
 }
 
 fn contains_number(v: &Value, x: f64) -> bool {
@@ -261,5 +281,39 @@ mod tests {
         );
         assert!(matches!(f.status(&ledger), Status::Unknown(_)));
         assert!(mcp_runs(&dir.path().join("absent.jsonl")).is_empty());
+    }
+
+    #[test]
+    fn a_probe_run_backs_a_heuristic_never_a_measure() {
+        let probe = json!({"is_heuristic": true, "evidence_level": "heuristic_screening",
+                           "probe_refusal_rate": 0.12, "mean_refusal_prob": 0.2});
+        let ledger = vec![
+            entry("probe", Verdict::Ok, probe),
+            entry("gen", Verdict::Ok, json!({"refusal_rate": 0.1})),
+        ];
+        let f = finding(
+            json!({"text": "refus sondé 0.12", "evidence": [{"run_id": "probe", "value": 0.12}]}),
+        );
+        let status = f.status(&ledger);
+        assert!(matches!(status, Status::Heuristic(_)), "{status:?}");
+        assert_eq!(status.label(), "Heuristique");
+        // One heuristic run among the cited ones is enough to keep it a heuristic.
+        let f = finding(json!({"text": "refus 0.1 puis 0.12", "evidence": [
+            {"run_id": "gen", "value": 0.1}, {"run_id": "probe", "value": 0.12}]}));
+        assert!(matches!(f.status(&ledger), Status::Heuristic(_)));
+        // The full generation alone is the measure.
+        let f =
+            finding(json!({"text": "refus 0.1", "evidence": [{"run_id": "gen", "value": 0.1}]}));
+        assert!(matches!(f.status(&ledger), Status::Measured(_)));
+        // Through the MCP journal too.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp_runs.jsonl");
+        let run = json!({"run_id": "mcp-2-0", "tool": "surgeon_bench", "ok": true, "exit_code": 0,
+                         "data": {"is_heuristic": true, "probe_refusal_rate": 0.3}});
+        std::fs::write(&path, format!("{run}\n")).unwrap();
+        let f = finding(
+            json!({"text": "refus 0.3", "evidence": [{"run_id": "mcp-2-0", "value": 0.3}]}),
+        );
+        assert!(matches!(f.status(&mcp_runs(&path)), Status::Heuristic(_)));
     }
 }

@@ -223,11 +223,16 @@ depuis le ledger du projet à chaque affichage :
 - **Mesuré** : il cite des runs présents dans le ledger et réussis, chaque valeur citée se
   trouve dans le résultat du run ; la carte affiche le run et l'empreinte du modèle. Un
   constat chiffré doit lier au moins une valeur.
+- **Heuristique** : appuyé comme un constat mesuré, mais au moins un des runs cités est une
+  heuristique d'exploration (son résultat porte `is_heuristic: true` ou
+  `evidence_level: "heuristic_screening"`, comme `surgeon_bench` en mode `refusal_probe`). Il
+  oriente sans prouver : une génération complète (`mode` `refusal` ou `eval`) reste à faire.
 - **Déduit** : pas de run, mais un raisonnement, affiché.
 - **Inconnu** : le reste, avec la raison (chiffre sans run, run absent ou en échec, valeur
   absente du résultat).
 
-L'interface n'affiche donc jamais « Mesuré » un chiffre sans run associé. Les chiffres écrits
+L'interface n'affiche donc jamais « Mesuré » un chiffre sans run associé, ni un chiffre tiré
+d'une sonde. Les chiffres écrits
 dans le texte libre de la conversation ne sont pas contrôlés : seul le journal fait foi.
 
 Pour un runtime CLI, `record_finding` est un outil du serveur MCP `surgeon` (section 8) qui

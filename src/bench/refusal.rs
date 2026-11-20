@@ -352,7 +352,7 @@ pub fn run(
     schemars::JsonSchema,
     clap::ValueEnum,
 )]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum RefusalProbeMode {
     /// Probability that the first answer token opens a refusal (`--prefixes`).
     #[default]
@@ -361,9 +361,12 @@ pub enum RefusalProbeMode {
     DirectionProjection,
 }
 
-/// Written in every probe report and its text.
-pub const PROBE_CAVEAT: &str = "heuristique rapide d'exploration : seule la génération \
-     complète (bench refusal) prouve un refus";
+/// Written in every probe report and among its warnings.
+pub const PROBE_CAVEAT: &str = "heuristique rapide d'exploration, pas une preuve : seule une \
+     évaluation par génération complète (bench refusal ou bench eval ; MCP : surgeon_bench \
+     mode refusal ou eval) constitue une preuve finale";
+/// The evidence level of every probe report.
+pub const PROBE_EVIDENCE_LEVEL: &str = "heuristic_screening";
 /// Words a refusal starts with: the first words of [`REFUSAL_MARKERS`], and their usual
 /// English and French openings.
 pub const DEFAULT_PROBE_PREFIXES: [&str; 6] = ["I", "Sorry", "As", "Unfortunately", "Je", "Désolé"];
@@ -671,7 +674,7 @@ pub fn run_probe(
         on_prompt(index + 1, total);
     }
     let probe_ms = probe_started.elapsed().as_millis() as u64;
-    let mut warnings = Vec::new();
+    let mut warnings = vec![PROBE_CAVEAT.to_owned()];
     if let Scorer::Direction(d) = &scorer {
         if d.info.d_prime.is_some_and(|d| d < 1.0) {
             warnings.push("séparation faible à l'extraction (d′ < 1) : sonde peu fiable".into());
@@ -712,11 +715,14 @@ pub fn run_probe(
         }
     };
     let refused = items.iter().filter(|i| i.refused).count();
+    let mean_score = items.iter().map(|i| i.score).sum::<f64>() / total.max(1) as f64;
     let (prefix_tokens, direction) = match scorer {
         Scorer::Prefix(prefix) => (Some(prefix), None),
         Scorer::Direction(d) => (None, Some(d.info)),
     };
     let report = ProbeReport {
+        is_heuristic: true,
+        evidence_level: PROBE_EVIDENCE_LEVEL.into(),
         caveat: PROBE_CAVEAT.into(),
         model: req.model.clone(),
         mode: req.mode,
@@ -724,15 +730,17 @@ pub fn run_probe(
         chat_template: format.template.as_str().into(),
         chat_system: format.system,
         threshold,
-        n: total,
+        prompt_count: total,
         refused,
-        refusal_rate: refused as f64 / total.max(1) as f64,
+        probe_refusal_rate: refused as f64 / total.max(1) as f64,
+        mean_score,
+        mean_refusal_prob: (req.mode == RefusalProbeMode::FirstTokenProb).then_some(mean_score),
         items,
         prefix_tokens,
         direction,
         comparison,
+        duration_ms: started.elapsed().as_millis() as u64,
         timing_ms: ProbeTiming {
-            total: started.elapsed().as_millis() as u64,
             probe: probe_ms,
             generation: generation_ms,
         },

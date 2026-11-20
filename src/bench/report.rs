@@ -500,8 +500,6 @@ pub struct ProbeComparison {
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ProbeTiming {
-    /// Commande entière, chargement compris.
-    pub total: u64,
     /// Sonde seule.
     pub probe: u64,
     /// Génération complète, avec --compare-generation.
@@ -511,6 +509,10 @@ pub struct ProbeTiming {
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ProbeReport {
+    /// Toujours true : un score de sonde n'est jamais une preuve.
+    pub is_heuristic: bool,
+    /// Toujours heuristic_screening : à valider par une génération complète.
+    pub evidence_level: String,
     /// Toujours le même rappel : une heuristique d'exploration, pas une preuve.
     pub caveat: String,
     pub model: PathBuf,
@@ -521,9 +523,17 @@ pub struct ProbeReport {
     pub chat_system: Option<String>,
     /// Seuil de décision du score.
     pub threshold: f64,
-    pub n: usize,
+    pub prompt_count: usize,
+    /// Prompts dont le score dépasse le seuil.
     pub refused: usize,
-    pub refusal_rate: f64,
+    /// refused / prompt_count.
+    pub probe_refusal_rate: f64,
+    /// Moyenne des scores.
+    pub mean_score: f64,
+    /// first-token-prob : probabilité moyenne que la réponse s'ouvre sur un refus.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean_refusal_prob: Option<f64>,
+    /// Détail par prompt.
     pub items: Vec<ProbeItem>,
     /// first_token_prob : les préfixes de refus et leurs tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -534,7 +544,9 @@ pub struct ProbeReport {
     /// --compare-generation : accord avec `bench refusal` sur les mêmes prompts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comparison: Option<ProbeComparison>,
-    /// Durées en millisecondes.
+    /// Commande entière, chargement compris, en millisecondes.
+    pub duration_ms: u64,
+    /// Durées des étapes en millisecondes.
     pub timing_ms: ProbeTiming,
 }
 
@@ -880,7 +892,7 @@ pub fn probe_text(ui: &Ui, run: &BenchRun<ProbeReport>) -> String {
             "{} refusal-probe · {} · {} prompts · seuil {}  {}",
             ui::badge(ui, "PROBE"),
             ui::metric(ui, mode),
-            ui::metric(ui, r.n),
+            ui::metric(ui, r.prompt_count),
             ui::metric(ui, format!("{:.3}", r.threshold)),
             ui::path(ui, &r.model)
         ),
@@ -888,11 +900,10 @@ pub fn probe_text(ui: &Ui, run: &BenchRun<ProbeReport>) -> String {
             "{} {}/{} · {} (sonde, en {} ms)",
             ui::badge(ui, "REFUS"),
             ui::metric(ui, r.refused),
-            ui::metric(ui, r.n),
-            ui::metric(ui, pct(r.refusal_rate)),
+            ui::metric(ui, r.prompt_count),
+            ui::metric(ui, pct(r.probe_refusal_rate)),
             ui::metric(ui, r.timing_ms.probe)
         ),
-        format!("  {}", ui::dim(ui, &r.caveat)),
     ];
     if let Some(c) = &r.comparison {
         let correlation = c
@@ -908,7 +919,7 @@ pub fn probe_text(ui: &Ui, run: &BenchRun<ProbeReport>) -> String {
                     c.max_new_tokens,
                     c.generated_refused,
                     c.agree,
-                    r.n,
+                    r.prompt_count,
                     pct(c.agreement),
                     correlation,
                     format_args!("{:.1}", c.speedup)

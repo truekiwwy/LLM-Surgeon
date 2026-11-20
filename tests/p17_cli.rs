@@ -269,12 +269,16 @@ fn the_refusal_probe_scores_without_generating_and_compares_on_demand() {
         envelope["data"].clone()
     };
     let first = probe(&[]);
-    assert_eq!(first["mode"], "first_token_prob");
+    assert_eq!(first["mode"], "first-token-prob");
     assert!(first["caveat"]
         .as_str()
         .unwrap()
         .contains("génération complète"));
-    assert_eq!(first["n"], 6);
+    assert_eq!(first["is_heuristic"], true);
+    assert_eq!(first["evidence_level"], "heuristic_screening");
+    assert_eq!(first["prompt_count"], 6);
+    assert!(first["mean_refusal_prob"].as_f64().is_some());
+    assert!(first["duration_ms"].as_u64().is_some());
     assert_eq!(first["threshold"], 0.5);
     assert!(first["prefix_tokens"]
         .as_array()
@@ -322,7 +326,11 @@ fn the_refusal_probe_scores_without_generating_and_compares_on_demand() {
         "--vector",
         "dir.safetensors",
     ]);
-    assert_eq!(along["mode"], "direction_projection");
+    assert_eq!(along["mode"], "direction-projection");
+    assert!(
+        along.get("mean_refusal_prob").is_none(),
+        "a projection is not a probability"
+    );
     assert_eq!(along["direction"]["layer"], 1);
     let calibrated = along["direction"]["calibrated_threshold"].as_f64().unwrap();
     assert_eq!(along["threshold"].as_f64().unwrap(), calibrated);
@@ -507,6 +515,48 @@ fn mcp(dir: &Path, calls: &[Value]) -> Vec<Value> {
     (1..=calls.len())
         .map(|id| replies.iter().find(|r| r["id"] == id).unwrap().clone())
         .collect()
+}
+
+#[test]
+fn mcp_refusal_probe_answers_as_a_heuristic() {
+    let dir = workspace();
+    let replies = mcp(
+        dir.path(),
+        &[
+            json!({"mode": "refusal_probe", "model": "qwen2-mini", "prompts": "pos.json"}),
+            json!({"mode": "refusal_probe", "model": "qwen2-mini", "prompts": "pos.json",
+                   "max_new_tokens": 8}),
+            json!({"mode": "refusal_probe", "model": "qwen2-mini", "prompts": "pos.json",
+                   "probe_method": "direction-projection"}),
+        ],
+    );
+    let content = |i: usize| replies[i]["result"]["structuredContent"].clone();
+    let ok = content(0);
+    assert_eq!(ok["ok"], true, "{ok}");
+    let data = &ok["data"];
+    assert_eq!(data["is_heuristic"], true);
+    assert_eq!(data["evidence_level"], "heuristic_screening");
+    assert_eq!(data["mode"], "first-token-prob");
+    assert_eq!(data["prompt_count"], 6);
+    for key in ["probe_refusal_rate", "mean_refusal_prob", "duration_ms"] {
+        assert!(data[key].is_number(), "{key}: {data}");
+    }
+    assert_eq!(data["items"].as_array().unwrap().len(), 6);
+    let warnings = ok["warnings"].to_string();
+    assert!(warnings.contains("mode refusal ou eval"), "{warnings}");
+    // A generation option is not a probe's; a direction without its file is refused.
+    assert_eq!(
+        content(1)["error"]["kind"],
+        "invalid_arguments",
+        "{}",
+        content(1)
+    );
+    let missing = content(2);
+    assert_eq!(missing["ok"], false, "{missing}");
+    assert!(missing["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--vector"));
 }
 
 #[test]
