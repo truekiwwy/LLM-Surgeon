@@ -660,6 +660,7 @@ impl GenerationArgs {
             gpu_layers: self.gpu_layers,
             ctx_size: self.ctx_size,
             allow_stale_hipfire: self.allow_stale_hipfire,
+            batch_auto: self.batch_size.is_none(),
         }
     }
 }

@@ -1478,6 +1478,7 @@ fn generation(args: &BenchToolArgs) -> crate::bench::generation::GenOptions {
         gpu_api: None,
         // Never over MCP: an agent cannot vouch for hipfire's cache.
         allow_stale_hipfire: false,
+        batch_auto: args.batch_size.is_none(),
     }
 }
 

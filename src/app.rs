@@ -1227,6 +1227,8 @@ pub enum ProgressEvent {
         operations: usize,
     },
     Warn(String),
+    /// What the engine decided on its own (dtype, batching): a log line, not a warning.
+    Info(String),
     DryRun {
         op_id: String,
         tensors: Vec<String>,
@@ -1712,6 +1714,12 @@ impl ProgressSink for CliSink<'_, '_> {
                 ui::metric(&ui, operations)
             )),
             ProgressEvent::Warn(warning) => self.io.line(&warning_line(&ui, &warning)),
+            // A log line, not part of the report: stderr, like the progress.
+            ProgressEvent::Info(note) => {
+                let err_ui = self.io.err_ui;
+                let line = format!("{} {}", ui::badge(&err_ui, "INFO"), ui::dim(&err_ui, &note));
+                err_ui.line(self.io.err, &line);
+            }
             ProgressEvent::DryRun {
                 op_id,
                 tensors,
@@ -2839,6 +2847,7 @@ impl ExtractObserver for SinkObserver<'_> {
                 ProgressEvent::ExtractPrompt { set, done, total }
             }
             ExtractEvent::Writing => ProgressEvent::ExtractWriting,
+            ExtractEvent::Note(note) => ProgressEvent::Info(note),
         };
         self.sink.event(progress);
         match self.interrupted.load(Ordering::SeqCst) {
@@ -3408,6 +3417,9 @@ fn native_generator(
         deps.probe.as_ref(),
         Arc::clone(&deps.interrupted),
     )?;
+    for note in generator.notes() {
+        sink.borrow_mut().event(ProgressEvent::Info(note.clone()));
+    }
     for warning in generator.warnings() {
         sink.borrow_mut()
             .event(ProgressEvent::Warn(warning.clone()));
@@ -3503,7 +3515,14 @@ pub(crate) fn bench_generator(
     match backend {
         Backend::Native => {
             let mut native = native_generator(model, deps, sink)?;
-            native.set_batching(generation.batch_size, generation.jobs, pool.clone());
+            match generation.batch_auto {
+                true => {
+                    let probe = deps.probe.as_ref();
+                    let note = native.auto_batching(probe, generation.jobs, pool.clone());
+                    sink.borrow_mut().event(ProgressEvent::Info(note));
+                }
+                false => native.set_batching(generation.batch_size, generation.jobs, pool.clone()),
+            }
             return Ok(Box::new(native));
         }
         Backend::MistralRs => {

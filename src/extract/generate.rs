@@ -26,7 +26,7 @@ use super::decoder::KvCache;
 use super::error::{ExtractError, Result};
 use super::forward::{build, Depth, ResidualForward};
 use super::weights::{check_tensors, load_tensors, required_tensors_full, SafetensorsDir};
-use super::{choose_dtype, plan_memory, DTypeChoice};
+use super::{dtype_decision, plan_memory, DTypeChoice};
 use crate::eval::sampling::{self, SamplingParams, Xoshiro256pp};
 use crate::hardware::HardwareProbe;
 
@@ -79,6 +79,7 @@ pub struct DecoderState {
     cfg: DecoderConfig,
     observer: Option<LayerObserver>,
     warnings: Vec<String>,
+    notes: Vec<String>,
 }
 
 /// `alpha_abs * v` broadcast on `[1, seq, hidden]`, added after layer `layer`.
@@ -333,6 +334,7 @@ impl DecoderState {
             cfg: cfg.clone(),
             observer: None,
             warnings: Vec::new(),
+            notes: Vec::new(),
         })
     }
 
@@ -354,13 +356,17 @@ impl DecoderState {
         let required = required_tensors_full(&cfg);
         let totals = check_tensors(&source, &required)?;
         let plan = plan_memory(&cfg, totals, max_context);
-        let mut warnings = Vec::new();
-        let dtype = choose_dtype(choice, plan, probe, &mut warnings)?;
-        let tensors = load_tensors(&source, &required, dtype, &Device::Cpu, &mut |_, _| {
-            ControlFlow::Continue(())
-        })?;
-        let mut state = Self::from_tensors(tensors, &cfg, dtype)?;
-        state.warnings = warnings;
+        let decision = dtype_decision(choice, plan, probe)?;
+        let tensors = load_tensors(
+            &source,
+            &required,
+            decision.dtype,
+            &Device::Cpu,
+            &mut |_, _| ControlFlow::Continue(()),
+        )?;
+        let mut state = Self::from_tensors(tensors, &cfg, decision.dtype)?;
+        state.warnings = decision.fallback().into_iter().collect();
+        state.notes = vec![decision.note()];
         Ok(state)
     }
 
@@ -371,6 +377,11 @@ impl DecoderState {
     /// Notes raised while loading (f32 did not fit, bf16 used).
     pub fn warnings(&self) -> &[String] {
         &self.warnings
+    }
+
+    /// What the load decided, for the log: the dtype and the free RAM it was chosen on.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     /// Installs (or removes) a callback run after every layer of every step.

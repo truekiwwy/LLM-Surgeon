@@ -71,12 +71,14 @@ pub fn count_items(kind: PillarKind, dataset: &Path, limit: Option<u32>) -> Resu
 }
 
 fn native(model: &Path, deps: &AppDeps) -> bench::Result<Box<dyn TextGenerator>> {
-    let generator = NativeGenerator::load(
+    let mut generator = NativeGenerator::load(
         model,
         DTypeChoice::Auto,
         deps.probe.as_ref(),
         Arc::clone(&deps.interrupted),
     )?;
+    // Batched decoding gives the tokens of the sequential one, several times faster.
+    generator.auto_batching(deps.probe.as_ref(), 1, None);
     Ok(Box::new(generator))
 }
 
@@ -115,6 +117,7 @@ pub(super) fn options(backend: Option<&BackendConfig>) -> GenOptions {
         batch_size: cfg.batch_size.unwrap_or(1),
         gpu_layers: cfg.gpu_layers,
         gguf_dtype: cfg.gguf_dtype.unwrap_or_default(),
+        batch_auto: cfg.batch_size.is_none(),
         ..GenOptions::default()
     }
 }

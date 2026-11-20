@@ -126,6 +126,45 @@ impl NativeGenerator {
         self.pool = pool;
     }
 
+    /// [`set_batching`](Self::set_batching) with [`auto_batching`](super::generation::auto_batching):
+    /// the RAM still free now that the weights are loaded, against the KV cache of one
+    /// sequence (K and V of every layer in f32 over the context the load planned for), and
+    /// the physical cores, unless `pool` (`--threads`) is given. What was chosen, for the log.
+    pub fn auto_batching(
+        &mut self,
+        probe: &dyn HardwareProbe,
+        jobs: usize,
+        pool: Option<Arc<rayon::ThreadPool>>,
+    ) -> String {
+        let cfg = self.state.config();
+        let head_dim = cfg
+            .head_dim
+            .unwrap_or(cfg.hidden_size / cfg.num_attention_heads.max(1));
+        let per_sequence = (2 * cfg.num_hidden_layers * cfg.num_key_value_heads * head_dim * 4)
+            as u64
+            * PLANNED_CONTEXT as u64;
+        let free = probe.system_ram().map_or(0, |m| m.available_bytes);
+        let cores = sysinfo::System::physical_core_count().ok();
+        let (batch, threads) = super::generation::auto_batching(free, per_sequence, cores);
+        let pool = pool.or_else(|| {
+            let built = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads?)
+                .build();
+            built.ok().map(Arc::new)
+        });
+        let used = pool
+            .as_ref()
+            .map_or_else(rayon::current_num_threads, |p| p.current_num_threads());
+        self.set_batching(batch, jobs, pool);
+        let mib = |b: u64| b as f64 / (1u64 << 20) as f64;
+        format!(
+            "génération native : lots de {batch} séquences au plus, {used} threads (RAM libre \
+             {:.0} Mio, cache KV {:.0} Mio par séquence ; --batch-size et --threads les fixent)",
+            mib(free),
+            mib(per_sequence)
+        )
+    }
+
     fn request(&self, prompt: &str, max_new_tokens: u32) -> eval::Result<GenRequest> {
         let failed = |e: &dyn std::fmt::Display| EvalError::Generator(e.to_string());
         let tokens =
@@ -153,6 +192,11 @@ impl NativeGenerator {
     /// Notes raised while loading (f32 did not fit, bf16 used).
     pub fn warnings(&self) -> &[String] {
         self.state.warnings()
+    }
+
+    /// The load's decisions for the log (dtype, free RAM).
+    pub fn notes(&self) -> &[String] {
+        self.state.notes()
     }
 }
 

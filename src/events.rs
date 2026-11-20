@@ -157,6 +157,7 @@ pub fn from_progress(event: &ProgressEvent) -> Vec<SurgeonEvent> {
         P::Warn(message) => one(S::Warning {
             message: message.clone(),
         }),
+        P::Info(message) => one(S::info(message.clone())),
         P::DryRun { op_id, tensors, .. } => one(S::info(format!(
             "dry-run {op_id} : {} tenseur(s) visé(s)",
             tensors.len()

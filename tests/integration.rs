@@ -2985,6 +2985,11 @@ fn extract_human_ui_golden_and_json_without_ui_bytes() {
     let d_prime = stats["d_prime"]
         .as_f64()
         .map_or("∞".to_owned(), |d| format!("{d:.2}"));
+    // The dtype line is a log on stderr: the report on stdout stays the golden.
+    assert!(
+        strip_ansi(&err).contains("[INFO]     dtype f32 (auto) : RAM libre "),
+        "{err}"
+    );
     let expected = [
         format!(
             "[EXTRACT]  Qwen2 · couche 2 · resid_post · pooling last  {}",

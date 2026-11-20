@@ -256,6 +256,8 @@ pub enum ExtractEvent {
         total: usize,
     },
     Writing,
+    /// A decision worth a log line (the dtype, the free RAM it was taken on).
+    Note(String),
 }
 
 /// Progress and cancellation: `Break` stops the run (checked between tensors and between
@@ -300,38 +302,101 @@ fn gib(bytes: u64) -> String {
     format!("{:.2} GiB", bytes as f64 / (1u64 << 30) as f64)
 }
 
-/// CPU only: RAM decides. `auto` prefers f32 and falls back to bf16.
+/// What [`dtype_decision`] chose, and on which numbers, for the logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DtypeDecision {
+    pub choice: DTypeChoice,
+    pub dtype: DType,
+    /// Free RAM when it was decided.
+    pub available_bytes: u64,
+    /// What the chosen dtype needs, margin included.
+    pub required_bytes: u64,
+    /// `auto` fell back to bf16: what f32 needed, margin included.
+    pub f32_required_bytes: Option<u64>,
+}
+
+impl DtypeDecision {
+    /// The log line of every load: dtype, how it was chosen, free RAM, need.
+    pub fn note(&self) -> String {
+        let how = match self.choice {
+            DTypeChoice::Auto => "auto",
+            _ => "demandé",
+        };
+        format!(
+            "dtype {} ({how}) : RAM libre {}, besoin {} marge incluse",
+            dtype_name(self.dtype),
+            gib(self.available_bytes),
+            gib(self.required_bytes)
+        )
+    }
+
+    /// The warning of a fallback to bf16, with the numbers that caused it.
+    pub fn fallback(&self) -> Option<String> {
+        let f32_needs = self.f32_required_bytes?;
+        Some(format!(
+            "repli en bf16 : f32 demande {} marge incluse, RAM libre {} ; bf16 est environ 2,5 \
+             fois plus lent sur CPU (forward de Qwen2.5-0.5B : 5,9 s en f32, 14,4 s en bf16). \
+             Un autre processus occupe-t-il la mémoire ? Libérez-la puis relancez pour revenir \
+             en f32",
+            gib(f32_needs),
+            gib(self.available_bytes)
+        ))
+    }
+}
+
+/// CPU only: RAM decides. `auto` prefers f32 and falls back to bf16 when f32 does not fit the
+/// RAM free at that moment; [`DtypeDecision::fallback`] says so with the numbers.
+pub fn dtype_decision(
+    choice: DTypeChoice,
+    plan: MemoryPlan,
+    probe: &dyn HardwareProbe,
+) -> Result<DtypeDecision> {
+    let policy = BudgetPolicy::default();
+    let available = probe
+        .system_ram()
+        .map_err(|e| ExtractError::InsufficientResources(e.to_string()))?
+        .available_bytes;
+    let need = |bytes: u64| required_ram(bytes, &policy);
+    let fits = |bytes: u64| need(bytes) <= available;
+    let refuse = |bytes: u64, dtype: &str| {
+        ExtractError::InsufficientResources(format!(
+            "{dtype} : besoin de {} (marge incluse), disponible {}",
+            gib(need(bytes)),
+            gib(available)
+        ))
+    };
+    let decided = |dtype: DType, bytes: u64, fell_back: bool| DtypeDecision {
+        choice,
+        dtype,
+        available_bytes: available,
+        required_bytes: need(bytes),
+        f32_required_bytes: fell_back.then(|| need(plan.f32_bytes)),
+    };
+    match choice {
+        DTypeChoice::F32 if fits(plan.f32_bytes) => Ok(decided(DType::F32, plan.f32_bytes, false)),
+        DTypeChoice::F32 => Err(refuse(plan.f32_bytes, "f32")),
+        DTypeChoice::Bf16 if fits(plan.bf16_bytes) => {
+            Ok(decided(DType::BF16, plan.bf16_bytes, false))
+        }
+        DTypeChoice::Bf16 => Err(refuse(plan.bf16_bytes, "bf16")),
+        DTypeChoice::Auto if fits(plan.f32_bytes) => Ok(decided(DType::F32, plan.f32_bytes, false)),
+        DTypeChoice::Auto if fits(plan.bf16_bytes) => {
+            Ok(decided(DType::BF16, plan.bf16_bytes, true))
+        }
+        DTypeChoice::Auto => Err(refuse(plan.bf16_bytes, "bf16")),
+    }
+}
+
+/// [`dtype_decision`], its fallback warning added to `warnings`.
 pub(crate) fn choose_dtype(
     choice: DTypeChoice,
     plan: MemoryPlan,
     probe: &dyn HardwareProbe,
     warnings: &mut Vec<String>,
 ) -> Result<DType> {
-    let policy = BudgetPolicy::default();
-    let available = probe
-        .system_ram()
-        .map_err(|e| ExtractError::InsufficientResources(e.to_string()))?
-        .available_bytes;
-    let fits = |bytes: u64| required_ram(bytes, &policy) <= available;
-    let refuse = |bytes: u64, dtype: &str| {
-        ExtractError::InsufficientResources(format!(
-            "{dtype} : besoin de {} (marge incluse), disponible {}",
-            gib(required_ram(bytes, &policy)),
-            gib(available)
-        ))
-    };
-    match choice {
-        DTypeChoice::F32 if fits(plan.f32_bytes) => Ok(DType::F32),
-        DTypeChoice::F32 => Err(refuse(plan.f32_bytes, "f32")),
-        DTypeChoice::Bf16 if fits(plan.bf16_bytes) => Ok(DType::BF16),
-        DTypeChoice::Bf16 => Err(refuse(plan.bf16_bytes, "bf16")),
-        DTypeChoice::Auto if fits(plan.f32_bytes) => Ok(DType::F32),
-        DTypeChoice::Auto if fits(plan.bf16_bytes) => {
-            warnings.push("f32 ne tient pas en RAM : calcul en bf16 (précision réduite)".into());
-            Ok(DType::BF16)
-        }
-        DTypeChoice::Auto => Err(refuse(plan.bf16_bytes, "bf16")),
-    }
+    let decision = dtype_decision(choice, plan, probe)?;
+    warnings.extend(decision.fallback());
+    Ok(decision.dtype)
 }
 
 pub(crate) fn dtype_name(dtype: DType) -> &'static str {
@@ -461,23 +526,20 @@ fn run_pipeline(
     let required = required_tensors(&cfg, req.layer);
     let totals = check_tensors(source, &required)?;
     let mut warnings = Vec::new();
-    let dtype = choose_dtype(
-        req.dtype,
-        plan_memory(&cfg, totals, req.max_tokens),
-        probe,
-        &mut warnings,
-    )?;
+    let decision = dtype_decision(req.dtype, plan_memory(&cfg, totals, req.max_tokens), probe)?;
+    warnings.extend(decision.fallback());
+    let dtype = decision.dtype;
     let tensor_bytes = totals.elements * dtype.size_in_bytes() as u64;
     let dtype_used = dtype_name(dtype).to_owned();
-    if observer
-        .on_event(ExtractEvent::Planned {
-            dtype_used: dtype_used.clone(),
-            weight_bytes: tensor_bytes,
-            tensors: required.len(),
-        })
-        .is_break()
-    {
-        return Err(ExtractError::Cancelled);
+    let planned = ExtractEvent::Planned {
+        dtype_used: dtype_used.clone(),
+        weight_bytes: tensor_bytes,
+        tensors: required.len(),
+    };
+    for event in [planned, ExtractEvent::Note(decision.note())] {
+        if observer.on_event(event).is_break() {
+            return Err(ExtractError::Cancelled);
+        }
     }
 
     let tokenizer = load_tokenizer(&req.model_dir)?;
@@ -925,4 +987,64 @@ pub fn model_name(model_dir: &Path) -> String {
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| model_dir.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hardware::{GpuInfo, MemoryInfo};
+
+    /// A machine with this much free RAM.
+    struct Free(u64);
+
+    impl HardwareProbe for Free {
+        fn system_ram(&self) -> crate::hardware::Result<MemoryInfo> {
+            Ok(MemoryInfo {
+                total_bytes: 64 << 30,
+                available_bytes: self.0,
+            })
+        }
+        fn gpus(&self) -> crate::hardware::Result<Vec<GpuInfo>> {
+            Ok(Vec::new())
+        }
+    }
+
+    const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn every_dtype_decision_is_logged_and_a_fallback_says_why() {
+        let plan = MemoryPlan {
+            f32_bytes: 4 * GIB,
+            bf16_bytes: 2 * GIB,
+        };
+        let policy = BudgetPolicy::default();
+        let f32_need = required_ram(plan.f32_bytes, &policy);
+        let bf16_need = required_ram(plan.bf16_bytes, &policy);
+
+        // Room for f32: f32, an info line, no warning.
+        let roomy = dtype_decision(DTypeChoice::Auto, plan, &Free(f32_need)).unwrap();
+        assert_eq!(roomy.dtype, DType::F32);
+        assert_eq!(roomy.fallback(), None);
+        let note = roomy.note();
+        assert!(note.starts_with("dtype f32 (auto) : RAM libre"), "{note}");
+        assert!(note.contains(&gib(f32_need)), "the need: {note}");
+
+        // Free RAM short of f32 at that moment: bf16, and the warning gives both numbers.
+        let short = dtype_decision(DTypeChoice::Auto, plan, &Free(f32_need - 1)).unwrap();
+        assert_eq!(short.dtype, DType::BF16);
+        assert_eq!(short.required_bytes, bf16_need);
+        let warning = short.fallback().unwrap();
+        assert!(warning.starts_with("repli en bf16"), "{warning}");
+        assert!(warning.contains(&gib(f32_need)) && warning.contains(&gib(f32_need - 1)));
+        assert!(warning.contains("2,5 fois plus lent"), "{warning}");
+        let mut warnings = Vec::new();
+        let dtype = choose_dtype(DTypeChoice::Auto, plan, &Free(f32_need - 1), &mut warnings);
+        assert_eq!((dtype.unwrap(), warnings), (DType::BF16, vec![warning]));
+
+        // An explicit choice is never a fallback; nothing that fits is an error.
+        let asked = dtype_decision(DTypeChoice::Bf16, plan, &Free(64 * GIB)).unwrap();
+        assert!(asked.note().contains("(demandé)") && asked.fallback().is_none());
+        assert!(dtype_decision(DTypeChoice::F32, plan, &Free(f32_need - 1)).is_err());
+        assert!(dtype_decision(DTypeChoice::Auto, plan, &Free(bf16_need - 1)).is_err());
+    }
 }

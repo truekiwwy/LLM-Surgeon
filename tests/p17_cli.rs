@@ -216,6 +216,43 @@ fn the_baseline_is_read_back_from_the_cache_until_an_input_changes() {
 }
 
 #[test]
+fn the_native_load_logs_its_dtype_and_batching() {
+    let dir = workspace();
+    let output = command(dir.path())
+        .args([
+            "bench",
+            "refusal",
+            "--model",
+            "qwen2-mini",
+            "--prompts",
+            "pos.json",
+        ])
+        .args(["--max-new-tokens", "4"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    // Logs on stderr, the report alone on stdout.
+    let log = String::from_utf8_lossy(&output.stderr);
+    assert!(log.contains("dtype f32 (auto) : RAM libre"), "{log}");
+    assert!(log.contains("génération native : lots de"), "{log}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("[INFO]"));
+    // With --batch-size, what was asked: no automatic batching to report.
+    let fixed = command(dir.path())
+        .args([
+            "bench",
+            "refusal",
+            "--model",
+            "qwen2-mini",
+            "--prompts",
+            "pos.json",
+        ])
+        .args(["--max-new-tokens", "4", "--batch-size", "2"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&fixed.stderr).contains("lots de"));
+}
+
+#[test]
 fn greedy_batches_change_nothing_but_the_generation_block() {
     let dir = workspace();
     let historical = refusal(dir.path(), &[]);
