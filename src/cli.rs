@@ -244,6 +244,10 @@ pub struct PipelineRunArgs {
     /// Consult a Test Set already consulted; the report is marked as contaminated.
     #[arg(long)]
     pub allow_test_reuse: bool,
+    /// Measure the candidates on hipfire although it serves its own cache of the model, not
+    /// the patched working copy (logged in the report).
+    #[arg(long)]
+    pub allow_stale_hipfire: bool,
     /// Run the worker in the background (output in <job>/worker.log) and return.
     #[arg(long)]
     pub detach: bool,
@@ -617,6 +621,10 @@ pub struct GenerationArgs {
     /// (lossless from bf16, twice the size).
     #[arg(long, value_enum)]
     pub gguf_dtype: Option<crate::eval::WeightType>,
+    /// hipfire: measure a working copy anyway (requantized and registered in hipfire under
+    /// its name); refused otherwise, since the daemon serves the weights of its own cache.
+    #[arg(long)]
+    pub allow_stale_hipfire: bool,
 }
 
 impl GenerationArgs {
@@ -638,6 +646,7 @@ impl GenerationArgs {
             threads: self.threads,
             gpu_layers: self.gpu_layers,
             ctx_size: self.ctx_size,
+            allow_stale_hipfire: self.allow_stale_hipfire,
         }
     }
 }

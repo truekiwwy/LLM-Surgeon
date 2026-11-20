@@ -266,11 +266,13 @@ en tête du détail. Un patch, des prompts ou des prompts d'évaluation passés 
 des fichiers nommés (`patch.json`...) signalés en commentaire. `bench eval` et `bench refusal`
 écrivent toujours `--backend`, pour que la configuration du terminal ne change pas la mesure.
 
-**hipfire et les copies patchées.** hipfire sert un cache quantifié enregistré par nom et ne lit
-jamais le dossier SafeTensors : `surgeon_bench` (`eval`, `refusal`) sur un modèle qui n'est pas
-un `.gguf` passe sur `native` quand la configuration ou l'appel nomme hipfire
-(`mcp::bench_backend`), avec l'avertissement `HIPFIRE_SET_ASIDE` en tête de l'enveloppe. Le fil
-le signale sous la ligne de l'appel.
+**hipfire et les copies de travail.** hipfire sert un cache quantifié enregistré par nom et ne
+lit jamais les fichiers donnés, GGUF compris : `surgeon_bench` (`eval`, `refusal`) sur une copie
+de travail (`backend::hipfire::is_working_copy` : `copies/` et sorties du projet, `work/` d'un
+job, dossier patché à côté de ses sauvegardes) passe sur `native` quand la configuration ou
+l'appel nomme hipfire (`mcp::bench_backend`), avec l'avertissement `HIPFIRE_SET_ASIDE` et le
+chemin en tête de l'enveloppe ; une copie `.gguf` est refusée. Le modèle d'origine reste mesuré
+par hipfire. Le fil le signale sous la ligne de l'appel.
 
 « Démarrer » sur un projet qui a un modèle d'origine mais aucune copie de travail lance d'abord
 la copie (`studio_copy`), puis la session dès qu'elle est faite ; un échec de la copie

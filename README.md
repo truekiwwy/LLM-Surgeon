@@ -1029,6 +1029,7 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | `--mistralrs-bin` | the user configuration | `mistralrs`: the binary itself; given, it is the only candidate. |
 | `--hipfire-url` | the user configuration, else `127.0.0.1:11435` when `hipfire` is found | `hipfire`: a daemon already running, `http://127.0.0.1:<port>` (loopback only). |
 | `--gguf-dtype` | `f16` | Matrix type of the temporary GGUF of a SafeTensors model: `f16` or `f32` (lossless from bf16, twice the size). |
+| `--allow-stale-hipfire` | off | `hipfire`: measure a working copy anyway (patched, inside a surgeon-gui project or a pipeline job). Refused otherwise: the daemon serves the quantized file registered under the model name, not the copy. Only once the copy is requantized and registered; the report says so. |
 
 The model's own answer is extracted by the first matching rule among: a `####` marker, the last balanced `\boxed{...}`, the last `**bold**` text, a phrase such as "the answer is X", then the last number. Numbers and fractions compare with a relative tolerance of 1e-9. This is a heuristic: read the per-item `items` of the `--json` output before trusting a score. This README publishes no GSM8K score: the real runs below use a fake llama.cpp.
 
@@ -1123,6 +1124,7 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--mistralrs-bin` | the user configuration | `mistralrs`: the binary itself; given, it is the only candidate. |
 | `--hipfire-url` | the user configuration, else `127.0.0.1:11435` when `hipfire` is found | `hipfire`: a daemon already running, `http://127.0.0.1:<port>` (loopback only). |
 | `--gguf-dtype` | `f16` | Matrix type of the temporary GGUF of a SafeTensors model: `f16` or `f32` (lossless from bf16, twice the size). |
+| `--allow-stale-hipfire` | off | `hipfire`: measure a working copy anyway (patched, inside a surgeon-gui project or a pipeline job). Refused otherwise: the daemon serves the quantized file registered under the model name, not the copy. Only once the copy is requantized and registered; the report says so. |
 
 An answer is a refusal when it contains one of twelve English markers (`I'm sorry`, `I cannot`, `As an AI`, ...; the list is in `data.markers`), compared without case and at word boundaries. `--marker-langs` adds the built-in French, Spanish or German markers and `--markers-file` your own; English stays first, and without these options nothing changes. Markers only find explicit refusals: a soft refusal is missed and a degraded or off-topic answer counts as compliance, so `data.items[]` keeps every answer in full (`index`, `refused`, `marker`, `output`) for review. `data` also has `n`, `refused`, `refusal_rate` and its Wilson interval (`ci95_low`, `ci95_high`); with a baseline, `baseline` and `paired` (`unblocked`, `newly_refused`, `delta_rate`, and its 95 % interval `delta_ci95_low` / `delta_ci95_high`, Newcombe's interval for paired proportions).
 
@@ -1527,6 +1529,7 @@ surgeon pipeline run [OPTIONS] --job-dir <JOB_DIR>
 | `--job-dir` | required | Job folder. |
 | `--allow-disable-safety` | off | Accept a configuration without a `safety` pillar (logged; CLI only). |
 | `--allow-test-reuse` | off | Consult a Test set already in the registry; the report is marked `test_contaminated` and cannot be GO (CLI only). |
+| `--allow-stale-hipfire` | off | With `--backend hipfire`, measure the candidates although the daemon serves its own cache of the model, not the patched working copy; refused before the first candidate otherwise (CLI only, noted in the report). |
 | `--detach` | off | Run the worker in the background (output in `<job>/worker.log`) and return. |
 | `--watch-stdin` | off | Stop when stdin closes; set by the MCP server for the workers it starts. |
 | `--backend` | `pipeline.json`, then the user configuration, else `native` | `native` (CPU), `mistralrs` (mistral.rs on the working copy as is), `llama-server` (GPU through llama.cpp) or `hipfire`. Only the binary pillars generate; `kl` and `logits` always read native logits. |

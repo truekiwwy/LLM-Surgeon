@@ -533,6 +533,55 @@ fn cancel_stops_the_worker_without_residue() {
     }
 }
 
+/// hipfire serves its own cache of the model, never the patched candidate: the job stops
+/// before the first candidate and before any Test Set is read or registered.
+#[test]
+fn hipfire_on_the_working_copies_fails_before_the_test_set_is_touched() {
+    let ws = Ws::new(12);
+    let closed = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut config = Ws::config();
+    config["backend"] = json!({"backend": "hipfire",
+        "hipfire_url": format!("http://127.0.0.1:{closed}")});
+    ws.write("pipeline.json", &config);
+    let (code, refused) = ws.run("job", &[]);
+    assert_eq!(code, 2, "{refused}");
+    assert_eq!(refused["error"]["kind"], "invalid_input");
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("copie de travail") && message.contains("--allow-stale-hipfire"),
+        "{message}"
+    );
+    let state = ws.read("job/state.json");
+    assert_eq!(state["status"], "failed", "{state}");
+    assert_eq!(state["stage"], "end");
+    assert!(state["dev_gates"].as_array().unwrap().is_empty());
+    assert!(tree(&ws.path("job/checkpoints")).is_empty(), "no candidate");
+    assert!(
+        tree(&ws.path("job/private")).len() <= 1,
+        "only the private/ marker"
+    );
+    assert!(
+        !ws.path("test_access.json").exists(),
+        "no Test Set consulted"
+    );
+
+    // The CLI override passes the guard: the run goes on until the daemon is asked for the
+    // base model (nothing listens here), still before any Test Set.
+    let (code, run) = ws.run("job-2", &["--allow-stale-hipfire"]);
+    assert_ne!(code, 0, "{run}");
+    let message = run["error"]["message"].as_str().unwrap();
+    assert!(!message.contains("copie de travail"), "{message}");
+    assert_eq!(
+        ws.read("job-2/job.json")["options"]["allow_stale_hipfire"],
+        true
+    );
+    assert!(!ws.path("test_access.json").exists());
+}
+
 #[test]
 fn the_safety_gate_is_mandatory_and_its_cli_override_is_logged() {
     let ws = Ws::new(12);

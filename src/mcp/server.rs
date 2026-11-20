@@ -363,6 +363,16 @@ impl<W: Write> Session<'_, W> {
         match outcome {
             Ok(mut tool_result) => {
                 tools_session::stamp(&ctx, name, started, &mut tool_result);
+                // A bench moved off hipfire says why in its result, and in the server's log.
+                let warnings = &tool_result["structuredContent"]["warnings"];
+                let set_aside = warnings
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str);
+                for w in set_aside.filter(|w| w.starts_with(tools::HIPFIRE_SET_ASIDE)) {
+                    let _ = writeln!(self.err, "surgeon mcp : {name} : {w}");
+                }
                 result(id, tool_result)
             }
             Err(payload) => {

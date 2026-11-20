@@ -168,6 +168,9 @@ pub fn worker_command(
     if options.allow_test_reuse {
         cmd.arg("--allow-test-reuse");
     }
+    if options.allow_stale_hipfire {
+        cmd.arg("--allow-stale-hipfire");
+    }
     if let Some(b) = flags.backend {
         cmd.args(["--backend", b.label()]);
     }

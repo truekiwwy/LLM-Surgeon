@@ -178,9 +178,12 @@ de sa liste blanche (`-m`, `--host 127.0.0.1`, `--port`, `--api-key` aléatoire,
 (`additionalProperties: false`), et `llama_cpp_dir` passe par le bac à sable. `mistralrs`
 lance mistral.rs sur le dossier SafeTensors tel quel, `hipfire` interroge un démon déjà lancé ;
 leurs emplacements viennent de la configuration de l'opérateur, jamais d'un argument. hipfire
-sert son propre cache quantifié et ne lit pas le modèle donné : sur un modèle qui n'est pas un
-`.gguf` (une copie SafeTensors patchée), `eval` et `refusal` passent sur `native` et
-l'enveloppe commence ses `warnings` par « backend hipfire écarté ». Voir la
+sert son propre cache quantifié et ne lit pas le modèle donné : sur une copie de travail
+(`copies/` ou sorties d'un projet surgeon-gui, `work/` d'un job pipeline, dossier à côté des
+sauvegardes d'`apply`), `eval` et `refusal` passent sur `native` et l'enveloppe commence ses
+`warnings` par « backend hipfire écarté (<chemin>) », écrit aussi sur stderr ; une copie
+`.gguf` est refusée (`invalid_input`). Le modèle d'origine reste servi par hipfire. Aucun
+argument ne lève cette règle (pas d'`--allow-stale-hipfire` côté agent). Voir la
 section « Échantillonnage, lots et backends » du README.
 
 `eval` avec `backend: "native"` et `refusal` génèrent en Rust pur sur le CPU, sur un dossier

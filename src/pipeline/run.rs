@@ -36,6 +36,10 @@ pub struct RunOptions {
     /// CLI only: a Test Set already consulted may be consulted again; the report is then
     /// marked as contaminated.
     pub allow_test_reuse: bool,
+    /// CLI only: the candidates may be measured on hipfire although it serves its own cache
+    /// of the model, not the patched copy; the report says so.
+    #[serde(default)]
+    pub allow_stale_hipfire: bool,
 }
 
 /// `<job>/job.json`: the resolved configuration the job is bound to, and its options.
@@ -344,6 +348,10 @@ impl Worker<'_> {
         let start = self.state.units_done;
         let deps = self.deps;
         let backend = self.file.config.backend.clone();
+        let generation = crate::bench::generation::GenOptions {
+            allow_stale_hipfire: self.file.options.allow_stale_hipfire,
+            ..measure::options(backend.as_ref())
+        };
         let (outcomes, items) = {
             let state = std::cell::RefCell::new(&mut *self);
             measure::binary(
@@ -351,6 +359,7 @@ impl Worker<'_> {
                 dataset,
                 model,
                 backend.as_ref(),
+                generation,
                 deps,
                 &deps.interrupted,
                 &mut |done, _| {
@@ -680,8 +689,30 @@ pub fn run(job: &Job, file: JobFile, deps: &AppDeps) -> Result<Ended> {
     outcome
 }
 
+/// Every candidate is measured on a patched working copy: on hipfire, which serves its own
+/// cache of the model, that is refused before the first candidate and the first read of a
+/// Test Set, unless `--allow-stale-hipfire` (then the warning for the report).
+fn hipfire_guard(w: &Worker) -> Result<Option<String>> {
+    let backend = w.config().backend.as_ref().and_then(|b| b.backend);
+    if backend != Some(Backend::Hipfire) {
+        return Ok(None);
+    }
+    let candidate = w.job.work().join("model");
+    crate::backend::hipfire::validate_hipfire_target(
+        &candidate,
+        true,
+        w.file.options.allow_stale_hipfire,
+    )
+    .map(|decision| decision.warning)
+    .map_err(|e| PipelineError::Config(vec![format!("backend hipfire : {e}")]))
+}
+
 fn execute(w: &mut Worker) -> Result<Ended> {
     let config = w.config().clone();
+    let hipfire_warning = hipfire_guard(w)?;
+    if let Some(warning) = &hipfire_warning {
+        eprintln!("surgeon pipeline : {warning}");
+    }
     w.step("static_checks", "modèle d'origine".into())?;
     let model_before = sha256_dir(&config.model)?;
     let check = core_check(
@@ -985,7 +1016,11 @@ fn execute(w: &mut Worker) -> Result<Ended> {
         candidates,
         selected,
         test,
-        notes: NOTES.iter().map(|s| s.to_string()).collect(),
+        notes: NOTES
+            .iter()
+            .map(|s| s.to_string())
+            .chain(hipfire_warning)
+            .collect(),
     };
     write_json(&w.job.path("results.json"), &results)?;
     write_json(&w.job.path("report.json"), &report(w, &results)?)?;

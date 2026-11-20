@@ -120,11 +120,14 @@ pub(super) fn options(backend: Option<&BackendConfig>) -> GenOptions {
 }
 
 /// A binary pillar (safety, unblocking, gsm8k) of the model on the dataset: success per item.
+/// `generation` is [`options`] of `backend` with the run's `--allow-*` choices.
+#[allow(clippy::too_many_arguments)]
 pub fn binary(
     pillar: &PillarConfig,
     dataset: &Path,
     model: &Path,
     backend: Option<&BackendConfig>,
+    generation: GenOptions,
     deps: &AppDeps,
     cancel: &AtomicBool,
     on_item: &mut dyn FnMut(usize, usize),
@@ -142,7 +145,7 @@ pub fn binary(
                     .unwrap_or(bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
                 chat_template: pillar.chat_template.unwrap_or_default(),
                 markers: Markers::default(),
-                generation: options(backend),
+                generation,
                 backend: backend
                     .and_then(|b| b.backend)
                     .unwrap_or(Backend::Native)
@@ -175,7 +178,7 @@ pub fn binary(
                 llama_cpp_dir: backend.and_then(|b| b.llama_cpp_dir.clone()),
                 timeout: None,
                 min_accuracy: None,
-                generation: options(backend),
+                generation,
             };
             let mut make = |m: &Path| generator(m, backend, &req.generation, deps);
             let run = bench::score::run(&req, deps.runner.as_ref(), &mut make, cancel, on_item)
