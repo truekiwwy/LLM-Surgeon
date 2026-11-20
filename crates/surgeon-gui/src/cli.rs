@@ -51,6 +51,10 @@ pub struct Cli {
     /// démarrage. Les composants installés et le config.toml du moteur sont conservés.
     #[arg(long)]
     pub reset_settings: bool,
+    /// Retire de la distribution WSL ce que l'installation de hipfire a écrit pour une carte
+    /// hors de la matrice ROCm (la ligne gfx1102 de dids.conf), puis quitte.
+    #[arg(long)]
+    pub hipfire_cleanup: bool,
 }
 
 /// `1440x900` as `[1440, 900]`.

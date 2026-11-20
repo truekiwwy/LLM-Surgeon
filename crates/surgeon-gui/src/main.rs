@@ -70,6 +70,18 @@ fn main() -> ExitCode {
     logging::init(&paths::logs_dir());
     logging::info(&format!("surgeon-gui {} start", env!("CARGO_PKG_VERSION")));
 
+    if cli.hipfire_cleanup {
+        return match surgeon_gui::hipfire_setup::cleanup() {
+            Ok(out) => {
+                print!("{out}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if cli.reset_settings {
         match Settings::reset(&paths::settings_path()) {
             Ok(()) => println!("réglages effacés : l'assistant se relancera au prochain démarrage"),

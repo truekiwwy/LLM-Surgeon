@@ -55,9 +55,14 @@ Diagnostics > Repair).
      Ubuntu 24.04 in WSL2 when missing, then as root in it ROCm 7.2.1, librocdxg 1.2.2 (SHA-256
      checked), Rust and hipfire v0.4.6 (its official `install.sh --yes`), starts `hipfire serve`
      and waits for it; the backend switches as soon as it answers (`hipfire_setup.rs`). The
-     GPU is first checked against the ROCm-under-WSL list (RX 9070/9060/7900/7800 XT, Ryzen AI):
-     an unlisted card (an RX 7600 XT, gfx1102) needs *Run it anyway*. The AMD Adrenalin 26.2.2
-     driver for WSL2 is the user's to install on Windows.
+     GPU is first checked against the ROCm-under-WSL list (RX 9070/9060/7900/7800 XT, Ryzen AI,
+     and the RX 7600 XT through its workarounds): another card needs *Run it anyway*. The RX 7600
+     XT (gfx1102, outside librocdxg's matrix) gets three workarounds: the line `0x7480,11,0,2` in
+     `/opt/rocm/share/rocdxg/dids.conf` (between `# >>> weight-surgeon` markers, `dids.conf.bak`
+     taken first, skipped when already there, removed by `surgeon-gui --hipfire-cleanup`),
+     `LD_PRELOAD=/opt/rocm-7.2.1/lib/libamdhip64.so` for hipfire's installer and daemon, and
+     `hipfire serve --spec ngram`; the last two live in the commands only. The AMD Adrenalin
+     26.2.2 driver for WSL2 is the user's to install on Windows.
    - **mistral.rs**: the official CPU build (`mistralrs-cpu-x86_64-pc-windows-msvc.zip`) is
      downloaded; with an NVIDIA GPU, *Build with CUDA* runs `cargo install --git
      …/mistral.rs --tag <release> mistralrs-cli --features cuda` when `cargo` and `nvcc`
