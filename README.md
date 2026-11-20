@@ -806,8 +806,19 @@ surgeon autotune [OPTIONS] --model <MODEL> --vector <VECTOR> --eval-dataset <EVA
 | `--chat-template` | the vector's | Override of the vector's chat template. |
 | `--out` | none | `patch.json` to write (validated first). |
 | `--overwrite` | off | Replace an existing `--out`. |
+| `--refusal-prompts` | none | Prompts the patched model should stop refusing (file or `builtin:refusals`): turns on the scale selection below. |
+| `--target-refusal-rate` | 0.1 | Refusal rate the selected scale must reach in generation. |
+| `--scales` | `0.25,0.5,0.75,1,1.25,1.5` | Candidate scales c of the fitted coefficients. |
+| `--probe-top-k` | 2 | Candidates the probe hands to the full generation. |
+| `--no-probe-prefilter` | off | Generate every candidate, without the probe. |
+| `--retention-dataset` | none | Capability set also generated on the base and the finalists, as `bench eval` does (file or `builtin:math`...). |
+| `--retention-limit` | 20 | First N questions of `--retention-dataset`. |
 
 `data` includes `alphas`, `ridge`, `linearity`, `validation`, `recommendation` and `patch`. Exit code 7 when the system is singular or ill-conditioned. Note that the written `patch.json` stores the absolute path of the vector file.
+
+With `--refusal-prompts`, the fitted coefficients are then tried at each scale c·α, applied in memory (the whole model is loaded once; no weight is read again between candidates), and the patch is written at the smallest scale whose generated answers reach `--target-refusal-rate`. Two stages: the first-token probe of `bench refusal-probe` scores every scale in one forward pass per prompt and rejects those whose probed refusal rate misses the target or whose refusal probability does not drop below the base model's; only the `--probe-top-k` best are generated as `bench refusal` does (40 tokens, markers, native batches), plus the retention set if given. The probe never decides alone, and `direction-projection` never screens (it over-triggers on sensitive legitimate prompts). The base model's answers come from the reference cache shared with `bench refusal` and `bench eval`. `data.selection` gives, per scale, the probed and the generated refusal rates, the retention accuracy and why a scale was rejected, the candidates probed and generated, the generations saved, and the time of each stage; `--events` streams the same figures as metrics (`probe_refusal_rate`, `generation_refusal_rate` per `scale:<c>`, `candidates_probed`, `candidates_generated`, `generations_saved`). When no scale reaches the target, the ridge coefficients are written as they are, with a warning.
+
+Measured on Qwen2.5-0.5B-Instruct (6 CPU cores, refusal direction of layer 12, ridge on 25 prompts and 9 layers, `builtin:refusals`, six scales, base answers read from the cache in both runs): the probe generated 2 candidates out of 6 and picked the same scale (0.5, generated refusals 5.6 % against 16.7 % for the base); the selection took 50.5 s (25.0 s of probes, 25.5 s of generation) against 74.6 s with `--no-probe-prefilter`, and the whole command 77.7 s against 102.8 s.
 
 <a id="cmd-diff"></a>
 #### `surgeon diff`
@@ -2168,7 +2179,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 | `surgeon_eval` | Loop and expectation checks, conditional GGUF export. |
 | `surgeon_extract` | Steering vector from a Qwen2, Llama/Mistral or Qwen3 layer. |
 | `surgeon_bench` | Measurement, with `mode` `dump`, `logits`, `ppl`, `eval` or `refusal`, the heuristic `refusal_probe` (no generation, never a final proof), and the judge calibration `judge_sample`, `judge_eval`; built-in probe sets need no file: `builtin:math`, `builtin:logic`, `builtin:general` (eval) and `builtin:refusals` (refusal). |
-| `surgeon_autotune` | Per-layer coefficients by ridge regression. |
+| `surgeon_autotune` | Per-layer coefficients by ridge regression, and with `refusal_prompts` the smallest scale of them that reaches a target refusal rate in generation (probe first, then the finalists generated). |
 | `surgeon_diff` | Difference of two checkpoints written to a new `.surgery`. |
 | `surgeon_lora` | `mode` `merge` (adapter folded in place) or `extract` (adapter written). |
 | `surgeon_pipeline` | Decision on a patch: `action` `plan`, `start` (background worker, returns a `job_id` at once), `status`, `cancel`, `report`, `promote_patch` ([docs/PIPELINE.md](docs/PIPELINE.md)). |

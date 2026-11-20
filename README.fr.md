@@ -808,8 +808,19 @@ surgeon autotune [OPTIONS] --model <MODEL> --vector <VECTOR> --eval-dataset <EVA
 | `--chat-template` | celui du vecteur | Remplace le gabarit de chat du vecteur. |
 | `--out` | aucun | `patch.json` à écrire (validé d'abord). |
 | `--overwrite` | désactivé | Remplace un `--out` existant. |
+| `--refusal-prompts` | aucun | Prompts que le modèle patché ne doit plus refuser (fichier ou `builtin:refusals`) : active la sélection d'échelle ci-dessous. |
+| `--target-refusal-rate` | 0.1 | Taux de refus que l'échelle retenue doit atteindre en génération. |
+| `--scales` | `0.25,0.5,0.75,1,1.25,1.5` | Échelles c candidates des coefficients ajustés. |
+| `--probe-top-k` | 2 | Candidats que la sonde passe à la génération complète. |
+| `--no-probe-prefilter` | désactivé | Génère chaque candidat, sans sonde. |
+| `--retention-dataset` | aucun | Jeu de capacités aussi généré sur la base et les finalistes, comme `bench eval` (fichier ou `builtin:math`...). |
+| `--retention-limit` | 20 | N premières questions de `--retention-dataset`. |
 
 `data` contient `alphas`, `ridge`, `linearity`, `validation`, `recommendation` et `patch`. Code de sortie 7 quand le système est singulier ou mal conditionné. Notez que le `patch.json` écrit enregistre le chemin absolu du fichier de vecteur.
+
+Avec `--refusal-prompts`, les coefficients ajustés sont ensuite essayés à chaque échelle c·α, appliqués en mémoire (le modèle entier est chargé une fois ; aucun poids n'est relu entre deux candidats), et le patch est écrit à la plus petite échelle dont les réponses générées atteignent `--target-refusal-rate`. Deux étapes : la sonde du premier token de `bench refusal-probe` note chaque échelle en une passe avant par prompt et écarte celles dont le taux de refus sondé manque la cible ou dont la probabilité de refus ne baisse pas sous celle du modèle de base ; seules les `--probe-top-k` meilleures sont générées comme le fait `bench refusal` (40 tokens, marqueurs, lots natifs), avec le jeu de rétention s'il est donné. La sonde ne décide jamais seule, et `direction-projection` ne sert jamais de filtre (elle sur-déclenche sur les prompts légitimes sensibles). Les réponses du modèle de base viennent du cache des références partagé avec `bench refusal` et `bench eval`. `data.selection` donne, par échelle, les taux de refus sondé et généré, l'exactitude de rétention et la raison d'un rejet, les candidats sondés et générés, les générations économisées, et la durée de chaque étape ; `--events` diffuse les mêmes chiffres en métriques (`probe_refusal_rate`, `generation_refusal_rate` par `scale:<c>`, `candidates_probed`, `candidates_generated`, `generations_saved`). Quand aucune échelle n'atteint la cible, les coefficients du ridge sont écrits tels quels, avec un avertissement.
+
+Mesuré sur Qwen2.5-0.5B-Instruct (6 cœurs CPU, direction de refus de la couche 12, ridge sur 25 prompts et 9 couches, `builtin:refusals`, six échelles, réponses de la base lues dans le cache dans les deux runs) : la sonde a fait générer 2 candidats sur 6 et retenu la même échelle (0.5, refus générés 5,6 % contre 16,7 % pour la base) ; la sélection a pris 50,5 s (25,0 s de sondes, 25,5 s de génération) contre 74,6 s avec `--no-probe-prefilter`, et la commande entière 77,7 s contre 102,8 s.
 
 <a id="cmd-diff"></a>
 #### `surgeon diff`
@@ -2170,7 +2181,7 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 | `surgeon_eval` | Contrôles de boucles et d'attentes, export GGUF conditionnel. |
 | `surgeon_extract` | Vecteur de steering depuis une couche Qwen2, Llama/Mistral ou Qwen3. |
 | `surgeon_bench` | Mesure, avec `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal`, la sonde heuristique `refusal_probe` (sans génération, jamais une preuve finale), et la calibration du juge `judge_sample`, `judge_eval` ; les jeux de sondes intégrés se passent de fichier : `builtin:math`, `builtin:logic`, `builtin:general` (eval) et `builtin:refusals` (refusal). |
-| `surgeon_autotune` | Coefficients par couche par régression ridge. |
+| `surgeon_autotune` | Coefficients par couche par régression ridge, et avec `refusal_prompts` leur plus petite échelle qui atteint un taux de refus cible en génération (sonde d'abord, puis génération des finalistes). |
 | `surgeon_diff` | Différence de deux checkpoints écrite dans un nouveau `.surgery`. |
 | `surgeon_lora` | `mode` `merge` (adaptateur fusionné en place) ou `extract` (adaptateur écrit). |
 | `surgeon_pipeline` | Décision sur un patch : `action` `plan`, `start` (travailleur en arrière-plan, renvoie un `job_id` tout de suite), `status`, `cancel`, `report`, `promote_patch` ([docs/PIPELINE.md](docs/PIPELINE.md)). |

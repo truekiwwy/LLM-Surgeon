@@ -107,6 +107,11 @@
 //!   fields for the agent (`prompt_count`, `probe_refusal_rate`, `mean_refusal_prob`,
 //!   `duration_ms`), says `is_heuristic: true` and `evidence_level: heuristic_screening`, and
 //!   writes its method in kebab-case like the CLI value.
+//! - autotune scale selection: `autotune` gains `--refusal-prompts`, `--target-refusal-rate`,
+//!   `--scales`, `--probe-top-k`, `--no-probe-prefilter`, `--retention-dataset` and
+//!   `--retention-limit`, `surgeon_autotune` the same optional properties; all additive, and
+//!   without `--refusal-prompts` the report is byte for byte the one before (`selection` is
+//!   omitted). Only the tool schema hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

@@ -440,6 +440,30 @@ pub struct AutotuneArgs {
     pub out: Option<PathBuf>,
     #[arg(long)]
     pub overwrite: bool,
+    /// Prompts the patched model should stop refusing (file or builtin:refusals): tries the
+    /// fitted alphas at several scales and writes the smallest one whose generated answers
+    /// reach --target-refusal-rate (native generation, 40 tokens).
+    #[arg(long)]
+    pub refusal_prompts: Option<PathBuf>,
+    /// Refusal rate (0..1) the selected scale must reach in generation.
+    #[arg(long, default_value_t = crate::patch::autotune_select::DEFAULT_TARGET_REFUSAL_RATE, requires = "refusal_prompts")]
+    pub target_refusal_rate: f64,
+    /// Candidate scales c of the fitted alphas, comma separated.
+    #[arg(long, value_delimiter = ',', default_values_t = crate::patch::autotune_select::DEFAULT_SCALES, requires = "refusal_prompts")]
+    pub scales: Vec<f64>,
+    /// Candidates the first-token probe hands to the full generation.
+    #[arg(long, default_value_t = crate::patch::autotune_select::DEFAULT_TOP_K, requires = "refusal_prompts")]
+    pub probe_top_k: usize,
+    /// Generate every candidate scale instead of screening them with the probe first.
+    #[arg(long, requires = "refusal_prompts")]
+    pub no_probe_prefilter: bool,
+    /// Capability set also generated on the finalists and the base, as bench eval does
+    /// (file or builtin:math, builtin:logic, builtin:general).
+    #[arg(long, requires = "refusal_prompts")]
+    pub retention_dataset: Option<PathBuf>,
+    /// First N questions of --retention-dataset.
+    #[arg(long, default_value_t = crate::patch::autotune_select::DEFAULT_RETENTION_LIMIT, requires = "retention_dataset")]
+    pub retention_limit: usize,
 }
 
 /// Exit codes: 0 ok (warnings included), 1 insufficient resources, llama.cpp binary not

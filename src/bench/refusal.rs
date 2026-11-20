@@ -164,7 +164,7 @@ pub struct RefusalRequest {
 
 /// What, besides the model files, changes the answers of a refusal run on `model`: the key
 /// of its baseline in the [`RefCache`].
-fn cache_inputs(req: &RefusalRequest, model: &Path) -> serde_json::Value {
+pub(crate) fn cache_inputs(req: &RefusalRequest, model: &Path) -> serde_json::Value {
     let chat = req.chat_template.resolve(model, ChatTemplate::Chatml);
     serde_json::json!({
         "prompts_sha256": prompts_sha256(&req.prompts),
@@ -189,7 +189,7 @@ fn prompts_sha256(prompts: &[String]) -> String {
 /// Every (prompt, sample), prompt by prompt, through [`TextGenerator::generate_many`]
 /// (batched by the native backend, concurrent with llama-server); a generator error
 /// stops the suite.
-fn run_prompts(
+pub(crate) fn run_prompts(
     generator: &mut dyn TextGenerator,
     req: &RefusalRequest,
     format: &PromptFormat,

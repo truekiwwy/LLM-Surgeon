@@ -38,6 +38,7 @@ use crate::extract::{
     DEFAULT_LEACE_RCOND, DEFAULT_LEACE_SHRINKAGE,
 };
 use crate::patch::autotune::{self, parse_layer_range, AutotuneRequest, EvalSource, L2Reg};
+use crate::patch::autotune_select::{self, SelectionRequest};
 use crate::patch::{LayerSelection, LayersField, PatchFile, Projection, ValidationIssue};
 use crate::plugin::{unknown_method_message, Registry, DEFAULT_METHOD};
 use crate::ui::Ui;
@@ -912,6 +913,43 @@ pub struct AutotuneToolArgs {
     pub out: Option<PathBuf>,
     #[serde(default)]
     pub overwrite: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Prompts que le modèle patché ne doit plus refuser (fichier ou builtin:refusals) : essaie les α du ridge à plusieurs échelles et écrit la plus petite dont les réponses générées atteignent target_refusal_rate. Sonde first-token-prob d'abord, génération complète (40 tokens, natif) des probe_top_k finalistes ; data.selection détaille sonde et génération."
+    )]
+    pub refusal_prompts: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "Avec refusal_prompts : taux de refus (0..1) à atteindre en génération, défaut 0.1."
+    )]
+    pub target_refusal_rate: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Avec refusal_prompts : échelles c candidates des α, défaut [0.25, 0.5, 0.75, 1, 1.25, 1.5]."
+    )]
+    pub scales: Option<Vec<f64>>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "Avec refusal_prompts : candidats passés de la sonde à la génération complète, défaut 2."
+    )]
+    pub probe_top_k: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "Avec refusal_prompts : génère chaque candidat sans sonde préalable (défaut false)."
+    )]
+    pub no_probe_prefilter: Option<bool>,
+    #[serde(default)]
+    #[schemars(
+        description = "Avec refusal_prompts : jeu de capacités aussi généré sur les finalistes et la base, comme surgeon_bench mode eval (fichier ou builtin:math, builtin:logic, builtin:general)."
+    )]
+    pub retention_dataset: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "Avec retention_dataset : N premières questions, défaut 20."
+    )]
+    pub retention_limit: Option<u32>,
 }
 
 fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
@@ -974,6 +1012,47 @@ fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             .map(|o| sandboxed(ctx, "out", o, &root))
             .transpose()?,
         overwrite: args.overwrite,
+        selection: match &args.refusal_prompts {
+            None => {
+                let orphan = args.target_refusal_rate.is_some()
+                    || args.scales.is_some()
+                    || args.probe_top_k.is_some()
+                    || args.no_probe_prefilter.is_some()
+                    || args.retention_dataset.is_some()
+                    || args.retention_limit.is_some();
+                if orphan {
+                    return Err(bad(
+                        "target_refusal_rate, scales, probe_top_k, no_probe_prefilter et retention_* demandent refusal_prompts".into(),
+                    ));
+                }
+                None
+            }
+            Some(prompts) => Some(SelectionRequest {
+                prompts: readable_or_builtin(ctx, "refusal_prompts", prompts, &root)?,
+                target_refusal_rate: args
+                    .target_refusal_rate
+                    .unwrap_or(autotune_select::DEFAULT_TARGET_REFUSAL_RATE),
+                scales: args
+                    .scales
+                    .unwrap_or_else(|| autotune_select::DEFAULT_SCALES.to_vec()),
+                top_k: args
+                    .probe_top_k
+                    .map_or(autotune_select::DEFAULT_TOP_K, |k| k as usize),
+                prefilter: !args.no_probe_prefilter.unwrap_or(false),
+                retention: args
+                    .retention_dataset
+                    .as_ref()
+                    .map(|d| readable_or_builtin(ctx, "retention_dataset", d, &root))
+                    .transpose()?
+                    .map(|d| {
+                        let limit = args
+                            .retention_limit
+                            .map_or(autotune_select::DEFAULT_RETENTION_LIMIT, |n| n as usize);
+                        (d, limit)
+                    }),
+                ref_cache: crate::bench::ref_cache::RefCache::from_env(),
+            }),
+        },
     };
     core_autotune(&request, ctx.deps, &Ui::off(), ctx.sink)
 }

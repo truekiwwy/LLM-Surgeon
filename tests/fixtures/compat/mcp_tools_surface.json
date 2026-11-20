@@ -1721,6 +1721,13 @@
         "model": {
           "type": "string"
         },
+        "no_probe_prefilter": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "objective": {
           "anyOf": [
             {
@@ -1794,6 +1801,15 @@
             "null"
           ]
         },
+        "probe_top_k": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "proj": {
           "default": null,
           "enum": [
@@ -1814,6 +1830,40 @@
           "minimum": 0.0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "refusal_prompts": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retention_dataset": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retention_limit": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scales": {
+          "default": null,
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },
@@ -1849,6 +1899,14 @@
           ]
         },
         "target_projection": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "target_refusal_rate": {
           "default": null,
           "format": "double",
           "type": [

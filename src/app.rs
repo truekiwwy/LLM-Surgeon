@@ -103,6 +103,7 @@ use crate::kernel::{self, IoConfig, IoMeter, KernelChoice, Level};
 use crate::patch::autotune::{
     self, AutotuneError, AutotuneEvent, AutotuneRequest, AutotuneRun, EvalSource,
 };
+use crate::patch::autotune_select::SelectionRequest;
 use crate::patch::gguf::{self, GgufApplyArgs, GgufApplyError, Requant};
 use crate::patch::{
     self, apply_patch, apply_patch_with, load_patch, untie, validate_patch, ApplyOptions,
@@ -1331,6 +1332,18 @@ pub enum ProgressEvent {
     },
     /// `autotune`: responses measured, ridge being solved.
     AutotuneSolve,
+    /// `autotune --refusal-prompts`: one candidate scale measured (`probe` or `generation`).
+    AutotuneScale {
+        scale: f64,
+        stage: &'static str,
+        refusal_rate: f64,
+    },
+    /// `autotune --refusal-prompts`: candidates probed and generated, generations saved.
+    AutotuneSelection {
+        probed: usize,
+        generated: usize,
+        saved: usize,
+    },
     /// `graph`: the model is open, the SVD loop is about to start.
     GraphStart {
         model: PathBuf,
@@ -1723,6 +1736,24 @@ impl ProgressSink for CliSink<'_, '_> {
                 let line = format!("{} {}", ui::badge(&err_ui, "INFO"), ui::dim(&err_ui, &note));
                 err_ui.line(self.io.err, &line);
             }
+            ProgressEvent::AutotuneScale {
+                scale,
+                stage,
+                refusal_rate,
+            } => {
+                let err_ui = self.io.err_ui;
+                let stage = match stage {
+                    "probe" => "sonde",
+                    _ => "génération",
+                };
+                let line = format!(
+                    "{} échelle {} · {stage} · refus {}",
+                    ui::badge(&err_ui, "SCALE"),
+                    ui::metric(&err_ui, scale),
+                    ui::metric(&err_ui, format!("{:.1} %", refusal_rate * 100.0))
+                );
+                err_ui.line(self.io.err, &line);
+            }
             ProgressEvent::DryRun {
                 op_id,
                 tensors,
@@ -1867,6 +1898,7 @@ impl ProgressSink for CliSink<'_, '_> {
             | ProgressEvent::BenchJudgeVerdict { .. }
             | ProgressEvent::AutotuneForward { .. }
             | ProgressEvent::AutotuneSolve
+            | ProgressEvent::AutotuneSelection { .. }
             | ProgressEvent::Surgery(_) => {}
         }
     }
@@ -3893,6 +3925,21 @@ fn autotune_cli(
         chat_template: args.chat_template,
         out: args.out.clone(),
         overwrite: args.overwrite,
+        selection: args
+            .refusal_prompts
+            .clone()
+            .map(|prompts| SelectionRequest {
+                prompts,
+                target_refusal_rate: args.target_refusal_rate,
+                scales: args.scales.clone(),
+                top_k: args.probe_top_k,
+                prefilter: !args.no_probe_prefilter,
+                retention: args
+                    .retention_dataset
+                    .clone()
+                    .map(|d| (d, args.retention_limit)),
+                ref_cache: bench::ref_cache::RefCache::from_env(),
+            }),
     };
     core_autotune(&request, deps, ui, sink)
 }
@@ -3915,6 +3962,25 @@ pub fn core_autotune(
                 sink.event(ProgressEvent::AutotuneForward { done, total })
             }
             AutotuneEvent::Solve => sink.event(ProgressEvent::AutotuneSolve),
+            AutotuneEvent::Scale {
+                scale,
+                stage,
+                refusal_rate,
+            } => sink.event(ProgressEvent::AutotuneScale {
+                scale,
+                stage: stage.as_str(),
+                refusal_rate,
+            }),
+            AutotuneEvent::Selected {
+                probed,
+                generated,
+                saved,
+            } => sink.event(ProgressEvent::AutotuneSelection {
+                probed,
+                generated,
+                saved,
+            }),
+            AutotuneEvent::Note(note) => sink.event(ProgressEvent::Info(note)),
         },
     )
     .map_err(|e| autotune_failure(&e))?;
@@ -3978,6 +4044,41 @@ fn autotune_text(ui: &Ui, run: &AutotuneRun) -> String {
             ui::metric(ui, format!("{:.4}", r.validation.target_rmse_after))
         ),
     ];
+    if let Some(s) = &r.selection {
+        let pct = |v: Option<f64>| v.map_or("—".to_owned(), |x| format!("{:.1} %", x * 100.0));
+        lines.push(format!(
+            "{} {} échelles · {} sondées · {} générées · {} générations économisées · cible {} → {}",
+            ui::badge(ui, "SELECT"),
+            ui::metric(ui, s.candidates.len()),
+            ui::metric(ui, s.candidates_probed),
+            ui::metric(ui, s.candidates_generated),
+            ui::metric(ui, s.generations_saved),
+            ui::metric(ui, pct(Some(s.target_refusal_rate))),
+            ui::metric(
+                ui,
+                s.selected_scale
+                    .map_or("aucune échelle".to_owned(), |c| format!("échelle {c}"))
+            )
+        ));
+        for c in std::iter::once(&s.baseline).chain(&s.candidates) {
+            let label = match c.scale {
+                0.0 => "base".to_owned(),
+                x => format!("c = {x}"),
+            };
+            let mut detail = format!(
+                "{label} : sonde {} · génération {}",
+                pct(c.probe_refusal_rate),
+                pct(c.generated_refusal_rate)
+            );
+            if let Some(acc) = c.retention_accuracy {
+                detail.push_str(&format!(" · rétention {}", pct(Some(acc))));
+            }
+            if let Some(reason) = &c.rejected {
+                detail.push_str(&format!(" · écartée : {reason}"));
+            }
+            lines.push(format!("  {}", ui::dim(ui, &detail)));
+        }
+    }
     lines.push(match (&r.out, &r.patch) {
         (Some(out), _) => format!("{} {}", ui::badge(ui, "WRITE"), ui::path(ui, out)),
         (None, Some(_)) => format!(

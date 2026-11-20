@@ -492,6 +492,10 @@ fn benches_run_through_llama_server() {
 
 /// Raw JSON-RPC replies of `surgeon_bench` calls to `surgeon mcp --allow-dir <dir>`.
 fn mcp(dir: &Path, calls: &[Value]) -> Vec<Value> {
+    mcp_tool(dir, "surgeon_bench", calls)
+}
+
+fn mcp_tool(dir: &Path, tool: &str, calls: &[Value]) -> Vec<Value> {
     let mut child = command(dir)
         .args(["mcp", "--allow-dir", dir.to_str().unwrap()])
         .stdin(Stdio::piped())
@@ -508,13 +512,160 @@ fn mcp(dir: &Path, calls: &[Value]) -> Vec<Value> {
     for (i, arguments) in calls.iter().enumerate() {
         lines.push(
             json!({"jsonrpc": "2.0", "id": i + 1, "method": "tools/call",
-            "params": {"name": "surgeon_bench", "arguments": arguments}}),
+            "params": {"name": tool, "arguments": arguments}}),
         );
     }
     let (replies, _) = mcp_client::exchange(&mut child, &lines);
     (1..=calls.len())
         .map(|id| replies.iter().find(|r| r["id"] == id).unwrap().clone())
         .collect()
+}
+
+#[test]
+fn autotune_picks_its_scale_by_probe_then_generation() {
+    let dir = workspace();
+    let cache = dir.path().join("cache");
+    let (code, extracted) = surgeon(
+        dir.path(),
+        &[
+            "extract",
+            "--model",
+            "qwen2-mini",
+            "--pos-prompts",
+            "pos.json",
+            "--neg-prompts",
+            "neg.json",
+            "--layer",
+            "1",
+            "--out",
+            "dir.safetensors",
+        ],
+    );
+    assert_eq!(code, 0, "{extracted}");
+    let tune = |extra: &[&str]| -> (i32, Value) {
+        let output = command(dir.path())
+            .env("WEIGHT_SURGEON_CACHE_DIR", &cache)
+            .arg("--json")
+            .args([
+                "autotune",
+                "--model",
+                "qwen2-mini",
+                "--vector",
+                "dir.safetensors",
+                "--eval-dataset",
+                "pos.json",
+            ])
+            .args(extra)
+            .output()
+            .unwrap();
+        let envelope = serde_json::from_slice(&output.stdout).unwrap();
+        (output.status.code().unwrap(), envelope)
+    };
+    let select = [
+        "--refusal-prompts",
+        "pos.json",
+        "--scales",
+        "0.5,1,1.5",
+        "--probe-top-k",
+        "1",
+        "--events",
+        "events.ndjson",
+    ];
+    let (code, screened) = tune(&select);
+    assert_eq!(code, 0, "{screened}");
+    let s = &screened["data"]["selection"];
+    assert_eq!(s["prefilter"], true);
+    assert_eq!(s["n_prompts"], 6);
+    assert_eq!(
+        (
+            &s["candidates_probed"],
+            &s["candidates_generated"],
+            &s["generations_saved"]
+        ),
+        (&json!(3), &json!(1), &json!(2))
+    );
+    assert_eq!(s["baseline_cache"], "miss");
+    let candidates = s["candidates"].as_array().unwrap();
+    assert!(candidates
+        .iter()
+        .all(|c| c["probe_refusal_rate"].is_number()));
+    let generated: Vec<&Value> = candidates
+        .iter()
+        .filter(|c| c["generated_refusal_rate"].is_number())
+        .collect();
+    assert_eq!(generated.len(), 1, "{s}");
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|c| c["rejected"].is_string())
+            .count(),
+        2
+    );
+    // The mini model never refuses: its only finalist reaches the target and is written.
+    let scale = s["selected_scale"].as_f64().unwrap();
+    assert_eq!(generated[0]["scale"], scale);
+    let patch = &screened["data"]["patch"];
+    assert!(patch["description"].as_str().unwrap().contains("échelle"));
+    for (op, a) in patch["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(screened["data"]["alphas"].as_array().unwrap())
+    {
+        assert_eq!(
+            op["alpha"].as_f64().unwrap() as f32,
+            a["alpha"].as_f64().unwrap() as f32
+        );
+    }
+    let events = std::fs::read_to_string(dir.path().join("events.ndjson")).unwrap();
+    for name in [
+        "probe_refusal_rate",
+        "generation_refusal_rate",
+        "generations_saved",
+    ] {
+        assert!(
+            events.contains(&format!("\"name\":\"{name}\"")),
+            "{name}: {events}"
+        );
+    }
+
+    // Every candidate generated, the base read back from the cache: the same choice or a
+    // smaller scale, never a larger one.
+    let (code, full) = tune(&[&select[..6], &["--no-probe-prefilter"]].concat());
+    assert_eq!(code, 0, "{full}");
+    let f = &full["data"]["selection"];
+    assert_eq!(
+        (
+            &f["candidates_probed"],
+            &f["candidates_generated"],
+            &f["generations_saved"]
+        ),
+        (&json!(0), &json!(3), &json!(0))
+    );
+    assert_eq!(f["baseline_cache"], "hit");
+    assert!(f["selected_scale"].as_f64().unwrap() <= scale);
+
+    // Selection options need --refusal-prompts; scales stay in ]0, 4].
+    assert_eq!(tune(&["--no-probe-prefilter"]).0, 2);
+    let (code, bad) = tune(&["--refusal-prompts", "pos.json", "--scales", "0"]);
+    assert_eq!(code, 2, "{bad}");
+
+    // The MCP tool takes the same selection.
+    let replies = mcp_tool(
+        dir.path(),
+        "surgeon_autotune",
+        &[
+            json!({"model": "qwen2-mini", "vector": "dir.safetensors", "eval_dataset": "pos.json",
+                   "refusal_prompts": "pos.json", "scales": [1.0], "no_probe_prefilter": true}),
+            json!({"model": "qwen2-mini", "vector": "dir.safetensors", "eval_dataset": "pos.json",
+                   "probe_top_k": 1}),
+        ],
+    );
+    let ok = &replies[0]["result"]["structuredContent"];
+    assert_eq!(ok["ok"], true, "{ok}");
+    assert_eq!(ok["data"]["selection"]["candidates_generated"], 1);
+    let orphan = &replies[1]["result"]["structuredContent"];
+    assert_eq!(orphan["error"]["kind"], "invalid_arguments", "{orphan}");
 }
 
 #[test]

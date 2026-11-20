@@ -6306,6 +6306,147 @@
           ]
         },
         {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "refusal_prompts",
+          "long": "refusal-prompts",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "REFUSAL_PROMPTS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0.1"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "target_refusal_rate",
+          "long": "target-refusal-rate",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "TARGET_REFUSAL_RATE"
+          ]
+        },
+        {
+          "action": "Append",
+          "aliases": null,
+          "default_values": [
+            "0.25",
+            "0.5",
+            "0.75",
+            "1",
+            "1.25",
+            "1.5"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "scales",
+          "long": "scales",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "SCALES"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "2"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "probe_top_k",
+          "long": "probe-top-k",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PROBE_TOP_K"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "no_probe_prefilter",
+          "long": "no-probe-prefilter",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "NO_PROBE_PREFILTER"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "retention_dataset",
+          "long": "retention-dataset",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "RETENTION_DATASET"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "20"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "retention_limit",
+          "long": "retention-limit",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "RETENTION_LIMIT"
+          ]
+        },
+        {
           "action": "SetTrue",
           "aliases": null,
           "default_values": [

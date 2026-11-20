@@ -257,7 +257,11 @@ pub fn judge(item: &Item, output: &str, loop_detected: bool) -> ItemResult {
 }
 
 /// What the model receives for each question: the template, then its chat format.
-fn render_prompts(items: &[Item], template: &Template, format: &PromptFormat) -> Vec<String> {
+pub(crate) fn render_prompts(
+    items: &[Item],
+    template: &Template,
+    format: &PromptFormat,
+) -> Vec<String> {
     items
         .iter()
         .map(|item| format.apply(&template.render(&item.question)))
@@ -434,7 +438,11 @@ pub struct EvalRequest {
 
 /// What, besides the model files, changes the answers of an eval of `model`: the key of its
 /// baseline in the [`RefCache`].
-fn cache_inputs(req: &EvalRequest, model: &Path, dataset_sha256: &str) -> serde_json::Value {
+pub(crate) fn cache_inputs(
+    req: &EvalRequest,
+    model: &Path,
+    dataset_sha256: &str,
+) -> serde_json::Value {
     let chat = req.chat_template.resolve(model, ChatTemplate::NoTemplate);
     serde_json::json!({
         "dataset_sha256": dataset_sha256,

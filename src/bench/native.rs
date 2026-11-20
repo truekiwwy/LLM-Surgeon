@@ -28,7 +28,7 @@ use crate::hardware::HardwareProbe;
 /// A longer prompt is refused, never silently truncated.
 pub const MAX_PROMPT_TOKENS: usize = 2048;
 /// Context assumed by the RAM check at load time.
-const PLANNED_CONTEXT: usize = MAX_PROMPT_TOKENS + 1024;
+pub const PLANNED_CONTEXT: usize = MAX_PROMPT_TOKENS + 1024;
 
 pub struct NativeGenerator {
     state: Qwen2State,
@@ -98,6 +98,16 @@ impl NativeGenerator {
             ));
         }
         let state = Qwen2State::load(model_dir, dtype, probe, PLANNED_CONTEXT)?;
+        Self::from_state(model_dir, state, cancel)
+    }
+
+    /// A generator over weights already in memory (autotune's patched candidates); the
+    /// tokenizer and the end-of-sequence ids come from `model_dir`.
+    pub fn from_state(
+        model_dir: &Path,
+        state: Qwen2State,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self> {
         let tokenizer = load_tokenizer(model_dir)?;
         let eos_ids = eos_ids_from_dir(model_dir, &tokenizer)?;
         Ok(Self {
@@ -194,6 +204,11 @@ impl NativeGenerator {
 
     pub fn tokenizer(&self) -> &Tokenizer {
         &self.tokenizer
+    }
+
+    /// Swaps the weights; the tokenizer, the sampling and the batching stay.
+    pub fn set_state(&mut self, state: Qwen2State) {
+        self.state = state;
     }
 
     fn request(&self, prompt: &str, max_new_tokens: u32) -> eval::Result<GenRequest> {
