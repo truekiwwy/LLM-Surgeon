@@ -3515,13 +3515,6 @@ pub(crate) fn bench_generator(
             // Its warning, when let through, is the caller's to report (bench, pipeline).
             let target = hipfire::prepare_target(model, engines, generation.allow_stale_hipfire)
                 .map_err(BenchError::InvalidArgument)?;
-            if target.model != hipfire::model_name(model) {
-                eprintln!(
-                    "surgeon hipfire : {} servie sous l'alias {} (SHA-256 des poids vérifié)",
-                    model.display(),
-                    target.model
-                );
-            }
             let endpoint = hipfire::probe(engines).map_err(BenchError::InvalidArgument)?;
             if let Some(warning) = endpoint.warning() {
                 sink.borrow_mut().event(ProgressEvent::Warn(warning.into()));
