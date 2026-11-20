@@ -40,10 +40,11 @@ if ($DryRun) {
 } else {
   if (-not $SkipBuild) {
     # Static CRT comes from crates\surgeon-gui\.cargo\config.toml: build from that folder.
+    # One workspace, one target folder; the GUI's fat-LTO profile is `dist` (root Cargo.toml).
     Push-Location $root;  try { Invoke-Native { cargo build --release --locked --bin surgeon } } finally { Pop-Location }
-    Push-Location $gui;   try { Invoke-Native { cargo build --release --locked } } finally { Pop-Location }
+    Push-Location $gui;   try { Invoke-Native { cargo build --profile dist --locked } } finally { Pop-Location }
   }
-  Copy-Item (Join-Path $gui "target\release\surgeon-gui.exe") $stage
+  Copy-Item (Join-Path $root "target\dist\surgeon-gui.exe") $stage
   Copy-Item (Join-Path $root "target\release\surgeon.exe") $stage
 }
 Copy-Item (Join-Path $PSScriptRoot "windows\README-WINDOWS.txt") $stage

@@ -61,8 +61,12 @@ fn the_release_workflow_runs_on_version_tags_and_does_not_publish_by_itself() {
 
 #[test]
 fn the_binary_is_built_small_and_static() {
-    let manifest = repo("crates/surgeon-gui/Cargo.toml");
-    assert!(manifest.contains("lto = \"fat\"") && manifest.contains("strip = true"));
+    // One workspace: the profiles live in the root manifest, `dist` is the GUI's.
+    let manifest = repo("Cargo.toml");
+    let dist = manifest.split("[profile.dist]").nth(1).unwrap_or_default();
+    assert!(dist.contains("inherits = \"release\"") && dist.contains("lto = \"fat\""));
+    assert!(manifest.contains("strip = true"));
+    assert!(repo("packaging/build-windows.ps1").contains("cargo build --profile dist"));
     let cargo = repo("crates/surgeon-gui/.cargo/config.toml");
     assert!(cargo.contains("+crt-static"));
     let manifest_xml = repo("crates/surgeon-gui/assets/app.manifest");

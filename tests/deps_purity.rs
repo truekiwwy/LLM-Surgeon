@@ -1,5 +1,8 @@
-//! The extraction stack stays pure Rust: no C/C++ build step, no GPU SDK, no Oniguruma.
-//! Reads `Cargo.lock`, which lists every platform and the dev-dependencies too.
+//! The engine stays pure Rust: no C/C++ build step, no GPU SDK, no Oniguruma. Read from the
+//! engine's own resolved tree (`cargo tree -p weight-surgeon`, every platform, build and dev
+//! dependencies included), not from `Cargo.lock`: the workspace's single lockfile also lists
+//! the desktop app's packages (windowing, TLS, the Windows resource compiler) and merges the
+//! features its members ask for, none of which the engine builds.
 
 const FORBIDDEN: [&str; 23] = [
     "onig_sys",
@@ -29,61 +32,94 @@ const FORBIDDEN: [&str; 23] = [
     "cblas-sys",
 ];
 
-/// `(name, dependencies)` of every `[[package]]` entry.
-fn packages(lock: &str) -> Vec<(String, Vec<String>)> {
-    lock.split("[[package]]")
-        .skip(1)
-        .filter_map(|entry| {
-            let name = entry
-                .lines()
-                .find_map(|l| l.strip_prefix("name = \""))?
-                .trim_end_matches('"')
-                .to_owned();
-            let deps = entry
-                .split("dependencies = [")
-                .nth(1)
-                .map(|d| d.split(']').next().unwrap_or_default())
-                .map(|d| {
-                    d.lines()
-                        .filter_map(|l| l.trim().strip_prefix('"'))
-                        .map(|l| l.split([' ', '"']).next().unwrap_or_default().to_owned())
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some((name, deps))
+/// One node of the tree: its depth and its package name. A node seen before is not expanded
+/// again by `cargo tree`.
+struct Node {
+    depth: usize,
+    name: String,
+}
+
+/// The engine's dependency tree, as `cargo tree` resolves it for this package alone.
+fn engine_tree() -> Vec<Node> {
+    let out = std::process::Command::new(env!("CARGO"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "tree",
+            "--locked",
+            "-p",
+            "weight-surgeon",
+            "--target",
+            "all",
+            "-e",
+            "normal,build,dev",
+            "--prefix",
+            "depth",
+            "-f",
+            "{p}",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "cargo tree: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let digits = line.chars().take_while(char::is_ascii_digit).count();
+            Node {
+                depth: line[..digits].parse().unwrap(),
+                name: line[digits..].split(' ').next().unwrap().to_owned(),
+            }
         })
         .collect()
 }
 
+/// The names of the direct dependencies of the first expansion of `name`.
+fn children(tree: &[Node], name: &str) -> Option<Vec<String>> {
+    let at = tree.iter().position(|n| n.name == name)?;
+    let depth = tree[at].depth;
+    Some(
+        tree[at + 1..]
+            .iter()
+            .take_while(|n| n.depth > depth)
+            .filter(|n| n.depth == depth + 1)
+            .map(|n| n.name.clone())
+            .collect(),
+    )
+}
+
 #[test]
-fn no_native_build_dependency_in_the_lockfile() {
-    let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock")).unwrap();
-    let packages = packages(&lock);
+fn no_native_build_dependency_in_the_engine() {
+    let tree = engine_tree();
     assert!(
-        packages.iter().any(|(n, _)| n == "candle-core"),
+        tree.iter().any(|n| n.name == "candle-core"),
         "parser sanity check"
     );
-    for (name, _) in &packages {
+    for node in &tree {
         assert!(
-            !FORBIDDEN.contains(&name.as_str()),
-            "native or GPU dependency in Cargo.lock: {name}"
+            !FORBIDDEN.contains(&node.name.as_str()),
+            "native or GPU dependency of the engine: {}",
+            node.name
         );
     }
     // `tokenizers` always depends on esaxx-rs; only its `cpp` feature (which pulls `cc`)
     // is native. It must stay a dependency-free pure-Rust build.
-    if let Some((_, deps)) = packages.iter().find(|(n, _)| n == "esaxx-rs") {
+    if let Some(deps) = children(&tree, "esaxx-rs") {
         assert!(deps.is_empty(), "esaxx-rs built with native code: {deps:?}");
     }
 }
 
 /// `bench logits` reads `.pt` files through candle-core's `zip`, built without default
 /// features: no compression backend at all (only stored entries, which `torch.save`
-/// writes), so neither C code nor a Rust inflater is linked for it.
+/// writes), so neither C code nor a Rust inflater is linked for it. The desktop app's own
+/// `zip` (deflate) is the same package in the lockfile, never in this tree.
 #[test]
 fn zip_has_no_compression_backend() {
-    let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock")).unwrap();
-    let packages = packages(&lock);
-    let Some((_, deps)) = packages.iter().find(|(n, _)| n == "zip") else {
+    let tree = engine_tree();
+    let Some(deps) = children(&tree, "zip") else {
         return;
     };
     for backend in [

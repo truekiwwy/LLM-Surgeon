@@ -1,9 +1,11 @@
 # Dependencies of the desktop app (`crates/surgeon-gui`)
 
 The engine crate (`weight-surgeon`, root `Cargo.toml`) stays pure Rust with no network stack,
-no TLS, no GUI and no C build step: `tests/deps_purity.rs` reads the root `Cargo.lock` and
-fails on any of them. The desktop app is a separate crate with **its own `Cargo.lock`**, so
-everything below lives there and never enters the engine's lockfile. The engine is reused as a
+no TLS, no GUI and no C build step: `tests/deps_purity.rs` reads the engine's own resolved
+tree (`cargo tree -p weight-surgeon`, every platform) and fails on any of them. The desktop app
+is a member of the root workspace, which has **one `Cargo.lock`** for the engine, the app and
+the terminal inspector: everything below is in that lockfile but never in the engine's tree,
+which is what the check reads. The engine is reused as a
 library (`weight_surgeon::backend`, `graph`, `patch`, `hardware`, `app::run_with`): the GUI
 duplicates none of its logic. The studio (projects, job manager, event stream) added no
 dependency to the engine: `src/events.rs` only uses `serde`, `serde_json` and `schemars`, which
@@ -68,9 +70,11 @@ The Claude Code and Codex CLIs, when used, make their own requests (docs/AGENTS.
 
 ## Reading the lockfile
 
-`crates/surgeon-gui/Cargo.lock` lists the packages of **every** platform, so it also names the
+The root `Cargo.lock` lists the packages of **every** member and platform, so it also names the
 TLS stacks the Windows build never compiles (`rustls`, `ring`, `openssl-sys`,
 `security-framework`...). On Windows the HTTP client is `ureq` + `native-tls` + `schannel`
 (plus `http`, `httparse`, `ureq-proto`, `utf8-zero`); `embed-resource` pulls `vswhom` and
 `winreg` to find the Windows SDK's resource compiler. Roughly thirty packages are new compared
-with the viewer-only crate, none of them in the engine's lockfile.
+with the viewer-only crate, none of them in the engine's tree. One package can be shared with
+the engine and still be built differently for each: `zip` is the same lock entry, with
+`deflate` for the app and no compression feature at all under `cargo tree -p weight-surgeon`.

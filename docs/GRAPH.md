@@ -296,8 +296,9 @@ flowchart LR
 ### 7.3 Visualiseur natif (`crates/surgeon-gui`)
 
 `surgeon-gui` est une application native en Rust (egui, rendu OpenGL), sans HTML ni
-navigateur. C'est un crate autonome avec son propre `Cargo.lock`, comme `surgeon-tui` :
-sa pile graphique n'entre pas dans le `Cargo.lock` racine que vérifie `tests/deps_purity.rs`.
+navigateur. C'est un membre du workspace Cargo racine, comme `surgeon-tui` (un seul
+`Cargo.lock`) : sa pile graphique n'entre pas dans l'arbre propre du moteur que vérifie
+`tests/deps_purity.rs` (`cargo tree -p weight-surgeon`).
 
 ```bash
 cargo run --release --manifest-path crates/surgeon-gui/Cargo.toml -- graph-out/graph.json

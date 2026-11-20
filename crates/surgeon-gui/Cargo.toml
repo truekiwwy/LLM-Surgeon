@@ -12,8 +12,8 @@ categories = ["visualization", "gui"]
 name = "surgeon-gui"
 path = "src/main.rs"
 
-# A crate of its own with its own Cargo.lock, like crates/surgeon-tui: the GUI stack (winit,
-# wayland, glutin) never enters the root lockfile that tests/deps_purity.rs checks.
+# A member of the root workspace (one Cargo.lock): the GUI stack (winit, wayland, glutin) never
+# enters the engine's own tree, which tests/deps_purity.rs checks.
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 # glow (OpenGL) rather than wgpu: no Metal / Vulkan SDK crates, painting is 2D anyway.
@@ -56,8 +56,4 @@ tempfile = "3.27.0"
 # The mini Qwen2 of examples/make_fake_qwen2.rs (same version and features as the engine).
 tokenizers = { version = "0.23.2", default-features = false, features = ["unstable_wasm"] }
 
-# Distribution binary: LTO and strip (the engine crate keeps the cargo defaults).
-[profile.release]
-lto = "fat"
-codegen-units = 1
-strip = true
+# Distribution binary: `[profile.dist]` of the root manifest (fat LTO, strip).
