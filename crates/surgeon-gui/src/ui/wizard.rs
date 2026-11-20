@@ -19,7 +19,6 @@ use crate::desktop::setup::Pick;
 use crate::install;
 use crate::sample_model::QWEN;
 use crate::settings::{Lang, Settings};
-use crate::studio::view::Studio;
 
 /// The widest the page grows, on the 8 grid.
 const PAGE: f32 = 960.0;
@@ -193,9 +192,8 @@ fn close(app: &mut SurgeonApp) {
 /// the agent.
 fn skip(app: &mut SurgeonApp, default: &std::path::Path) {
     if app.desktop.settings.workspace.is_none() {
-        match app.desktop.use_workspace(default) {
-            Ok(()) => app.studio = Studio::new(default.to_path_buf()),
-            Err(e) => app.desktop.notify(e),
+        if let Err(e) = app.use_workspace(default.to_path_buf()) {
+            app.desktop.notify(e);
         }
     }
     close(app);

@@ -20,7 +20,7 @@ option `surgeon-gui --workspace <DOSSIER>`) :
 | `copies/<id>/` | Copies de travail, les seuls modèles que le studio écrit |
 | `chat/` | Conversations, actions et journal des preuves de l'agent ([AGENTS.md](AGENTS.md)) |
 | `ledger.jsonl` | Journal d'expériences, en ajout seul |
-| `project.lock` | PID du studio qui a ouvert le projet |
+| `project.lock` | PID du studio qui a ouvert le projet ; tenu aussi par chaque job en cours, jusqu'à la fin de son thread |
 
 Le nom de projet accepte 1 à 64 lettres, chiffres, `-`, `_` et `.`, sans point initial.
 
@@ -68,6 +68,13 @@ Transitions permises (toute autre est refusée) :
 
 Quand plusieurs jobs se terminent pendant que le projet est `En cours`, c'est la pire fin
 qui compte (échec, puis annulation, puis succès).
+
+Tant qu'un job tourne ou attend, le studio ne quitte pas le projet : ouvrir un autre projet,
+changer de dossier de projets (assistant, réglages, dossier déposé ou passé en argument) et
+ouvrir un projet qui vient d'être créé sont refusés avec « un job tourne : attendez ou
+annulez-le » (`Studio::can_switch`), dans la bannière ou la notification. Pendant la création
+d'un projet, ce refus vaut aussi. Le thread d'un job, détaché, garde `project.lock` jusqu'à ce
+qu'il ait fini d'écrire, même si la fenêtre se ferme entre-temps.
 
 ## 2. Copies de travail : garanties
 
