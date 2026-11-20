@@ -1269,6 +1269,37 @@ N processus séparés en même temps, une séquence chacun :
 
 Sur cette machine et ce modèle : un lot de 8 a donné 4,1 fois le total d'une séquence et un lot de 16, 4,6 fois, chaque séquence ralentissant ; un lot de 8 a fait mieux que les mêmes séquences réparties en lots parallèles ; 6 threads ont fait mieux que 12 pour un lot de 8 ; 3 processus séparés ont donné 1,39 fois un processus et 6 en ont donné 1,49 fois, avec ou sans `RAYON_NUM_THREADS` fixé à 12 / N. Ces exécutions mesurent le débit seulement, pas la bande passante mémoire : elles ne montrent pas pourquoi chaque courbe s'aplatit.
 
+<a id="cmd-bench-refusal-probe"></a>
+#### `surgeon bench refusal-probe`
+
+Estime les refus de `bench refusal` sans générer : une passe avant par prompt, enveloppé comme le fait `bench refusal`. Une heuristique rapide pour explorer (un agent, un balayage de patchs) ; le rapport et le texte rappellent toujours que seule la génération complète prouve un refus. Deux méthodes :
+
+- `first-token-prob` : la probabilité, sous les logits de la dernière position du prompt, que le premier token de réponse soit le premier token d'un mot de `--prefixes` (résolu par le tokenizer du modèle). Refus au-dessus de `--threshold` (0.5).
+- `direction-projection` : le flux résiduel après la couche d'une direction de `surgeon extract` (`resid_post` seulement), réduit comme à l'extraction et projeté dessus ; refus au-dessus du seuil calibré par l'extraction (`<fichier>.stats.json`, sinon le milieu des deux projections moyennes). Les prompts sont enveloppés comme à l'extraction, le seul enveloppage pour lequel ce seuil vaut. Elle mesure à quel point le modèle juge un prompt nuisible, ce qui n'est pas toujours un refus.
+
+`--compare-generation` génère ensuite les réponses avec le même modèle chargé (`bench refusal`, 40 tokens, lots natifs automatiques) et donne l'accord, les quatre cases, la corrélation point-bisériale des scores avec les verdicts générés, et les deux durées. Backend natif seulement (CPU, dossier SafeTensors).
+
+```text
+surgeon bench refusal-probe [OPTIONS] --model <MODEL> --prompts <PROMPTS>
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--model` | requis | Dossier SafeTensors Qwen2, Llama/Mistral ou Qwen3. |
+| `--prompts` | requis | Tableau JSON de textes ou de `{"text": ...}`, JSONL, texte brut, ou `builtin:<jeu>`. |
+| `--method` | `first-token-prob` | `first-token-prob` ou `direction-projection`. |
+| `--prefixes` | `I,Sorry,As,Unfortunately,Je,Désolé` | `first-token-prob` : mots par lesquels un refus commence, séparés par des virgules ; leurs premiers tokens sont additionnés. |
+| `--vector` | aucun | `direction-projection` : le fichier de direction de `surgeon extract` (requis pour cette méthode). |
+| `--threshold` | 0.5, ou celui de la direction | Seuil de décision du score. |
+| `--chat-template` | `auto` | Enveloppage de chaque prompt pour `first-token-prob` et la comparaison, comme dans `bench refusal`. |
+| `--compare-generation` | désactivé | Génère aussi les réponses et compare, prompt par prompt. |
+
+Mesuré sur Qwen2.5-0.5B-Instruct ([détails](docs/validation/qwen2.5-0.5b-validation.md), section 14) : `first-token-prob` a donné le verdict de la génération sur 17 des 18 prompts de `builtin:refusals` et 62 de 65 prompts mélangés, en 4,3 s contre 11,8 s pour la génération par lots de 40 tokens et 430 s pour la génération historique (un par un, 256 tokens).
+
+```bash
+surgeon bench refusal-probe --model qwen2-mini --prompts pos.json --compare-generation
+```
+
 <a id="cmd-bench-judge-sample"></a>
 #### `surgeon bench judge-sample`
 

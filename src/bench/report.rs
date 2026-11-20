@@ -437,6 +437,107 @@ pub struct BenchRefusalReport {
     pub generation: Option<super::generation::GenerationReport>,
 }
 
+// ------------------------------------------------------------------ refusal probe
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ProbeItem {
+    /// Index du prompt (base 0) dans le fichier.
+    pub index: usize,
+    /// first_token_prob : probabilité que le premier token de réponse ouvre un refus ;
+    /// direction_projection : projection du flux résiduel sur la direction.
+    pub score: f64,
+    /// Score au-dessus du seuil.
+    pub refused: bool,
+    /// first_token_prob : le premier token le plus probable (diagnostic).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ProbeToken {
+    /// Mot de la liste des préfixes de refus.
+    pub word: String,
+    /// Son premier token pour le tokenizer du modèle.
+    pub id: u32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ProbeDirectionInfo {
+    /// Fichier de `surgeon extract`.
+    pub path: PathBuf,
+    pub layer: usize,
+    pub site: String,
+    pub pooling: String,
+    /// Séparation des prompts d'extraction le long de la direction ; null si non écrite.
+    pub d_prime: Option<f64>,
+    /// Seuil calibré à l'extraction (positifs au-dessus).
+    pub calibrated_threshold: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ProbeComparison {
+    /// Budget de la génération complète, en tokens.
+    pub max_new_tokens: u32,
+    /// Refus selon la génération complète (marqueurs).
+    pub generated_refused: usize,
+    /// Prompts où la sonde et la génération disent la même chose.
+    pub agree: usize,
+    /// agree / n.
+    pub agreement: f64,
+    pub both_refused: usize,
+    /// Refus selon la sonde seulement.
+    pub probe_only: usize,
+    /// Refus selon la génération seulement.
+    pub generation_only: usize,
+    pub neither: usize,
+    /// Corrélation de Pearson entre le score et le verdict généré (0/1, point-bisériale) ;
+    /// null quand l'un des deux ne varie pas.
+    pub point_biserial: Option<f64>,
+    /// Durée de la génération / durée de la sonde.
+    pub speedup: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ProbeTiming {
+    /// Commande entière, chargement compris.
+    pub total: u64,
+    /// Sonde seule.
+    pub probe: u64,
+    /// Génération complète, avec --compare-generation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ProbeReport {
+    /// Toujours le même rappel : une heuristique d'exploration, pas une preuve.
+    pub caveat: String,
+    pub model: PathBuf,
+    pub mode: super::refusal::RefusalProbeMode,
+    /// sha256 des prompts (tableau JSON des textes, avant gabarit).
+    pub prompts_sha256: String,
+    pub chat_template: String,
+    pub chat_system: Option<String>,
+    /// Seuil de décision du score.
+    pub threshold: f64,
+    pub n: usize,
+    pub refused: usize,
+    pub refusal_rate: f64,
+    pub items: Vec<ProbeItem>,
+    /// first_token_prob : les préfixes de refus et leurs tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix_tokens: Option<Vec<ProbeToken>>,
+    /// direction_projection : la direction utilisée.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<ProbeDirectionInfo>,
+    /// --compare-generation : accord avec `bench refusal` sur les mêmes prompts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<ProbeComparison>,
+    /// Durées en millisecondes.
+    pub timing_ms: ProbeTiming,
+}
+
 // ------------------------------------------------------------------ dump
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -764,6 +865,56 @@ pub fn refusal_text(ui: &Ui, run: &BenchRun<BenchRefusalReport>) -> String {
                 ui::metric(ui, format!("avertissement : {exceeded}"))
             ));
         }
+    }
+    finish(ui, lines, &run.warnings, &run.threshold_warnings)
+}
+
+pub fn probe_text(ui: &Ui, run: &BenchRun<ProbeReport>) -> String {
+    let r = &run.report;
+    let mode = match r.mode {
+        super::refusal::RefusalProbeMode::FirstTokenProb => "first-token-prob",
+        super::refusal::RefusalProbeMode::DirectionProjection => "direction-projection",
+    };
+    let mut lines = vec![
+        format!(
+            "{} refusal-probe · {} · {} prompts · seuil {}  {}",
+            ui::badge(ui, "PROBE"),
+            ui::metric(ui, mode),
+            ui::metric(ui, r.n),
+            ui::metric(ui, format!("{:.3}", r.threshold)),
+            ui::path(ui, &r.model)
+        ),
+        format!(
+            "{} {}/{} · {} (sonde, en {} ms)",
+            ui::badge(ui, "REFUS"),
+            ui::metric(ui, r.refused),
+            ui::metric(ui, r.n),
+            ui::metric(ui, pct(r.refusal_rate)),
+            ui::metric(ui, r.timing_ms.probe)
+        ),
+        format!("  {}", ui::dim(ui, &r.caveat)),
+    ];
+    if let Some(c) = &r.comparison {
+        let correlation = c
+            .point_biserial
+            .map_or("indéfinie".to_owned(), |x| format!("{x:.2}"));
+        lines.push(format!(
+            "  {}",
+            ui::dim(
+                ui,
+                &format!(
+                    "génération ({} tokens) : {} refus · accord {}/{} ({}) · corrélation {} · \
+                     sonde {}x plus rapide",
+                    c.max_new_tokens,
+                    c.generated_refused,
+                    c.agree,
+                    r.n,
+                    pct(c.agreement),
+                    correlation,
+                    format_args!("{:.1}", c.speedup)
+                )
+            )
+        ));
     }
     finish(ui, lines, &run.warnings, &run.threshold_warnings)
 }

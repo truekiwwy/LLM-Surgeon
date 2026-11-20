@@ -528,3 +528,27 @@ au départ :
 
 Le hit comprend le SHA-256 des fichiers du modèle d'origine (1,26 Go). Comparaisons appariées
 identiques entre les deux lancements.
+
+## 14. Addendum du 2026-11-20 : sonde de refus sans génération (`bench refusal-probe`)
+
+Même machine que la section 13, binaire release, `Qwen2.5-0.5B-Instruct`. Chaque ligne est un
+`bench refusal-probe --compare-generation` : la sonde, puis la génération complète des mêmes
+prompts par le même modèle chargé (`bench refusal`, 40 tokens, lots natifs automatiques).
+`dev_combined.json` : 65 prompts de `overrefusal-exp` (OR-Bench limites et AdvBench). Direction :
+`refusal_L16.safetensors` (couche 16, `resid_post`, last, d′ 4,29, seuil 6,161).
+
+| Méthode | Prompts | Sonde | Génération | Refus sonde / générés | Accord | r point-bisérial |
+| --- | --- | --- | --- | --- | --- | --- |
+| `first-token-prob` | `builtin:refusals` (18) | 4,3 s | 11,8 s | 2 / 3 | 17/18 | 0,84 |
+| `first-token-prob` | `dev_combined` (65) | 15,2 s | 26,3 s | 59 / 62 | 62/65 | 0,62 |
+| `direction-projection` | `builtin:refusals` (18) | 2,0 s | 12,2 s | 11 / 3 | 8/18 | 0,38 |
+| `direction-projection` | `dev_combined` (65) | 8,6 s | 30,6 s | 64 / 62 | 63/65 | 0,36 |
+
+La génération historique (un prompt à la fois, 256 tokens, 12 threads) prend 430,4 s sur
+`builtin:refusals` : la sonde `first-token-prob` va 100 fois plus vite qu'elle, mais seulement
+2,7 fois plus vite que la génération par lots de 40 tokens de la section 13 (la sonde passe les
+prompts un par un). Ses écarts sont tous des refus manqués (générés, non sondés), aucun faux refus.
+La direction, calibrée sur AdvBench contre des prompts neutres, classe 11 des 18 demandes
+légitimes « limites » de `builtin:refusals` comme des refus alors que le modèle n'en refuse que
+3 : elle mesure la nocivité perçue d'un prompt plus que le refus. Limites : un modèle de 0,5B, 83
+prompts dont 65 surtout refusés ; les seuils par défaut ne sont pas réglés.

@@ -253,6 +253,115 @@ fn the_native_load_logs_its_dtype_and_batching() {
 }
 
 #[test]
+fn the_refusal_probe_scores_without_generating_and_compares_on_demand() {
+    let dir = workspace();
+    let probe = |extra: &[&str]| {
+        let base = [
+            "bench",
+            "refusal-probe",
+            "--model",
+            "qwen2-mini",
+            "--prompts",
+            "pos.json",
+        ];
+        let (code, envelope) = surgeon(dir.path(), &[&base[..], extra].concat());
+        assert_eq!(code, 0, "{extra:?}: {envelope}");
+        envelope["data"].clone()
+    };
+    let first = probe(&[]);
+    assert_eq!(first["mode"], "first_token_prob");
+    assert!(first["caveat"]
+        .as_str()
+        .unwrap()
+        .contains("génération complète"));
+    assert_eq!(first["n"], 6);
+    assert_eq!(first["threshold"], 0.5);
+    assert!(first["prefix_tokens"]
+        .as_array()
+        .is_some_and(|t| !t.is_empty()));
+    for item in first["items"].as_array().unwrap() {
+        let score = item["score"].as_f64().unwrap();
+        assert!((0.0..=1.0).contains(&score), "{item}");
+    }
+    assert!(
+        first.get("comparison").is_none(),
+        "nothing generated unless asked"
+    );
+
+    // Against the full generation of the same prompts.
+    let compared = probe(&["--compare-generation"]);
+    let c = &compared["comparison"];
+    assert_eq!(c["max_new_tokens"], 40);
+    let cells = ["both_refused", "probe_only", "generation_only", "neither"];
+    let total: u64 = cells.iter().map(|k| c[k].as_u64().unwrap()).sum();
+    assert_eq!(total, 6);
+    assert!(c["speedup"].as_f64().unwrap() > 0.0);
+    assert!(compared["timing_ms"]["generation"].as_u64().is_some());
+
+    // Along a direction extracted from the same model: its layer, threshold and wrapping.
+    let (code, extracted) = surgeon(
+        dir.path(),
+        &[
+            "extract",
+            "--model",
+            "qwen2-mini",
+            "--pos-prompts",
+            "pos.json",
+            "--neg-prompts",
+            "neg.json",
+            "--layer",
+            "1",
+            "--out",
+            "dir.safetensors",
+        ],
+    );
+    assert_eq!(code, 0, "{extracted}");
+    let along = probe(&[
+        "--method",
+        "direction-projection",
+        "--vector",
+        "dir.safetensors",
+    ]);
+    assert_eq!(along["mode"], "direction_projection");
+    assert_eq!(along["direction"]["layer"], 1);
+    let calibrated = along["direction"]["calibrated_threshold"].as_f64().unwrap();
+    assert_eq!(along["threshold"].as_f64().unwrap(), calibrated);
+    assert_eq!(
+        calibrated,
+        extracted["data"]["stats"]["threshold"].as_f64().unwrap()
+    );
+    // The extraction's own prompts project above its threshold, as it measured them.
+    let refused = along["refused"].as_u64().unwrap();
+    let measured = extracted["data"]["pos_projections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p.as_f64().unwrap() > calibrated)
+        .count() as u64;
+    assert_eq!(refused, measured);
+
+    // Without --vector, a clear refusal.
+    let (code, envelope) = surgeon(
+        dir.path(),
+        &[
+            "bench",
+            "refusal-probe",
+            "--model",
+            "qwen2-mini",
+            "--prompts",
+            "pos.json",
+            "--method",
+            "direction-projection",
+        ],
+    );
+    assert_eq!(code, 2, "{envelope}");
+    assert!(envelope["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--vector"));
+}
+
+#[test]
 fn greedy_batches_change_nothing_but_the_generation_block() {
     let dir = workspace();
     let historical = refusal(dir.path(), &[]);

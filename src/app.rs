@@ -404,6 +404,7 @@ fn command_name(command: &Commands) -> &'static str {
             BenchCommand::Eval(_) => "bench eval",
             BenchCommand::Dump(_) => "bench dump",
             BenchCommand::Refusal(_) => "bench refusal",
+            BenchCommand::RefusalProbe(_) => "bench refusal-probe",
             BenchCommand::JudgeSample(_) => "bench judge-sample",
             BenchCommand::JudgeEval(_) => "bench judge-eval",
         },
@@ -3304,6 +3305,21 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 &mut sink,
             )
         }
+        BenchCommand::RefusalProbe(a) => {
+            let prompts = extract::load_prompt_texts(&a.prompts)
+                .map_err(|m| invalid(BenchError::input(&a.prompts, m)))?;
+            let req = bench::refusal::ProbeRequest {
+                model: a.model.clone(),
+                prompts,
+                mode: a.method,
+                chat_template: a.chat_template,
+                prefixes: a.prefixes.clone(),
+                vector: a.vector.clone(),
+                threshold: a.threshold,
+                compare_generation: a.compare_generation,
+            };
+            core_bench_refusal_probe(&req, deps, &ui, &mut sink)
+        }
         BenchCommand::JudgeSample(a) => {
             let prompts = extract::load_prompt_texts(&a.prompts)
                 .map_err(|m| invalid(BenchError::input(&a.prompts, m)))?;
@@ -3425,6 +3441,29 @@ fn native_generator(
             .event(ProgressEvent::Warn(warning.clone()));
     }
     Ok(generator)
+}
+
+/// `bench refusal-probe`: the native model loaded once (its dtype logged), probed prompt by
+/// prompt, then, with `--compare-generation`, the same instance generates the answers with
+/// the automatic native batches.
+pub fn core_bench_refusal_probe(
+    req: &bench::refusal::ProbeRequest,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let sink = RefCell::new(sink);
+    let mut generator = native_generator(&req.model, deps, &sink).map_err(|e| bench_failure(&e))?;
+    if req.compare_generation {
+        let note = generator.auto_batching(deps.probe.as_ref(), 1, None);
+        sink.borrow_mut().event(ProgressEvent::Info(note));
+    }
+    let run = bench::refusal::run_probe(req, generator, &deps.interrupted, &mut |done, total| {
+        sink.borrow_mut()
+            .event(ProgressEvent::BenchRefusalPrompt { done, total })
+    })
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, false, bench_report::probe_text(ui, &run))
 }
 
 /// Shared by the CLI and the MCP tool. Generators come from `deps.generator_factory` (or

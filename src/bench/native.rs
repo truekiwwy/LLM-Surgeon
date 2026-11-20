@@ -165,6 +165,37 @@ impl NativeGenerator {
         )
     }
 
+    /// The logits of the first answer token after `prompt`: one forward pass over the prompt,
+    /// nothing generated past it.
+    pub fn first_token_logits(&mut self, prompt: &str) -> Result<Vec<f32>> {
+        let request = self
+            .request(prompt, 1)
+            .map_err(|e| BenchError::Generation(e.to_string()))?;
+        let mut logits = Vec::new();
+        self.state.generate_with_logits(
+            &request,
+            &self.cancel,
+            &mut |_| ControlFlow::Break(()),
+            &mut |row| logits = row.to_vec(),
+        )?;
+        Ok(logits)
+    }
+
+    /// The residual stream after `layer` for `prompt`, one row per position; no layer past
+    /// it is computed.
+    pub fn residual(&mut self, prompt: &str, layer: usize) -> Result<Vec<Vec<f32>>> {
+        let request = self
+            .request(prompt, 1)
+            .map_err(|e| BenchError::Generation(e.to_string()))?;
+        Ok(self
+            .state
+            .capture_residual(&request.prompt_ids, layer, None)?)
+    }
+
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
+
     fn request(&self, prompt: &str, max_new_tokens: u32) -> eval::Result<GenRequest> {
         let failed = |e: &dyn std::fmt::Display| EvalError::Generator(e.to_string());
         let tokens =

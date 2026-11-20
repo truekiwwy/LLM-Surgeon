@@ -1267,6 +1267,37 @@ N separate processes at once, one sequence each:
 
 On this machine and this model: a batch of 8 gave 4.1 times the total of one sequence and a batch of 16 gave 4.6 times, each sequence getting slower; one batch of 8 beat the same sequences split into parallel batches; 6 threads did better than 12 for a batch of 8; 3 separate processes gave 1.39 times one process and 6 gave 1.49 times, with or without `RAYON_NUM_THREADS` set to 12 / N. These runs measure throughput only, not memory bandwidth: they do not show why each curve flattens.
 
+<a id="cmd-bench-refusal-probe"></a>
+#### `surgeon bench refusal-probe`
+
+Estimates the refusals of `bench refusal` without generating: one forward pass per prompt, wrapped as `bench refusal` wraps it. A fast heuristic to explore with (an agent, a sweep of patches); the report and the text always say that only the full generation proves a refusal. Two methods:
+
+- `first-token-prob`: the probability, under the logits of the last prompt position, that the first answer token is the first token of one of `--prefixes` (resolved by the model's tokenizer). Refused above `--threshold` (0.5).
+- `direction-projection`: the residual stream after the layer of a `surgeon extract` direction (`resid_post` only), pooled as at extraction and projected on it; refused above the threshold the extraction calibrated (`<file>.stats.json`, else the midpoint of the two mean projections). The prompts are wrapped as at extraction, the wrapping that threshold holds for. It measures how harmful the model finds a prompt, which is not always a refusal.
+
+`--compare-generation` then generates the answers with the same loaded model (`bench refusal`, 40 tokens, automatic native batches) and reports the agreement, the four cells, the point-biserial correlation of the scores with the generated verdicts, and both durations. Native backend only (CPU, SafeTensors directory).
+
+```text
+surgeon bench refusal-probe [OPTIONS] --model <MODEL> --prompts <PROMPTS>
+```
+
+| Option | Default | Role |
+| --- | --- | --- |
+| `--model` | required | Qwen2, Llama/Mistral or Qwen3 SafeTensors directory. |
+| `--prompts` | required | JSON array of strings or of `{"text": ...}`, JSONL, plain text, or `builtin:<set>`. |
+| `--method` | `first-token-prob` | `first-token-prob` or `direction-projection`. |
+| `--prefixes` | `I,Sorry,As,Unfortunately,Je,Désolé` | `first-token-prob`: words a refusal starts with, comma separated; their first tokens are summed. |
+| `--vector` | none | `direction-projection`: the direction file of `surgeon extract` (required for that method). |
+| `--threshold` | 0.5, or the direction's | Decision threshold of the score. |
+| `--chat-template` | `auto` | Wrapping of each prompt for `first-token-prob` and the comparison, as in `bench refusal`. |
+| `--compare-generation` | off | Also generate the answers and compare, prompt by prompt. |
+
+Measured on Qwen2.5-0.5B-Instruct ([details](docs/validation/qwen2.5-0.5b-validation.md), section 14): `first-token-prob` agreed with the generation on 17 of the 18 `builtin:refusals` prompts and 62 of 65 mixed prompts, in 4.3 s against 11.8 s for the batched 40-token generation and 430 s for the historical one (one by one, 256 tokens).
+
+```bash
+surgeon bench refusal-probe --model qwen2-mini --prompts pos.json --compare-generation
+```
+
 <a id="cmd-bench-judge-sample"></a>
 #### `surgeon bench judge-sample`
 

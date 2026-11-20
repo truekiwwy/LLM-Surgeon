@@ -461,10 +461,46 @@ pub enum BenchCommand {
     Dump(BenchDumpArgs),
     /// Refusal rate of a Qwen2, Llama/Mistral or Qwen3 model on prompts (greedy, pure Rust, CPU).
     Refusal(BenchRefusalArgs),
+    /// Refusal estimated without generating, one forward pass per prompt: a fast heuristic to
+    /// explore with, `bench refusal` stays the proof.
+    RefusalProbe(BenchRefusalProbeArgs),
     /// Sample the answers of a `bench refusal` run for human labelling.
     JudgeSample(BenchJudgeSampleArgs),
     /// Agreement of a judge model with human labels; writes the calibration file.
     JudgeEval(BenchJudgeEvalArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchRefusalProbeArgs {
+    /// Qwen2, Llama/Mistral or Qwen3 SafeTensors directory (native forward, CPU).
+    #[arg(long)]
+    pub model: PathBuf,
+    /// JSON array of strings or of {"text": ...}, JSONL, plain text, or builtin:<set>.
+    #[arg(long)]
+    pub prompts: PathBuf,
+    /// first-token-prob: probability that the first answer token opens a refusal;
+    /// direction-projection: residual stream projected on an extracted refusal direction.
+    #[arg(long, value_enum, default_value_t = crate::bench::refusal::RefusalProbeMode::FirstTokenProb)]
+    pub method: crate::bench::refusal::RefusalProbeMode,
+    /// first-token-prob: words a refusal starts with, comma separated (their first token).
+    #[arg(long, value_delimiter = ',', default_values_t = crate::bench::refusal::DEFAULT_PROBE_PREFIXES.map(String::from))]
+    pub prefixes: Vec<String>,
+    /// direction-projection: the direction file of `surgeon extract` (resid_post), with its
+    /// .stats.json for the calibrated threshold.
+    #[arg(long)]
+    pub vector: Option<PathBuf>,
+    /// Decision threshold of the score (default: 0.5 for first-token-prob, the direction's
+    /// calibrated threshold for direction-projection).
+    #[arg(long)]
+    pub threshold: Option<f64>,
+    /// Wrapping of each prompt, as in bench refusal: auto follows the model (ChatML if it
+    /// declares nothing).
+    #[arg(long, value_enum, default_value_t = ChatTemplate::Auto)]
+    pub chat_template: ChatTemplate,
+    /// Also generate the answers (bench refusal, default budget) and report the agreement,
+    /// the correlation and both durations.
+    #[arg(long)]
+    pub compare_generation: bool,
 }
 
 #[derive(Debug, Clone, Args)]
