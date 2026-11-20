@@ -96,6 +96,11 @@
 //!   `--method`, `--prefixes`, `--vector`, `--threshold`, `--chat-template`,
 //!   `--compare-generation`), CLI only. The rewrite added it to `cli_surface.json` (and to
 //!   the `help` mirror) and nothing else; no tool schema, no output hash moved.
+//! - composed directions: the subcommand `compose` (`--ablate`, `--keep`, `--mode`, `--out`,
+//!   `--patch-out`, `--layers`, `--projections`, `--alpha`, `--overwrite`) and the eighteenth
+//!   tool `surgeon_compose`, both additive; the optional `composition` of `patch.json` (absent
+//!   from every older patch). Only the `schema` hash (the patch schema) and the tool schema
+//!   hash moved; no option, property or output of an existing command changed.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
@@ -267,7 +272,7 @@ fn mcp_tools_surface() -> Value {
 #[test]
 fn mcp_tools_surface_is_unchanged() {
     let current = mcp_tools_surface();
-    assert_eq!(current.as_array().unwrap().len(), 17, "seventeen MCP tools");
+    assert_eq!(current.as_array().unwrap().len(), 18, "eighteen MCP tools");
     let reference = read_fixture("mcp_tools_surface.json");
     assert!(
         current == reference,

@@ -36,6 +36,13 @@ pub struct PatchFile {
         description = "Opérations appliquées dans l'ordre ; au moins une. Toute erreur annule l'ensemble (rollback)."
     )]
     pub operations: Vec<Operation>,
+    /// `surgeon compose`: what the vector of this patch was made of. Absent from older
+    /// patches and from any other patch: reading one gives `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Recette de surgeon compose (vecteurs sources, sha256, alpha, mode, cosinus avant/après, ratio de norme conservée) ; informative, sans effet sur l'application."
+    )]
+    pub composition: Option<super::compose::Composition>,
 }
 
 fn default_true() -> bool {

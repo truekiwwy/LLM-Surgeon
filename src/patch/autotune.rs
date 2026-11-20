@@ -1134,6 +1134,7 @@ pub fn run_with(
                     axis: engine_axis(req.proj).1,
                 })
                 .collect(),
+            composition: None,
         }),
     };
     if let Some(p) = &patch {

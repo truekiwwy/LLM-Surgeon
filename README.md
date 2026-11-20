@@ -611,6 +611,31 @@ surgeon restore [OPTIONS] --model <MODEL>
 
 Without `--backup` nor `--from-origin`, the model goes back to the state before the last `apply`: all the backups of one `apply` share a checkpoint (`<name>.bak-<secs>-<n>`), so this works after any number of them, sharded or not, and running it again changes nothing. An `apply` made while the model is already in the state of the newest checkpoint reuses it instead of copying the weights again. In a folder written by an older version, a single backed up file gets its newest backup; several files, which nothing links, all go back to the state before the first `apply` (`data.checkpoint`: `last_apply` or `first_apply`). A weights file given as `--from-origin` is copied over the file of that name in a model folder. A file already identical to its source is not rewritten. `data`: `mode` (`backup` or `origin`), `checkpoint` (detection only), `model`, `files` (`path`, `source`, `sha256_before` (null if the file was missing), `sha256_source`, `sha256_after`, `rewritten`), `identical`. Exit codes: 2 nothing to restore from or invalid arguments (nothing touched), 3 copy failed or final hash different (the message counts the files already restored; the sources are intact, run it again).
 
+<a id="cmd-compose"></a>
+#### `surgeon compose`
+
+Makes one direction out of several extracted vectors, and the patch that removes it. In `orthogonal-preserve` mode (the default), the directions to preserve (`--keep`, capability vectors such as math or logic) are orthonormalized by modified Gram-Schmidt in f64, and every vector to remove is projected out of their subspace before the weighted sum: removing the result leaves the kept directions untouched, linearly. `standard` mode is the plain weighted sum. A zero, non-finite or mismatched vector, and one that the projection leaves below 1e-6 of its norm (nearly inside the kept subspace), are refused by name, layer and ratio rather than normalizing rounding noise. The composed file holds `direction` and `a` = `b` = its unit vector; `--patch-out` writes a `project_out` patch whose `composition` records the sources, their SHA-256 and weights, the mode, and the cosines before and after. Linear orthogonality does not rule out a nonlinear interference: measure both abilities with `bench` after applying.
+
+```text
+surgeon compose [OPTIONS] --ablate <ABLATE> --out <OUT>
+```
+
+| Option | Default | Role |
+| --- | --- | --- |
+| `--ablate` | required | Vector to remove, `file` or `file:alpha` (weight in the sum, default 1); repeatable. |
+| `--keep` | none | Direction to preserve; repeatable. |
+| `--mode` | `orthogonal-preserve` | `orthogonal-preserve` or `standard`. |
+| `--out` | required | Composed direction (`.safetensors`). |
+| `--patch-out` | none | Also write the `project_out` patch (`.json`) with the recipe. |
+| `--layers` | `all` | Layers of the patch: `all`, `A-B` or a list. |
+| `--projections` | `o_proj,down_proj` | Matrices of the patch. |
+| `--alpha` | 1 | Strength of the `project_out`, in [0, 1]. |
+| `--overwrite` | off | Replace existing outputs. |
+
+```bash
+surgeon compose --ablate refusal_L14.safetensors --keep dir_math_L13.safetensors --keep dir_logic_L13.safetensors --out refusal_ortho.safetensors --patch-out patch_ortho.json
+```
+
 <a id="cmd-eval"></a>
 #### `surgeon eval`
 
@@ -2131,7 +2156,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 <a id="tools"></a>
 ### 4.2 Tools
 
-`surgeon mcp` serves seventeen tools: thirteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), `surgeon_files` for an agent's working files, and three studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
+`surgeon mcp` serves eighteen tools: fourteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), `surgeon_files` for an agent's working files, and three studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
 
 | Tool | Role |
 | --- | --- |
@@ -2139,6 +2164,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 | `surgeon_inspect` | Layers and MLP matrices, optional statistics. |
 | `surgeon_apply` | Applies a patch in place (`dry_run` to check first); `gguf: true` for a quantized GGUF. |
 | `surgeon_restore` | Puts the model back byte for byte from the last checkpoint (the state before the last `surgeon_apply`), named backups or the origin model (`from_origin`, read in `--allow-read`); SHA-256 of every file before and after. The rollback after a regression measured by `surgeon_bench`. |
+| `surgeon_compose` | One direction from several extracted vectors, orthogonal to the capability directions to preserve (modified Gram-Schmidt, f64), and the `project_out` patch that removes it with its recipe. Writes files, never a model. |
 | `surgeon_eval` | Loop and expectation checks, conditional GGUF export. |
 | `surgeon_extract` | Steering vector from a Qwen2, Llama/Mistral or Qwen3 layer. |
 | `surgeon_bench` | Measurement, with `mode` `dump`, `logits`, `ppl`, `eval` or `refusal`, and the judge calibration `judge_sample`, `judge_eval`; built-in probe sets need no file: `builtin:math`, `builtin:logic`, `builtin:general` (eval) and `builtin:refusals` (refusal). |
@@ -2172,7 +2198,7 @@ The first call (`surgeon_check` on `qwen2-mini`) succeeds; the second asks for `
 ### 4.3 Guardrails
 
 - `--allow-dir` (repeatable, else `SURGEON_MCP_ALLOW_DIRS`, else the current folder): every path is resolved by the system (symbolic links, `..`) and must fall under an allowed folder; relative paths are relative to the first one.
-- `--read-only`: refuses every tool that writes (`surgeon_apply`, `surgeon_restore`, `surgeon_extract`, GGUF exports, `surgeon_bench` in `dump` and `judge_sample` modes or `judge_eval` with `out`, `surgeon_autotune` with `out`, `surgeon_diff`, `surgeon_lora`, `surgeon_graph` with `out_dir` or `cache_dir`, `surgeon_pipeline` `start`, `cancel` and `promote_patch`).
+- `--read-only`: refuses every tool that writes (`surgeon_apply`, `surgeon_restore`, `surgeon_compose`, `surgeon_extract`, GGUF exports, `surgeon_bench` in `dump` and `judge_sample` modes or `judge_eval` with `out`, `surgeon_autotune` with `out`, `surgeon_diff`, `surgeon_lora`, `surgeon_graph` with `out_dir` or `cache_dir`, `surgeon_pipeline` `start`, `cancel` and `promote_patch`).
 - Backup imposed: a verified SHA-256 backup precedes any write, and a failed backup blocks the write. `backup: false` in a patch is honored only with `--allow-no-backup`.
 - Cancellation: `notifications/cancelled` stops the running call, rolls back a partial patch and kills the running llama.cpp process; a cancelled extraction or dump leaves no file.
 - Shutdown: closing stdin, which is how an MCP client stops the server, cancels the running call the same way and answers nothing more, not even requests already sent. The server exits once that call has returned, and after 3 s even if it has not. A script must read its replies before it closes stdin.

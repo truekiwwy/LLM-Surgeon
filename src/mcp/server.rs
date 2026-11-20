@@ -32,6 +32,8 @@ avec des outils typés. Outils : surgeon_check (budget RAM/VRAM), surgeon_inspec
 matrices MLP), surgeon_apply (applique un patch EN PLACE ; faire d'abord dry_run: true), \
 surgeon_restore (remet le modèle octet pour octet depuis la sauvegarde ou l'origine, SHA-256 \
 vérifié : le rollback quand surgeon_bench montre une régression), \
+surgeon_compose (une direction faite de plusieurs vecteurs, orthogonale aux directions de \
+capacité à préserver, et le patch qui la retire), \
 surgeon_eval (non-régression et export GGUF), surgeon_extract (vecteur de direction depuis \
 une couche Qwen2 ; method est un identifiant du registre du moteur : mean_diff, svd, leace), \
 surgeon_bench (mesure d'une chirurgie : mode dump, logits, ppl ou eval), surgeon_autotune \

@@ -68,6 +68,9 @@ pub enum Commands {
     Apply(ApplyArgs),
     /// Put a model back byte for byte, from an `apply` backup or from the origin model.
     Restore(RestoreArgs),
+    /// One direction from several extracted vectors, kept orthogonal to the directions to
+    /// preserve, and the patch that removes it.
+    Compose(ComposeArgs),
     /// Evaluate a model on prompts.
     Eval(EvalArgs),
     /// Extract a steering vector from a Qwen2, Llama/Mistral or Qwen3 layer (pure Rust, CPU).
@@ -903,6 +906,40 @@ pub struct ApplyArgs {
     pub backup_dir: Option<PathBuf>,
     #[command(flatten)]
     pub surgery: crate::surgery::cli_args::SurgeryApplyArgs,
+}
+
+/// `surgeon compose` (`patch::compose`).
+#[derive(Debug, Clone, Args)]
+pub struct ComposeArgs {
+    /// Vector to remove: a `surgeon extract` file (or a JSON array), as `file` or
+    /// `file:alpha` (its weight in the sum, default 1); repeatable.
+    #[arg(long, required = true)]
+    pub ablate: Vec<String>,
+    /// Direction to preserve (a capability vector); repeatable.
+    #[arg(long)]
+    pub keep: Vec<PathBuf>,
+    /// orthogonal-preserve: the vectors to remove are projected out of the subspace of the
+    /// kept directions; standard: their plain weighted sum.
+    #[arg(long, value_enum, default_value_t = crate::patch::compose::ComposeMode::OrthogonalPreserve)]
+    pub mode: crate::patch::compose::ComposeMode,
+    /// Composed direction (.safetensors): `direction`, and `a` = `b` = its unit vector.
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Also write a patch.json that removes it (project_out), with the recipe in
+    /// `composition`.
+    #[arg(long)]
+    pub patch_out: Option<PathBuf>,
+    /// Layers of the patch: all, A-B, or a list.
+    #[arg(long, default_value = "all")]
+    pub layers: String,
+    /// Matrices of the patch, comma separated.
+    #[arg(long, value_delimiter = ',', default_values_t = ["o_proj".to_owned(), "down_proj".to_owned()])]
+    pub projections: Vec<String>,
+    /// Strength of the project_out, in [0, 1] (1 removes the direction entirely).
+    #[arg(long, default_value_t = 1.0)]
+    pub alpha: f32,
+    #[arg(long)]
+    pub overwrite: bool,
 }
 
 /// `surgeon restore` (`patch::restore`). Without `--backup` nor `--from-origin`: the state

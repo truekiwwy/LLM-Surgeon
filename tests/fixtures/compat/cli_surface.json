@@ -1013,6 +1013,265 @@
       "aliases": [],
       "args": [
         {
+          "action": "Append",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "ablate",
+          "long": "ablate",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "ABLATE"
+          ]
+        },
+        {
+          "action": "Append",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "keep",
+          "long": "keep",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "KEEP"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "orthogonal-preserve"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "mode",
+          "long": "mode",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "standard",
+            "orthogonal-preserve"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "MODE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "out",
+          "long": "out",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "OUT"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "patch_out",
+          "long": "patch-out",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PATCH_OUT"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "all"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "layers",
+          "long": "layers",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "LAYERS"
+          ]
+        },
+        {
+          "action": "Append",
+          "aliases": null,
+          "default_values": [
+            "o_proj",
+            "down_proj"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "projections",
+          "long": "projections",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PROJECTIONS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "1"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "alpha",
+          "long": "alpha",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "ALPHA"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "overwrite",
+          "long": "overwrite",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "OVERWRITE"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "compose",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
           "action": "Set",
           "aliases": null,
           "default_values": [],
@@ -9830,6 +10089,14 @@
           "args": [],
           "hidden": false,
           "name": "restore",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "compose",
           "subcommand_required": false,
           "subcommands": []
         },

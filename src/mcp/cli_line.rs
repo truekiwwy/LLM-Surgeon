@@ -55,6 +55,7 @@ fn command(tool: &str, args: &Value) -> Option<&'static str> {
         "surgeon_autotune" => "autotune",
         "surgeon_graph" => "graph",
         "surgeon_restore" => "restore",
+        "surgeon_compose" => "compose",
         "surgeon_bench" => match bench_command(args) {
             "bench" => return None,
             sub => sub,
@@ -136,7 +137,7 @@ pub fn cli_line(
         match value {
             Value::Bool(_) => push(&option, None),
             // A repeatable option, the others take a comma-separated list.
-            Value::Array(items) if option == "proj" => {
+            Value::Array(items) if matches!(option.as_str(), "proj" | "ablate" | "keep") => {
                 for item in items {
                     push(&option, Some(&scalar(item)));
                 }
@@ -275,7 +276,7 @@ mod tests {
         }
         assert_eq!(
             checked,
-            8 + BENCH_FIELDS.len(),
+            9 + BENCH_FIELDS.len(),
             "every tool with a command is covered"
         );
     }
