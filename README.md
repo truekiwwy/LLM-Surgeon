@@ -438,6 +438,8 @@ consent next to the URL, size and SHA-256, and nothing is sent anywhere.
   trusted toolchain), workspace folder, optional sample model (Qwen2.5-0.5B-Instruct), tour.
   Replay it from the home screen; the **Diagnostics** page repairs or reinstalls each part.
 - **Check it works**: run the self-test below (exit code 0 or 1).
+- **Your own agent instead**: Claude Code, Codex or OpenCode can drive the same engine with
+  the `weight-surgeon` skill; see [two ways to work](#two-modes).
 
 ```powershell
 surgeon-gui --self-test
@@ -2297,7 +2299,7 @@ If the client cannot find `surgeon`, use the absolute path of the binary as `com
 7. `surgeon_bench` `dump` again, then `logits`, then `ppl` and `eval` if llama.cpp is available.
 8. Decide from the measured numbers. If it is bad, restore the backup. Announce no result that was not measured.
 
-This is what the `safe-surgery-workflow` skill of the Claude Code plugin tells the agent. The same recipe from a shell, with the commands of [path A](#path-a): `check`, `extract`, `apply --dry-run`, `apply`, `bench dump`, `bench logits`.
+This is what the `safe-surgery-workflow` skill of the Claude Code plugin tells the agent; the `weight-surgeon` skill ([section 4.8](#two-modes)) teaches the Studio's whole method. The same recipe from a shell, with the commands of [path A](#path-a): `check`, `extract`, `apply --dry-run`, `apply`, `bench dump`, `bench logits`.
 
 <a id="llama-cpp"></a>
 ### 4.6 llama.cpp: what is used and how it is found
@@ -2342,6 +2344,25 @@ surgeon bench eval --model C:\models\Qwen2.5-0.5B-Instruct --dataset gsm_dev.jso
 ### 4.7 Architecture and plugins
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (French) defines the vocabulary: the Surgery Engine at the core, the CLI and the MCP server as front-ends, and the extension points. In short, `surgeon` is split into modules (`hardware`, `engine`, `patch`, `extract`, `bench`, `eval`, `kernel`, `linalg`, `lora`, `surgery`, `tui`, `mcp`, `plugin`). One extension point exists today, `ExtractionMethod` (API `v0`, unstable): a Rust trait whose implementations are registered statically in a program that links the library. The `surgeon` binary only registers the three built-in methods, and `surgeon plugins list` shows them. [docs/PLUGINS.md](docs/PLUGINS.md) (French) walks through writing a method and describes a proposal for out-of-process plugins that is not implemented.
+
+<a id="two-modes"></a>
+### 4.8 Two ways to work: the Studio or your own agent
+
+Both run the same engine, the same tools and the same project folder: a project started in one opens in the other.
+
+- **Everything in the Studio.** `surgeon-gui` connects to an AI provider (an API key, a local server, or the Claude Code, Codex, OpenCode or Antigravity CLI signed in on your account) and runs the agent itself, with approvals computed by the code, the evidence log, the results and the 3D graph ([docs/AGENTS.md](docs/AGENTS.md), in French). Settings > Engine also shows the machine health of `surgeon doctor` (free RAM and the largest model in f32 or bf16, cores, reference cache, hipfire daemon and its GPU memory), purges a stale cache and starts or restarts hipfire; the backend dialog sets `hipfire_requantize`.
+- **Your own agent, in your harness.** Claude Code, Codex, OpenCode or Cursor reaches the engine through `surgeon mcp`, and the `weight-surgeon` skill ([skills/weight-surgeon](skills/weight-surgeon/SKILL.md), in French) teaches it the Studio's method: `surgeon_doctor` first, inspection and extraction, screening with `surgeon_bench` mode `refusal_probe` and `surgeon_autotune`, orthogonal composition with `surgeon_compose` when a capability must be kept, and no conclusion before a full generation (`refusal` and `eval` against the original, plus a safety set). Run the harness in the project folder: the server journals every call in `chat/mcp_runs.jsonl` and `record_finding` fills the evidence log, so the Studio reopens the project with its results and its "Heuristic" or "Measured" badges.
+
+Install the skill and the server entry from Settings > External harnesses, one click each: the skill goes to `~/.claude/skills`, `~/.codex/skills` or `~/.agents/skills` (its state is the SHA-256 of each file against the copy the app ships), and the entry is copied, or merged into `~/.claude.json` with every other server kept and a `.bak` of the file first. From a terminal:
+
+```powershell
+# the skill for Claude Code (codex or agents for the other folders)
+surgeon-gui --install-skill claude
+# the server entry, with the absolute path of surgeon
+surgeon-gui --mcp-config
+```
+
+The entry is `{"mcpServers": {"weight-surgeon": {"command": "<absolute path of surgeon>", "args": ["mcp"]}}}`. Without `--allow-dir` the server serves the folder the harness runs in; add `--allow-read` and the model folder to its `args` to read an original model outside the project. The folder needs its `project.surgeon.json`, either written by the Studio or the one-line manifest the skill gives the agent; otherwise nothing is journaled.
 
 <a id="faq"></a>
 ## 5. FAQ, safety and troubleshooting

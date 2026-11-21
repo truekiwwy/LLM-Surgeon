@@ -440,6 +440,8 @@ taille et du SHA-256, et rien n'est envoyé nulle part.
   facultatif (Qwen2.5-0.5B-Instruct), visite guidée. Rejouable depuis l'accueil ; la page
   **Diagnostics** répare ou réinstalle chaque composant.
 - **Vérifier que ça marche** : lancez l'auto-test ci-dessous (code de sortie 0 ou 1).
+- **Votre propre agent à la place** : Claude Code, Codex ou OpenCode peuvent piloter le même
+  moteur avec le Skill `weight-surgeon` ; voir [deux façons de travailler](#two-modes).
 
 ```powershell
 surgeon-gui --self-test
@@ -2299,7 +2301,7 @@ Si le client ne trouve pas `surgeon`, mettez le chemin absolu du binaire dans `c
 7. `surgeon_bench` `dump` de nouveau, puis `logits`, puis `ppl` et `eval` si llama.cpp est disponible.
 8. Décider d'après les chiffres mesurés. Si c'est mauvais, restaurer la sauvegarde. N'annoncer aucun résultat qui n'a pas été mesuré.
 
-C'est ce que le skill `safe-surgery-workflow` du plugin Claude Code dit à l'agent. La même recette depuis un shell, avec les commandes du [chemin A](#path-a) : `check`, `extract`, `apply --dry-run`, `apply`, `bench dump`, `bench logits`.
+C'est ce que le skill `safe-surgery-workflow` du plugin Claude Code dit à l'agent ; le Skill `weight-surgeon` ([section 4.8](#two-modes)) enseigne toute la méthode du Studio. La même recette depuis un shell, avec les commandes du [chemin A](#path-a) : `check`, `extract`, `apply --dry-run`, `apply`, `bench dump`, `bench logits`.
 
 <a id="llama-cpp"></a>
 ### 4.6 llama.cpp : ce qui est utilisé et comment il est trouvé
@@ -2344,6 +2346,25 @@ surgeon bench eval --model C:\models\Qwen2.5-0.5B-Instruct --dataset gsm_dev.jso
 ### 4.7 Architecture et plugins
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (en français) définit le vocabulaire : le Surgery Engine au centre, le CLI et le serveur MCP comme front-ends, et les points d'extension. En bref, `surgeon` est découpé en modules (`hardware`, `engine`, `patch`, `extract`, `bench`, `eval`, `kernel`, `linalg`, `lora`, `surgery`, `tui`, `mcp`, `plugin`). Un seul point d'extension existe aujourd'hui, `ExtractionMethod` (API `v0`, instable) : un trait Rust dont les implémentations sont enregistrées statiquement dans un programme qui lie la bibliothèque. Le binaire `surgeon` n'enregistre que les trois méthodes intégrées, et `surgeon plugins list` les montre. [docs/PLUGINS.md](docs/PLUGINS.md) (en français) explique pas à pas comment écrire une méthode et décrit une proposition de plugins hors processus qui n'est pas implémentée.
+
+<a id="two-modes"></a>
+### 4.8 Deux façons de travailler : le Studio ou votre propre agent
+
+Les deux font tourner le même moteur, les mêmes outils et le même dossier projet : un projet commencé dans l'un s'ouvre dans l'autre.
+
+- **Tout dans le Studio.** `surgeon-gui` se connecte à un fournisseur d'IA (une clé d'API, un serveur local, ou la CLI Claude Code, Codex, OpenCode ou Antigravity connectée à votre compte) et fait tourner l'agent lui-même, avec des approbations calculées par le code, le journal des preuves, les résultats et le graphe 3D ([docs/AGENTS.md](docs/AGENTS.md)). Réglages > Moteur montre aussi la santé de la machine selon `surgeon doctor` (RAM libre et plus gros modèle en f32 ou en bf16, cœurs, cache des références, démon hipfire et sa mémoire GPU), purge un cache obsolète et démarre ou redémarre hipfire ; le dialogue du backend règle `hipfire_requantize`.
+- **Votre propre agent, dans votre harnais.** Claude Code, Codex, OpenCode ou Cursor atteint le moteur par `surgeon mcp`, et le Skill `weight-surgeon` ([skills/weight-surgeon](skills/weight-surgeon/SKILL.md)) lui enseigne la méthode du Studio : `surgeon_doctor` d'abord, inspection et extraction, criblage par `surgeon_bench` mode `refusal_probe` et `surgeon_autotune`, composition orthogonale par `surgeon_compose` quand une capacité doit être gardée, et aucune conclusion avant une génération complète (`refusal` et `eval` contre l'original, plus un jeu de sécurité). Lancez le harnais dans le dossier projet : le serveur journalise chaque appel dans `chat/mcp_runs.jsonl` et `record_finding` remplit le journal des preuves, donc le Studio rouvre le projet avec ses résultats et ses badges « Heuristique » ou « Mesuré ».
+
+Installez le Skill et l'entrée du serveur depuis Réglages > Harnais externes, un clic chacun : le Skill va dans `~/.claude/skills`, `~/.codex/skills` ou `~/.agents/skills` (son état est le SHA-256 de chaque fichier comparé à la copie livrée avec l'application), et l'entrée est copiée, ou fusionnée dans `~/.claude.json` avec tous les autres serveurs gardés et une copie `.bak` du fichier d'abord. Depuis un terminal :
+
+```powershell
+# le Skill pour Claude Code (codex ou agents pour les autres dossiers)
+surgeon-gui --install-skill claude
+# l'entrée du serveur, avec le chemin absolu de surgeon
+surgeon-gui --mcp-config
+```
+
+L'entrée est `{"mcpServers": {"weight-surgeon": {"command": "<chemin absolu de surgeon>", "args": ["mcp"]}}}`. Sans `--allow-dir`, le serveur sert le dossier où le harnais est lancé ; ajoutez `--allow-read` et le dossier du modèle à ses `args` pour lire un modèle d'origine hors du projet. Le dossier a besoin de son `project.surgeon.json`, écrit par le Studio ou le manifeste d'une ligne que le Skill donne à l'agent ; sinon rien n'est journalisé.
 
 <a id="faq"></a>
 ## 5. FAQ, sécurité et dépannage

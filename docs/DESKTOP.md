@@ -105,6 +105,8 @@ surgeon-gui --screenshot d.png --screen settings:engine   # agent, agent:advance
 surgeon-gui --demo-data --no-motion --size 1920x1080 --scale 1.0 --screenshot g.png --screen graph
 surgeon-gui --demo-data                      # a throwaway workspace filled by the real engine, offline
 surgeon-gui --reset-settings                 # the wizard runs again at the next start
+surgeon-gui --install-skill claude           # the weight-surgeon skill for Claude Code (codex, agents)
+surgeon-gui --mcp-config                     # the MCP entry that starts surgeon mcp, absolute path
 surgeon-gui graph.json                       # still accepted: graph.json, graph.ndjson, - (stdin)
 surgeon-gui "C:\Modèles\mon espace"          # a folder becomes the workspace; so does a drop on the window
 ```

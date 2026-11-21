@@ -43,6 +43,12 @@ Claude Code, en plugin : le dossier [`plugin/`](../plugin) déclare le même ser
 (`allow_dir` demandé à l'activation) et un skill de démarche sûre ; voir
 [docs/PLUGINS.md](PLUGINS.md#plugin-claude-code-plugin).
 
+Tout harnais (Claude Code, Codex, OpenCode, Cursor), avec la méthode du Studio : le Skill
+[`skills/weight-surgeon`](../skills/weight-surgeon/SKILL.md) et l'entrée
+`{"mcpServers": {"weight-surgeon": {"command": "<surgeon>", "args": ["mcp"]}}}`, que
+surgeon-gui installe et écrit (Réglages > Harnais externes, ou `surgeon-gui --install-skill`
+et `--mcp-config`) ; voir [AGENTS.md](AGENTS.md) section 8 bis.
+
 ## Outils
 
 | Outil | Rôle | Annotations |
