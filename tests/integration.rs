@@ -4286,6 +4286,8 @@ fn bench_json_on_the_binary_is_one_clean_document_even_with_forced_colors() {
             "--after",
             s(&after),
         ])
+        // NO_COLOR beats CLICOLOR_FORCE: a terminal that sets it must not decide this test.
+        .env_remove("NO_COLOR")
         .env("CLICOLOR_FORCE", "1")
         .env("COLORTERM", "truecolor")
         .output()
@@ -4311,6 +4313,7 @@ fn bench_json_on_the_binary_is_one_clean_document_even_with_forced_colors() {
             "--after",
             s(&after),
         ])
+        .env_remove("NO_COLOR")
         .env("CLICOLOR_FORCE", "1")
         .env("COLORTERM", "truecolor")
         .output()
