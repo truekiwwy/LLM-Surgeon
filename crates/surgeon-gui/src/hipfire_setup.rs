@@ -214,16 +214,35 @@ fn serve_script(workarounds: Option<&Workarounds>) -> String {
     )
 }
 
+/// Stops every hipfire process of the distro: the HTTP front and the GPU process it owns. A
+/// daemon that lost its GPU still answers `/health`, so a restart starts here. `[h]` keeps the
+/// pattern from matching the shell that runs this script.
+const STOP_SCRIPT: &str = r#"pkill -f '[h]ipfire' || true
+for _ in $(seq 1 50); do
+  pgrep -f '[h]ipfire' >/dev/null || exit 0
+  sleep 0.2
+done
+pkill -9 -f '[h]ipfire' || true
+"#;
+
+/// What `start-hipfire.ps1` runs as the user: `~/start-hipfire.sh`, its output in the log
+/// `surgeon doctor` reads.
+const USER_SERVE: &str = r#"exec "$HOME/start-hipfire.sh" > "$HOME/hipfire-serve.log" 2>&1"#;
+
 fn wsl() -> std::process::Command {
     platform::command(PathBuf::from("wsl.exe"))
 }
 
 /// `-e` hands the script to bash as is: `--` would run it through another shell first,
 /// which strips its quotes.
-fn as_root(script: &str) -> std::process::Command {
+fn as_user(user: &str, script: &str) -> std::process::Command {
     let mut cmd = wsl();
-    cmd.args(["-d", DISTRO, "-u", "root", "-e", "bash", "-lc", script]);
+    cmd.args(["-d", DISTRO, "-u", user, "-e", "bash", "-lc", script]);
     cmd
+}
+
+fn as_root(script: &str) -> std::process::Command {
+    as_user("root", script)
 }
 
 /// `surgeon-gui --hipfire-cleanup`: [`cleanup_script`] in the distribution; what it printed.
@@ -258,9 +277,37 @@ pub fn run(handle: &Handle, gpu: &str) -> Result<(), String> {
         return Err(t("hipfire.distro.not_ready").into());
     }
     task::run_streamed(as_root(&install_script(workarounds)), handle)?;
+    serve(handle, as_root(&serve_script(workarounds)))
+}
 
+/// Stops the daemon of the distro (frozen at 0 MB of GPU, or stopped) and starts it again:
+/// with the user's `~/start-hipfire.sh` when it is there, as `start-hipfire.ps1` does (that
+/// user's models), else with what [`run`] installed as root. Nothing is installed here.
+pub fn restart(handle: &Handle, gpu: &str) -> Result<(), String> {
+    handle.report(t("hipfire.step.stop"), 0, None);
+    let (code, out) = platform::run_capture(as_root(STOP_SCRIPT), Duration::from_secs(60))
+        .map_err(|e| e.to_string())?;
+    if code != Some(0) {
+        return Err(format!(
+            "{DISTRO} : arrêt de hipfire en échec ({code:?}) : {out}"
+        ));
+    }
+    let user = std::env::var("USERNAME").ok().filter(|u| {
+        let test = as_user(u, r#"test -x "$HOME/start-hipfire.sh""#);
+        platform::run_capture(test, Duration::from_secs(30)).is_ok_and(|(code, _)| code == Some(0))
+    });
+    let command = match user {
+        Some(u) => as_user(&u, USER_SERVE),
+        None => as_root(&serve_script(workarounds(gpu))),
+    };
+    serve(handle, command)
+}
+
+/// Starts the daemon in the background of its `wsl.exe` (which keeps the distro up while it
+/// runs) and waits for it to answer.
+fn serve(handle: &Handle, mut command: std::process::Command) -> Result<(), String> {
     handle.report(t("hipfire.step.serve"), 0, None);
-    as_root(&serve_script(workarounds))
+    command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -371,6 +418,30 @@ mod tests {
         std::fs::write(&conf, "0x7480,11,0,2\n").unwrap();
         assert!(bash(dids_step(&GFX1102, path)).contains("hors weight-surgeon"));
         assert_eq!(read(), "0x7480,11,0,2\n");
+    }
+
+    #[test]
+    fn a_restart_stops_hipfire_but_never_its_own_shell() {
+        // pkill -f reads command lines: the script's own text must not hold the plain word.
+        assert!(!STOP_SCRIPT.contains("hipfire"), "{STOP_SCRIPT}");
+        assert!(STOP_SCRIPT.contains("pkill -f '[h]ipfire'"));
+        assert!(
+            STOP_SCRIPT.contains("pkill -9"),
+            "a daemon that ignores TERM"
+        );
+        // The user's script, as start-hipfire.ps1 runs it, logging where surgeon doctor reads.
+        let args: Vec<String> = as_user("alice", USER_SERVE)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            ["-d", DISTRO, "-u", "alice", "-e", "bash", "-lc", USER_SERVE]
+        );
+        assert!(
+            USER_SERVE.contains("$HOME/start-hipfire.sh")
+                && USER_SERVE.contains("hipfire-serve.log")
+        );
     }
 
     #[test]

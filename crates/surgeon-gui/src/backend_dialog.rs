@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use eframe::egui::{self, Align, Grid, Layout, RichText, TextEdit};
-use weight_surgeon::backend::config::{self, BackendConfig};
+use weight_surgeon::backend::config::{self, BackendConfig, Requantize};
 use weight_surgeon::backend::detect::BackendReport;
 use weight_surgeon::bench::score::Backend;
 
@@ -26,6 +26,8 @@ pub struct BackendDialog {
     mistralrs_bin: String,
     hipfire_url: String,
     batch_size: String,
+    /// `hipfire_requantize = "auto"`: a working copy is requantized before its measure.
+    requantize: bool,
     /// Saved by hand since the app last asked ([`Self::take_saved`]).
     saved_by_hand: bool,
     /// Why the last load or save failed.
@@ -58,6 +60,7 @@ impl BackendDialog {
             mistralrs_bin: String::new(),
             hipfire_url: String::new(),
             batch_size: String::new(),
+            requantize: false,
             saved_by_hand: false,
             saved: BackendConfig::default(),
             error,
@@ -76,6 +79,7 @@ impl BackendDialog {
         self.mistralrs_bin = shown(&saved.mistralrs_bin);
         self.hipfire_url = saved.hipfire_url.clone().unwrap_or_default();
         self.batch_size = saved.batch_size.unwrap_or(BATCH_SIZE).to_string();
+        self.requantize = saved.hipfire_requantize == Some(Requantize::Auto);
         self.saved = saved;
     }
 
@@ -127,11 +131,18 @@ impl BackendDialog {
             .filter(|&b| b >= 1)
             .ok_or_else(|| format!("batch_size « {} » : entier >= 1 attendu", self.batch_size))?;
         let text = |text: &str| Some(text.trim().to_owned()).filter(|t| !t.is_empty());
+        // Unticked: `off` only when the file named a mode; otherwise the key stays absent.
+        let requantize = match (self.requantize, self.saved.hipfire_requantize) {
+            (true, _) => Some(Requantize::Auto),
+            (false, None) => None,
+            (false, Some(_)) => Some(Requantize::Off),
+        };
         Ok(BackendConfig {
             backend: Some(self.backend),
             batch_size: Some(batch_size),
             mistralrs_bin: text(&self.mistralrs_bin).map(PathBuf::from),
             hipfire_url: text(&self.hipfire_url),
+            hipfire_requantize: requantize,
             ..self.saved.clone()
         })
     }
@@ -227,6 +238,14 @@ impl BackendDialog {
                         .desired_width(60.0),
                 );
                 ui.end_row();
+                ui.label(theme::mono("hipfire_requantize"));
+                ui.checkbox(&mut self.requantize, "auto").on_hover_text(
+                    "auto : une copie de travail sans alias pour ses poids actuels est \
+                         requantifiée (q8f16, alias ws-<copie>-<sha8>) avant d'être mesurée sur \
+                         hipfire ; off : jamais sur hipfire (native pour un agent, refus en \
+                         ligne de commande).",
+                );
+                ui.end_row();
             });
     }
 
@@ -314,6 +333,19 @@ mod tests {
         assert_eq!(config::parse_toml(&config::to_toml(&cfg)).unwrap(), cfg);
         form.hipfire_url.clear();
         assert_eq!(form.to_config().unwrap().hipfire_url, None);
+        // hipfire_requantize: absent stays absent, ticked is auto, unticked after it is off.
+        assert_eq!(form.to_config().unwrap().hipfire_requantize, None);
+        form.requantize = true;
+        let auto = form.to_config().unwrap();
+        assert_eq!(auto.hipfire_requantize, Some(Requantize::Auto));
+        assert_eq!(config::parse_toml(&config::to_toml(&auto)).unwrap(), auto);
+        let mut form = dialog(auto);
+        assert!(form.requantize, "shown from the file");
+        form.requantize = false;
+        assert_eq!(
+            form.to_config().unwrap().hipfire_requantize,
+            Some(Requantize::Off)
+        );
         form.batch_size = "0".into();
         assert!(form.to_config().unwrap_err().contains("batch_size"));
     }

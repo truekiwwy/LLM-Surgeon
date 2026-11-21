@@ -751,9 +751,26 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
                         c::status(ui, State::Warn, t("bench.native"))
                             .on_hover_text(weight_surgeon::mcp::HIPFIRE_SET_ASIDE);
                     }
-                    if name == "surgeon_bench" && input["mode"] == "refusal_probe" {
+                    // A CLI runtime names it `mcp__surgeon__<tool>`.
+                    let tool = name.rsplit("__").next().unwrap_or(name);
+                    if tool == "surgeon_bench" && input["mode"] == "refusal_probe" {
                         c::status(ui, State::Warn, t("bench.heuristic"))
                             .on_hover_text(weight_surgeon::bench::refusal::PROBE_CAVEAT);
+                    }
+                    if tool == "surgeon_compose" {
+                        let removed = file_names(&input["ablate"]);
+                        let kept = file_names(&input["keep"]);
+                        let line = tf("thread.compose", &[("removed", &removed), ("kept", &kept)]);
+                        c::status(ui, State::Idle, line);
+                    }
+                    if tool == "surgeon_doctor" {
+                        // The envelope inside the result, compact JSON: its `data.ready`.
+                        let content = result.map_or("", |(content, _)| *content);
+                        if content.contains("\"ready\":true") {
+                            c::status(ui, State::Ok, t("thread.doctor.ready"));
+                        } else if content.contains("\"ready\":false") {
+                            c::status(ui, State::Warn, t("thread.doctor.not_ready"));
+                        }
                     }
                 }
                 (
@@ -820,6 +837,21 @@ fn plan_step(step: &str) -> &str {
         false => rest.strip_prefix(['-', '*', '\u{2022}']),
     };
     marked.map_or(step, str::trim_start)
+}
+
+/// The file names of a list of paths (`chemin` or `chemin:alpha`), `-` when it is empty.
+fn file_names(list: &serde_json::Value) -> String {
+    let names: Vec<&str> = list
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str())
+        .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p))
+        .collect();
+    match names.is_empty() {
+        true => "-".into(),
+        false => names.join(", "),
+    }
 }
 
 /// What a folded tool row says of its input: the command, prompt or path it names, else
@@ -1037,5 +1069,16 @@ mod tests {
         assert_eq!(tool_summary(&engine), "copies/c1");
         let other = serde_json::json!({"n": 1});
         assert_eq!(tool_summary(&other), r#"{"n":1}"#);
+    }
+
+    #[test]
+    fn a_composition_names_the_vectors_it_removes_and_keeps() {
+        let ablate =
+            serde_json::json!(["work/dir_L14.safetensors:0.5", r"C:\p\work\b.safetensors"]);
+        assert_eq!(
+            file_names(&ablate),
+            "dir_L14.safetensors:0.5, b.safetensors"
+        );
+        assert_eq!(file_names(&serde_json::Value::Null), "-", "keep left out");
     }
 }

@@ -102,6 +102,28 @@ impl Setup {
         ));
     }
 
+    /// Stops the WSL daemon and starts it again (`hipfire_setup::restart`): nothing is
+    /// downloaded, so no consent; one task at a time, like an install.
+    pub fn restart_hipfire(&mut self, ctx: &egui::Context, gpu: String) {
+        if self.installing() {
+            return;
+        }
+        let (lang, wake) = (i18n::lang(), ctx.clone());
+        self.hipfire = None;
+        self.hipfire_task = Some(Task::spawn(
+            move || wake.request_repaint(),
+            move |handle| {
+                i18n::set_lang(lang);
+                crate::hipfire_setup::restart(handle, &gpu)
+            },
+        ));
+    }
+
+    /// Whether hipfire is being installed or restarted.
+    pub fn hipfire_busy(&self) -> bool {
+        self.hipfire_task.is_some()
+    }
+
     /// A download may start only with the consent box ticked, outside local-only mode, with
     /// something picked, the engine's plan on screen, and no install running.
     pub fn download_allowed(&self, pick: Pick, consent: bool, local_only: bool) -> bool {

@@ -1,6 +1,7 @@
 //! The desktop services around the studio: paths handed over by a second launch or dropped on
 //! the window, the first-run wizard's state and the installs it starts ([`setup`]), the
-//! machine probe, the manual update check and the diagnostics export. It owns its own state
+//! machine probe and the engine's machine check (`surgeon doctor`), the manual update check
+//! and the diagnostics export. It owns its own state
 //! and hands the app a list of [`Event`]s; `ui::wizard` and the System view draw it.
 
 pub mod setup;
@@ -9,6 +10,8 @@ use std::path::PathBuf;
 
 use eframe::egui;
 use weight_surgeon::backend::config::BackendConfig;
+use weight_surgeon::doctor::{self, DoctorReport, DoctorRequest};
+use weight_surgeon::hardware::SystemProbe;
 
 use crate::actions::{self, Env};
 use crate::cli::{self, Item};
@@ -46,6 +49,9 @@ pub struct Desktop {
     env: Env,
     pub system: Option<SystemReport>,
     system_task: Option<Task<SystemReport>>,
+    /// The engine's machine check (`surgeon doctor`), run when Settings > Engine first shows.
+    pub doctor: Option<DoctorReport>,
+    doctor_task: Option<Task<DoctorReport>>,
     /// The first-run wizard, open over the whole body.
     pub wizard: Option<Wizard>,
     /// The optional components being planned or installed.
@@ -89,6 +95,8 @@ impl Desktop {
             setup: Setup::default(),
             system: None,
             system_task: None,
+            doctor: None,
+            doctor_task: None,
             update: UpdateState::Idle,
             message: None,
             pending: Vec::new(),
@@ -202,6 +210,32 @@ impl Desktop {
         ));
     }
 
+    pub fn doctoring(&self) -> bool {
+        self.doctor_task.is_some()
+    }
+
+    /// `surgeon doctor` off the UI thread, the same checks as the CLI and `surgeon_doctor`: RAM
+    /// and the dtype `model` gets, cores, the reference cache, the hipfire daemon. `clean`
+    /// removes the unreadable and obsolete cache entries first (`ref_cache::purge`).
+    pub fn refresh_doctor(&mut self, ctx: &egui::Context, model: Option<PathBuf>, clean: bool) {
+        if self.doctor_task.is_some() {
+            return;
+        }
+        let wake = ctx.clone();
+        self.doctor_task = Some(Task::spawn(
+            move || wake.request_repaint(),
+            move |_| {
+                let req = DoctorRequest {
+                    model,
+                    clean_cache: clean,
+                    ..DoctorRequest::default()
+                };
+                let user = weight_surgeon::backend::load_user_config().unwrap_or_default();
+                doctor::run(&req, &SystemProbe::detect(), &user)
+            },
+        ));
+    }
+
     /// The dependency rows: components, toolchain, workspace, machine, with their severity
     /// under `uses`.
     pub fn rows(&self, backend: &BackendConfig, uses: diag::Uses) -> Vec<Row> {
@@ -277,6 +311,10 @@ impl Desktop {
             self.system = Some(system);
             self.system_task = None;
         }
+        if let Some(report) = self.doctor_task.as_ref().and_then(Task::poll) {
+            self.doctor = Some(report);
+            self.doctor_task = None;
+        }
         let next = match &self.update {
             UpdateState::Checking(task) => task.poll().map(|r| match r {
                 Ok(Some(u)) => UpdateState::Available(u),
@@ -338,5 +376,39 @@ impl Desktop {
             components::drop_hint(&ctx, t("drop.hint"));
         }
         events
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The engine's own check, off the UI thread, read only (no purge asked).
+    #[test]
+    fn the_machine_check_runs_in_the_background_and_lands_in_the_desktop() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = Env {
+            components: dir.path().join("components"),
+            config: None,
+            settings: dir.path().join("settings.json"),
+        };
+        let mut desktop = Desktop::detached(None, Settings::default(), env);
+        let ctx = egui::Context::default();
+        desktop.refresh_doctor(&ctx, None, false);
+        assert!(desktop.doctoring());
+        desktop.refresh_doctor(&ctx, None, true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while desktop.doctor.is_none() && std::time::Instant::now() < deadline {
+            desktop.poll();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let report = desktop.doctor.as_ref().expect("a report");
+        assert!(!desktop.doctoring());
+        let names: Vec<&str> = report.checks.iter().map(|c| c.name).collect();
+        assert_eq!(&names[..3], ["memory", "cpu", "cache"]);
+        assert_eq!(
+            report.cache.removed, 0,
+            "the second call, a purge, was ignored"
+        );
     }
 }

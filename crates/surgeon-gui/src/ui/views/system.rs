@@ -19,6 +19,7 @@ use crate::desktop::UpdateState;
 use crate::diag::{actions_needed, Fix, Group, Row, Severity, Status, Uses};
 use crate::integration::{self, Harness, SkillState};
 use crate::settings::Lang;
+use weight_surgeon::doctor::Level;
 
 /// The column of the sections.
 const NAV: f32 = 232.0;
@@ -249,6 +250,7 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 if c::button_if(ui, !probing, label, ButtonKind::Ghost, t("diag.probing")).clicked()
                 {
                     app.desktop.refresh_system(&ctx);
+                    app.refresh_doctor(&ctx, false);
                 }
             },
             |ui, app| {
@@ -274,6 +276,7 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 .id_salt("deps")
                 .auto_shrink(false)
                 .show(ui, |ui| {
+                    health(ui, app);
                     for group in [Group::Essential, Group::Acceleration, Group::Samples] {
                         c::section(ui, group_label(group));
                         for row in rows.iter().filter(|r| r.group == group) {
@@ -287,6 +290,94 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     if let Some((what, force)) = fix {
         app.desktop.open_fix(what, force);
     }
+}
+
+/// The engine's machine check (`surgeon doctor`, run the first time the section shows): one
+/// line per check with the engine's own words, then what can be done from here: purge the
+/// stale reference cache, start or restart a hipfire daemon that is down or lost its GPU.
+fn health(ui: &mut Ui, app: &mut SurgeonApp) {
+    let ctx = ui.ctx().clone();
+    c::section(ui, t("doctor.title"));
+    let checking = app.desktop.doctoring();
+    if app.desktop.doctor.is_none() && !checking {
+        app.refresh_doctor(&ctx, false);
+    }
+    let Some(report) = app.desktop.doctor.clone() else {
+        c::status(ui, State::Active, t("doctor.running"));
+        ui.add_space(T.space.m);
+        return;
+    };
+    match report.ready {
+        true => c::status(ui, State::Ok, t("doctor.ready")),
+        false => c::status(ui, State::Error, t("doctor.not_ready")),
+    };
+    ui.add_space(T.space.xs);
+    for check in &report.checks {
+        let state = match check.level {
+            Level::Ok => State::Ok,
+            Level::Warn => State::Warn,
+            Level::Fail => State::Error,
+        };
+        let name = match check.name {
+            "memory" => t("doctor.memory"),
+            "cpu" => t("doctor.cpu"),
+            "cache" => t("doctor.cache"),
+            _ => t("doctor.hipfire"),
+        };
+        c::status(ui, state, name);
+        c::secondary(ui, check.message.as_str());
+        ui.add_space(T.space.xs);
+    }
+    let stale = report.cache.corrupt + report.cache.obsolete;
+    let hipfire = report.hipfire.as_ref();
+    let down = hipfire.is_some_and(|h| !h.up);
+    let frozen = hipfire
+        .and_then(|h| h.gpu_memory.as_ref())
+        .is_some_and(|g| g.total_mb == 0);
+    let busy = app.desktop.setup.hipfire_busy();
+    ui.add_space(T.space.s);
+    ui.horizontal_wrapped(|ui| {
+        let why = t("doctor.running");
+        if stale > 0
+            && c::button_if(
+                ui,
+                !checking,
+                &tf("doctor.purge", &[("n", &stale)]),
+                ButtonKind::Secondary,
+                why,
+            )
+            .clicked()
+        {
+            app.refresh_doctor(&ctx, true);
+        }
+        if down || frozen {
+            let label = match down {
+                true => t("doctor.hipfire.start"),
+                false => t("doctor.hipfire.restart"),
+            };
+            if c::button_if(
+                ui,
+                !busy,
+                label,
+                ButtonKind::Secondary,
+                t("doctor.hipfire.busy"),
+            )
+            .clicked()
+            {
+                app.restart_hipfire(&ctx);
+            }
+        }
+    });
+    if busy {
+        c::status(ui, State::Active, t("doctor.hipfire.busy"));
+    }
+    if let Some(Err(e)) = &app.desktop.setup.hipfire {
+        c::message(ui, e, true);
+    }
+    if report.cache.removed > 0 {
+        c::meta(ui, tf("doctor.purged", &[("n", &report.cache.removed)]));
+    }
+    c::separator(ui);
 }
 
 /// The machine in key / value rows: OS, GPUs, Vulkan, memory, disk, notes.
