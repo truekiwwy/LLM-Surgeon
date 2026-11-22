@@ -105,7 +105,7 @@ fn pillar_units(p: &PillarConfig, candidates: u64) -> Result<u64> {
                 .max_new_tokens
                 .map_or(u64::from(crate::bench::DEFAULT_MAX_NEW_TOKENS), u64::from),
             _ => p.max_new_tokens.map_or(
-                u64::from(crate::bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
+                u64::from(crate::bench::PIPELINE_REFUSAL_MAX_NEW_TOKENS),
                 u64::from,
             ),
         };

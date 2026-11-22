@@ -74,15 +74,18 @@ pub use crate::settings::Mode;
 pub enum Section {
     General,
     Providers,
+    /// External harnesses: the skill and the MCP configuration.
+    Harnesses,
     Engine,
     Updates,
     Journal,
 }
 
 impl Section {
-    pub const ALL: [Section; 5] = [
+    pub const ALL: [Section; 6] = [
         Section::General,
         Section::Providers,
+        Section::Harnesses,
         Section::Engine,
         Section::Updates,
         Section::Journal,
@@ -90,7 +93,14 @@ impl Section {
 
     /// The `--screen settings:<name>` part; `machine` (before G7) is the engine.
     pub fn from_name(name: &str) -> Option<Self> {
-        let names = ["general", "providers", "engine", "updates", "journal"];
+        let names = [
+            "general",
+            "providers",
+            "harnesses",
+            "engine",
+            "updates",
+            "journal",
+        ];
         match name {
             "machine" => Some(Section::Engine),
             _ => names.iter().position(|n| *n == name).map(|k| Self::ALL[k]),
@@ -182,6 +192,8 @@ pub struct SurgeonApp {
     pub motion: bool,
     /// The settings dialog, open on this section.
     pub settings: Option<Section>,
+    /// What the last skill install or MCP configuration did (`true`: an error).
+    pub harness_note: Option<(String, bool)>,
     /// The system picker of the workspace folder (wizard, settings).
     pub workspace_picker: Picker,
     pub right: RightPane,
@@ -248,6 +260,7 @@ impl SurgeonApp {
             palette: Palette::default(),
             motion: true,
             settings: None,
+            harness_note: None,
             workspace_picker: Picker::default(),
             right: RightPane::Evidence,
             focus: None,
@@ -602,6 +615,39 @@ impl SurgeonApp {
         }
     }
 
+    /// The engine's machine check, with the open project's model (its working copy, else its
+    /// origin) when it is a SafeTensors folder: the dtype that model gets and its batch.
+    /// `clean` purges the stale reference cache entries first.
+    pub fn refresh_doctor(&mut self, ctx: &egui::Context, clean: bool) {
+        let model = self
+            .agents
+            .project
+            .as_deref()
+            .map(ProjectPaths::of)
+            .and_then(|p| p.copy.or(p.origin))
+            .filter(|m| m.join("config.json").is_file());
+        self.desktop.refresh_doctor(ctx, model, clean);
+    }
+
+    /// Starts hipfire again, stopped or frozen without its GPU. On Windows the daemon of WSL
+    /// (`hipfire_setup::restart`); elsewhere the one this window runs, started again by the
+    /// next probe. A daemon started outside the app there is left to its owner.
+    pub fn restart_hipfire(&mut self, ctx: &egui::Context) {
+        if cfg!(windows) {
+            // The GPU whose name decides the workarounds, picked as the wizard does.
+            let gpus = self.desktop.system.iter().flat_map(|s| s.gpus.iter());
+            let gpu = gpus
+                .map(|g| g.name.clone())
+                .find(|n| backend_choice::vendor(n) == backend_choice::Vendor::Amd)
+                .unwrap_or_default();
+            self.desktop.setup.restart_hipfire(ctx, gpu);
+        } else {
+            self.hipfire.stop();
+            self.hardware = None;
+            self.spawn_probe(ctx);
+        }
+    }
+
     /// The first launch, and every probe while the choice is automatic: the backend the
     /// hardware calls for among the Rust engines (`backend_choice`), written to the user
     /// `config.toml`. A backend saved by hand in the dialog ends the automatic choice.
@@ -647,6 +693,10 @@ impl SurgeonApp {
                 self.dialog = BackendDialog::load();
                 self.hardware = None;
                 self.spawn_probe(ctx);
+                // A daemon just installed or restarted: the check on screen is out of date.
+                if self.desktop.doctor.is_some() {
+                    self.refresh_doctor(ctx, false);
+                }
             }
             Event::Open(items) => {
                 for item in items {

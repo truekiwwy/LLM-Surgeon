@@ -54,6 +54,11 @@ pub struct PipelineConfig {
         description = "Registre append-only des consultations du Test Set ; défaut : test_access.json à côté de ce fichier. Partagé par les jobs : un Test Set déjà consulté est refusé."
     )]
     pub test_registry: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(
+        description = "Directions de capacité à préserver (fichiers de surgeon extract, par exemple maths ou logique) : chaque vector_file du gabarit est d'abord composé orthogonalement à elles (surgeon compose, mode orthogonal-preserve) sous <job>/composed/, et les opérations project_out lisent ses tenseurs unitaires a et b. Absent : le gabarit tel quel."
+    )]
+    pub keep_vectors: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
         description = "Moteur de génération des piliers binaires (safety, unblocking, gsm8k) : native (CPU, défaut), mistralrs (mistral.rs sur le dossier SafeTensors), llama-server (GPU via llama.cpp) ou hipfire (démon AMD). Les options de la ligne de commande passent devant, puis la configuration utilisateur (surgeon backend show). Les piliers kl et logits lisent toujours les logits natifs."
@@ -408,6 +413,19 @@ pub fn validate(config: &PipelineConfig, allow_disable_safety: bool) -> Result<(
             ));
         }
     }
+    if !config.keep_vectors.is_empty() {
+        let direction = |t: &Option<String>| t.as_deref().is_none_or(|t| t == "direction");
+        for op in &config.patch.operations {
+            if !direction(&op.vector_tensor) || !direction(&op.vector_tensor_b) || op.rank.is_some()
+            {
+                issues.push(format!(
+                    "keep_vectors : l'opération {} doit lire le tenseur direction, sans rank, pour \
+                     être composée",
+                    op.id
+                ));
+            }
+        }
+    }
     if !config.pillars.iter().any(|p| p.kind == PillarKind::Safety) && !allow_disable_safety {
         issues.push(
             "aucun pilier safety : la porte de sécurité est obligatoire (--allow-disable-safety \
@@ -447,6 +465,7 @@ pub fn resolve(config: &mut PipelineConfig, base: &Path) {
     for op in &mut config.patch.operations {
         abs(&mut op.vector_file);
     }
+    config.keep_vectors.iter_mut().for_each(abs);
     for p in &mut config.pillars {
         abs(&mut p.dataset_dev);
         abs(&mut p.dataset_test);
@@ -474,6 +493,9 @@ pub fn inputs(config: &PipelineConfig) -> Vec<(String, PathBuf)> {
             format!("patch.operations[{i}].vector_file"),
             op.vector_file.clone(),
         ));
+    }
+    for (i, keep) in config.keep_vectors.iter().enumerate() {
+        out.push((format!("keep_vectors[{i}]"), keep.clone()));
     }
     for p in &config.pillars {
         out.push((

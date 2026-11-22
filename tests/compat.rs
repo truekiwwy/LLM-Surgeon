@@ -81,6 +81,42 @@
 //!   `--allow-stale-hipfire` of `bench eval`, `bench refusal` and `pipeline run`, CLI only. The
 //!   rewrite added those three entries to `cli_surface.json` and nothing else; no tool schema,
 //!   no output hash moved.
+//! - requantized hipfire copies (`ws-<copy>-<sha8>`): the option `--hipfire-requantize` of
+//!   `bench eval`, `bench refusal`, `pipeline plan` and `pipeline run` (the key
+//!   `hipfire_requantize` of the user configuration). The rewrite added those four entries to
+//!   `cli_surface.json` and nothing else; no tool schema, no output hash moved.
+//! - the reference cache (`bench::ref_cache`): the option `--no-ref-cache` of `bench eval` and
+//!   `bench refusal`, two entries added to `cli_surface.json`. The reports gain an optional
+//!   `baseline.cache`, absent without a cache directory (as in this harness): no tool schema,
+//!   no output hash moved.
+//! - the refusal budget: the default of `bench refusal --max-new-tokens` goes from 256 to 40
+//!   (one deliberate change of default, measured to keep the verdicts of 256 on the built-in
+//!   sets); the pipeline keeps 256. No other entry, no tool schema, no output hash moved.
+//! - the refusal probe: the subcommand `bench refusal-probe` (`--model`, `--prompts`,
+//!   `--method`, `--prefixes`, `--vector`, `--threshold`, `--chat-template`,
+//!   `--compare-generation`), CLI only. The rewrite added it to `cli_surface.json` (and to
+//!   the `help` mirror) and nothing else; no tool schema, no output hash moved.
+//! - composed directions: the subcommand `compose` (`--ablate`, `--keep`, `--mode`, `--out`,
+//!   `--patch-out`, `--layers`, `--projections`, `--alpha`, `--overwrite`) and the eighteenth
+//!   tool `surgeon_compose`, both additive; the optional `composition` of `patch.json` (absent
+//!   from every older patch). Only the `schema` hash (the patch schema) and the tool schema
+//!   hash moved; no option, property or output of an existing command changed.
+//! - refusal probe over MCP: `surgeon_bench` gains the mode `refusal_probe` and the optional
+//!   properties `probe_method`, `direction_path` and `threshold`, all additive; only the tool
+//!   schema hash moved. The report of `bench refusal-probe` (not released yet) now names its
+//!   fields for the agent (`prompt_count`, `probe_refusal_rate`, `mean_refusal_prob`,
+//!   `duration_ms`), says `is_heuristic: true` and `evidence_level: heuristic_screening`, and
+//!   writes its method in kebab-case like the CLI value.
+//! - autotune scale selection: `autotune` gains `--refusal-prompts`, `--target-refusal-rate`,
+//!   `--scales`, `--probe-top-k`, `--no-probe-prefilter`, `--retention-dataset` and
+//!   `--retention-limit`, `surgeon_autotune` the same optional properties; all additive, and
+//!   without `--refusal-prompts` the report is byte for byte the one before (`selection` is
+//!   omitted). Only the tool schema hash moved.
+//! - machine readiness: the subcommand `doctor` (`--model`, `--clean-cache`, `--hipfire-url`,
+//!   `--hipfire-log`) and the nineteenth tool `surgeon_doctor` (read only, `model`), both
+//!   additive; only the tool schema hash moved.
+//! - studio projects from external agents: the twentieth tool `surgeon_workspace` (`action`
+//!   `init`, `model`, `name`, `force`), MCP only, additive; only the tool schema hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
@@ -252,7 +288,7 @@ fn mcp_tools_surface() -> Value {
 #[test]
 fn mcp_tools_surface_is_unchanged() {
     let current = mcp_tools_surface();
-    assert_eq!(current.as_array().unwrap().len(), 17, "seventeen MCP tools");
+    assert_eq!(current.as_array().unwrap().len(), 20, "twenty MCP tools");
     let reference = read_fixture("mcp_tools_surface.json");
     assert!(
         current == reference,

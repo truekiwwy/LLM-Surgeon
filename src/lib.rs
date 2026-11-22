@@ -6,6 +6,7 @@ pub mod arch;
 pub mod backend;
 pub mod bench;
 pub mod cli;
+pub mod doctor;
 pub mod engine;
 pub mod eval;
 pub mod events;

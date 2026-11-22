@@ -38,6 +38,7 @@ use crate::extract::{
     DEFAULT_LEACE_RCOND, DEFAULT_LEACE_SHRINKAGE,
 };
 use crate::patch::autotune::{self, parse_layer_range, AutotuneRequest, EvalSource, L2Reg};
+use crate::patch::autotune_select::{self, SelectionRequest};
 use crate::patch::{LayerSelection, LayersField, PatchFile, Projection, ValidationIssue};
 use crate::plugin::{unknown_method_message, Registry, DEFAULT_METHOD};
 use crate::ui::Ui;
@@ -434,7 +435,10 @@ pub fn tool_definitions() -> Value {
         list.extend(super::tools_graph::definitions());
         list.extend(super::tools_backend::definitions());
         list.extend(super::tools_restore::definitions());
+        list.extend(super::tools_compose::definitions());
+        list.extend(super::tools_doctor::definitions());
         list.extend(super::tools_files::definitions());
+        list.extend(super::tools_workspace::definitions());
         list.extend(super::tools_session::definitions());
     }
     sorted(tools)
@@ -480,7 +484,7 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_BENCH,
             "Mesure d'une chirurgie",
-            "Mesure l'effet d'une chirurgie ; eval, dump et refusal habillent les prompts avec le format de chat du modèle (chat_template, défaut auto). Selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH ou un jeu intégré builtin:math|logic|general, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts ou builtin:refusals, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe), judge_sample et judge_eval (calibration du juge de refusal : échantillon stratifié à faire étiqueter par un humain, puis accord du juge avec ces étiquettes et fichier de calibration). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision ; en cas de régression, surgeon_restore.",
+            "Mesure l'effet d'une chirurgie ; eval, dump et refusal habillent les prompts avec le format de chat du modèle (chat_template, défaut auto). Selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH ou un jeu intégré builtin:math|logic|general, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts ou builtin:refusals, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe), refusal_probe (refus estimé sans générer, une passe avant par prompt : first-token-prob ou direction-projection ; réponse marquée is_heuristic: true et evidence_level heuristic_screening, à confirmer par le mode refusal ou eval, jamais une preuve finale), judge_sample et judge_eval (calibration du juge de refusal : échantillon stratifié à faire étiqueter par un humain, puis accord du juge avec ces étiquettes et fichier de calibration). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision ; en cas de régression, surgeon_restore.",
             schema_value::<BenchToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
@@ -517,7 +521,10 @@ pub(crate) fn is_known(name: &str) -> bool {
         || super::tools_graph::NAMES.contains(&name)
         || super::tools_backend::NAMES.contains(&name)
         || super::tools_restore::NAMES.contains(&name)
+        || super::tools_compose::NAMES.contains(&name)
+        || super::tools_doctor::NAMES.contains(&name)
         || super::tools_files::NAMES.contains(&name)
+        || super::tools_workspace::NAMES.contains(&name)
         || super::tools_session::NAMES.contains(&name)
 }
 
@@ -552,7 +559,10 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         super::tools_graph::TOOL_GRAPH => super::tools_graph::call(arguments, ctx),
         super::tools_backend::TOOL_BACKENDS => super::tools_backend::call(arguments, ctx),
         super::tools_restore::TOOL_RESTORE => super::tools_restore::call(arguments, ctx),
+        super::tools_compose::TOOL_COMPOSE => super::tools_compose::call(arguments, ctx),
+        super::tools_doctor::TOOL_DOCTOR => super::tools_doctor::call(arguments, ctx),
         super::tools_files::TOOL_FILES => super::tools_files::call(arguments, ctx),
+        super::tools_workspace::TOOL_WORKSPACE => super::tools_workspace::call(arguments, ctx),
         _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);
@@ -909,6 +919,43 @@ pub struct AutotuneToolArgs {
     pub out: Option<PathBuf>,
     #[serde(default)]
     pub overwrite: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Prompts que le modèle patché ne doit plus refuser (fichier ou builtin:refusals) : essaie les α du ridge à plusieurs échelles et écrit la plus petite dont les réponses générées atteignent target_refusal_rate. Sonde first-token-prob d'abord, génération complète (40 tokens, natif) des probe_top_k finalistes ; data.selection détaille sonde et génération."
+    )]
+    pub refusal_prompts: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "Avec refusal_prompts : taux de refus (0..1) à atteindre en génération, défaut 0.1."
+    )]
+    pub target_refusal_rate: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Avec refusal_prompts : échelles c candidates des α, défaut [0.25, 0.5, 0.75, 1, 1.25, 1.5]."
+    )]
+    pub scales: Option<Vec<f64>>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "Avec refusal_prompts : candidats passés de la sonde à la génération complète, défaut 2."
+    )]
+    pub probe_top_k: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "Avec refusal_prompts : génère chaque candidat sans sonde préalable (défaut false)."
+    )]
+    pub no_probe_prefilter: Option<bool>,
+    #[serde(default)]
+    #[schemars(
+        description = "Avec refusal_prompts : jeu de capacités aussi généré sur les finalistes et la base, comme surgeon_bench mode eval (fichier ou builtin:math, builtin:logic, builtin:general)."
+    )]
+    pub retention_dataset: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "Avec retention_dataset : N premières questions, défaut 20."
+    )]
+    pub retention_limit: Option<u32>,
 }
 
 fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
@@ -971,6 +1018,47 @@ fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             .map(|o| sandboxed(ctx, "out", o, &root))
             .transpose()?,
         overwrite: args.overwrite,
+        selection: match &args.refusal_prompts {
+            None => {
+                let orphan = args.target_refusal_rate.is_some()
+                    || args.scales.is_some()
+                    || args.probe_top_k.is_some()
+                    || args.no_probe_prefilter.is_some()
+                    || args.retention_dataset.is_some()
+                    || args.retention_limit.is_some();
+                if orphan {
+                    return Err(bad(
+                        "target_refusal_rate, scales, probe_top_k, no_probe_prefilter et retention_* demandent refusal_prompts".into(),
+                    ));
+                }
+                None
+            }
+            Some(prompts) => Some(SelectionRequest {
+                prompts: readable_or_builtin(ctx, "refusal_prompts", prompts, &root)?,
+                target_refusal_rate: args
+                    .target_refusal_rate
+                    .unwrap_or(autotune_select::DEFAULT_TARGET_REFUSAL_RATE),
+                scales: args
+                    .scales
+                    .unwrap_or_else(|| autotune_select::DEFAULT_SCALES.to_vec()),
+                top_k: args
+                    .probe_top_k
+                    .map_or(autotune_select::DEFAULT_TOP_K, |k| k as usize),
+                prefilter: !args.no_probe_prefilter.unwrap_or(false),
+                retention: args
+                    .retention_dataset
+                    .as_ref()
+                    .map(|d| readable_or_builtin(ctx, "retention_dataset", d, &root))
+                    .transpose()?
+                    .map(|d| {
+                        let limit = args
+                            .retention_limit
+                            .map_or(autotune_select::DEFAULT_RETENTION_LIMIT, |n| n as usize);
+                        (d, limit)
+                    }),
+                ref_cache: crate::bench::ref_cache::RefCache::from_env(),
+            }),
+        },
     };
     core_autotune(&request, ctx.deps, &Ui::off(), ctx.sink)
 }
@@ -1039,6 +1127,8 @@ pub enum BenchMode {
     Dump,
     /// Taux de refus d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, génération native (model, prompts).
     Refusal,
+    /// Refus estimé sans générer, une passe avant par prompt (model, prompts) : heuristique d'exploration, jamais une preuve.
+    RefusalProbe,
     /// Échantillon stratifié d'un run refusal à étiqueter à la main (responses, prompts, out).
     JudgeSample,
     /// Juge LLM confronté aux étiquettes humaines, fichier de calibration en option (labels, judge_model).
@@ -1050,7 +1140,7 @@ pub enum BenchMode {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Arguments de surgeon_bench : mode, puis les champs de ce mode (logits : before, after ; ppl : model, text ; eval : model, dataset ; dump : model, prompts, out ; refusal : model, prompts ; judge_sample : responses, prompts, out ; judge_eval : labels, judge_model)."
+    description = "Arguments de surgeon_bench : mode, puis les champs de ce mode (logits : before, after ; ppl : model, text ; eval : model, dataset ; dump : model, prompts, out ; refusal : model, prompts ; refusal_probe : model, prompts ; judge_sample : responses, prompts, out ; judge_eval : labels, judge_model)."
 )]
 pub struct BenchToolArgs {
     pub mode: BenchMode,
@@ -1193,7 +1283,7 @@ pub struct BenchToolArgs {
     #[serde(default)]
     #[schemars(
         range(min = 1),
-        description = "eval : tokens générés au plus par question (défaut 512) ; refusal : par prompt (défaut 256). Réduire fausse la mesure : réponses coupées avant la réponse finale ou le refus."
+        description = "eval : tokens générés au plus par question (défaut 512) ; refusal : par prompt (défaut 40). Réduire fausse la mesure : réponses coupées avant la réponse finale ou le refus."
     )]
     pub max_new_tokens: Option<u32>,
     #[serde(default)]
@@ -1305,6 +1395,21 @@ pub struct BenchToolArgs {
     pub markers_file: Option<PathBuf>,
     #[serde(default)]
     #[schemars(
+        description = "refusal_probe : first-token-prob (défaut : probabilité que le premier token de réponse ouvre un refus) ou direction-projection (projection du flux résiduel sur direction_path, contre son seuil calibré)."
+    )]
+    pub probe_method: Option<crate::bench::refusal::RefusalProbeMode>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal_probe en direction-projection : fichier de direction de surgeon_extract (resid_post), avec son .stats.json."
+    )]
+    pub direction_path: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal_probe : seuil de décision du score (défaut 0.5 en first-token-prob, le seuil calibré de la direction en direction-projection)."
+    )]
+    pub threshold: Option<f64>,
+    #[serde(default)]
+    #[schemars(
         description = "judge_sample : sortie JSON (enveloppe ou data) d'un surgeon_bench mode refusal."
     )]
     pub responses: Option<PathBuf>,
@@ -1322,7 +1427,17 @@ pub struct BenchToolArgs {
 }
 
 /// (mode, required fields, optional fields).
-pub(super) const BENCH_FIELDS: [(&str, &[&str], &[&str]); 7] = [
+pub(super) const BENCH_FIELDS: [(&str, &[&str], &[&str]); 8] = [
+    (
+        "refusal-probe",
+        &["model", "prompts"],
+        &[
+            "probe_method",
+            "direction_path",
+            "threshold",
+            "chat_template",
+        ],
+    ),
     (
         "judge-sample",
         &["responses", "prompts", "out"],
@@ -1478,6 +1593,7 @@ fn generation(args: &BenchToolArgs) -> crate::bench::generation::GenOptions {
         gpu_api: None,
         // Never over MCP: an agent cannot vouch for hipfire's cache.
         allow_stale_hipfire: false,
+        batch_auto: args.batch_size.is_none(),
     }
 }
 
@@ -1582,6 +1698,7 @@ pub(super) fn bench_command(arguments: &Value) -> &'static str {
         Some("eval") => "bench eval",
         Some("dump") => "bench dump",
         Some("refusal") => "bench refusal",
+        Some("refusal_probe") => "bench refusal-probe",
         Some("judge_sample") => "bench judge-sample",
         Some("judge_eval") => "bench judge-eval",
         _ => "bench",
@@ -1785,6 +1902,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 timeout,
                 min_accuracy: args.min_accuracy,
                 generation: eval_generation,
+                ref_cache: bench::ref_cache::RefCache::from_env(),
             };
             set_aside(
                 core_bench_eval(&req, &engines, fail_on_warn, ctx.deps, &ui, ctx.sink),
@@ -1847,6 +1965,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 markers,
                 generation: refusal_generation,
                 backend: refusal_backend.label().into(),
+                ref_cache: bench::ref_cache::RefCache::from_env(),
             };
             // Every judge path is sandboxed; nothing an agent writes reaches llama.cpp but
             // the rubric text, the prompts and the answers.
@@ -1889,6 +2008,24 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 ),
                 hipfire_set_aside,
             )
+        }
+        BenchMode::RefusalProbe => {
+            let prompts_file = source(ctx, "prompts", &args.prompts)?;
+            let req = crate::bench::refusal::ProbeRequest {
+                model: path(ctx, "model", &args.model)?,
+                prompts: extract::load_prompt_texts(&prompts_file)
+                    .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?,
+                mode: args.probe_method.unwrap_or_default(),
+                chat_template: args.chat_template.unwrap_or_default(),
+                prefixes: crate::bench::refusal::DEFAULT_PROBE_PREFIXES
+                    .map(String::from)
+                    .to_vec(),
+                vector: optional_path(ctx, "direction_path", &args.direction_path)?,
+                threshold: args.threshold,
+                // The full generation is mode refusal: the probe stays a probe here.
+                compare_generation: false,
+            };
+            crate::app::core_bench_refusal_probe(&req, ctx.deps, &ui, ctx.sink)
         }
         BenchMode::JudgeSample => {
             let prompts_file = source(ctx, "prompts", &args.prompts)?;

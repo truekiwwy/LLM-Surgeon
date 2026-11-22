@@ -157,6 +157,7 @@ pub fn from_progress(event: &ProgressEvent) -> Vec<SurgeonEvent> {
         P::Warn(message) => one(S::Warning {
             message: message.clone(),
         }),
+        P::Info(message) => one(S::info(message.clone())),
         P::DryRun { op_id, tensors, .. } => one(S::info(format!(
             "dry-run {op_id} : {} tenseur(s) visé(s)",
             tensors.len()
@@ -225,6 +226,29 @@ pub fn from_progress(event: &ProgressEvent) -> Vec<SurgeonEvent> {
         P::BenchJudgeVerdict { done, total } => one(S::progress(*done, Some(*total), "verdict")),
         P::AutotuneForward { done, total } => one(S::progress(*done, Some(*total), "forward")),
         P::AutotuneSolve => one(S::info("régression ridge".into())),
+        P::AutotuneScale {
+            scale,
+            stage,
+            refusal_rate,
+        } => S::metric(
+            Some(&format!("scale:{scale}")),
+            &format!("{stage}_refusal_rate"),
+            *refusal_rate,
+        )
+        .into_iter()
+        .collect(),
+        P::AutotuneSelection {
+            probed,
+            generated,
+            saved,
+        } => [
+            ("candidates_probed", probed),
+            ("candidates_generated", generated),
+            ("generations_saved", saved),
+        ]
+        .into_iter()
+        .filter_map(|(name, n)| S::metric(None, name, *n as f64))
+        .collect(),
         P::GraphStart {
             model, matrices, ..
         } => one(S::info(format!(

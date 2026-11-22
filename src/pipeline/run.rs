@@ -19,14 +19,15 @@ use super::job::{
     self, append_registry, io_error, read_json, read_json_opt, read_registry, sha256_bytes,
     sha256_dir, sha256_file, write_json, DevGate, Job, Lock, Result, State, Status, TestAccess,
 };
-use super::measure::{self, Measurement, Outcomes};
+use super::measure::{self, Fingerprint, Measurement, Outcomes};
 use super::stats::{binary_gate, drift_gate, GateResult, PairedCounts, Verdict};
 use super::PipelineError;
 use crate::app::{core_apply, core_check, AppDeps, ApplyRequest, NullSink};
 use crate::backend::BackendConfig;
 use crate::bench::score::Backend;
 use crate::cli::CheckArgs;
-use crate::patch::PatchFile;
+use crate::patch::compose::{self, ComposeMode, Composition};
+use crate::patch::{OperationKind, PatchFile};
 
 /// Options of one run, kept in `<job>/job.json` so that a resume keeps them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,7 +193,97 @@ pub struct CandidateResult {
     pub dev: Vec<PillarResult>,
     /// Pilier où l'évaluation s'est arrêtée ; null si toutes les portes Dev sont GO.
     pub stopped_at: Option<String>,
+    /// La porte qui a arrêté le candidat, et de combien elle manque ; absent sinon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<GateMiss>,
     pub passed_dev: bool,
+}
+
+/// The first gate a candidate did not pass: the bound of its interval that had to clear the
+/// threshold, and by how much it misses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GateMiss {
+    pub pillar: String,
+    pub verdict: Verdict,
+    /// Effet observé (après − avant, ou dérive moyenne).
+    pub estimate: f64,
+    /// Borne comparée au seuil : basse pour un pilier binaire (doit le dépasser), haute pour
+    /// une dérive (doit rester en dessous).
+    pub bound: f64,
+    pub threshold: f64,
+    /// Écart de la borne au seuil, du mauvais côté (positif).
+    pub gap: f64,
+}
+
+/// The miss of a pillar result that is not GO.
+pub fn miss(r: &PillarResult) -> Option<GateMiss> {
+    if r.gate.verdict == Verdict::Go {
+        return None;
+    }
+    let (bound, gap) = match r.kind.is_binary() {
+        true => (r.gate.ci_low, r.gate.threshold - r.gate.ci_low),
+        false => (r.gate.ci_high, r.gate.ci_high - r.gate.threshold),
+    };
+    Some(GateMiss {
+        pillar: r.pillar.clone(),
+        verdict: r.gate.verdict,
+        estimate: r.gate.estimate,
+        bound,
+        threshold: r.gate.threshold,
+        gap,
+    })
+}
+
+/// The selected candidate: among those that pass every Dev gate (the blocking thresholds),
+/// the best observed effect on the selection pillar; on a tie, the most parsimonious (the
+/// smallest |value|), then the first in the list.
+pub fn select(candidates: &[CandidateResult], pillar: &str) -> Option<usize> {
+    let effect = |c: &CandidateResult| {
+        c.dev
+            .iter()
+            .find(|r| r.pillar == pillar)
+            .map_or(f64::MIN, |r| r.gate.estimate)
+    };
+    candidates
+        .iter()
+        .filter(|c| c.passed_dev)
+        .max_by(|a, b| {
+            effect(a)
+                .total_cmp(&effect(b))
+                .then(b.value.abs().total_cmp(&a.value.abs()))
+                .then(b.index.cmp(&a.index))
+        })
+        .map(|c| c.index)
+}
+
+/// Why no candidate passed, one per candidate: the pillar and by how much its gate misses.
+pub fn diagnosis(candidates: &[CandidateResult]) -> String {
+    let verdict = |v: Verdict| match v {
+        Verdict::Go => "GO",
+        Verdict::NoGo => "NO_GO",
+        Verdict::Inconclusive => "INCONCLUSIVE",
+    };
+    candidates
+        .iter()
+        .map(|c| {
+            let why = match (&c.failure, &c.static_error, c.stopped_at.as_deref()) {
+                (Some(m), _, _) => format!(
+                    "{} {}, effet {:.3}, borne {:.3} contre seuil {:.3} (écart {:.3})",
+                    m.pillar,
+                    verdict(m.verdict),
+                    m.estimate,
+                    m.bound,
+                    m.threshold,
+                    m.gap
+                ),
+                (None, Some(_), _) => "contrôles statiques".into(),
+                (None, None, Some(stage)) => format!("arrêt : {stage}"),
+                (None, None, None) => "toutes les portes Dev GO".into(),
+            };
+            format!("candidat {} ({}) : {why}", c.index, c.value)
+        })
+        .collect::<Vec<_>>()
+        .join(" ; ")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -251,6 +342,11 @@ struct Worker<'a> {
     hashes: HashMap<PathBuf, String>,
     /// Measurements and dumps whose units are counted (each once per session).
     counted: HashSet<PathBuf>,
+    /// SHA-256 of the original model, taken by the static checks: the base checkpoints'
+    /// subject.
+    model_sha256: String,
+    /// The recipes of the vectors composed for `keep_vectors`, for the report.
+    compositions: Vec<Composition>,
 }
 
 impl Worker<'_> {
@@ -309,40 +405,43 @@ impl Worker<'_> {
         Ok(h)
     }
 
+    /// The measurement in `checkpoint` when it is exactly `fp` on `dataset` as it is now:
+    /// the only one a resume reuses.
+    fn holds(
+        &mut self,
+        checkpoint: &Path,
+        dataset: &Path,
+        fp: &Fingerprint,
+    ) -> Result<Option<Measurement>> {
+        let sha = self.hash(dataset)?;
+        Ok(read_json_opt::<Measurement>(checkpoint)?
+            .filter(|m| m.dataset_sha256 == sha && m.fingerprint.as_ref() == Some(fp)))
+    }
+
     /// Units of one measurement (tokens generated or evaluated, upper estimate).
     fn units(&self, pillar: &PillarConfig, n: usize) -> u64 {
-        let per_item = match pillar.kind {
-            PillarKind::Kl | PillarKind::Logits => pillar
-                .max_tokens
-                .map_or(crate::bench::DEFAULT_DUMP_MAX_TOKENS as u64, u64::from),
-            PillarKind::Gsm8k => pillar
-                .max_new_tokens
-                .map_or(u64::from(crate::bench::DEFAULT_MAX_NEW_TOKENS), u64::from),
-            _ => pillar.max_new_tokens.map_or(
-                u64::from(crate::bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
-                u64::from,
-            ),
-        };
-        n as u64 * per_item
+        n as u64 * budget(pillar)
     }
 
     /// A binary measurement of `model` on `pillar`'s `split`, from its checkpoint when it
-    /// exists.
+    /// holds exactly this measure (`fp`). `cache`: the base model on a Dev set, read from
+    /// the reference cache shared with `bench` (never a Test set: its answers stay in
+    /// `private/`).
     fn binary(
         &mut self,
         pillar: &PillarConfig,
         dataset: &Path,
         model: &Path,
         checkpoint: &Path,
+        fp: Fingerprint,
+        cache: bool,
     ) -> Result<Measurement> {
-        let sha = self.hash(dataset)?;
-        if let Some(m) = read_json_opt::<Measurement>(checkpoint)? {
-            if m.dataset_sha256 == sha {
-                let units = self.units(pillar, outcome_len(&m.outcomes));
-                self.count(checkpoint, units);
-                return Ok(m);
-            }
+        if let Some(m) = self.holds(checkpoint, dataset, &fp)? {
+            let units = self.units(pillar, outcome_len(&m.outcomes));
+            self.count(checkpoint, units);
+            return Ok(m);
         }
+        let sha = self.hash(dataset)?;
         let n = measure::count_items(pillar.kind, dataset, pillar.limit)?;
         let per_item = self.units(pillar, 1);
         let start = self.state.units_done;
@@ -352,6 +451,9 @@ impl Worker<'_> {
             allow_stale_hipfire: self.file.options.allow_stale_hipfire,
             ..measure::options(backend.as_ref())
         };
+        let cache = cache
+            .then(crate::bench::ref_cache::RefCache::from_env)
+            .flatten();
         let (outcomes, items) = {
             let state = std::cell::RefCell::new(&mut *self);
             measure::binary(
@@ -360,6 +462,7 @@ impl Worker<'_> {
                 model,
                 backend.as_ref(),
                 generation,
+                cache.as_ref(),
                 deps,
                 &deps.interrupted,
                 &mut |done, _| {
@@ -374,6 +477,7 @@ impl Worker<'_> {
         let m = Measurement {
             pillar: pillar.id.clone(),
             dataset_sha256: sha,
+            fingerprint: Some(fp),
             outcomes: Outcomes::Binary(outcomes),
             items,
         };
@@ -389,15 +493,14 @@ impl Worker<'_> {
         model: &Path,
         label: &str,
         checkpoint: &Path,
+        fp: Fingerprint,
     ) -> Result<Measurement> {
-        let sha = self.hash(dataset)?;
-        if let Some(m) = read_json_opt::<Measurement>(checkpoint)? {
-            if m.dataset_sha256 == sha {
-                let units = self.units(pillar, outcome_len(&m.outcomes));
-                self.count(checkpoint, units);
-                return Ok(m);
-            }
+        if let Some(m) = self.holds(checkpoint, dataset, &fp)? {
+            let units = self.units(pillar, outcome_len(&m.outcomes));
+            self.count(checkpoint, units);
+            return Ok(m);
         }
+        let sha = self.hash(dataset)?;
         let work = self.job.work();
         let base_dump = measure::dump_path(&work, "base", &sha, pillar.max_tokens);
         let cand_dump = measure::dump_path(&work, label, &sha, pillar.max_tokens);
@@ -435,6 +538,7 @@ impl Worker<'_> {
         let m = Measurement {
             pillar: pillar.id.clone(),
             dataset_sha256: sha,
+            fingerprint: Some(fp),
             outcomes: Outcomes::Drift(values),
             items,
         };
@@ -443,14 +547,17 @@ impl Worker<'_> {
     }
 
     /// The pillar's gate for `candidate` against the base model on `split`.
+    #[allow(clippy::too_many_arguments)]
     fn evaluate(
         &mut self,
         pillar: &PillarConfig,
         split: &str,
         candidate_label: &str,
+        candidate_sha256: &str,
         model: Option<&Path>,
         store: &dyn Fn(&Job, &str) -> PathBuf,
     ) -> Result<PillarResult> {
+        let fp = |subject: String| fingerprint(pillar, split, subject);
         let dataset = match split {
             "dev" => pillar.dataset_dev.clone(),
             _ => pillar.dataset_test.clone(),
@@ -465,8 +572,18 @@ impl Worker<'_> {
         let result = if pillar.kind.is_binary() {
             let base_model = self.config().model.clone();
             let base_checkpoint = store(&self.job, &checkpoint_name("base"));
-            let before = self.binary(pillar, &dataset, &base_model, &base_checkpoint)?;
-            let after = self.binary(pillar, &dataset, &model, &cand_checkpoint)?;
+            let base = fp(format!("base:{}", self.model_sha256));
+            let before = self.binary(
+                pillar,
+                &dataset,
+                &base_model,
+                &base_checkpoint,
+                base,
+                split == "dev",
+            )?;
+            let candidate = fp(candidate_sha256.into());
+            let after =
+                self.binary(pillar, &dataset, &model, &cand_checkpoint, candidate, false)?;
             let (Outcomes::Binary(b), Outcomes::Binary(a)) = (&before.outcomes, &after.outcomes)
             else {
                 return Err(PipelineError::Io("point de reprise incohérent".into()));
@@ -499,7 +616,15 @@ impl Worker<'_> {
                 gate: binary_gate(&counts, gate),
             }
         } else {
-            let m = self.drift(pillar, &dataset, &model, candidate_label, &cand_checkpoint)?;
+            let candidate = fp(candidate_sha256.into());
+            let m = self.drift(
+                pillar,
+                &dataset,
+                &model,
+                candidate_label,
+                &cand_checkpoint,
+                candidate,
+            )?;
             let Outcomes::Drift(values) = &m.outcomes else {
                 return Err(PipelineError::Io("point de reprise incohérent".into()));
             };
@@ -529,6 +654,106 @@ impl Worker<'_> {
             }
         };
         Ok(result)
+    }
+}
+
+/// What a measurement of `pillar` on `split` of `subject` is, for its checkpoint.
+fn fingerprint(pillar: &PillarConfig, split: &str, subject: String) -> Fingerprint {
+    Fingerprint {
+        split: split.into(),
+        subject,
+        budget: budget(pillar),
+    }
+}
+
+/// Tokens generated per answer, or read per prompt by a dump, for `pillar`.
+fn budget(pillar: &PillarConfig) -> u64 {
+    match pillar.kind {
+        PillarKind::Kl | PillarKind::Logits => pillar
+            .max_tokens
+            .map_or(crate::bench::DEFAULT_DUMP_MAX_TOKENS as u64, u64::from),
+        PillarKind::Gsm8k => pillar
+            .max_new_tokens
+            .map_or(u64::from(crate::bench::DEFAULT_MAX_NEW_TOKENS), u64::from),
+        _ => pillar.max_new_tokens.map_or(
+            u64::from(crate::bench::PIPELINE_REFUSAL_MAX_NEW_TOKENS),
+            u64::from,
+        ),
+    }
+}
+
+/// The patch template the candidates scale: the configuration's, or with `keep_vectors`
+/// each vector composed orthogonally to the kept directions (`surgeon compose`, mode
+/// orthogonal-preserve), written under `<job>/composed/` (the same bytes on every resume).
+pub fn template(
+    job: &Job,
+    config: &PipelineConfig,
+) -> Result<(PatchFile, Vec<Composition>, Vec<String>)> {
+    let mut patch = config.patch.clone();
+    if config.keep_vectors.is_empty() {
+        return Ok((patch, Vec::new(), Vec::new()));
+    }
+    let failed =
+        |e: compose::ComposeError| PipelineError::Config(vec![format!("keep_vectors : {e}")]);
+    let keep = config
+        .keep_vectors
+        .iter()
+        .map(|p| compose::read_vector(p, 1.0))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(failed)?;
+    let dir = job.path("composed");
+    fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
+    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let (mut recipes, mut warnings) = (Vec::new(), Vec::new());
+    for op in &mut patch.operations {
+        let out = match done.iter().find(|(source, _)| *source == op.vector_file) {
+            Some((_, out)) => out.clone(),
+            None => {
+                let ablate = compose::read_vector(&op.vector_file, 1.0).map_err(failed)?;
+                let mut composed = compose::compose(
+                    std::slice::from_ref(&ablate),
+                    &keep,
+                    ComposeMode::OrthogonalPreserve,
+                )
+                .map_err(failed)?;
+                let bytes = compose::encode_composed(&composed, &ablate).map_err(failed)?;
+                let stem = op
+                    .vector_file
+                    .file_stem()
+                    .map_or("vector".into(), |s| s.to_string_lossy().into_owned());
+                let out = dir.join(format!("{}-{stem}-orthogonal.safetensors", done.len()));
+                job::write_atomic(&out, &bytes)?;
+                composed.composition.output = out.clone();
+                composed.composition.output_sha256 = sha256_bytes(&bytes);
+                recipes.push(composed.composition);
+                warnings.extend(composed.warnings);
+                done.push((op.vector_file.clone(), out.clone()));
+                out
+            }
+        };
+        op.vector_file = out;
+        // A projector reads the unit vector; the other operations keep the composed d.
+        if op.operation == OperationKind::ProjectOut {
+            op.vector_tensor = Some("a".into());
+            op.vector_tensor_b = Some("b".into());
+        }
+    }
+    Ok((patch, recipes, warnings))
+}
+
+/// Removes the `.tmp` files a killed worker may have left in the job directory, its
+/// checkpoints and its private measurements.
+fn remove_partial(job: &Job) {
+    for dir in [
+        job.dir.clone(),
+        job.path("checkpoints"),
+        job.path("private"),
+    ] {
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if entry.file_name().to_string_lossy().ends_with(".tmp") {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
     }
 }
 
@@ -632,6 +857,10 @@ pub enum Ended {
 /// removes the working copy and leaves only complete checkpoints.
 pub fn run(job: &Job, file: JobFile, deps: &AppDeps) -> Result<Ended> {
     let _lock = Lock::acquire(job)?;
+    // A killed worker may have left a partial working copy, dumps or temporary files:
+    // nothing of it is reused, only complete checkpoints are.
+    let _ = fs::remove_dir_all(job.work());
+    remove_partial(job);
     job.prepare()?;
     let _ = fs::remove_file(job.path("cancel"));
     if let Some(results) = read_json_opt::<Results>(&job.path("results.json"))? {
@@ -662,6 +891,8 @@ pub fn run(job: &Job, file: JobFile, deps: &AppDeps) -> Result<Ended> {
         last_write: Instant::now(),
         hashes: HashMap::new(),
         counted: HashSet::new(),
+        model_sha256: String::new(),
+        compositions: Vec::new(),
     };
     // `apply` and `check` report an interruption as a failure of their own: once a
     // cancellation was requested, whatever error follows is that cancellation.
@@ -691,11 +922,20 @@ pub fn run(job: &Job, file: JobFile, deps: &AppDeps) -> Result<Ended> {
 
 /// Every candidate is measured on a patched working copy: on hipfire, which serves its own
 /// cache of the model, that is refused before the first candidate and the first read of a
-/// Test Set, unless `--allow-stale-hipfire` (then the warning for the report).
+/// Test Set, unless `--allow-stale-hipfire` (then the warning for the report) or
+/// `hipfire_requantize = "auto"` (each candidate requantized before its measure).
 fn hipfire_guard(w: &Worker) -> Result<Option<String>> {
-    let backend = w.config().backend.as_ref().and_then(|b| b.backend);
-    if backend != Some(Backend::Hipfire) {
+    use crate::backend::config::Requantize;
+    let config = w.config().backend.as_ref();
+    if config.and_then(|b| b.backend) != Some(Backend::Hipfire) {
         return Ok(None);
+    }
+    if config.and_then(|b| b.hipfire_requantize) == Some(Requantize::Auto) {
+        return Ok(Some(
+            "hipfire_requantize = auto : chaque candidat est requantifié avant sa mesure sur \
+             hipfire"
+                .into(),
+        ));
     }
     let candidate = w.job.work().join("model");
     crate::backend::hipfire::validate_hipfire_target(
@@ -709,12 +949,11 @@ fn hipfire_guard(w: &Worker) -> Result<Option<String>> {
 
 fn execute(w: &mut Worker) -> Result<Ended> {
     let config = w.config().clone();
+    // For the report's notes: nothing of the worker is printed.
     let hipfire_warning = hipfire_guard(w)?;
-    if let Some(warning) = &hipfire_warning {
-        eprintln!("surgeon pipeline : {warning}");
-    }
     w.step("static_checks", "modèle d'origine".into())?;
     let model_before = sha256_dir(&config.model)?;
+    w.model_sha256 = model_before.clone();
     let check = core_check(
         &CheckArgs {
             model: config.model.clone(),
@@ -738,11 +977,13 @@ fn execute(w: &mut Worker) -> Result<Ended> {
             )]));
         }
     }
+    let (template, compositions, compose_warnings) = template(&w.job, &config)?;
+    w.compositions = compositions;
     let patches: Vec<PatchFile> = config
         .candidates
         .values()
         .iter()
-        .map(|v| config.candidates.patch(&config.patch, *v))
+        .map(|v| config.candidates.patch(&template, *v))
         .collect();
     if w.state.units_total == 0 {
         w.state.units_total = super::plan::units_total(&config)?;
@@ -764,8 +1005,10 @@ fn execute(w: &mut Worker) -> Result<Ended> {
             static_error: None,
             dev: Vec::new(),
             stopped_at: None,
+            failure: None,
             passed_dev: false,
         };
+        let patch_sha256 = result.patch_sha256.clone();
         if w.over_budget() {
             budget_exceeded = true;
             result.stopped_at = Some("budget".into());
@@ -792,10 +1035,10 @@ fn execute(w: &mut Worker) -> Result<Ended> {
                 "candidate_dev",
                 format!("candidat {index}, pilier {}", pillar.id),
             )?;
-            let needs_model = !w
-                .job
-                .checkpoint(&format!("{label}_dev_{}", pillar.id))
-                .exists();
+            // A missing or stale checkpoint is measured on the patched copy.
+            let checkpoint = w.job.checkpoint(&format!("{label}_dev_{}", pillar.id));
+            let fp = fingerprint(pillar, "dev", patch_sha256.clone());
+            let needs_model = w.holds(&checkpoint, &pillar.dataset_dev, &fp)?.is_none();
             if needs_model && applied.is_none() {
                 w.step("working_copy", format!("candidat {index}"))?;
                 let keep = config.working_copy == WorkingCopy::RestoreFromBackup;
@@ -814,6 +1057,7 @@ fn execute(w: &mut Worker) -> Result<Ended> {
                 pillar,
                 "dev",
                 &label,
+                &patch_sha256,
                 Some(&work_model),
                 &|job: &Job, name: &str| job.checkpoint(name),
             )?;
@@ -838,6 +1082,10 @@ fn execute(w: &mut Worker) -> Result<Ended> {
             }
         }
         result.passed_dev = stopped.is_none() && result.dev.len() == config.pillars.len();
+        result.failure = match stopped.as_deref() {
+            None | Some("budget") => None,
+            Some(_) => result.dev.last().and_then(miss),
+        };
         result.stopped_at = stopped;
         // Units of the pillars skipped by the early stop are no longer expected.
         if !result.passed_dev {
@@ -853,23 +1101,7 @@ fn execute(w: &mut Worker) -> Result<Ended> {
     let _ = fs::remove_dir_all(&work_model);
 
     // Selection on the Dev only.
-    let selection = &config.selection.pillar;
-    let selected = candidates
-        .iter()
-        .filter(|c| c.passed_dev)
-        .max_by(|a, b| {
-            let effect = |c: &CandidateResult| {
-                c.dev
-                    .iter()
-                    .find(|r| &r.pillar == selection)
-                    .map_or(f64::MIN, |r| r.gate.estimate)
-            };
-            effect(a)
-                .total_cmp(&effect(b))
-                .then(b.value.abs().total_cmp(&a.value.abs()))
-                .then(b.index.cmp(&a.index))
-        })
-        .map(|c| c.index);
+    let selected = select(&candidates, &config.selection.pillar);
 
     let mut test = None;
     let mut contaminated = false;
@@ -919,10 +1151,12 @@ fn execute(w: &mut Worker) -> Result<Ended> {
             }
         }
         let label = format!("cand{index}");
-        let needs_model = config
-            .pillars
-            .iter()
-            .any(|p| !w.job.private(&format!("{label}_test_{}", p.id)).exists());
+        let mut needs_model = false;
+        for p in &config.pillars {
+            let checkpoint = w.job.private(&format!("{label}_test_{}", p.id));
+            let fp = fingerprint(p, "test", candidates[index].patch_sha256.clone());
+            needs_model |= w.holds(&checkpoint, &p.dataset_test, &fp)?.is_none();
+        }
         if needs_model {
             copy_model(&config.model, &work_model)?;
             apply(&patches[index], &work_model, None, w.deps)?;
@@ -934,6 +1168,7 @@ fn execute(w: &mut Worker) -> Result<Ended> {
                 pillar,
                 "test",
                 &label,
+                &candidates[index].patch_sha256.clone(),
                 Some(&work_model),
                 &|job: &Job, name: &str| job.private(name),
             )?);
@@ -983,9 +1218,20 @@ fn execute(w: &mut Worker) -> Result<Ended> {
                 ),
                 true => (
                     Verdict::Inconclusive,
-                    "aucun candidat ne passe le Dev ; au moins une porte non concluante".into(),
+                    format!(
+                        "aucun candidat ne passe le Dev ; au moins une porte non concluante ; \
+                         modèle d'origine conservé, aucun patch à promouvoir ({})",
+                        diagnosis(&candidates)
+                    ),
                 ),
-                false => (Verdict::NoGo, "aucun candidat ne passe le Dev".into()),
+                false => (
+                    Verdict::NoGo,
+                    format!(
+                        "aucun candidat ne passe le Dev ; modèle d'origine conservé, aucun \
+                         patch à promouvoir ({})",
+                        diagnosis(&candidates)
+                    ),
+                ),
             }
         }
         (None, Some(_), _) => (Verdict::Inconclusive, "Test non évalué".into()),
@@ -1020,6 +1266,12 @@ fn execute(w: &mut Worker) -> Result<Ended> {
             .iter()
             .map(|s| s.to_string())
             .chain(hipfire_warning)
+            .chain((!config.keep_vectors.is_empty()).then(|| {
+                "vecteurs du gabarit composés orthogonalement à keep_vectors (surgeon compose, \
+                 orthogonal-preserve) : recette dans report.json, manifest.composition"
+                    .to_string()
+            }))
+            .chain(compose_warnings)
             .collect(),
     };
     write_json(&w.job.path("results.json"), &results)?;
@@ -1067,6 +1319,7 @@ fn report(w: &mut Worker, results: &Results) -> Result<Value> {
             "model_sha256": results.model.sha256_before,
             "datasets": datasets,
             "vectors": vectors,
+            "composition": w.compositions,
             "backend": results.backend,
             "llama_cpp": match config.backend.as_ref().and_then(|b| b.llama_cpp_dir.as_ref()) {
                 Some(dir) => json!(dir),
@@ -1085,4 +1338,143 @@ fn report(w: &mut Worker, results: &Results) -> Result<Value> {
 /// Reads the results of a finished job.
 pub fn results(job: &Job) -> Result<Results> {
     read_json(&job.path("results.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::stats::GateResult;
+
+    fn pillar(
+        id: &str,
+        kind: PillarKind,
+        verdict: Verdict,
+        ci: (f64, f64),
+        threshold: f64,
+    ) -> PillarResult {
+        PillarResult {
+            pillar: id.into(),
+            kind,
+            metric: String::new(),
+            split: "dev".into(),
+            n: 60,
+            rate_before: None,
+            rate_after: None,
+            counts: None,
+            truncated_before: None,
+            truncated_after: None,
+            loops_before: None,
+            loops_after: None,
+            no_answer_before: None,
+            no_answer_after: None,
+            gate: GateResult {
+                verdict,
+                estimate: (ci.0 + ci.1) / 2.0,
+                ci_low: ci.0,
+                ci_high: ci.1,
+                threshold,
+                confidence: 0.9,
+                method: "test".into(),
+                n: 60,
+                n_required: None,
+                mcnemar_p: None,
+                reason: String::new(),
+            },
+        }
+    }
+
+    /// As the worker builds it: the Dev results up to the first gate that is not GO.
+    fn candidate(index: usize, value: f32, dev: Vec<PillarResult>) -> CandidateResult {
+        let stopped = dev
+            .iter()
+            .find(|r| r.gate.verdict != Verdict::Go)
+            .map(|r| r.pillar.clone());
+        CandidateResult {
+            index,
+            value,
+            patch_sha256: String::new(),
+            static_error: None,
+            failure: stopped.as_ref().and_then(|_| dev.last().and_then(miss)),
+            passed_dev: stopped.is_none(),
+            stopped_at: stopped,
+            dev,
+        }
+    }
+
+    const GO: Verdict = Verdict::Go;
+    const NO_GO: Verdict = Verdict::NoGo;
+
+    fn unblock(low: f64, high: f64) -> PillarResult {
+        pillar("unblock", PillarKind::Unblocking, GO, (low, high), 0.05)
+    }
+
+    fn retention(verdict: Verdict, low: f64, high: f64) -> PillarResult {
+        pillar("retention", PillarKind::Gsm8k, verdict, (low, high), -0.05)
+    }
+
+    fn safety() -> PillarResult {
+        pillar("safety", PillarKind::Safety, GO, (-0.02, 0.02), -0.05)
+    }
+
+    #[test]
+    fn a_candidate_that_unblocks_but_breaks_retention_is_never_selected() {
+        let candidates = [
+            // The strongest unblocking, and a retention drop beyond the allowed margin.
+            candidate(
+                0,
+                1.0,
+                vec![unblock(0.3, 0.5), retention(NO_GO, -0.4, -0.2)],
+            ),
+            candidate(
+                1,
+                0.5,
+                vec![unblock(0.1, 0.3), retention(GO, -0.03, 0.03), safety()],
+            ),
+        ];
+        assert_eq!(select(&candidates, "unblock"), Some(1));
+        let miss = candidates[0].failure.as_ref().unwrap();
+        assert_eq!(miss.pillar, "retention");
+        assert!((miss.gap - 0.35).abs() < 1e-12, "{miss:?}");
+        assert_eq!(miss.bound, -0.4);
+    }
+
+    #[test]
+    fn at_equal_effect_the_most_parsimonious_candidate_wins() {
+        let passing = |index, value| {
+            candidate(
+                index,
+                value,
+                vec![unblock(0.1, 0.3), retention(GO, -0.03, 0.03), safety()],
+            )
+        };
+        let candidates = [passing(0, 1.0), passing(1, -0.5), passing(2, 0.5)];
+        // |-0.5| = |0.5| < 1: the smaller magnitude, then the first in the list.
+        assert_eq!(select(&candidates, "unblock"), Some(1));
+        assert_eq!(select(&candidates[..1], "unblock"), Some(0));
+        // A better effect beats parsimony.
+        let mut stronger = passing(0, 1.0);
+        stronger.dev[0] = unblock(0.2, 0.4);
+        assert_eq!(select(&[stronger, passing(1, 0.5)], "unblock"), Some(0));
+    }
+
+    #[test]
+    fn when_no_candidate_passes_each_one_says_which_gate_failed_and_by_how_much() {
+        let drift = pillar("kl", PillarKind::Kl, NO_GO, (0.6, 0.8), 0.5);
+        let candidates = [
+            candidate(
+                0,
+                1.0,
+                vec![unblock(0.3, 0.5), retention(NO_GO, -0.4, -0.2)],
+            ),
+            candidate(1, 0.25, vec![drift]),
+        ];
+        assert_eq!(select(&candidates, "unblock"), None);
+        let text = diagnosis(&candidates);
+        for needle in [
+            "candidat 0 (1) : retention NO_GO, effet -0.300, borne -0.400 contre seuil -0.050 (écart 0.350)",
+            "candidat 1 (0.25) : kl NO_GO, effet 0.700, borne 0.800 contre seuil 0.500 (écart 0.300)",
+        ] {
+            assert!(text.contains(needle), "{needle} in {text}");
+        }
+    }
 }

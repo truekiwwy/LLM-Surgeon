@@ -16,18 +16,23 @@ pub const UPDATE_PLAN: &str = "update_plan";
 pub const SHOW_IN_3D: &str = "show_in_3d";
 pub const RECORD_FINDING: &str = "record_finding";
 pub const UI_TOOLS: [&str; 4] = [ASK_USER, UPDATE_PLAN, SHOW_IN_3D, RECORD_FINDING];
+/// Engine tools for agents outside the studio only: a studio project already has its manifest.
+pub const EXTERNAL_ONLY: [&str; 1] = [weight_surgeon::mcp::TOOL_WORKSPACE];
 
 /// Above this many characters a result is stored in `artifacts/agent/` and summarized.
 pub const MAX_INLINE: usize = 6000;
 
 /// The `tools` array of the engine's `tools/list`, without the interface tools the studio
-/// answers itself.
+/// answers itself and the [`EXTERNAL_ONLY`] ones.
 pub fn engine_definitions() -> Vec<ToolDef> {
     weight_surgeon::mcp::tool_definitions()
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|t| !UI_TOOLS.contains(&t["name"].as_str().unwrap_or_default()))
+        .filter(|t| {
+            let name = t["name"].as_str().unwrap_or_default();
+            !UI_TOOLS.contains(&name) && !EXTERNAL_ONLY.contains(&name)
+        })
         .map(|t| ToolDef {
             name: t["name"].as_str().unwrap_or_default().into(),
             description: t["description"].as_str().unwrap_or_default().into(),
@@ -147,6 +152,7 @@ mod tests {
         let engine: Vec<&Value> = mcp
             .iter()
             .filter(|m| !UI_TOOLS.contains(&m["name"].as_str().unwrap()))
+            .filter(|m| !EXTERNAL_ONLY.contains(&m["name"].as_str().unwrap()))
             .collect();
         let ours = engine_definitions();
         assert_eq!(ours.len(), engine.len());
@@ -164,6 +170,13 @@ mod tests {
         let names: Vec<_> = all_definitions().into_iter().map(|t| t.name).collect();
         for ui in UI_TOOLS {
             assert_eq!(names.iter().filter(|n| *n == ui).count(), 1, "{ui} once");
+        }
+        for external in EXTERNAL_ONLY {
+            assert!(mcp.iter().any(|m| m["name"] == external), "{external}");
+            assert!(
+                !names.iter().any(|n| n == external),
+                "{external} not offered"
+            );
         }
         // What a CLI agent reaches over MCP: the same interface tools but ask_user.
         for shared in [UPDATE_PLAN, SHOW_IN_3D, RECORD_FINDING] {

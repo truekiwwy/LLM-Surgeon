@@ -25,7 +25,7 @@ pub const TOOL_PLAN: &str = "update_plan";
 pub(super) const NAMES: [&str; 3] = [TOOL_FINDING, TOOL_SHOW, TOOL_PLAN];
 
 /// The manifest that marks a studio project folder.
-const PROJECT_FILE: &str = "project.surgeon.json";
+pub(super) const PROJECT_FILE: &str = "project.surgeon.json";
 pub const FINDINGS: &str = "findings.jsonl";
 pub const FOCUS: &str = "focus.json";
 pub const PLAN: &str = "plan.json";
@@ -197,11 +197,23 @@ pub(super) fn call(
 /// Journals a finished engine tool call of a project and adds its `run_id` to the result
 /// (envelope and text); nothing outside a project, for the studio tools, or when the journal
 /// cannot be written (the call itself already succeeded).
-pub(super) fn stamp(ctx: &ToolContext, tool: &str, started_unix: u64, result: &mut Value) {
+pub(super) fn stamp(
+    ctx: &ToolContext,
+    tool: &str,
+    arguments: &Value,
+    started_unix: u64,
+    result: &mut Value,
+) {
     if NAMES.contains(&tool) || tool == super::tools_files::TOOL_FILES {
         return;
     }
-    let Some(run_id) = journal(ctx, tool, started_unix, &result["structuredContent"]) else {
+    let Some(run_id) = journal(
+        ctx,
+        tool,
+        arguments,
+        started_unix,
+        &result["structuredContent"],
+    ) else {
         return;
     };
     result["structuredContent"]["run_id"] = json!(run_id);
@@ -209,7 +221,13 @@ pub(super) fn stamp(ctx: &ToolContext, tool: &str, started_unix: u64, result: &m
     result["content"] = json!([{ "type": "text", "text": text }]);
 }
 
-fn journal(ctx: &ToolContext, tool: &str, started_unix: u64, envelope: &Value) -> Option<String> {
+fn journal(
+    ctx: &ToolContext,
+    tool: &str,
+    arguments: &Value,
+    started_unix: u64,
+    envelope: &Value,
+) -> Option<String> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let chat = chat_dir(ctx)?;
     let millis = SystemTime::now()
@@ -221,6 +239,8 @@ fn journal(ctx: &ToolContext, tool: &str, started_unix: u64, envelope: &Value) -
     let entry = json!({
         "run_id": run_id,
         "tool": tool,
+        // What the studio's summary of the experiments reads (layers, alpha, mode).
+        "arguments": arguments,
         "ok": envelope["ok"],
         "exit_code": envelope["exit_code"],
         "data": if large { Value::Null } else { data.clone() },

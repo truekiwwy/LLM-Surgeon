@@ -18,7 +18,9 @@ pub struct CliLine {
 }
 
 /// Arguments whose CLI option has another name: (command, argument, option).
-const RENAMED: [(&str, &str, &str); 8] = [
+const RENAMED: [(&str, &str, &str); 10] = [
+    ("bench refusal-probe", "probe_method", "method"),
+    ("bench refusal-probe", "direction_path", "vector"),
     ("inspect", "projections", "proj"),
     ("extract", "pos_prompts_file", "pos-prompts"),
     ("extract", "neg_prompts_file", "neg-prompts"),
@@ -55,6 +57,8 @@ fn command(tool: &str, args: &Value) -> Option<&'static str> {
         "surgeon_autotune" => "autotune",
         "surgeon_graph" => "graph",
         "surgeon_restore" => "restore",
+        "surgeon_compose" => "compose",
+        "surgeon_doctor" => "doctor",
         "surgeon_bench" => match bench_command(args) {
             "bench" => return None,
             sub => sub,
@@ -136,7 +140,7 @@ pub fn cli_line(
         match value {
             Value::Bool(_) => push(&option, None),
             // A repeatable option, the others take a comma-separated list.
-            Value::Array(items) if option == "proj" => {
+            Value::Array(items) if matches!(option.as_str(), "proj" | "ablate" | "keep") => {
                 for item in items {
                     push(&option, Some(&scalar(item)));
                 }
@@ -275,7 +279,7 @@ mod tests {
         }
         assert_eq!(
             checked,
-            8 + BENCH_FIELDS.len(),
+            10 + BENCH_FIELDS.len(),
             "every tool with a command is covered"
         );
     }

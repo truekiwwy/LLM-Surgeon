@@ -152,7 +152,8 @@ pub fn promote(job: &Job, deps: &AppDeps) -> job::Result<PathBuf> {
     };
     let config = &file.config;
     let value = config.candidates.values()[index];
-    let mut patch = config.candidates.patch(&config.patch, value);
+    let (template, _, _) = run::template(job, config)?;
+    let mut patch = config.candidates.patch(&template, value);
     patch.backup = true;
     patch.description = Some(format!(
         "pipeline {} : candidat {index} (valeur {value}), verdict GO",

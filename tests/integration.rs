@@ -1535,7 +1535,7 @@ fn mcp_full_session_is_pure_json_rpc() {
         .contains("sauvegarde"));
     assert_eq!(
         responses[1]["result"]["tools"].as_array().unwrap().len(),
-        17
+        20
     );
     let (is_error, env) = envelope(&responses, 3);
     assert!(!is_error, "{env}");
@@ -2170,7 +2170,10 @@ fn schema_tools_kind_equals_tools_list() {
             "surgeon_graph",
             "surgeon_backends",
             "surgeon_restore",
+            "surgeon_compose",
+            "surgeon_doctor",
             "surgeon_files",
+            "surgeon_workspace",
             "record_finding",
             "show_in_3d",
             "update_plan"
@@ -2985,6 +2988,11 @@ fn extract_human_ui_golden_and_json_without_ui_bytes() {
     let d_prime = stats["d_prime"]
         .as_f64()
         .map_or("∞".to_owned(), |d| format!("{d:.2}"));
+    // The dtype line is a log on stderr: the report on stdout stays the golden.
+    assert!(
+        strip_ansi(&err).contains("[INFO]     dtype f32 (auto) : RAM libre "),
+        "{err}"
+    );
     let expected = [
         format!(
             "[EXTRACT]  Qwen2 · couche 2 · resid_post · pooling last  {}",
@@ -3091,7 +3099,7 @@ fn mcp_extract_tool_end_to_end() {
             .as_array()
             .unwrap()
             .len(),
-        17
+        20
     );
     let (is_error, env) = envelope(&responses, 2);
     assert!(!is_error, "{env}");
@@ -3166,7 +3174,7 @@ fn mcp_binary_extract_speaks_only_json_rpc() {
             .as_array()
             .unwrap()
             .len(),
-        17
+        20
     );
     assert!(!envelope(&responses, 2).0, "{responses:?}");
     assert!(f.dir.path().join("bin.safetensors").exists());
@@ -4279,6 +4287,8 @@ fn bench_json_on_the_binary_is_one_clean_document_even_with_forced_colors() {
             "--after",
             s(&after),
         ])
+        // NO_COLOR beats CLICOLOR_FORCE: a terminal that sets it must not decide this test.
+        .env_remove("NO_COLOR")
         .env("CLICOLOR_FORCE", "1")
         .env("COLORTERM", "truecolor")
         .output()
@@ -4304,6 +4314,7 @@ fn bench_json_on_the_binary_is_one_clean_document_even_with_forced_colors() {
             "--after",
             s(&after),
         ])
+        .env_remove("NO_COLOR")
         .env("CLICOLOR_FORCE", "1")
         .env("COLORTERM", "truecolor")
         .output()

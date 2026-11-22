@@ -44,12 +44,15 @@ mod sandbox;
 mod server;
 mod tools;
 mod tools_backend;
+mod tools_compose;
+mod tools_doctor;
 mod tools_files;
 mod tools_graph;
 mod tools_p13;
 mod tools_pipeline;
 mod tools_restore;
 mod tools_session;
+mod tools_workspace;
 
 use std::io::Write;
 
@@ -68,6 +71,7 @@ pub use tools::{
 };
 pub use tools_files::TOOL_FILES;
 pub use tools_pipeline::PipelineJobs;
+pub use tools_workspace::TOOL_WORKSPACE;
 
 use crate::app::{exit, AppDeps, ProgressSink};
 use crate::cli::{McpArgs, SchemaKind};

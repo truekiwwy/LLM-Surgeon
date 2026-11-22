@@ -39,13 +39,16 @@ enveloppe JSON (`--json`, résultats MCP).
   surgery  .surgery v1, SVD randomisée ; lora : fusion / extraction PEFT
   bench    KL et top-k entre dumps, perplexité (llama-perplexity), Pass@1 et taux de refus
            (générateur natif par lots, llama-completion ou llama-server), statistiques par
-           prompt, juge LLM optionnel et sa calibration ;
+           prompt, juge LLM optionnel et sa calibration ; ref_cache : réponses de la
+           référence gardées sur disque, clé SHA-256 du modèle et des entrées ;
+           refusal-probe : refus estimé sans génération (premier token, direction) ;
            eval : llama.cpp (processus ou serveur local), échantillonnage, client HTTP local
   pipeline décision atomique sur un patch : candidats sur les jeux Dev, portes appariées,
            une consultation du Test Set ; travailleur reprenable (docs/PIPELINE.md)
   backend  moteurs d'inférence (native, mistralrs, llama-server, hipfire), configuration
            utilisateur ; hipfire::validate_hipfire_target, la règle unique qui refuse une
-           copie de travail à hipfire (CLI, pipeline, MCP)
+           copie de travail à hipfire sauf sous l'alias ws-<copie>-<sha8> de ses poids
+           actuels (CLI, pipeline, MCP), hipfire::requantize qui l'enregistre
   hardware budget RAM/VRAM ; linalg : QR, Cholesky, Jacobi, Gram
   process  kill_tree : un processus enfant et ce qu'il a lancé (taskkill /T, groupe Unix),
            pour surgeon et surgeon-gui

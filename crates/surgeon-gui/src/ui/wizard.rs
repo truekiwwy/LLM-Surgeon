@@ -623,7 +623,7 @@ fn hipfire_guide(ui: &mut Ui, app: &mut SurgeonApp, w: &mut Wizard, ctx: &egui::
     if install {
         app.desktop
             .setup
-            .install_hipfire(ctx, w.hipfire_consent, local);
+            .install_hipfire(ctx, w.hipfire_consent, local, gpu.clone());
     }
     if check {
         app.reprobe(ctx);

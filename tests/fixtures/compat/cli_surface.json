@@ -1013,6 +1013,422 @@
       "aliases": [],
       "args": [
         {
+          "action": "Append",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "ablate",
+          "long": "ablate",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "ABLATE"
+          ]
+        },
+        {
+          "action": "Append",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "keep",
+          "long": "keep",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "KEEP"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "orthogonal-preserve"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "mode",
+          "long": "mode",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [
+            "standard",
+            "orthogonal-preserve"
+          ],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "MODE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "out",
+          "long": "out",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": true,
+          "short": null,
+          "value_names": [
+            "OUT"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "patch_out",
+          "long": "patch-out",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PATCH_OUT"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "all"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "layers",
+          "long": "layers",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "LAYERS"
+          ]
+        },
+        {
+          "action": "Append",
+          "aliases": null,
+          "default_values": [
+            "o_proj",
+            "down_proj"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "projections",
+          "long": "projections",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PROJECTIONS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "1"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "alpha",
+          "long": "alpha",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "ALPHA"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "overwrite",
+          "long": "overwrite",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "OVERWRITE"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "compose",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "model",
+          "long": "model",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "MODEL"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "clean_cache",
+          "long": "clean-cache",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "CLEAN_CACHE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "hipfire_url",
+          "long": "hipfire-url",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "HIPFIRE_URL"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "hipfire_log",
+          "long": "hipfire-log",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "HIPFIRE_LOG"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "json",
+          "long": "json",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "JSON"
+          ]
+        },
+        {
+          "action": "Count",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "verbose",
+          "long": "verbose",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "v",
+          "value_names": [
+            "VERBOSE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": true,
+          "hidden": false,
+          "id": "events",
+          "long": "events",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "FICHIER|-"
+          ]
+        },
+        {
+          "action": "Help",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "help",
+          "long": "help",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": "h",
+          "value_names": null
+        }
+      ],
+      "hidden": false,
+      "name": "doctor",
+      "subcommand_required": false,
+      "subcommands": []
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
           "action": "Set",
           "aliases": null,
           "default_values": [],
@@ -3168,6 +3584,26 @@
               ]
             },
             {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "no_ref_cache",
+              "long": "no-ref-cache",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "NO_REF_CACHE"
+              ]
+            },
+            {
               "action": "Set",
               "aliases": null,
               "default_values": [
@@ -3469,6 +3905,26 @@
               "short": null,
               "value_names": [
                 "HIPFIRE_URL"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "hipfire_requantize",
+              "long": "hipfire-requantize",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "HIPFIRE_REQUANTIZE"
               ]
             },
             {
@@ -3924,7 +4380,7 @@
               "action": "Set",
               "aliases": null,
               "default_values": [
-                "256"
+                "40"
               ],
               "env": null,
               "global": false,
@@ -4257,6 +4713,26 @@
               ]
             },
             {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "no_ref_cache",
+              "long": "no-ref-cache",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "NO_REF_CACHE"
+              ]
+            },
+            {
               "action": "Set",
               "aliases": null,
               "default_values": [],
@@ -4586,6 +5062,26 @@
               ]
             },
             {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "hipfire_requantize",
+              "long": "hipfire-requantize",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "HIPFIRE_REQUANTIZE"
+              ]
+            },
+            {
               "action": "Set",
               "aliases": null,
               "default_values": [],
@@ -4703,6 +5199,256 @@
           ],
           "hidden": false,
           "name": "refusal",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "model",
+              "long": "model",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "MODEL"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "prompts",
+              "long": "prompts",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": true,
+              "short": null,
+              "value_names": [
+                "PROMPTS"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "first-token-prob"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "method",
+              "long": "method",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "first-token-prob",
+                "direction-projection"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "METHOD"
+              ]
+            },
+            {
+              "action": "Append",
+              "aliases": null,
+              "default_values": [
+                "I",
+                "Sorry",
+                "As",
+                "Unfortunately",
+                "Je",
+                "Désolé"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "prefixes",
+              "long": "prefixes",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "PREFIXES"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "vector",
+              "long": "vector",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "VECTOR"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "threshold",
+              "long": "threshold",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "THRESHOLD"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [
+                "auto"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "chat_template",
+              "long": "chat-template",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "auto",
+                "none",
+                "chatml",
+                "llama3",
+                "inst",
+                "gemma"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "CHAT_TEMPLATE"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "compare_generation",
+              "long": "compare-generation",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "COMPARE_GENERATION"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "Count",
+              "aliases": null,
+              "default_values": [
+                "0"
+              ],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "verbose",
+              "long": "verbose",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "v",
+              "value_names": [
+                "VERBOSE"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": true,
+              "hidden": false,
+              "id": "events",
+              "long": "events",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "FICHIER|-"
+              ]
+            },
+            {
+              "action": "Help",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": "h",
+              "value_names": null
+            }
+          ],
+          "hidden": false,
+          "name": "refusal-probe",
           "subcommand_required": false,
           "subcommands": []
         },
@@ -5262,6 +6008,14 @@
               "aliases": [],
               "args": [],
               "hidden": false,
+              "name": "refusal-probe",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
               "name": "judge-sample",
               "subcommand_required": false,
               "subcommands": []
@@ -5706,6 +6460,147 @@
           "short": null,
           "value_names": [
             "OVERWRITE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "refusal_prompts",
+          "long": "refusal-prompts",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "REFUSAL_PROMPTS"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0.1"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "target_refusal_rate",
+          "long": "target-refusal-rate",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "TARGET_REFUSAL_RATE"
+          ]
+        },
+        {
+          "action": "Append",
+          "aliases": null,
+          "default_values": [
+            "0.25",
+            "0.5",
+            "0.75",
+            "1",
+            "1.25",
+            "1.5"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "scales",
+          "long": "scales",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "SCALES"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "2"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "probe_top_k",
+          "long": "probe-top-k",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "PROBE_TOP_K"
+          ]
+        },
+        {
+          "action": "SetTrue",
+          "aliases": null,
+          "default_values": [
+            "false"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "no_probe_prefilter",
+          "long": "no-probe-prefilter",
+          "num_args": "0",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "NO_PROBE_PREFILTER"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "retention_dataset",
+          "long": "retention-dataset",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "RETENTION_DATASET"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "20"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "retention_limit",
+          "long": "retention-limit",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "RETENTION_LIMIT"
           ]
         },
         {
@@ -7586,6 +8481,26 @@
                 "false"
               ],
               "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "hipfire_requantize",
+              "long": "hipfire-requantize",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "HIPFIRE_REQUANTIZE"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
               "global": true,
               "hidden": false,
               "id": "json",
@@ -7947,6 +8862,26 @@
               "short": null,
               "value_names": [
                 "HIPFIRE_URL"
+              ]
+            },
+            {
+              "action": "SetTrue",
+              "aliases": null,
+              "default_values": [
+                "false"
+              ],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "hipfire_requantize",
+              "long": "hipfire-requantize",
+              "num_args": "0",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "HIPFIRE_REQUANTIZE"
               ]
             },
             {
@@ -9459,6 +10394,22 @@
           "aliases": [],
           "args": [],
           "hidden": false,
+          "name": "compose",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
+          "name": "doctor",
+          "subcommand_required": false,
+          "subcommands": []
+        },
+        {
+          "aliases": [],
+          "args": [],
+          "hidden": false,
           "name": "eval",
           "subcommand_required": false,
           "subcommands": []
@@ -9539,6 +10490,14 @@
               "args": [],
               "hidden": false,
               "name": "refusal",
+              "subcommand_required": false,
+              "subcommands": []
+            },
+            {
+              "aliases": [],
+              "args": [],
+              "hidden": false,
+              "name": "refusal-probe",
               "subcommand_required": false,
               "subcommands": []
             },

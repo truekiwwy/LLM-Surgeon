@@ -24,6 +24,12 @@
 //! use `surgeon bench`. The evaluation prompts serve both to fit and to measure, so
 //! `M < 2L` warns of probable overfitting.
 //!
+//! With `--refusal-prompts`, the fitted α are then tried at several scales c·α and the
+//! patch is written at the smallest scale whose generated answers reach the target refusal
+//! rate ([`super::autotune_select`]: first-token probe first, full generation of the
+//! finalists). The whole model is then loaded once, the ridge reads its first layers, and
+//! each candidate shifts the kept matrices in memory from the mapped stored bytes.
+//!
 //! Unlike the rest of `patch`, this module drives the extraction model (`extract`,
 //! `engine`, `hardware`, `linalg`): it produces a `PatchFile`, validated by
 //! `validate_patch` before it is written.
@@ -31,6 +37,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use candle_core::{DType, Device, Tensor};
@@ -38,14 +45,22 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::autotune_select::{
+    self, Generated, ScaleEvaluator, ScaleSelection, SelectionOptions, SelectionRequest, Stage,
+};
 use super::schema::{Axis, LayersField, Operation, OperationKind, PatchFile, Projection};
 use super::validate::{validate_patch, ValidationOptions, MAX_ABS_ALPHA};
+use crate::bench::native::NativeGenerator;
+use crate::bench::report::ProbeToken;
+use crate::bench::{self, dataset, markers::Markers, ref_cache, refusal, score, BenchError};
 use crate::engine::{self, BroadcastAxis, ReadOnlyModel, ShiftOp};
+use crate::eval::TextGenerator;
+use crate::extract::generate::DecoderState;
 use crate::extract::{
-    check_tensors, choose_dtype, companion_path, dtype_name, forward, load_config, load_tensors,
-    load_tokenizer, plan_memory, pool, required_tensors, tokenize, write_atomic, ChatTemplate,
-    DTypeChoice, ExtractError, Pooling, PromptFormat, Qwen2Config, SafetensorsDir, Site,
-    TensorSource,
+    check_tensors, choose_dtype, companion_path, dtype_name, forward, load_config,
+    load_prompt_texts, load_tensors, load_tokenizer, plan_memory, pool, required_tensors,
+    required_tensors_full, tokenize, write_atomic, ChatTemplate, DTypeChoice, ExtractError,
+    Pooling, PromptFormat, Qwen2Config, SafetensorsDir, Site, TensorSource,
 };
 use crate::hardware::HardwareProbe;
 use crate::linalg::cholesky::Cholesky;
@@ -111,6 +126,19 @@ impl From<ExtractError> for AutotuneError {
             ExtractError::Io { path, message } => Self::Io { path, message },
             ExtractError::Compute(m) => Self::Compute(m),
             other => Self::Model(other.to_string()),
+        }
+    }
+}
+
+impl From<BenchError> for AutotuneError {
+    fn from(e: BenchError) -> Self {
+        match e {
+            BenchError::InvalidArgument(m) => Self::InvalidArgument(m),
+            BenchError::Input { path, message } => Self::Input { path, message },
+            BenchError::InsufficientResources(m) => Self::InsufficientResources(m),
+            BenchError::Cancelled => Self::Cancelled,
+            BenchError::Model(m) => Self::Model(m),
+            other => Self::Compute(other.to_string()),
         }
     }
 }
@@ -190,6 +218,8 @@ pub struct AutotuneRequest {
     pub chat_template: Option<ChatTemplate>,
     pub out: Option<PathBuf>,
     pub overwrite: bool,
+    /// `--refusal-prompts`: the scale c of the fitted α picked by generation; `None`: off.
+    pub selection: Option<SelectionRequest>,
 }
 
 /// Parses `A-B` or `A` (inclusive).
@@ -210,9 +240,29 @@ pub fn parse_layer_range(s: &str) -> std::result::Result<(usize, usize), String>
 }
 
 pub enum AutotuneEvent {
-    Planned { forwards: usize, layers: usize },
-    Forward { done: usize, total: usize },
+    Planned {
+        forwards: usize,
+        layers: usize,
+    },
+    Forward {
+        done: usize,
+        total: usize,
+    },
     Solve,
+    /// Scale selection: one candidate measured.
+    Scale {
+        scale: f64,
+        stage: Stage,
+        refusal_rate: f64,
+    },
+    /// Scale selection over: candidates probed and generated, generations the probe saved.
+    Selected {
+        probed: usize,
+        generated: usize,
+        saved: usize,
+    },
+    /// A decision for the log (the native batching of the selection).
+    Note(String),
 }
 
 /// Counts forwards for the progress events.
@@ -449,6 +499,9 @@ pub struct AutotuneReport {
     pub patch: Option<PatchFile>,
     /// Fichier écrit (--out) ; null sinon.
     pub out: Option<PathBuf>,
+    /// --refusal-prompts : échelles c·α sondées puis générées, et celle retenue ; absent sinon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<ScaleSelection>,
     pub recommendation: String,
     pub timing_ms: AutotuneTiming,
 }
@@ -457,6 +510,325 @@ pub struct AutotuneReport {
 pub struct AutotuneRun {
     pub report: AutotuneReport,
     pub warnings: Vec<String>,
+}
+
+// ------------------------------------------------------------------ scale selection
+
+/// The refusal prompts and the retention set, read before any weight.
+struct SelectionInputs {
+    prompts: Vec<String>,
+    retention: Option<(score::EvalRequest, Vec<dataset::Item>, String)>,
+}
+
+fn selection_inputs(req: &AutotuneRequest, sel: &SelectionRequest) -> Result<SelectionInputs> {
+    let prompts = load_prompt_texts(&sel.prompts).map_err(|m| AutotuneError::Input {
+        path: sel.prompts.clone(),
+        message: m.to_string(),
+    })?;
+    let retention = match &sel.retention {
+        None => None,
+        Some((path, limit)) => {
+            // The defaults of `bench eval --backend native`: its reference cache entry is
+            // the same.
+            let request = score::EvalRequest {
+                model: req.model.clone(),
+                dataset: path.clone(),
+                backend: score::Backend::Native,
+                baseline_model: None,
+                limit: *limit,
+                max_new_tokens: bench::DEFAULT_MAX_NEW_TOKENS,
+                template: bench::prompt::Template::default(),
+                chat_template: ChatTemplate::Auto,
+                format: dataset::DatasetFormat::default(),
+                llama_cpp_dir: None,
+                timeout: None,
+                min_accuracy: None,
+                generation: bench::generation::GenOptions::default(),
+                ref_cache: sel.ref_cache.clone(),
+            };
+            let items = dataset::load(path, request.format, *limit)?;
+            let sha = match bench::builtin::dataset(path) {
+                Some(set) => bench::sha256_hex(set.unwrap_or_default().as_bytes()),
+                None => bench::sha256_file(path)?,
+            };
+            Some((request, items, sha))
+        }
+    };
+    Ok(SelectionInputs { prompts, retention })
+}
+
+/// The candidates of the selection: the whole model the bench loaded, with `scale`·α
+/// shifted in memory on the kept matrices, measured as `bench refusal` (and `bench eval`
+/// for the retention set) measure it.
+struct Candidates<'a> {
+    bench: &'a Bench<'a>,
+    kept: Vec<(usize, f64)>,
+    generator: NativeGenerator,
+    refusal: refusal::RefusalRequest,
+    format: PromptFormat,
+    prefix: Vec<ProbeToken>,
+    retention: Option<(score::EvalRequest, Vec<dataset::Item>, Vec<String>, String)>,
+    /// The base model's SHA-256, for the reference cache keys; computed once, when needed.
+    model_sha256: Option<String>,
+    cancel: &'a AtomicBool,
+    /// Reference cache notes, for the warnings.
+    notes: Vec<String>,
+}
+
+impl Candidates<'_> {
+    /// The generator's weights: the base with `scale`·α subtracted (as written, in f32).
+    fn load(&mut self, scale: f64) -> Result<()> {
+        let mut tensors = self.bench.base.clone();
+        for &(layer, alpha) in self.kept.iter().filter(|_| scale != 0.0) {
+            let shift = f64::from((scale * alpha) as f32);
+            tensors.insert(
+                self.bench.weight_name(layer),
+                self.bench.shifted(layer, shift)?,
+            );
+        }
+        let state = DecoderState::from_tensors(tensors, self.bench.cfg, self.bench.dtype)?;
+        self.generator.set_state(state);
+        Ok(())
+    }
+
+    fn key(&mut self, kind: &str, inputs: Value) -> Result<String> {
+        if self.refusal.ref_cache.is_none() {
+            return Ok(String::new());
+        }
+        let sha = match &self.model_sha256 {
+            Some(sha) => sha.clone(),
+            None => ref_cache::model_sha256(&self.refusal.model)?,
+        };
+        self.model_sha256 = Some(sha.clone());
+        Ok(ref_cache::key(kind, &sha, inputs))
+    }
+
+    fn refusals(&mut self) -> bench::Result<Vec<bench::report::RefusalItem>> {
+        refusal::run_prompts(
+            &mut self.generator,
+            &self.refusal,
+            &self.format,
+            self.cancel,
+            &mut |_, _| {},
+        )
+    }
+
+    fn accuracy(&mut self) -> bench::Result<Option<Vec<bench::report::ItemResult>>> {
+        let Some((request, items, prompts, _)) = &self.retention else {
+            return Ok(None);
+        };
+        score::run_suite(
+            &mut self.generator,
+            items,
+            prompts,
+            request.max_new_tokens,
+            &request.generation,
+            self.cancel,
+            &mut |_, _| {},
+        )
+        .map(Some)
+    }
+}
+
+impl ScaleEvaluator for Candidates<'_> {
+    fn probe(&mut self, scale: f64) -> Result<Vec<f64>> {
+        self.load(scale)?;
+        let mut probs = Vec::with_capacity(self.refusal.prompts.len());
+        for prompt in &self.refusal.prompts {
+            if self.cancel.load(Ordering::SeqCst) {
+                return Err(AutotuneError::Cancelled);
+            }
+            let logits = self
+                .generator
+                .first_token_logits(&self.format.apply(prompt))?;
+            probs.push(refusal::first_token_score(&logits, &self.prefix)?);
+        }
+        Ok(probs)
+    }
+
+    fn generate(&mut self, scale: f64) -> Result<Generated> {
+        self.load(scale)?;
+        let flags =
+            |items: Vec<bench::report::RefusalItem>| items.iter().map(|i| i.refused).collect();
+        let accuracy = |results: Option<Vec<bench::report::ItemResult>>| {
+            results.map(|r| score::score(&r).accuracy)
+        };
+        if scale != 0.0 {
+            let refused = flags(self.refusals()?);
+            let retention = accuracy(self.accuracy()?);
+            return Ok(Generated {
+                refused,
+                retention,
+                cache: None,
+            });
+        }
+        // The base model: its answers are read back when `bench refusal` or a previous run
+        // already generated them with the same inputs.
+        let cache = self.refusal.ref_cache.clone();
+        let model = self.refusal.model.clone();
+        let key = self.key("refusal", refusal::cache_inputs(&self.refusal, &model))?;
+        let got = ref_cache::cached(cache.as_ref(), &key, "refusal", &model, || {
+            let started = Instant::now();
+            Ok((self.refusals()?, started.elapsed().as_millis() as u64))
+        })?;
+        self.notes.extend(got.notes);
+        let lookup = got.lookup;
+        let retention_inputs = self
+            .retention
+            .as_ref()
+            .map(|(request, _, _, sha)| score::cache_inputs(request, &model, sha));
+        let retention = match retention_inputs {
+            None => None,
+            Some(inputs) => {
+                let key = self.key("eval", inputs)?;
+                let got = ref_cache::cached(cache.as_ref(), &key, "eval", &model, || {
+                    let started = Instant::now();
+                    let results = self.accuracy()?.unwrap_or_default();
+                    Ok((results, started.elapsed().as_millis() as u64))
+                })?;
+                self.notes.extend(got.notes);
+                accuracy(Some(got.items))
+            }
+        };
+        Ok(Generated {
+            refused: flags(got.items),
+            retention,
+            cache: cache.map(|_| lookup.as_str().to_owned()),
+        })
+    }
+}
+
+/// Runs the selection on the fitted α; `None` (with a warning) when nothing can be tried.
+#[allow(clippy::too_many_arguments)]
+fn select(
+    bench: &Bench<'_>,
+    alphas: &[LayerAlpha],
+    limits: &[f64],
+    req: &AutotuneRequest,
+    sel: &SelectionRequest,
+    inputs: SelectionInputs,
+    probe: &dyn HardwareProbe,
+    cancel: &AtomicBool,
+    on_event: &mut dyn FnMut(AutotuneEvent),
+    warnings: &mut Vec<String>,
+) -> Result<Option<ScaleSelection>> {
+    let kept: Vec<(usize, f64)> = alphas
+        .iter()
+        .filter(|a| !a.dropped)
+        .map(|a| (a.layer, a.alpha))
+        .collect();
+    if kept.is_empty() {
+        warnings.push("aucune couche retenue : pas de sélection d'échelle".into());
+        return Ok(None);
+    }
+    // A scale stays within the bounds of the fit: |c·α_l| at most the limit of layer l.
+    let ceiling = alphas
+        .iter()
+        .zip(limits)
+        .filter(|(a, _)| !a.dropped)
+        .map(|(a, limit)| limit / a.alpha.abs())
+        .fold(f64::INFINITY, f64::min);
+    let (scales, beyond): (Vec<f64>, Vec<f64>) = sel
+        .scales
+        .iter()
+        .partition(|c| **c <= ceiling * (1.0 + 1e-9));
+    if !beyond.is_empty() {
+        warnings.push(format!(
+            "échelles {beyond:?} écartées : c·α dépasserait --alpha-max ou --max-delta-norm-ratio (échelle {ceiling:.3} au plus)"
+        ));
+    }
+    if scales.is_empty() {
+        warnings.push("aucune échelle dans les bornes : pas de sélection d'échelle".into());
+        return Ok(None);
+    }
+    let state = DecoderState::from_tensors(bench.base.clone(), bench.cfg, bench.dtype)?;
+    // Never set: the selection checks `cancel` itself between prompts and batches.
+    let mut generator =
+        NativeGenerator::from_state(&req.model, state, Arc::new(AtomicBool::new(false)))?;
+    let refusal = refusal::RefusalRequest {
+        model: req.model.clone(),
+        prompts: inputs.prompts,
+        baseline_model: None,
+        max_new_tokens: bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS,
+        chat_template: ChatTemplate::Auto,
+        markers: Markers::default(),
+        generation: bench::generation::GenOptions::default(),
+        backend: "native".into(),
+        ref_cache: sel.ref_cache.clone(),
+    };
+    generator.configure(&refusal.generation.decoding(None));
+    on_event(AutotuneEvent::Note(generator.auto_batching(
+        probe,
+        refusal.generation.jobs,
+        None,
+    )));
+    let prefix = refusal::prefix_tokens(
+        generator.tokenizer(),
+        &refusal::DEFAULT_PROBE_PREFIXES.map(String::from),
+    )?;
+    // As `bench refusal` wraps them: ChatML when the model declares nothing.
+    let format = refusal
+        .chat_template
+        .resolve(&req.model, ChatTemplate::Chatml);
+    let retention = inputs.retention.map(|(request, items, sha)| {
+        let wrap = request
+            .chat_template
+            .resolve(&req.model, ChatTemplate::NoTemplate);
+        let prompts = score::render_prompts(&items, &request.template, &wrap);
+        (request, items, prompts, sha)
+    });
+    let mut candidates = Candidates {
+        bench,
+        kept,
+        generator,
+        refusal,
+        format,
+        prefix,
+        retention,
+        model_sha256: None,
+        cancel,
+        notes: Vec::new(),
+    };
+    let options = SelectionOptions {
+        scales,
+        target_refusal_rate: sel.target_refusal_rate,
+        top_k: sel.top_k,
+        prefilter: sel.prefilter,
+        threshold: refusal::DEFAULT_PROBE_THRESHOLD,
+    };
+    let selection = autotune_select::select_scale(&mut candidates, &options, on_event)?;
+    warnings.append(&mut candidates.notes);
+    let target = selection.target_refusal_rate;
+    if let Some(base) = selection
+        .baseline
+        .generated_refusal_rate
+        .filter(|r| *r <= target)
+    {
+        warnings.push(format!(
+            "la base refuse déjà {base:.3} ≤ cible {target} des prompts : la sélection ne fait que réduire le patch"
+        ));
+    }
+    match selection.selected_scale {
+        None => warnings.push(format!(
+            "aucune échelle générée n'atteint le taux de refus cible {target} : le patch garde les α du ridge (échelle 1)"
+        )),
+        Some(c) => {
+            let chosen = selection.candidates.iter().find(|x| x.scale == c);
+            if let (Some(after), Some(before)) = (
+                chosen.and_then(|x| x.retention_accuracy),
+                selection.baseline.retention_accuracy,
+            ) {
+                if after < before {
+                    warnings.push(format!(
+                        "rétention {:.1} % contre {:.1} % pour la base à l'échelle {c} : à confirmer par surgeon bench eval sur plus de questions",
+                        after * 100.0,
+                        before * 100.0
+                    ));
+                }
+            }
+        }
+    }
+    Ok(Some(selection))
 }
 
 // ------------------------------------------------------------------ pipeline
@@ -787,6 +1159,25 @@ fn validate_request(req: &AutotuneRequest) -> Result<()> {
     if req.objective == Objective::Target && req.target_projection.is_none() {
         return bad("--objective target exige --target-projection");
     }
+    if let Some(s) = &req.selection {
+        let max = autotune_select::MAX_SCALE;
+        if s.scales.is_empty()
+            || s.scales
+                .iter()
+                .any(|c| !(c.is_finite() && *c > 0.0 && *c <= max))
+        {
+            return bad(&format!("--scales : des nombres dans ]0, {max}]"));
+        }
+        if !(0.0..=1.0).contains(&s.target_refusal_rate) {
+            return bad("--target-refusal-rate doit être entre 0 et 1");
+        }
+        if s.top_k == 0 {
+            return bad("--probe-top-k doit être >= 1");
+        }
+        if s.retention.as_ref().is_some_and(|(_, limit)| *limit == 0) {
+            return bad("--retention-limit doit être >= 1");
+        }
+    }
     if let Some(out) = &req.out {
         if !out
             .extension()
@@ -937,11 +1328,25 @@ pub fn run_with(
         ));
     }
 
-    let required = required_tensors(&cfg, readout);
+    // Read before any weight, so that a bad file fails fast.
+    let selection_inputs = req
+        .selection
+        .as_ref()
+        .map(|s| selection_inputs(req, s))
+        .transpose()?;
+    // The selection generates with the whole model: loaded once, the ridge reads its first
+    // layers out of it.
+    let (required, context) = match &req.selection {
+        Some(_) => (
+            required_tensors_full(&cfg),
+            req.max_tokens.max(bench::native::PLANNED_CONTEXT),
+        ),
+        None => (required_tensors(&cfg, readout), req.max_tokens),
+    };
     let totals = check_tensors(source, &required)?;
     let dtype = choose_dtype(
         req.dtype,
-        plan_memory(&cfg, totals, req.max_tokens),
+        plan_memory(&cfg, totals, context),
         probe,
         &mut warnings,
     )?;
@@ -1029,6 +1434,7 @@ pub fn run_with(
         L2Reg::Auto => ridge_auto(&f, m, l, &y)?,
     };
     let mut alphas = Vec::with_capacity(l);
+    let mut limits = Vec::with_capacity(l);
     let mut clipped_layers = Vec::new();
     for (col, &layer) in layers.iter().enumerate() {
         let fitted = fit.alpha[col];
@@ -1036,6 +1442,7 @@ pub fn run_with(
         let limit = req
             .max_delta_norm_ratio
             .map_or(req.alpha_max, |r| req.alpha_max.min(r / ratio_per_alpha));
+        limits.push(limit);
         let clipped = fitted.abs() > limit;
         let value = fitted.clamp(-limit, limit);
         let dropped = value.abs() < req.min_alpha;
@@ -1064,6 +1471,27 @@ pub fn run_with(
             req.max_delta_norm_ratio
                 .map_or(String::new(), |r| format!(", ‖ΔW‖/‖W‖ ≤ {r}"))
         ));
+    }
+    let selection = match (&req.selection, selection_inputs) {
+        (Some(sel), Some(inputs)) => select(
+            &bench,
+            &alphas,
+            &limits,
+            req,
+            sel,
+            inputs,
+            probe,
+            cancel,
+            &mut *progress.on_event,
+            &mut warnings,
+        )?,
+        _ => None,
+    };
+    if let Some(c) = selection.as_ref().and_then(|s| s.selected_scale) {
+        for a in alphas.iter_mut().filter(|a| !a.dropped) {
+            a.alpha *= c;
+            a.delta_norm_ratio *= c;
+        }
     }
     // The coefficients are written as f32: predict and validate with those exact values.
     let kept: Vec<(usize, f64)> = alphas
@@ -1116,7 +1544,18 @@ pub fn run_with(
                 fit.r2.map_or("—".to_owned(), |r| format!("{r:.4}")),
                 validation.predicted_mean_shift,
                 validation.actual_mean_shift
-            )),
+            ) + &selection
+                .as_ref()
+                .and_then(|s| {
+                    let c = s.selected_scale?;
+                    let chosen = s.candidates.iter().find(|x| x.scale == c)?;
+                    Some(format!(
+                        ", échelle {c} des α du ridge retenue par génération (refus {:.3} ≤ cible {})",
+                        chosen.generated_refusal_rate.unwrap_or_default(),
+                        s.target_refusal_rate
+                    ))
+                })
+                .unwrap_or_default()),
             backup: true,
             operations: kept
                 .iter()
@@ -1134,6 +1573,7 @@ pub fn run_with(
                     axis: engine_axis(req.proj).1,
                 })
                 .collect(),
+            composition: None,
         }),
     };
     if let Some(p) = &patch {
@@ -1185,6 +1625,7 @@ pub fn run_with(
             validation,
             patch,
             out,
+            selection,
             recommendation: "effets secondaires non mesurés ici : appliquer sur une copie puis surgeon bench (dump, logits, ppl)".into(),
             timing_ms: AutotuneTiming {
                 total: started.elapsed().as_millis() as u64,

@@ -411,6 +411,7 @@ pub fn allowed_tools(mode: AgentMode) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(|t| t["name"].as_str().map(str::to_owned))
+        .filter(|n| !super::tools::EXTERNAL_ONLY.contains(&n.as_str()))
         .filter(|n| match mode {
             AgentMode::Ask => {
                 READ_TOOLS.contains(&n.as_str()) || super::tools::UI_TOOLS.contains(&n.as_str())

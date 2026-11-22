@@ -68,6 +68,12 @@ pub enum Commands {
     Apply(ApplyArgs),
     /// Put a model back byte for byte, from an `apply` backup or from the origin model.
     Restore(RestoreArgs),
+    /// One direction from several extracted vectors, kept orthogonal to the directions to
+    /// preserve, and the patch that removes it.
+    Compose(ComposeArgs),
+    /// Check in a few seconds that the machine is ready for a campaign: RAM, cores, the
+    /// reference cache and the hipfire daemon.
+    Doctor(DoctorArgs),
     /// Evaluate a model on prompts.
     Eval(EvalArgs),
     /// Extract a steering vector from a Qwen2, Llama/Mistral or Qwen3 layer (pure Rust, CPU).
@@ -207,6 +213,10 @@ pub struct EngineArgs {
     /// hipfire: a daemon already running, http://127.0.0.1:<port> (loopback only).
     #[arg(long)]
     pub hipfire_url: Option<String>,
+    /// hipfire: requantize a working copy that has no alias for its current weights before
+    /// measuring it (`hipfire_requantize = "auto"` in the user configuration).
+    #[arg(long)]
+    pub hipfire_requantize: bool,
 }
 
 impl EngineArgs {
@@ -218,6 +228,9 @@ impl EngineArgs {
             mistralrs_bin: self.mistralrs_bin.clone(),
             hipfire_bin: self.hipfire_bin.clone(),
             hipfire_url: self.hipfire_url.clone(),
+            hipfire_requantize: self
+                .hipfire_requantize
+                .then_some(crate::backend::config::Requantize::Auto),
             ..Default::default()
         }
     }
@@ -228,6 +241,8 @@ impl EngineArgs {
         self.mistralrs_bin.clone_from(&config.mistralrs_bin);
         self.hipfire_bin.clone_from(&config.hipfire_bin);
         self.hipfire_url.clone_from(&config.hipfire_url);
+        self.hipfire_requantize =
+            config.hipfire_requantize == Some(crate::backend::config::Requantize::Auto);
     }
 }
 
@@ -428,6 +443,30 @@ pub struct AutotuneArgs {
     pub out: Option<PathBuf>,
     #[arg(long)]
     pub overwrite: bool,
+    /// Prompts the patched model should stop refusing (file or builtin:refusals): tries the
+    /// fitted alphas at several scales and writes the smallest one whose generated answers
+    /// reach --target-refusal-rate (native generation, 40 tokens).
+    #[arg(long)]
+    pub refusal_prompts: Option<PathBuf>,
+    /// Refusal rate (0..1) the selected scale must reach in generation.
+    #[arg(long, default_value_t = crate::patch::autotune_select::DEFAULT_TARGET_REFUSAL_RATE, requires = "refusal_prompts")]
+    pub target_refusal_rate: f64,
+    /// Candidate scales c of the fitted alphas, comma separated.
+    #[arg(long, value_delimiter = ',', default_values_t = crate::patch::autotune_select::DEFAULT_SCALES, requires = "refusal_prompts")]
+    pub scales: Vec<f64>,
+    /// Candidates the first-token probe hands to the full generation.
+    #[arg(long, default_value_t = crate::patch::autotune_select::DEFAULT_TOP_K, requires = "refusal_prompts")]
+    pub probe_top_k: usize,
+    /// Generate every candidate scale instead of screening them with the probe first.
+    #[arg(long, requires = "refusal_prompts")]
+    pub no_probe_prefilter: bool,
+    /// Capability set also generated on the finalists and the base, as bench eval does
+    /// (file or builtin:math, builtin:logic, builtin:general).
+    #[arg(long, requires = "refusal_prompts")]
+    pub retention_dataset: Option<PathBuf>,
+    /// First N questions of --retention-dataset.
+    #[arg(long, default_value_t = crate::patch::autotune_select::DEFAULT_RETENTION_LIMIT, requires = "retention_dataset")]
+    pub retention_limit: usize,
 }
 
 /// Exit codes: 0 ok (warnings included), 1 insufficient resources, llama.cpp binary not
@@ -452,10 +491,46 @@ pub enum BenchCommand {
     Dump(BenchDumpArgs),
     /// Refusal rate of a Qwen2, Llama/Mistral or Qwen3 model on prompts (greedy, pure Rust, CPU).
     Refusal(BenchRefusalArgs),
+    /// Refusal estimated without generating, one forward pass per prompt: a fast heuristic to
+    /// explore with, `bench refusal` stays the proof.
+    RefusalProbe(BenchRefusalProbeArgs),
     /// Sample the answers of a `bench refusal` run for human labelling.
     JudgeSample(BenchJudgeSampleArgs),
     /// Agreement of a judge model with human labels; writes the calibration file.
     JudgeEval(BenchJudgeEvalArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchRefusalProbeArgs {
+    /// Qwen2, Llama/Mistral or Qwen3 SafeTensors directory (native forward, CPU).
+    #[arg(long)]
+    pub model: PathBuf,
+    /// JSON array of strings or of {"text": ...}, JSONL, plain text, or builtin:<set>.
+    #[arg(long)]
+    pub prompts: PathBuf,
+    /// first-token-prob: probability that the first answer token opens a refusal;
+    /// direction-projection: residual stream projected on an extracted refusal direction.
+    #[arg(long, value_enum, default_value_t = crate::bench::refusal::RefusalProbeMode::FirstTokenProb)]
+    pub method: crate::bench::refusal::RefusalProbeMode,
+    /// first-token-prob: words a refusal starts with, comma separated (their first token).
+    #[arg(long, value_delimiter = ',', default_values_t = crate::bench::refusal::DEFAULT_PROBE_PREFIXES.map(String::from))]
+    pub prefixes: Vec<String>,
+    /// direction-projection: the direction file of `surgeon extract` (resid_post), with its
+    /// .stats.json for the calibrated threshold.
+    #[arg(long)]
+    pub vector: Option<PathBuf>,
+    /// Decision threshold of the score (default: 0.5 for first-token-prob, the direction's
+    /// calibrated threshold for direction-projection).
+    #[arg(long)]
+    pub threshold: Option<f64>,
+    /// Wrapping of each prompt, as in bench refusal: auto follows the model (ChatML if it
+    /// declares nothing).
+    #[arg(long, value_enum, default_value_t = ChatTemplate::Auto)]
+    pub chat_template: ChatTemplate,
+    /// Also generate the answers (bench refusal, default budget) and report the agreement,
+    /// the correlation and both durations.
+    #[arg(long)]
+    pub compare_generation: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -570,6 +645,10 @@ pub struct BenchEvalArgs {
     /// Exit with code 9 when the accuracy is below --min-accuracy.
     #[arg(long)]
     pub fail_on_warn: bool,
+    /// Regenerate the --baseline-model answers instead of reading them from the reference
+    /// cache (the entry is overwritten).
+    #[arg(long)]
+    pub no_ref_cache: bool,
     #[command(flatten)]
     pub generation: Box<GenerationArgs>,
 }
@@ -647,6 +726,7 @@ impl GenerationArgs {
             gpu_layers: self.gpu_layers,
             ctx_size: self.ctx_size,
             allow_stale_hipfire: self.allow_stale_hipfire,
+            batch_auto: self.batch_size.is_none(),
         }
     }
 }
@@ -720,6 +800,10 @@ pub struct BenchRefusalArgs {
     /// Exit with code 9 when --max-unparsable is exceeded.
     #[arg(long)]
     pub fail_on_warn: bool,
+    /// Regenerate the --baseline-model answers instead of reading them from the reference
+    /// cache (the entry is overwritten).
+    #[arg(long)]
+    pub no_ref_cache: bool,
     /// Generator: native (pure Rust), mistralrs (mistral.rs on the SafeTensors directory as
     /// is), llama-server or llama-completion (on a GGUF, a SafeTensors model converted first;
     /// --llama-cpp-dir) or hipfire (an AMD HIP daemon). Default: the user configuration, else
@@ -849,6 +933,60 @@ pub struct ApplyArgs {
     pub backup_dir: Option<PathBuf>,
     #[command(flatten)]
     pub surgery: crate::surgery::cli_args::SurgeryApplyArgs,
+}
+
+/// `surgeon doctor` (`doctor`). Exit code 0: `data.ready` says whether a check failed.
+#[derive(Debug, Clone, Args)]
+pub struct DoctorArgs {
+    /// Model folder: its exact RAM need, the dtype it gets (f32, or the slow bf16 fallback)
+    /// and its native batch.
+    #[arg(long)]
+    pub model: Option<PathBuf>,
+    /// Remove the reference cache files that can never be read again (unreadable, another
+    /// schema, temporary files).
+    #[arg(long)]
+    pub clean_cache: bool,
+    /// hipfire daemon URL (default: the configuration's, else http://127.0.0.1:11435).
+    #[arg(long)]
+    pub hipfire_url: Option<String>,
+    /// hipfire daemon log, where it writes the GPU memory of each load (default: the one
+    /// start-hipfire.ps1 writes).
+    #[arg(long)]
+    pub hipfire_log: Option<PathBuf>,
+}
+
+/// `surgeon compose` (`patch::compose`).
+#[derive(Debug, Clone, Args)]
+pub struct ComposeArgs {
+    /// Vector to remove: a `surgeon extract` file (or a JSON array), as `file` or
+    /// `file:alpha` (its weight in the sum, default 1); repeatable.
+    #[arg(long, required = true)]
+    pub ablate: Vec<String>,
+    /// Direction to preserve (a capability vector); repeatable.
+    #[arg(long)]
+    pub keep: Vec<PathBuf>,
+    /// orthogonal-preserve: the vectors to remove are projected out of the subspace of the
+    /// kept directions; standard: their plain weighted sum.
+    #[arg(long, value_enum, default_value_t = crate::patch::compose::ComposeMode::OrthogonalPreserve)]
+    pub mode: crate::patch::compose::ComposeMode,
+    /// Composed direction (.safetensors): `direction`, and `a` = `b` = its unit vector.
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Also write a patch.json that removes it (project_out), with the recipe in
+    /// `composition`.
+    #[arg(long)]
+    pub patch_out: Option<PathBuf>,
+    /// Layers of the patch: all, A-B, or a list.
+    #[arg(long, default_value = "all")]
+    pub layers: String,
+    /// Matrices of the patch, comma separated.
+    #[arg(long, value_delimiter = ',', default_values_t = ["o_proj".to_owned(), "down_proj".to_owned()])]
+    pub projections: Vec<String>,
+    /// Strength of the project_out, in [0, 1] (1 removes the direction entirely).
+    #[arg(long, default_value_t = 1.0)]
+    pub alpha: f32,
+    #[arg(long)]
+    pub overwrite: bool,
 }
 
 /// `surgeon restore` (`patch::restore`). Without `--backup` nor `--from-origin`: the state

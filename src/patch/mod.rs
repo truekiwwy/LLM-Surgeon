@@ -30,7 +30,9 @@
 //! `left_modified: true` when no backup was taken). See [`exit_code`].
 
 pub mod autotune;
+pub mod autotune_select;
 mod backup;
+pub mod compose;
 mod error;
 mod executor;
 pub mod gguf;

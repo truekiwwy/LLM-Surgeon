@@ -1,11 +1,16 @@
 # Starts the hipfire daemon in WSL2 in the background and waits until it answers.
-# Usage: powershell -ExecutionPolicy Bypass -File .\start-hipfire.ps1
+# Usage: powershell -ExecutionPolicy Bypass -File .\start-hipfire.ps1 [-User <wsl user>]
+# -User is the WSL account whose ~/.hipfire holds the models; it defaults to the Windows one,
+# which is usually the account WSL created at install time.
+param(
+    [string]$User = $env:USERNAME
+)
 $ErrorActionPreference = 'Stop'
 
 $distro = 'Ubuntu-24.04'
-$user = 'kiwwy'
 $health = 'http://127.0.0.1:11435/health'
-$log = "/home/$user/hipfire-serve.log"
+$script = "/home/$User/start-hipfire.sh"
+$log = "/home/$User/hipfire-serve.log"
 $timeoutSeconds = 60
 
 function Test-Daemon {
@@ -21,8 +26,21 @@ if (Test-Daemon) {
     exit 0
 }
 
+# The daemon script is not in the distribution until copied there from this repository.
+wsl.exe -d $distro -u $User -e test -x $script
+if ($LASTEXITCODE -ne 0) {
+    $source = Join-Path $PSScriptRoot 'start-hipfire.sh'
+    $linux = wsl.exe -d $distro -u $User -e wslpath -a $source
+    if ($LASTEXITCODE -ne 0) { $linux = $source }
+    [Console]::Error.WriteLine("$script is missing or not executable in $distro for user '$User' (or that user or distribution does not exist).")
+    [Console]::Error.WriteLine("Install it from this repository, then run this script again:")
+    [Console]::Error.WriteLine("  wsl.exe -d $distro -u $User -e install -m 755 $linux $script")
+    [Console]::Error.WriteLine("Another WSL user: -User <name>.")
+    exit 2
+}
+
 # This hidden wsl.exe stays attached: it keeps the distro up as long as the daemon runs.
-$arguments = "-d $distro -u $user -- /home/$user/start-hipfire.sh > $log 2>&1"
+$arguments = "-d $distro -u $User -- $script > $log 2>&1"
 $wsl = Start-Process wsl.exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
 
 $deadline = (Get-Date).AddSeconds($timeoutSeconds)
@@ -35,5 +53,5 @@ while ((Get-Date) -lt $deadline -and -not $wsl.HasExited) {
 }
 
 Write-Output "hipfire did not answer on $health. Last lines of ${log}:"
-wsl.exe -d $distro -u $user -- tail -n 20 $log
+wsl.exe -d $distro -u $User -- tail -n 20 $log
 exit 1

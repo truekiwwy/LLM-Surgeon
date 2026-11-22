@@ -7,6 +7,11 @@ la vue ne garde que l'usage : projet et sessions à gauche, session au centre, p
 droite. Ce que l'agent peut faire (Demander / Modifier) se choisit dans le formulaire de
 nouvelle session.
 
+Deux façons de travailler, sur le même moteur et le même dossier projet : tout dans le Studio
+(ce document), ou votre propre agent dans son harnais (Claude Code, Codex, OpenCode, Cursor)
+branché sur `surgeon mcp` avec le Skill `weight-surgeon` (section 8 bis). Un projet commencé
+d'un côté s'ouvre de l'autre.
+
 ## 0. Deux missions
 
 Une session démarre d'un formulaire, sous l'une de deux formes enregistrées avec la
@@ -223,11 +228,16 @@ depuis le ledger du projet à chaque affichage :
 - **Mesuré** : il cite des runs présents dans le ledger et réussis, chaque valeur citée se
   trouve dans le résultat du run ; la carte affiche le run et l'empreinte du modèle. Un
   constat chiffré doit lier au moins une valeur.
+- **Heuristique** : appuyé comme un constat mesuré, mais au moins un des runs cités est une
+  heuristique d'exploration (son résultat porte `is_heuristic: true` ou
+  `evidence_level: "heuristic_screening"`, comme `surgeon_bench` en mode `refusal_probe`). Il
+  oriente sans prouver : une génération complète (`mode` `refusal` ou `eval`) reste à faire.
 - **Déduit** : pas de run, mais un raisonnement, affiché.
 - **Inconnu** : le reste, avec la raison (chiffre sans run, run absent ou en échec, valeur
   absente du résultat).
 
-L'interface n'affiche donc jamais « Mesuré » un chiffre sans run associé. Les chiffres écrits
+L'interface n'affiche donc jamais « Mesuré » un chiffre sans run associé, ni un chiffre tiré
+d'une sonde. Les chiffres écrits
 dans le texte libre de la conversation ne sont pas contrôlés : seul le journal fait foi.
 
 Pour un runtime CLI, `record_finding` est un outil du serveur MCP `surgeon` (section 8) qui
@@ -260,11 +270,42 @@ cet ordre :
 2. sonde de toutes les couches : une extraction par couche, classée par `d_prime` et
    `threshold_accuracy`, puis `surgeon_inspect` sur `o_proj` et `down_proj` ;
 3. `surgeon_apply` avec `project_out` sur `["o_proj", "down_proj"]`, `layers: "all"` sauf si
-   la sonde justifie une plage, α balayé de 0.4 à 1.0 ; `add` (et `surgeon_autotune`, qui ne
-   produit que des décalages additifs) seulement si l'utilisateur l'impose ;
-4. validation après chaque apply contre `origin_path` : `refusal` sur `builtin:refusals`,
-   `eval` sur `builtin:math`, `builtin:logic` et `builtin:general`, et un contrôle sécurité
-   (demandes dangereuses écrites dans `work/`, taux de refus qui ne doit pas baisser).
+   la sonde justifie une plage, α balayé de 0.4 à 1.0 en entonnoir : chaque α est d'abord criblé
+   par `surgeon_bench` mode `refusal_probe` (`first-token-prob`, une passe avant par prompt),
+   seuls les deux plus petits α retenus passent en génération complète ;
+   `surgeon_autotune` avec `refusal_prompts` calibre de même l'échelle d'un patch de steering ;
+   `add` et `subtract` (ses seules sorties) seulement si l'utilisateur l'impose ;
+   3 bis. pour retirer un comportement sans dégrader une capacité (maths, logique, code) :
+   direction de la capacité extraite à la même couche, puis `surgeon_compose` mode
+   `orthogonal-preserve` et son `patch_out` appliqué ;
+4. certification obligatoire par génération complète sur chaque finaliste puis sur l'état final,
+   contre `origin_path` : `refusal` sur `builtin:refusals`, `eval` sur `builtin:math`,
+   `builtin:logic` et `builtin:general`, et un contrôle sécurité (demandes dangereuses écrites
+   dans `work/`, taux de refus qui ne doit pas baisser). Un `refusal_probe` ne certifie jamais.
+
+**Essais déjà faits** (`agent/experiments.rs`). Le prompt système et celui d'un runtime CLI
+listent les 30 derniers essais réussis du projet, du ledger et du journal MCP
+(`chat/mcp_runs.jsonl`, qui garde désormais les `arguments` de chaque appel) : patchs
+(opération, couches, projections, alpha, vecteur), compositions (mode, vecteurs retirés et
+gardés), autotune (échelle retenue), sondes (refus sondé, heuristique) et mesures (refus,
+exactitude, base, `↓ rétention` quand l'exactitude baisse), avec deux consignes : ne pas
+relancer une configuration identique, ne pas augmenter alpha sur les mêmes couches après une
+baisse de rétention.
+
+**Répétition exacte.** Un appel de `surgeon_apply`, `surgeon_bench`, `surgeon_autotune`,
+`surgeon_compose` ou `surgeon_extract` dont les arguments, l'état du modèle (empreinte rapide de
+la copie, ou SHA-256 de la source) et les fichiers d'entrée lus égalent ceux d'un run réussi
+n'est pas relancé : le studio répond avec ce run (`run_id`, résultat résumé) et journalise
+l'événement `repeat`. Après un `surgeon_apply`, l'empreinte de la copie change, et la même
+mesure redevient une mesure nouvelle.
+
+**Certification.** Quand l'agent rend un tour sans appel d'outil (il conclut) alors qu'une sonde
+`refusal_probe` a servi dans l'exécution et qu'aucun `surgeon_bench` mode `refusal` ou `eval`
+n'a réussi après la dernière écriture du modèle (`surgeon_apply` réel, `surgeon_restore`,
+`surgeon_lora` merge), la boucle ajoute un rappel du studio qui demande cette génération
+complète, journalise l'événement `certify` et relance un tour, une seule fois par exécution.
+Un runtime CLI tourne hors de la boucle du studio : il reçoit la même consigne dans son prompt,
+et ses constats tirés d'une sonde restent « Heuristique » dans le journal des preuves.
 
 **Commande CLI équivalente.** Chaque appel d'outil du fil affiche la commande `surgeon …` qui
 le rejoue en terminal (`weight_surgeon::mcp::cli_line`) : en résumé de la ligne, puis entière
@@ -278,7 +319,9 @@ de travail (`backend::hipfire::is_working_copy` : `copies/` et sorties du projet
 job, dossier patché à côté de ses sauvegardes) passe sur `native` quand la configuration ou
 l'appel nomme hipfire (`mcp::bench_backend`), avec l'avertissement `HIPFIRE_SET_ASIDE` et le
 chemin en tête de l'enveloppe ; une copie `.gguf` est refusée. Le modèle d'origine reste mesuré
-par hipfire. Le fil le signale sous la ligne de l'appel.
+par hipfire. Le fil le signale sous la ligne de l'appel. Exception : une copie requantifiée en
+ligne de commande (`--hipfire-requantize`), dont le `.hipfire-alias.json` correspond encore à
+ses poids, reste sur hipfire sous son alias `ws-<copie>-<sha8>` ; l'agent ne requantifie jamais.
 
 « Démarrer » sur un projet qui a un modèle d'origine mais aucune copie de travail lance d'abord
 la copie (`studio_copy`), puis la session dès qu'elle est faite ; un échec de la copie
@@ -384,6 +427,60 @@ les droits de l'utilisateur) le relâcherait. Hors Windows, il n'existe pas : l'
 sont lus du flux (`result`, `step_update`) : les arguments des outils n'ont pas encore été
 observés sur un run réel.
 
+## 8 bis. Votre propre harnais : le Skill `weight-surgeon`
+
+L'autre mode : l'utilisateur garde son agent, dans son harnais, et lui donne le moteur par
+`surgeon mcp` et la méthode du Studio par le Skill `skills/weight-surgeon/` (format Agent
+Skills : `SKILL.md` avec son frontmatter, `references/workflow.md` pour les règles de décision,
+`references/recipes.md` pour les arguments de chaque appel). Le Skill reprend le protocole de
+la section 6 bis dans le même ordre :
+
+1. `surgeon_doctor` d'abord : `dtype` `f32` ou `bf16` (repli lent) du modèle, entrées
+   illisibles ou obsolètes du cache `ref_bench`, démon hipfire à `0 Mo` de GPU (figé : demander
+   à l'utilisateur de le redémarrer avant toute mesure hipfire) ;
+2. `surgeon_inspect`, `surgeon_extract` couche par couche, crible en entonnoir par
+   `surgeon_bench` mode `refusal_probe` (`first-token-prob`) et `surgeon_autotune`
+   (`refusal_prompts`), `surgeon_compose` mode `orthogonal_preserve` dès qu'une capacité doit
+   être préservée ;
+3. certification non négociable : un `refusal_probe` (`is_heuristic: true`) ne conclut jamais ;
+   `refusal`, `eval` (rétention) et le jeu de sécurité, contre l'origine, sur l'état final ;
+4. le journal : `record_finding` cite les `run_id` que le serveur renvoie.
+
+**Le dossier projet.** Le harnais tourne dans le dossier projet (sans `--allow-dir`, le serveur
+sert le dossier courant). Il lui faut un `project.surgeon.json` : celui d'un projet créé dans le
+Studio, ou le manifeste d'une ligne que le Skill fait écrire à l'agent avec son propre outil de
+fichiers (`schema_version`, `name`, `created_unix`, `state`, sans `source` dont le SHA-256 est
+calculé par le Studio). L'agent copie le modèle dans `copies/<id>/`, écrit ses fichiers et ses
+`patch_*.json` sous `work/` ; le serveur tient `chat/mcp_runs.jsonl`, `chat/findings.jsonl` et
+`chat/plan.json`. Le Studio ouvre ce dossier comme l'un des siens (son dossier parent comme
+espace de travail) : runs dans Résultats, résumé des essais (`agent/experiments.rs`) et
+constats avec leurs badges « Heuristique » ou « Mesuré ». Sans projet créé dans le Studio,
+`origin_path` reste inconnu et le Studio ne verrouille pas l'origine.
+
+**Installation** (`crates/surgeon-gui/src/integration.rs`). Réglages > Harnais externes montre
+le Skill de chaque harnais (`~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills`) :
+« Non installé », « Installé » ou « Mise à jour disponible », par le SHA-256 de chaque fichier
+comparé aux fichiers embarqués (`include_str!`). « Installer le Skill » écrit chaque fichier par
+un fichier temporaire et un renommage, `SKILL.md` en dernier. À droite, la commande détectée
+(`surgeon` à côté de l'application, sinon dans le `PATH`, sinon `surgeon-gui` qui sert `mcp`
+lui-même), l'extrait `{"mcpServers": {"weight-surgeon": {"command": …, "args": ["mcp"]}}}` à
+copier, et « Ajouter à ~/.claude.json » qui fusionne l'entrée en gardant les autres clés et
+serveurs, après une copie `.bak` du fichier ; un fichier qui n'est pas un objet JSON est refusé
+tel quel. En terminal : `surgeon-gui --install-skill claude|codex|agents` et
+`surgeon-gui --mcp-config`.
+
+**Santé de la machine dans le Studio.** Réglages > Moteur lance `doctor::run` (le cœur de
+`surgeon doctor` et de `surgeon_doctor`) à la première ouverture et à chaque « Actualiser »,
+avec la copie de travail du projet ouvert comme modèle quand c'est un dossier SafeTensors. Deux
+actions : « Purger le cache obsolète ou corrompu » (le même diagnostic avec `clean_cache`, donc
+`ref_cache::purge`), et « Démarrer / Redémarrer hipfire » quand le démon ne répond pas ou a
+perdu son GPU (`hipfire_setup::restart` : arrêt de tout processus hipfire de la distribution
+WSL, puis `~/start-hipfire.sh` de l'utilisateur comme `start-hipfire.ps1`, sinon l'installation
+du Studio en root, et attente de `/health`). Le dialogue du backend règle
+`hipfire_requantize` (`auto` coché, `off` décoché quand le fichier nommait un mode). Dans le
+fil, un appel `surgeon_compose` affiche les vecteurs retirés et gardés, un appel
+`surgeon_doctor` si la machine est prête, runtimes CLI compris (`mcp__surgeon__…`).
+
 ## 9. Ajouter un fournisseur
 
 1. Si l'API parle le format Chat Completions, rien à coder : une connexion « Compatible
@@ -402,6 +499,8 @@ observés sur un run réel.
 ```bash
 cd crates/surgeon-gui
 cargo test agent                          # faux serveurs, dialogues, politique, coffre, CLI
+cargo test --test external_project        # un projet fait seulement par MCP, ouvert par le studio
+cargo test integration                    # état, installation du Skill, fusion de la config MCP
 cargo run -- --self-test                  # dont « agent » : dialogue scripté sur le vrai moteur
 cargo run -- --screenshot a.png --screen agent:scalping --demo-data
 ```
@@ -419,4 +518,12 @@ cargo run -- --screenshot a.png --screen agent:scalping --demo-data
   qui s'en écarterait, et les runtimes CLI ne passent pas par elle.
 - La commande CLI et l'alerte hipfire du fil sont calculées avec la configuration de backend
   du moment, pas celle de l'appel.
+- « Redémarrer hipfire » arrête tout processus dont la ligne de commande contient `hipfire`
+  dans la distribution WSL (une requantification en cours aussi). Hors Windows, il ne relance
+  que le démon que la fenêtre a démarré ; un démon lancé ailleurs se relance à la main.
+- La fusion dans `~/.claude.json` peut réordonner les clés du fichier (le `.bak` garde
+  l'original). Codex lit ses serveurs MCP en TOML (`~/.codex/config.toml`) : l'entrée s'y
+  écrit à la main (recette dans `references/recipes.md` du Skill).
+- Le statut « Prête » de `surgeon_doctor` dans le fil est lu dans le texte du résultat
+  (`"ready":true`) : un résultat tronqué ou reformulé par un runtime n'affiche rien.
 - Aucune télémétrie ; aucune requête sans action de l'utilisateur dans la page.

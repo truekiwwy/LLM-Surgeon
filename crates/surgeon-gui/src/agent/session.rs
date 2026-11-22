@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use super::config::{AskMode, Prices, RunBudgets};
 use super::evidence::{self, Finding};
+use super::experiments;
 use super::mission::{Forced, Mission};
 use super::paths::ProjectPaths;
 use super::policy::{self, AgentMode, Decision, Rule, Scope};
@@ -35,6 +36,10 @@ pub trait ToolHost {
     /// The configured models folder, read only.
     fn models_dir(&self) -> Option<PathBuf> {
         weight_surgeon::backend::models_dir()
+    }
+    /// The SHA-256 the project records for its source, the model hash of its runs.
+    fn source_sha256(&self) -> Option<String> {
+        None
     }
     /// The job manager's guard for a job of this tool and these arguments.
     fn guard(&self, tool: &str, args: &Value) -> Result<(), String>;
@@ -58,6 +63,14 @@ impl ToolHost for Manager {
             .source
             .as_ref()
             .map(|s| s.path.clone())
+    }
+
+    fn source_sha256(&self) -> Option<String> {
+        self.project
+            .manifest
+            .source
+            .as_ref()
+            .map(|s| s.sha256.clone())
     }
 
     fn guard(&self, tool: &str, args: &Value) -> Result<(), String> {
@@ -349,6 +362,10 @@ pub struct Session {
     run_calls: u32,
     budget_override: bool,
     overflow_retry: bool,
+    /// First message of the current execution (the user's last message).
+    exec_start: usize,
+    /// The certification reminder was given in this execution (once only).
+    certify_reminded: bool,
     next_card: u64,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -384,6 +401,8 @@ impl Session {
             run_calls: 0,
             budget_override: false,
             overflow_retry: false,
+            exec_start: 0,
+            certify_reminded: false,
             next_card: 1,
             wake,
         }
@@ -420,6 +439,8 @@ impl Session {
             Some(m) if m.role == Role::User => m.blocks.push(Block::Text { text }),
             _ => self.conv.messages.push(Message::user_text(text)),
         }
+        self.exec_start = self.conv.messages.len() - 1;
+        self.certify_reminded = false;
         self.error = None;
         self.paused = false;
         self.run_started = Some(Instant::now());
@@ -680,6 +701,67 @@ impl Session {
         self.save();
         self.pending = calls;
         self.dispatch(host);
+        if self.pending.is_empty() {
+            self.certify();
+        }
+    }
+
+    /// The agent closes: if a heuristic probe is all that measured the final model, it is
+    /// told once to certify by full generation, and the loop goes on.
+    fn certify(&mut self) {
+        let start = self.exec_start.min(self.conv.messages.len());
+        if self.certify_reminded || !experiments::uncertified(&self.conv.messages[start..]) {
+            return;
+        }
+        self.certify_reminded = true;
+        self.conv
+            .messages
+            .push(Message::user_text(experiments::CERTIFY_REMINDER));
+        self.save();
+        self.log_simple(
+            "certify",
+            "conclusion sur une sonde seule : rappel de certification",
+        );
+        self.start_turn();
+    }
+
+    /// An exact repeat of a finished run is answered with that run; nothing is submitted.
+    fn repeat(&mut self, i: usize, host: &dyn ToolHost) -> bool {
+        let (id, tool, args) = {
+            let c = &self.pending[i];
+            (c.id.clone(), c.tool.clone(), c.args.clone())
+        };
+        if !experiments::REPEATABLE.contains(&tool.as_str()) {
+            return false;
+        }
+        let source = host.source().zip(host.source_sha256());
+        let now = ledger::hash_inputs(
+            &args,
+            &host.project_dir(),
+            source.as_ref().map(|(p, s)| (p.as_path(), s.as_str())),
+        );
+        let entries = host.ledger();
+        let Some(prev) = experiments::already_tried(&tool, &args, &now, &entries) else {
+            return false;
+        };
+        let result = experiments::describe(prev).unwrap_or_else(|| {
+            let json = prev.result.to_string();
+            json.chars().take(1500).collect()
+        });
+        let text = format!(
+            "Non relancé : configuration identique déjà mesurée (run {}, même état du modèle, \
+             mêmes entrées). Résultat de ce run : {result}\nCite ce run, ou change un paramètre \
+             (couches, alpha, mode, jeu).",
+            prev.run_id
+        );
+        let content = tools::frame(&tool, Some(&prev.run_id), &self.outgoing(&text));
+        self.pending[i].state = CallState::Done {
+            content,
+            is_error: false,
+        };
+        let run = prev.run_id.clone();
+        self.log(&id, &tool, &args, "repeat", Some(run.clone()), Some(&run));
+        true
     }
 
     /// Decides every new call: UI tools answered here, engine tools through the policy.
@@ -752,7 +834,11 @@ impl Session {
                     };
                     self.done(i, &text, false);
                 }
-                _ => self.decide_engine(i, host),
+                _ => {
+                    if !self.repeat(i, host) {
+                        self.decide_engine(i, host);
+                    }
+                }
             }
             self.log(&id, &tool, &args, "requested", None, None);
         }
@@ -999,9 +1085,10 @@ impl Session {
              - Chaque chiffre que tu affirmes vient d'un run : consigne-le avec record_finding \
              (run_id et valeur exacte). Sinon dis que c'est déduit ou inconnu.\n\
              - Tiens le plan à jour avec update_plan ; montre un tenseur avec show_in_3d.\n\
-             {paths}{mission}",
+             {paths}{tried}{mission}",
             tag = tools::FRAME_TAG,
             mission = brief(self.conv.mission, self.conv.forced.as_ref()),
+            tried = self.outgoing(&tried(self.dirs.chat.parent())),
             paths = self.outgoing(
                 &self
                     .dirs
@@ -1076,6 +1163,14 @@ impl Session {
 
     fn log_simple(&self, event: &str, detail: &str) {
         self.log("", "", &Value::Null, event, Some(detail.into()), None);
+    }
+}
+
+/// The project's experiment summary, after a blank line; empty without one.
+pub fn tried(project: Option<&Path>) -> String {
+    match project.map(experiments::project_summary) {
+        Some(s) if !s.is_empty() => format!("\n\n{s}"),
+        _ => String::new(),
     }
 }
 

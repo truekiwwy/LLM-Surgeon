@@ -178,6 +178,144 @@
               "default": true,
               "type": "boolean"
             },
+            "composition": {
+              "properties": {
+                "diagnostics": {
+                  "items": {
+                    "properties": {
+                      "cos_after": {
+                        "items": {
+                          "format": "double",
+                          "type": "number"
+                        },
+                        "type": "array"
+                      },
+                      "cos_before": {
+                        "items": {
+                          "format": "double",
+                          "type": "number"
+                        },
+                        "type": "array"
+                      },
+                      "norm_ratio": {
+                        "format": "double",
+                        "type": "number"
+                      },
+                      "path": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "cos_after",
+                      "cos_before",
+                      "norm_ratio",
+                      "path"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "mode": {
+                  "oneOf": [
+                    {
+                      "enum": [
+                        "standard"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "enum": [
+                        "orthogonal_preserve"
+                      ],
+                      "type": "string"
+                    }
+                  ]
+                },
+                "output": {
+                  "type": "string"
+                },
+                "output_sha256": {
+                  "type": "string"
+                },
+                "result_cos_keep": {
+                  "items": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "type": "array"
+                },
+                "result_norm": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "sources": {
+                  "items": {
+                    "properties": {
+                      "alpha": {
+                        "format": "double",
+                        "type": "number"
+                      },
+                      "layer": {
+                        "format": "uint",
+                        "minimum": 0.0,
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "norm": {
+                        "format": "double",
+                        "type": "number"
+                      },
+                      "path": {
+                        "type": "string"
+                      },
+                      "role": {
+                        "oneOf": [
+                          {
+                            "enum": [
+                              "ablate"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "enum": [
+                              "keep"
+                            ],
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "sha256": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "alpha",
+                      "norm",
+                      "path",
+                      "role",
+                      "sha256"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "diagnostics",
+                "mode",
+                "output",
+                "output_sha256",
+                "result_cos_keep",
+                "result_norm",
+                "sources"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
             "description": {
               "default": null,
               "type": [
@@ -884,6 +1022,13 @@
             "null"
           ]
         },
+        "direction_path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "dtype": {
           "anyOf": [
             {
@@ -1180,6 +1325,12 @@
             },
             {
               "enum": [
+                "refusal_probe"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
                 "judge_sample"
               ],
               "type": "string"
@@ -1248,6 +1399,30 @@
             "boolean",
             "null"
           ]
+        },
+        "probe_method": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "first-token-prob"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "direction-projection"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "prompt_template": {
           "default": null,
@@ -1324,6 +1499,14 @@
           "minimum": 1.0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "threshold": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
             "null"
           ]
         },
@@ -1538,6 +1721,13 @@
         "model": {
           "type": "string"
         },
+        "no_probe_prefilter": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "objective": {
           "anyOf": [
             {
@@ -1611,6 +1801,15 @@
             "null"
           ]
         },
+        "probe_top_k": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "proj": {
           "default": null,
           "enum": [
@@ -1631,6 +1830,40 @@
           "minimum": 0.0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "refusal_prompts": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retention_dataset": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retention_limit": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scales": {
+          "default": null,
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },
@@ -1666,6 +1899,14 @@
           ]
         },
         "target_projection": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "target_refusal_rate": {
           "default": null,
           "format": "double",
           "type": [
@@ -2306,6 +2547,134 @@
   {
     "annotations": {
       "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "ablate": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "alpha": {
+          "default": null,
+          "format": "float",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "keep": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "layers": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "enum": [
+                    "standard"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "orthogonal_preserve"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "out": {
+          "type": "string"
+        },
+        "overwrite": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "patch_out": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projections": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "ablate",
+        "out"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_compose"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "name": "surgeon_doctor"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
       "idempotentHint": false,
       "openWorldHint": false,
       "readOnlyHint": false
@@ -2365,6 +2734,50 @@
       "type": "object"
     },
     "name": "surgeon_files"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "oneOf": [
+            {
+              "enum": [
+                "init"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "force": {
+          "default": false,
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "name": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "model"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_workspace"
   },
   {
     "annotations": {

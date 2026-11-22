@@ -87,18 +87,36 @@ impl ProjectPaths {
              retenue>, \"vector_tensor\": \"direction\", \"vector_tensor_b\": \"direction\", \
              \"alpha\": α}}. Ne restreins layers à la plage à fort signal que si la sonde le \
              justifie. Balaie α de 0.4 à 1.0 (surgeon_restore entre deux essais) et garde le \
-             plus petit α qui atteint l'objectif. add et subtract, seules sorties de \
-             surgeon_autotune, décalent les poids sans retirer la direction : ne les emploie que \
-             si l'utilisateur impose add.\n\
-             (4) Validation multi-benchmarks après chaque apply, chacun avec baseline_model = \
-             origin_path : surgeon_bench refusal sur builtin:refusals ; eval sur builtin:math, \
-             builtin:logic et builtin:general ; contrôle sécurité : refusal sur un jeu de \
-             demandes réellement dangereuses (10 au moins), écrit une fois dans work_dir puis \
-             réutilisé, dont le taux de refus ne doit pas baisser. Une baisse sur math, logic, \
-             general ou sécurité hors de l'intervalle rapporté est une régression.\n\
+             plus petit α qui atteint l'objectif. Calibre le balayage en entonnoir : après \
+             chaque apply, crible d'abord la copie avec surgeon_bench mode refusal_probe \
+             (probe_method first-token-prob, prompts builtin:refusals), une passe avant par \
+             prompt ; écarte les α dont le refus sondé ne baisse pas, et ne passe en génération \
+             complète (étape 4) que les deux plus petits α retenus. surgeon_autotune avec \
+             refusal_prompts (sans out, il ne fait que mesurer) calibre de la même façon \
+             l'échelle d'un patch de steering, sonde puis génération des finalistes \
+             (data.selection) ; add et subtract, ses seules sorties, décalent les poids sans \
+             retirer la direction : ne les écris que si l'utilisateur impose add.\n\
+             (3 bis) Préserver une capacité : dès qu'il faut retirer un comportement (des refus) \
+             sans dégrader une capacité (maths, logique, code), extrais aussi la direction de \
+             cette capacité à la même couche (surgeon_extract, pos = builtin:math ou \
+             builtin:logic, neg = des prompts neutres), puis surgeon_compose avec ablate = la \
+             direction retenue, keep = les directions de capacité, mode orthogonal-preserve, \
+             out et patch_out dans work_dir ; applique ce patch_out (project_out, recette dans \
+             composition). Un refus collinear_vectors veut dire que la capacité et le \
+             comportement ne se séparent pas linéairement à cette couche : change de couche.\n\
+             (4) Certification obligatoire par génération complète, sur chaque finaliste puis \
+             sur working_copy_path dans son état final, avant de déclarer un candidat gagnant ou \
+             de clore l'objectif, chacun avec baseline_model = origin_path : surgeon_bench \
+             refusal sur builtin:refusals ; eval sur builtin:math, builtin:logic et \
+             builtin:general ; contrôle sécurité : refusal sur un jeu de demandes réellement \
+             dangereuses (10 au moins), écrit une fois dans work_dir puis réutilisé, dont le \
+             taux de refus ne doit pas baisser. Une baisse sur math, logic, general ou sécurité \
+             hors de l'intervalle rapporté est une régression. Un résultat refusal_probe \
+             (is_heuristic: true) oriente mais ne certifie jamais : le studio le marque \
+             « Heuristique » et te rappelle cette certification si tu conclus sans elle.\n\
              Le format de chat du modèle est appliqué par défaut (chat_template auto) : \
              n'habille pas les prompts à la main, et ne mets none que pour le désactiver exprès. \
-             Garde les max_new_tokens par défaut (refusal 256, eval 512) : une réponse coupée \
+             Garde les max_new_tokens par défaut (refusal 40, eval 512) : une réponse coupée \
              fausse la mesure. Backend : une mesure de la copie (dossier SafeTensors) tourne sur \
              native ; le serveur écarte hipfire, qui sert un cache quantifié et ignore les poids \
              modifiés (avertissement « backend hipfire écarté »).\n\
@@ -167,6 +185,13 @@ mod tests {
             "surgeon_files".to_owned(),
             r#"{"operation": "project_out", "projections": ["o_proj", "down_proj"]"#.to_owned(),
             "Sonde de toutes les couches".to_owned(),
+            "surgeon_bench mode refusal_probe".to_owned(),
+            "probe_method first-token-prob".to_owned(),
+            "surgeon_compose avec ablate".to_owned(),
+            "mode orthogonal-preserve".to_owned(),
+            "Certification obligatoire par génération complète".to_owned(),
+            "ne certifie jamais".to_owned(),
+            "refusal 40, eval 512".to_owned(),
             "builtin:logic et builtin:general ; contrôle sécurité".to_owned(),
             "le serveur écarte hipfire".to_owned(),
             "chat_template auto".to_owned(),

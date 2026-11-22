@@ -32,6 +32,9 @@ avec des outils typés. Outils : surgeon_check (budget RAM/VRAM), surgeon_inspec
 matrices MLP), surgeon_apply (applique un patch EN PLACE ; faire d'abord dry_run: true), \
 surgeon_restore (remet le modèle octet pour octet depuis la sauvegarde ou l'origine, SHA-256 \
 vérifié : le rollback quand surgeon_bench montre une régression), \
+surgeon_compose (une direction faite de plusieurs vecteurs, orthogonale aux directions de \
+capacité à préserver, et le patch qui la retire), \
+surgeon_doctor (la machine est-elle prête : RAM, cœurs, cache des références, démon hipfire), \
 surgeon_eval (non-régression et export GGUF), surgeon_extract (vecteur de direction depuis \
 une couche Qwen2 ; method est un identifiant du registre du moteur : mean_diff, svd, leace), \
 surgeon_bench (mesure d'une chirurgie : mode dump, logits, ppl ou eval), surgeon_autotune \
@@ -466,12 +469,13 @@ impl<W: Write> Session<'_, W> {
             pipeline: self.pipeline,
         };
         let started = tools_session::now_unix();
+        let journaled = arguments.clone();
         // A panic unwinds through BackupSet::drop (rollback) and never kills the server.
         let outcome = catch_unwind(AssertUnwindSafe(|| tools::call(name, arguments, &mut ctx)));
         self.finish();
         match outcome {
             Ok(mut tool_result) => {
-                tools_session::stamp(&ctx, name, started, &mut tool_result);
+                tools_session::stamp(&ctx, name, &journaled, started, &mut tool_result);
                 // A bench moved off hipfire says why in its result, and in the server's log.
                 let warnings = &tool_result["structuredContent"]["warnings"];
                 let set_aside = warnings
