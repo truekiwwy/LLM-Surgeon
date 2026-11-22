@@ -31,10 +31,10 @@ ou `~/.agents/skills/weight-surgeon/` (Studio : Installer le Skill ; CLI : `surg
 
 ## Projet
 
-`project.surgeon.json`, écrit par ton outil de fichiers s'il manque :
+`surgeon_workspace`, une fois, au début d'un nouveau projet :
 
 ```json
-{"schema_version": 1, "name": "qwen-refus", "created_unix": 1795000000, "state": "ready"}
+{"action": "init", "model": "<ORIGINE>", "name": "qwen-refus"}
 ```
 
 ## Diagnostic

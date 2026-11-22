@@ -7,7 +7,7 @@ Les chemins relatifs partent du dossier projet (le premier dossier autorisé du 
 
 | Chemin | Écrit par | Rôle |
 | --- | --- | --- |
-| `project.surgeon.json` | l'agent (une fois) ou le Studio | marque le projet ; sans lui, rien n'est journalisé |
+| `project.surgeon.json` | `surgeon_workspace` `init` (une fois) ou le Studio | marque le projet et son origine (chemin, SHA-256) ; sans lui, rien n'est journalisé |
 | `copies/<id>/` | l'agent (copie du dossier du modèle) ou le Studio | la copie de travail, la plus récente sert par défaut |
 | `work/` | `surgeon_files`, les sorties `out` / `patch_out` | prompts, jeux de sécurité, directions, `patch_*.json` |
 | `chat/mcp_runs.jsonl` | le serveur | un run par appel d'outil : `run_id`, outil, arguments, `ok`, `data` |

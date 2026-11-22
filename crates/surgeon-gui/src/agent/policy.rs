@@ -2,7 +2,8 @@
 //! arguments only: the agent's prose, the tool results and the model outputs have no say.
 //! `Safe` runs, `Approval` waits for a human, `Forbidden` is answered with an error.
 //!
-//! - Forbidden: an unknown tool, a path outside the sandbox (project folder and source
+//! - Forbidden: an unknown tool, a tool for agents outside the studio (`surgeon_workspace`:
+//!   the project already has its manifest), a path outside the sandbox (project folder and source
 //!   model folder), anything the job manager refuses (the source model written, an in-place
 //!   tool on anything but a working copy), a pipeline without its Safety pillar, a promotion
 //!   (human only), and in "Ask" mode every tool that is not a read.
@@ -17,7 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::tools::UI_TOOLS;
+use super::tools::{EXTERNAL_ONLY, UI_TOOLS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +87,11 @@ pub fn classify(tool: &str, args: &Value, mode: AgentMode, scope: &Scope) -> Dec
         .is_some_and(|t| t.iter().any(|d| d["name"] == tool));
     if !known {
         return Decision::Forbidden(format!("outil inconnu : {tool}"));
+    }
+    if EXTERNAL_ONLY.contains(&tool) {
+        return Decision::Forbidden(format!(
+            "{tool} sert aux agents hors du studio : ce projet a déjà son manifeste"
+        ));
     }
     if !args.is_object() {
         return Decision::Forbidden("arguments illisibles (objet JSON attendu)".into());

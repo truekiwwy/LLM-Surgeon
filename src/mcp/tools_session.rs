@@ -25,7 +25,7 @@ pub const TOOL_PLAN: &str = "update_plan";
 pub(super) const NAMES: [&str; 3] = [TOOL_FINDING, TOOL_SHOW, TOOL_PLAN];
 
 /// The manifest that marks a studio project folder.
-const PROJECT_FILE: &str = "project.surgeon.json";
+pub(super) const PROJECT_FILE: &str = "project.surgeon.json";
 pub const FINDINGS: &str = "findings.jsonl";
 pub const FOCUS: &str = "focus.json";
 pub const PLAN: &str = "plan.json";

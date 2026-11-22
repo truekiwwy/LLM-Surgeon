@@ -115,6 +115,8 @@
 //! - machine readiness: the subcommand `doctor` (`--model`, `--clean-cache`, `--hipfire-url`,
 //!   `--hipfire-log`) and the nineteenth tool `surgeon_doctor` (read only, `model`), both
 //!   additive; only the tool schema hash moved.
+//! - studio projects from external agents: the twentieth tool `surgeon_workspace` (`action`
+//!   `init`, `model`, `name`, `force`), MCP only, additive; only the tool schema hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
@@ -286,7 +288,7 @@ fn mcp_tools_surface() -> Value {
 #[test]
 fn mcp_tools_surface_is_unchanged() {
     let current = mcp_tools_surface();
-    assert_eq!(current.as_array().unwrap().len(), 19, "nineteen MCP tools");
+    assert_eq!(current.as_array().unwrap().len(), 20, "twenty MCP tools");
     let reference = read_fixture("mcp_tools_surface.json");
     assert!(
         current == reference,

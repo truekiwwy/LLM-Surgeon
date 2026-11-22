@@ -1,8 +1,8 @@
 //! The distributable skill `skills/weight-surgeon/` (Agent Skills format: `SKILL.md` with a
 //! YAML frontmatter, references beside it), checked against the engine it teaches: every
 //! `surgeon_*` word is a real MCP tool, every `builtin:` set exists, every JSON block is an
-//! argument some tool accepts (or the project manifest the studio reads), and the method of
-//! the studio (doctor first, funnel, orthogonal composition, certification) is all there.
+//! argument some tool accepts, and the method of the studio (the project and its origin
+//! first, then doctor, funnel, orthogonal composition, certification) is all there.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -77,14 +77,18 @@ fn the_frontmatter_follows_the_agent_skills_format() {
 #[test]
 fn the_method_of_the_studio_is_all_there() {
     let markdown = std::fs::read_to_string(skill_dir().join("SKILL.md")).unwrap();
+    let init = markdown.find("surgeon_workspace").unwrap();
     let doctor = markdown.find("surgeon_doctor").unwrap();
     let extract = markdown.find("surgeon_extract").unwrap();
     let certify = markdown.find("## 3. Certification").unwrap();
     assert!(
-        doctor < extract && extract < certify,
-        "doctor, funnel, then proof"
+        init < doctor && doctor < extract && extract < certify,
+        "project, doctor, funnel, then proof"
     );
     for needle in [
+        // Step 0: the project, its origin recorded by the engine.
+        "`action: \"init\"`",
+        "output_exists",
         // Step 1: the machine.
         "`f32`",
         "`bf16`",
@@ -167,6 +171,7 @@ fn every_tool_set_and_link_named_is_real() {
         "surgeon_compose",
         "surgeon_restore",
         "surgeon_files",
+        "surgeon_workspace",
     ] {
         assert!(cited.contains(needed), "never cited: {needed}");
     }
@@ -193,26 +198,8 @@ fn json_blocks(markdown: &str) -> Vec<Value> {
     blocks
 }
 
-/// The project manifest template `SKILL.md` gives, inline.
-fn manifest_template() -> Value {
-    let markdown = std::fs::read_to_string(skill_dir().join("SKILL.md")).unwrap();
-    let start = markdown.find("`{\"schema_version\"").unwrap() + 1;
-    let end = start + markdown[start..].find('`').unwrap();
-    let filled = markdown[start..end]
-        .replace("<nom du dossier>", "p")
-        .replace("<secondes Unix>", "1795000000");
-    serde_json::from_str(&filled).unwrap()
-}
-
 #[test]
-fn every_json_block_is_accepted_by_a_tool_or_the_studio() {
-    let schema = |rel: &str| -> Value {
-        let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel));
-        serde_json::from_str(&text.unwrap()).unwrap()
-    };
-    let manifest =
-        jsonschema::validator_for(&schema("docs/schemas/project.surgeon.schema.json")).unwrap();
-    assert!(manifest.is_valid(&manifest_template()), "SKILL.md template");
+fn every_json_block_is_accepted_by_a_tool() {
     let tools: Vec<(String, jsonschema::Validator)> = weight_surgeon::mcp::tool_definitions()
         .as_array()
         .unwrap()
@@ -236,10 +223,6 @@ fn every_json_block_is_accepted_by_a_tool_or_the_studio() {
                     servers["weight-surgeon"]["args"],
                     serde_json::json!(["mcp"])
                 );
-                continue;
-            }
-            if block.get("schema_version").is_some() && block.get("operations").is_none() {
-                assert!(manifest.is_valid(&block), "{}: {block}", path.display());
                 continue;
             }
             assert!(

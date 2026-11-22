@@ -1535,7 +1535,7 @@ fn mcp_full_session_is_pure_json_rpc() {
         .contains("sauvegarde"));
     assert_eq!(
         responses[1]["result"]["tools"].as_array().unwrap().len(),
-        19
+        20
     );
     let (is_error, env) = envelope(&responses, 3);
     assert!(!is_error, "{env}");
@@ -2173,6 +2173,7 @@ fn schema_tools_kind_equals_tools_list() {
             "surgeon_compose",
             "surgeon_doctor",
             "surgeon_files",
+            "surgeon_workspace",
             "record_finding",
             "show_in_3d",
             "update_plan"
@@ -3098,7 +3099,7 @@ fn mcp_extract_tool_end_to_end() {
             .as_array()
             .unwrap()
             .len(),
-        19
+        20
     );
     let (is_error, env) = envelope(&responses, 2);
     assert!(!is_error, "{env}");
@@ -3173,7 +3174,7 @@ fn mcp_binary_extract_speaks_only_json_rpc() {
             .as_array()
             .unwrap()
             .len(),
-        19
+        20
     );
     assert!(!envelope(&responses, 2).0, "{responses:?}");
     assert!(f.dir.path().join("bin.safetensors").exists());

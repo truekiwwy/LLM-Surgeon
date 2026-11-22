@@ -2193,7 +2193,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 <a id="tools"></a>
 ### 4.2 Tools
 
-`surgeon mcp` serves nineteen tools: fifteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), `surgeon_files` for an agent's working files, and three studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
+`surgeon mcp` serves twenty tools: fifteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), `surgeon_files` for an agent's working files, and four studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
 
 | Tool | Role |
 | --- | --- |
@@ -2213,9 +2213,16 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 | `surgeon_graph` | Residual-stream write/read graph with certified spectral bounds; bounded summary, or files with `out_dir`. |
 | `surgeon_backends` | GPUs and Rust inference engines of the machine (hipfire for AMD, mistralrs for NVIDIA, Apple Silicon or CPU, native as fallback), the user configuration and the recommended backend; read only. |
 | `surgeon_files` | Working files of an agent without file tools: `list` and `read` in the allowed folders, read-only roots included, `write` of text files under `work/` only. |
+| `surgeon_workspace` | Studio project for an agent that works outside the GUI: `action` `init` writes `project.surgeon.json` with the origin model as the Studio records it (canonical path, SHA-256 and size) and creates `runs/`, `artifacts/`, `copies/` and `chat/`. The origin is only read; an existing manifest is replaced only with `force`. |
 | `record_finding` | Studio project only: appends a finding to the evidence log (`chat/findings.jsonl`), citing the `run_id` every other tool returns in a project. |
 | `show_in_3d` | Studio project only: selects a tensor or graph node in the studio's 3D view (`chat/focus.json`). |
 | `update_plan` | Studio project only: replaces the plan shown to the user (`chat/plan.json`). |
+
+`surgeon_workspace` is the birth certificate of a project: a small sealed file, `project.surgeon.json`, that says which model the folder works from and proves it with a fingerprint. A 0.5 B model such as Qwen2.5-0.5B-Instruct is about 988 MB of SafeTensors in `C:\models\Qwen2.5-0.5B-Instruct`; the manifest records that canonical path, its size and the SHA-256 of its files, a 64-character digest (shown as `4f9c…` here). From then on `surgeon-gui` opens the folder exactly as if it had created it in the Studio: same origin, locked in read-only, same evidence log. One call at the start of the session:
+
+```json
+{"action": "init", "model": "C:\\models\\Qwen2.5-0.5B-Instruct", "name": "qwen-0.5b-refus"}
+```
 
 A real session on the fake model: the client sends `initialize`, `notifications/initialized`, then a `tools/call`. The server writes one line on stderr, then answers on stdout (the `initialize` answer is left out, and the answer line is cut):
 

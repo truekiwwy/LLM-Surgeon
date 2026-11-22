@@ -51,6 +51,9 @@ et `--mcp-config`) ; voir [AGENTS.md](AGENTS.md) section 8 bis.
 
 ## Outils
 
+Le serveur expose vingt outils (`tools/list`), décrits ici dans l'ordre où un agent les appelle
+le plus souvent.
+
 | Outil | Rôle | Annotations |
 | --- | --- | --- |
 | `surgeon_check` | Budget RAM/VRAM du modèle | lecture seule |
@@ -60,6 +63,7 @@ et `--mcp-config`) ; voir [AGENTS.md](AGENTS.md) section 8 bis.
 | `surgeon_doctor` | La machine est-elle prête : RAM libre et plus gros modèle en f32 ou bf16 (avec `model` : son besoin exact et son lot natif), cœurs et threads, cache `ref_bench`, démon hipfire (URL, `/health`, `/metrics`, mémoire GPU lue dans son log ; 0 Mo au total = démon figé) ; `data.ready` | lecture seule, idempotent |
 | `surgeon_compose` | Une direction faite de vecteurs extraits (`ablate`, poids `chemin:alpha`), orthogonale aux directions préservées (`keep`, Gram-Schmidt modifié en f64), et le patch `project_out` qui la retire avec sa recette (`composition`) ; refus nommé d'un vecteur nul, non fini, de dimension différente ou quasi colinéaire (`collinear_vectors`) | écrit des fichiers, idempotent |
 | `surgeon_files` | Fichiers de travail d'un agent : `list`, `read` dans les dossiers autorisés, `write` de fichiers texte sous `work/` ([détail](#fichiers-de-travail-surgeon_files)) | écrit sous `work/` seulement |
+| `surgeon_workspace` | Projet du studio pour un agent hors de l'interface : `action` `init` écrit `project.surgeon.json` (origine : chemin canonique, SHA-256, taille) et crée `runs/`, `artifacts/`, `copies/`, `chat/` ; le modèle n'est que lu, un manifeste existant n'est remplacé qu'avec `force` ([détail](#projet-du-studio-surgeon_workspace)) | écrit le manifeste, non destructif, idempotent |
 | `surgeon_eval` | Non-régression (boucles, attentes) et export GGUF conditionnel | écrit le GGUF |
 | `surgeon_extract` | Vecteur de direction depuis une couche Qwen2 (Rust pur, CPU) | écrit le `.safetensors`, idempotent |
 | `surgeon_bench` | Mesure d'une chirurgie : `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal` ; sonde heuristique `refusal_probe` ; calibration du juge : `judge_sample`, `judge_eval` | non destructif, idempotent |
@@ -311,6 +315,34 @@ sessions API). `action` :
 
 Hors de `work/`, l'écriture est refusée (`error.kind = "path_not_allowed"`) : ni poids, ni
 copie de travail, ni journal du projet. `--read-only` refuse `write`.
+
+## Projet du studio (`surgeon_workspace`)
+
+`surgeon_workspace` donne son acte de naissance au dossier de travail : un petit fichier scellé,
+`project.surgeon.json`, qui dit de quel modèle le dossier travaille et le prouve par une
+empreinte. C'est le même manifeste que celui écrit par le Studio à la création d'un projet, donc
+`surgeon-gui` rouvre ensuite le dossier comme l'un des siens : origine reconnue et verrouillée
+en lecture, runs dans Résultats, constats et essais dans le journal.
+
+Un modèle de 0,5 milliard de paramètres comme Qwen2.5-0.5B-Instruct pèse environ 988 Mo de
+SafeTensors dans `C:\models\Qwen2.5-0.5B-Instruct` ; le manifeste enregistre ce chemin
+canonique, sa taille et le SHA-256 de ses fichiers, une empreinte de 64 caractères (abrégée ici
+en `4f9c…`). Un seul appel, au début de la session :
+
+```json
+{"action": "init", "model": "C:\\models\\Qwen2.5-0.5B-Instruct", "name": "qwen-0.5b-refus"}
+```
+
+| Argument | Effet |
+| --- | --- |
+| `action` | `init` seulement : prépare le dossier courant (le premier `--allow-dir`) comme projet. |
+| `model` | Modèle d'origine, lu seulement : dossier SafeTensors (`config.json`, `*.safetensors`) ou fichier `.safetensors` / `.gguf`, dans un dossier autorisé (`--allow-read` compris). |
+| `name` | Nom affiché par le Studio, 1 à 64 caractères ; par défaut le nom du dossier de travail. |
+| `force` | Remplace un `project.surgeon.json` existant, sinon l'appel échoue (`output_exists`). |
+
+Le modèle est refusé s'il est le projet lui-même ou une copie de `copies/`
+(`invalid_arguments`) et si le dossier ne contient aucun fichier de poids (`invalid_input`).
+`--read-only` refuse l'appel : il écrit le manifeste.
 
 ## Méthodes d'extraction, `project_out` et `surgeon_autotune`
 

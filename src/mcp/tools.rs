@@ -438,6 +438,7 @@ pub fn tool_definitions() -> Value {
         list.extend(super::tools_compose::definitions());
         list.extend(super::tools_doctor::definitions());
         list.extend(super::tools_files::definitions());
+        list.extend(super::tools_workspace::definitions());
         list.extend(super::tools_session::definitions());
     }
     sorted(tools)
@@ -523,6 +524,7 @@ pub(crate) fn is_known(name: &str) -> bool {
         || super::tools_compose::NAMES.contains(&name)
         || super::tools_doctor::NAMES.contains(&name)
         || super::tools_files::NAMES.contains(&name)
+        || super::tools_workspace::NAMES.contains(&name)
         || super::tools_session::NAMES.contains(&name)
 }
 
@@ -560,6 +562,7 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         super::tools_compose::TOOL_COMPOSE => super::tools_compose::call(arguments, ctx),
         super::tools_doctor::TOOL_DOCTOR => super::tools_doctor::call(arguments, ctx),
         super::tools_files::TOOL_FILES => super::tools_files::call(arguments, ctx),
+        super::tools_workspace::TOOL_WORKSPACE => super::tools_workspace::call(arguments, ctx),
         _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);

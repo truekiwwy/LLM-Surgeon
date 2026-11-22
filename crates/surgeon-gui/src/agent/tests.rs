@@ -955,6 +955,9 @@ fn forbidden_calls_are_answered_without_running_anything() {
             "pos_prompts": ["a"], "neg_prompts": ["b"]}),
         m
     ));
+    // A studio project already has its manifest: surgeon_workspace is for outside agents.
+    let init = json!({"action": "init", "model": e.source.display().to_string(), "force": true});
+    assert!(forbidden("surgeon_workspace", init, m));
     // Working files: no card in "Modify", refused in "Ask", read everywhere it may be read.
     let write = json!({"action": "write", "path": "p.jsonl", "content": "C:\\x/../y"});
     assert!(matches!(

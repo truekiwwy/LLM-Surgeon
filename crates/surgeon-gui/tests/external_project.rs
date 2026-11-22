@@ -1,9 +1,10 @@
 //! A project folder made only by an external agent (Claude Code, Codex... with the
-//! `weight-surgeon` skill) through `surgeon mcp`: the manifest of the skill's template, a
-//! working copy under `copies/`, working files and a patch under `work/`, the runs the server
-//! journals in `chat/mcp_runs.jsonl` and the findings it records. The studio opens it as one
-//! of its own: listed, opened, its runs in the results, the experiments summary, and the
-//! evidence log with its "Heuristique" and "Mesuré" badges on screen.
+//! `weight-surgeon` skill) through `surgeon mcp`: the manifest `surgeon_workspace` writes with
+//! the origin model, a working copy under `copies/`, working files and a patch under `work/`,
+//! the runs the server journals in `chat/mcp_runs.jsonl` and the findings it records. The
+//! studio opens it as one of its own: listed, opened with its origin recognised and locked,
+//! its runs in the results, the experiments summary, and the evidence log with its
+//! "Heuristique" and "Mesuré" badges on screen.
 
 #[path = "../../../examples/make_fake_qwen2.rs"]
 #[allow(dead_code)]
@@ -24,21 +25,11 @@ use surgeon_gui::agent::{experiments, vault::SessionStore, view::Hub};
 use surgeon_gui::app::{SurgeonApp, Tab};
 use surgeon_gui::desktop::Desktop;
 use surgeon_gui::settings::{Lang, Settings};
-use surgeon_gui::studio::{exec::EngineExecutor, jobs::Manager, project::Project, results};
+use surgeon_gui::studio::project::{self, Project};
+use surgeon_gui::studio::{exec::EngineExecutor, jobs::Manager, results};
 use surgeon_gui::{raster, studio::ledger::Verdict};
 use weight_surgeon::app::{self, AppDeps};
 use weight_surgeon::mcp::McpConfig;
-
-const SKILL: &str = include_str!("../../../skills/weight-surgeon/SKILL.md");
-
-/// The manifest `SKILL.md` tells the agent to write, filled in.
-fn skill_manifest(name: &str) -> String {
-    let start = SKILL.find("`{\"schema_version\"").unwrap() + 1;
-    let end = start + SKILL[start..].find('`').unwrap();
-    SKILL[start..end]
-        .replace("<nom du dossier>", name)
-        .replace("<secondes Unix>", "1795000000")
-}
 
 fn deps() -> AppDeps {
     AppDeps {
@@ -55,8 +46,17 @@ fn deps() -> AppDeps {
 }
 
 /// One client session of the engine's MCP server on `cfg`, as a harness drives it: the
-/// handshake, then `calls` in order; the `structuredContent` of each answer.
+/// handshake, then `calls` in order; the `structuredContent` of each answer, each one a success.
 fn session(cfg: &McpConfig, calls: &[(&str, Value)]) -> Vec<Value> {
+    let contents = answers(cfg, calls);
+    for (content, (tool, _)) in contents.iter().zip(calls) {
+        assert_eq!(content["ok"], true, "{tool}: {content}");
+    }
+    contents
+}
+
+/// [`session`], failures included.
+fn answers(cfg: &McpConfig, calls: &[(&str, Value)]) -> Vec<Value> {
     let mut lines = vec![
         json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
             "protocolVersion": "2025-06-18", "capabilities": {},
@@ -87,9 +87,7 @@ fn session(cfg: &McpConfig, calls: &[(&str, Value)]) -> Vec<Value> {
     (1..=calls.len())
         .map(|id| {
             let reply = replies.iter().find(|r| r["id"] == id).unwrap();
-            let content = reply["result"]["structuredContent"].clone();
-            assert_eq!(content["ok"], true, "{}: {content}", calls[id - 1].0);
-            content
+            reply["result"]["structuredContent"].clone()
         })
         .collect()
 }
@@ -102,19 +100,12 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-/// What the external agent leaves: `(workspace, project)`.
-fn external_project(root: &Path) -> (PathBuf, PathBuf) {
+/// What the external agent leaves: `(workspace, project, origin)`.
+fn external_project(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let origin = fake_qwen2::write_fake_qwen2(&root.join("models")).unwrap();
     let workspace = root.join("projects");
     let project = workspace.join("qwen-refus");
     std::fs::create_dir_all(&project).unwrap();
-    // Its own file and shell tools: the manifest of the skill, then the working copy.
-    std::fs::write(
-        project.join("project.surgeon.json"),
-        skill_manifest("qwen-refus"),
-    )
-    .unwrap();
-    copy_dir(&origin, &project.join("copies").join("copy-1"));
     let (prompts, _) = fake_qwen2::write_prompt_files(root).unwrap();
     let prompts = std::fs::read_to_string(prompts).unwrap();
 
@@ -123,6 +114,12 @@ fn external_project(root: &Path) -> (PathBuf, PathBuf) {
         .unwrap()
         .with_read_roots(std::slice::from_ref(&origin))
         .unwrap();
+    // The skill's first call: the folder becomes a project with its origin recorded.
+    let init = json!({"action": "init", "model": origin, "name": "qwen-refus"});
+    let made = session(&cfg, &[("surgeon_workspace", init.clone())]);
+    assert_eq!(made[0]["data"]["replaced"], false);
+    // Its own shell tool: the working copy.
+    copy_dir(&origin, &project.join("copies").join("copy-1"));
     let patch = json!({"schema_version": 1, "operations": [{"id": "po",
         "operation": "project_out", "projections": ["o_proj", "down_proj"], "layers": "all",
         "vector_file": "work/dir_L2.safetensors", "alpha": 0.6}]});
@@ -176,7 +173,10 @@ fn external_project(root: &Path) -> (PathBuf, PathBuf) {
             ),
         ],
     );
-    (workspace, project)
+    // A second init never replaces the project by accident.
+    let again = answers(&cfg, &[("surgeon_workspace", init)]);
+    assert_eq!(again[0]["error"]["kind"], "output_exists", "{}", again[0]);
+    (workspace, project, origin)
 }
 
 #[test]
@@ -184,12 +184,19 @@ fn a_project_made_only_through_mcp_opens_in_the_studio() {
     // The test never reads the user's configuration nor writes the user's reference cache.
     std::env::set_var(weight_surgeon::backend::config::NO_USER_CONFIG_ENV, "1");
     let root = tempfile::tempdir().unwrap();
-    let (workspace, project) = external_project(root.path());
+    let (workspace, project, origin) = external_project(root.path());
 
-    // Listed and opened like a project of the studio, its newest copy found.
+    // Listed and opened like a project of the studio, its origin the one the studio records.
     let listed = Project::list(&workspace);
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].1.as_ref().unwrap().name, "qwen-refus");
+    let manifest = listed[0].1.as_ref().unwrap();
+    assert_eq!(manifest.name, "qwen-refus");
+    let source = manifest.source.clone().expect("the origin is recorded");
+    assert_eq!(
+        source,
+        project::source_model(&origin).unwrap(),
+        "path, SHA-256, size"
+    );
     let manager = Manager::open(
         &project,
         Arc::new(EngineExecutor::default()),
@@ -203,14 +210,26 @@ fn a_project_made_only_through_mcp_opens_in_the_studio() {
     drop(manager);
     let paths = ProjectPaths::of(&project);
     assert_eq!(paths.copy, Some(project.join("copies").join("copy-1")));
+    assert_eq!(paths.origin, Some(source.path.clone()));
     assert!(project.join("work").join("patch_po.json").is_file());
 
-    // The server's journal: every engine call, the working files aside.
+    // The server's journal: every engine call, the working files aside, the refused init too.
     let dirs = Dirs::of(&project);
     let runs = evidence::mcp_runs(&dirs.mcp_runs());
     let tools: Vec<&str> = runs.iter().map(|r| r.tool.as_str()).collect();
-    assert_eq!(tools, ["surgeon_doctor", "surgeon_bench", "surgeon_bench"]);
-    assert!(runs.iter().all(|r| r.verdict == Verdict::Ok));
+    assert_eq!(
+        tools,
+        [
+            "surgeon_workspace",
+            "surgeon_doctor",
+            "surgeon_bench",
+            "surgeon_bench",
+            "surgeon_workspace"
+        ]
+    );
+    let verdicts: Vec<Verdict> = runs.iter().map(|r| r.verdict).collect();
+    assert_eq!(&verdicts[..4], [Verdict::Ok; 4]);
+    assert_eq!(verdicts[4], Verdict::Failed);
     let listed = results::runs(&runs);
     assert_eq!(listed.len(), 2, "both measures in the results");
     assert!(

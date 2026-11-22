@@ -1,6 +1,6 @@
 ---
 name: weight-surgeon
-description: Méthode du Studio Weight Surgeon pour un agent branché sur le serveur MCP « surgeon mcp » (Claude Code, Codex, OpenCode, Cursor) qui modifie les poids d'un LLM local. Diagnostic machine avec surgeon_doctor, inspection et extraction de directions, criblage en entonnoir (surgeon_bench refusal_probe, surgeon_autotune), composition orthogonale avec surgeon_compose pour préserver une capacité, certification obligatoire par génération complète, et un dossier projet que surgeon-gui rouvre. À suivre dès qu'on retire un comportement (refus excessifs, répétitions) d'un modèle SafeTensors ou GGUF, qu'on mesure ou corrige des poids avec les outils surgeon_*, ou qu'on prépare un projet à ouvrir dans le Studio.
+description: Méthode du Studio Weight Surgeon pour un agent branché sur le serveur MCP « surgeon mcp » (Claude Code, Codex, OpenCode, Cursor) qui modifie les poids d'un LLM local. D'abord le dossier projet avec surgeon_workspace (origine enregistrée et vérifiée), puis diagnostic machine avec surgeon_doctor, inspection et extraction de directions, criblage en entonnoir (surgeon_bench refusal_probe, surgeon_autotune), composition orthogonale avec surgeon_compose pour préserver une capacité, certification obligatoire par génération complète, et un dossier projet que surgeon-gui rouvre. À suivre dès qu'on retire un comportement (refus excessifs, répétitions) d'un modèle SafeTensors ou GGUF, qu'on mesure ou corrige des poids avec les outils surgeon_*, ou qu'on prépare un projet à ouvrir dans le Studio.
 ---
 
 # Weight Surgeon : la méthode du Studio
@@ -18,11 +18,12 @@ Arguments prêts à copier pour chaque appel : [references/recipes.md](reference
 Le serveur sert le dossier courant du harnais (`surgeon mcp` sans `--allow-dir`), sinon son
 premier `--allow-dir`. Ce dossier est le projet : surgeon-gui le rouvre tel quel.
 
-- `project.surgeon.json` doit exister, sinon aucun run n'est journalisé et `record_finding`
-  échoue (`no_project`). S'il manque, crée-le avec ton propre outil de fichiers
-  (`surgeon_files` n'écrit que sous `work/`), exactement ainsi, sans autre champ :
-  `{"schema_version": 1, "name": "<nom du dossier>", "created_unix": <secondes Unix>, "state": "ready"}`.
-  Pas de champ `source` : son SHA-256 est calculé par le Studio quand le projet y est créé.
+- Nouveau projet : appelle d'abord `surgeon_workspace` avec `action: "init"` et `model` = le
+  dossier du modèle d'origine (`name` facultatif). Il écrit `project.surgeon.json` avec
+  l'origine comme le Studio l'enregistre (chemin, SHA-256, taille) : le Studio la reconnaît et
+  la verrouille. Sans ce fichier, aucun run n'est journalisé et `record_finding` échoue
+  (`no_project`). Une erreur `output_exists` veut dire que le dossier est déjà un projet :
+  continue avec lui, ne passe `force: true` que si l'utilisateur le demande.
 - `copies/<id>/` : la copie de travail, la seule que tu modifies. Ne patche jamais le modèle
   d'origine. Copie son dossier dans `copies/` avec ton outil shell, ou demande à
   l'utilisateur de le faire ; l'origine se lit par `--allow-read`.

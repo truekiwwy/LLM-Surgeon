@@ -2195,7 +2195,7 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 <a id="tools"></a>
 ### 4.2 Outils
 
-`surgeon mcp` sert dix-neuf outils : quinze, un par commande du moteur (une commande et son outil partagent le même cœur, les mêmes arguments et la même enveloppe JSON ; `backend detect --save` reste réservé à la CLI, un agent ne réécrit jamais la configuration de l'opérateur), `surgeon_files` pour les fichiers de travail d'un agent, et trois outils du studio (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
+`surgeon mcp` sert vingt outils : quinze, un par commande du moteur (une commande et son outil partagent le même cœur, les mêmes arguments et la même enveloppe JSON ; `backend detect --save` reste réservé à la CLI, un agent ne réécrit jamais la configuration de l'opérateur), `surgeon_files` pour les fichiers de travail d'un agent, et quatre outils du studio (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
 
 | Outil | Rôle |
 | --- | --- |
@@ -2215,9 +2215,16 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 | `surgeon_graph` | Graphe écritures/lectures du flux résiduel avec bornes spectrales certifiées ; synthèse bornée, ou fichiers avec `out_dir`. |
 | `surgeon_backends` | GPU et moteurs d'inférence Rust de la machine (hipfire pour AMD, mistralrs pour NVIDIA, Apple Silicon ou CPU, native en secours), configuration utilisateur et backend recommandé ; lecture seule. |
 | `surgeon_files` | Fichiers de travail d'un agent sans outils de fichiers : `list` et `read` dans les dossiers autorisés, racines en lecture seule comprises, `write` de fichiers texte sous `work/` seulement. |
+| `surgeon_workspace` | Projet du studio pour un agent qui travaille hors de l'interface : `action` `init` écrit `project.surgeon.json` avec le modèle d'origine tel que le Studio l'enregistre (chemin canonique, SHA-256 et taille) et crée `runs/`, `artifacts/`, `copies/` et `chat/`. Le modèle n'est que lu ; un manifeste existant n'est remplacé qu'avec `force`. |
 | `record_finding` | Projet du studio seulement : ajoute un constat au journal des preuves (`chat/findings.jsonl`), en citant le `run_id` que renvoie chaque autre outil dans un projet. |
 | `show_in_3d` | Projet du studio seulement : sélectionne un tenseur ou un nœud du graphe dans la vue 3D du studio (`chat/focus.json`). |
 | `update_plan` | Projet du studio seulement : remplace le plan affiché à l'utilisateur (`chat/plan.json`). |
+
+`surgeon_workspace` est l'acte de naissance du projet : un petit fichier scellé, `project.surgeon.json`, qui dit de quel modèle le dossier travaille et le prouve par une empreinte. Un modèle de 0,5 milliard de paramètres comme Qwen2.5-0.5B-Instruct pèse environ 988 Mo de SafeTensors dans `C:\models\Qwen2.5-0.5B-Instruct` ; le manifeste enregistre ce chemin canonique, sa taille et le SHA-256 de ses fichiers, une empreinte de 64 caractères (abrégée ici en `4f9c…`). Dès lors `surgeon-gui` ouvre le dossier exactement comme s'il l'avait créé dans le Studio : même origine, verrouillée en lecture, même journal des preuves. Un seul appel au début de la session :
+
+```json
+{"action": "init", "model": "C:\\models\\Qwen2.5-0.5B-Instruct", "name": "qwen-0.5b-refus"}
+```
 
 Une vraie session sur le faux modèle : le client envoie `initialize`, `notifications/initialized`, puis un `tools/call`. Le serveur écrit une ligne sur stderr, puis répond sur stdout (la réponse à `initialize` est omise, et les lignes de réponse sont coupées) :
 
