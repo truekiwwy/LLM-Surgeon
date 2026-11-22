@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use serde::Serialize;
 use serde_json::Value;
 
 use super::evidence;
@@ -174,6 +175,105 @@ pub fn project_summary(project: &Path) -> String {
     entries.extend(evidence::mcp_runs(&Dirs::of(project).mcp_runs()));
     entries.sort_by_key(|e| e.started_unix);
     summary(&entries)
+}
+
+/// One bench run as the exported report lists it: its scores and the strength of its evidence.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExperimentRun {
+    /// `run_id` of the ledger or of the MCP journal.
+    pub run: String,
+    pub tool: String,
+    /// Refusal rate: measured by generation, or screened by the probe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal_rate: Option<f64>,
+    /// Accuracy of the `eval` mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_accuracy: Option<f64>,
+    /// `heuristic` for a probe, `measure` for a full generation.
+    pub status: &'static str,
+}
+
+/// Whether the run is an exploration probe rather than a full generation.
+fn is_heuristic(e: &Entry) -> bool {
+    e.result["is_heuristic"] == true
+        || e.result["evidence_level"] == "heuristic_screening"
+        || e.params["mode"] == "refusal_probe"
+}
+
+/// The `surgeon_bench` runs of `entries` that carry a score, oldest first.
+pub fn experiment_runs(entries: &[Entry]) -> Vec<ExperimentRun> {
+    entries
+        .iter()
+        .filter(|e| e.tool == "surgeon_bench")
+        .filter_map(|e| {
+            let refusal_rate = e.result["refusal_rate"]
+                .as_f64()
+                .or_else(|| e.result["probe_refusal_rate"].as_f64());
+            let eval_accuracy = e.result["accuracy"].as_f64();
+            (refusal_rate.is_some() || eval_accuracy.is_some()).then(|| ExperimentRun {
+                run: e.run_id.clone(),
+                tool: e.tool.clone(),
+                refusal_rate,
+                eval_accuracy,
+                status: if is_heuristic(e) {
+                    "heuristic"
+                } else {
+                    "measure"
+                },
+            })
+        })
+        .collect()
+}
+
+fn score(v: Option<f64>) -> String {
+    v.map_or_else(|| "-".to_owned(), |x| format!("{x:.3}"))
+}
+
+/// A Markdown report of the project's bench runs, for a human: the legend of the two kinds of
+/// evidence, then one row per run. Pure: nothing is written.
+pub fn export_experiments_markdown(title: &str, entries: &[Entry]) -> String {
+    let title = match title.trim() {
+        "" => "projet",
+        title => title,
+    };
+    let runs = experiment_runs(entries);
+    let mut out = format!(
+        "# Bilan des essais : {title}\n\n\
+         ## Comment lire ce tableau\n\n\
+         - **Heuristique** : une sonde rapide sur les activations, comme prendre la température \
+         en deux secondes. Elle oriente, elle ne prouve rien.\n\
+         - **Mesure** : une génération complète de texte, le vrai test sur route.\n\n"
+    );
+    if runs.is_empty() {
+        out.push_str(
+            "Aucun essai mesuré dans ce projet : lancez `surgeon_bench` (modes `refusal`, `eval` \
+             ou `refusal_probe`), puis exportez à nouveau.\n",
+        );
+        return out;
+    }
+    out.push_str(
+        "| Run | Outil | Score refus | Score eval | Statut |\n\
+         | --- | --- | --- | --- | --- |\n",
+    );
+    for run in &runs {
+        let status = match run.status {
+            "heuristic" => "Heuristique",
+            _ => "Mesure",
+        };
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {status} |\n",
+            run.run,
+            run.tool,
+            score(run.refusal_rate),
+            score(run.eval_accuracy),
+        ));
+    }
+    out
+}
+
+/// The same runs as indented JSON, for a script.
+pub fn export_experiments_json(entries: &[Entry]) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(&experiment_runs(entries))
 }
 
 /// The finished run that `tool` with `args` would repeat: same arguments, same model state,
@@ -442,5 +542,61 @@ mod tests {
             "a dry run writes nothing"
         );
         assert!(run(&[&probe, &failed]), "a failed bench certifies nothing");
+    }
+
+    #[test]
+    fn the_export_says_when_there_is_nothing_to_report() {
+        let markdown = export_experiments_markdown("qwen-0.5b-refus", &[]);
+        assert!(markdown.contains("# Bilan des essais : qwen-0.5b-refus"));
+        assert!(markdown.contains("Aucun essai mesuré"), "{markdown}");
+        assert!(!markdown.contains("| Run |"), "{markdown}");
+        let json: Value = serde_json::from_str(&export_experiments_json(&[]).unwrap()).unwrap();
+        assert_eq!(json, json!([]));
+    }
+
+    #[test]
+    fn the_export_keeps_probes_and_measures_apart() {
+        let entries = [
+            entry(
+                "r1",
+                "surgeon_bench",
+                json!({"mode": "refusal_probe", "model": "copies/c1"}),
+                json!({"is_heuristic": true, "probe_refusal_rate": 0.85}),
+                "fast-a",
+            ),
+            entry(
+                "r2",
+                "surgeon_bench",
+                json!({"mode": "refusal", "model": "copies/c1"}),
+                json!({"refusal_rate": 0.12, "baseline": {"refusal_rate": 0.85}}),
+                "fast-b",
+            ),
+            entry(
+                "r3",
+                "surgeon_bench",
+                json!({"mode": "eval", "model": "copies/c1", "dataset": "builtin:math"}),
+                json!({"accuracy": 0.64, "baseline": {"accuracy": 0.85}}),
+                "fast-b",
+            ),
+            entry("r4", "surgeon_apply", json!({}), json!({}), "fast-b"),
+        ];
+        let markdown = export_experiments_markdown("Qwen2.5-0.5B-Instruct", &entries);
+        for row in [
+            "| r1 | surgeon_bench | 0.850 | - | Heuristique |",
+            "| r2 | surgeon_bench | 0.120 | - | Mesure |",
+            "| r3 | surgeon_bench | - | 0.640 | Mesure |",
+        ] {
+            assert!(markdown.contains(row), "{row} in {markdown}");
+        }
+        assert!(!markdown.contains("r4"), "not a bench run: {markdown}");
+        let json: Value =
+            serde_json::from_str(&export_experiments_json(&entries).unwrap()).unwrap();
+        let rows = json.as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["status"], "heuristic");
+        assert_eq!(rows[0]["refusal_rate"], 0.85);
+        assert!(rows[0].get("eval_accuracy").is_none(), "{json}");
+        assert_eq!(rows[2]["eval_accuracy"], 0.64);
+        assert_eq!(rows[2]["status"], "measure");
     }
 }

@@ -9,17 +9,26 @@ use super::super::i18n::{t, tf};
 use super::super::icons::{self, Icon, State};
 use super::super::theme::TOKENS as T;
 use super::{age, duration};
+use crate::agent::experiments;
 use crate::app::{SurgeonApp, Tab};
-use crate::studio::ledger::Verdict;
+use crate::studio::ledger::{self, Verdict};
 use crate::studio::project::now_unix;
 use crate::studio::results::{Answer, Bench, Mode, Run, Score};
 
 pub fn show(ui: &mut Ui, app: &mut SurgeonApp) {
+    let entries = app.runs();
     let runs = app.results().to_vec();
     if runs.is_empty() {
         c::empty(ui, Icon::Check, t("results.none"), t("results.none.hint"));
         return;
     }
+    let title = app
+        .studio
+        .manager
+        .as_ref()
+        .map(|m| m.project.manifest.name.clone())
+        .unwrap_or_default();
+    export_buttons(ui, app, &title, &entries);
     let mut open3d = None;
     ScrollArea::vertical()
         .id_salt("results")
@@ -35,6 +44,32 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp) {
         app.open_graph(ui.ctx(), &path);
         app.tab = Tab::Graph;
     }
+}
+
+/// "Copy Markdown" and "Copy JSON": the pure exports of the experiment report, to the clipboard.
+fn export_buttons(ui: &mut Ui, app: &mut SurgeonApp, title: &str, entries: &[ledger::Entry]) {
+    ui.horizontal(|ui| {
+        if c::button(ui, t("results.export.md"), c::ButtonKind::Secondary).clicked() {
+            let text = experiments::export_experiments_markdown(title, entries);
+            to_clipboard(ui, app, text);
+        }
+        if c::button(ui, t("results.export.json"), c::ButtonKind::Secondary).clicked() {
+            match experiments::export_experiments_json(entries) {
+                Ok(text) => to_clipboard(ui, app, text),
+                Err(e) => {
+                    app.desktop.message =
+                        Some(tf("results.export.failed", &[("error", &e.to_string())]))
+                }
+            }
+        }
+    });
+    ui.add_space(T.space.s);
+}
+
+fn to_clipboard(ui: &Ui, app: &mut SurgeonApp, text: String) {
+    let lines = text.lines().count();
+    ui.ctx().copy_text(text);
+    app.desktop.message = Some(tf("report.copied", &[("n", &lines)]));
 }
 
 /// A row that folds `body`, its state kept by egui under `id`.
