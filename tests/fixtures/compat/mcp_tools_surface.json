@@ -3192,5 +3192,294 @@
       "type": "object"
     },
     "name": "surgeon_causal_trace"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "oneOf": [
+            {
+              "enum": [
+                "create"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "list"
+              ],
+              "type": "string"
+            },
+            {
+              "enum": [
+                "restore"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metrics": {
+          "additionalProperties": {
+            "format": "double",
+            "type": "number"
+          },
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "model": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_checkpoint"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "alphas": {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "drift": {
+          "additionalProperties": false,
+          "properties": {
+            "dataset": {
+              "type": "string"
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "oneOf": [
+                    {
+                      "enum": [
+                        "safety"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "enum": [
+                        "unblocking"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "enum": [
+                        "gsm8k"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "enum": [
+                        "kl"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "enum": [
+                        "logits"
+                      ],
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "max_tokens": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 1.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "dataset"
+          ],
+          "type": "object"
+        },
+        "layers": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "max_drift": {
+          "format": "double",
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "subtract",
+            "add",
+            "project_out"
+          ],
+          "type": "string"
+        },
+        "projections": {
+          "default": null,
+          "items": {
+            "enum": [
+              "gate_proj",
+              "up_proj",
+              "down_proj",
+              "o_proj",
+              "embed_tokens"
+            ],
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "target": {
+          "additionalProperties": false,
+          "properties": {
+            "dataset": {
+              "type": "string"
+            },
+            "kind": {
+              "oneOf": [
+                {
+                  "enum": [
+                    "safety"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "unblocking"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "gsm8k"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "kl"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "logits"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            "limit": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 1.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_new_tokens": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 1.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "dataset",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "vector_tensor": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vectors": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "alphas",
+        "drift",
+        "layers",
+        "max_drift",
+        "model",
+        "operation",
+        "target",
+        "vectors"
+      ],
+      "type": "object"
+    },
+    "name": "surgeon_sweep"
   }
 ]

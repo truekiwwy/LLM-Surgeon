@@ -44,6 +44,7 @@ mod sandbox;
 mod server;
 mod tools;
 mod tools_backend;
+mod tools_checkpoint;
 mod tools_compose;
 mod tools_doctor;
 mod tools_files;
@@ -70,6 +71,7 @@ pub use tools::{
     MethodId, HIPFIRE_SET_ASIDE, TOOL_APPLY, TOOL_AUTOTUNE, TOOL_BENCH, TOOL_CHECK, TOOL_EVAL,
     TOOL_EXTRACT, TOOL_INSPECT,
 };
+pub use tools_checkpoint::{TOOL_CHECKPOINT, TOOL_SWEEP};
 pub use tools_files::TOOL_FILES;
 pub use tools_pipeline::PipelineJobs;
 pub use tools_trace::TOOL_CAUSAL_TRACE;

@@ -2200,7 +2200,7 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 <a id="tools"></a>
 ### 4.2 Outils
 
-`surgeon mcp` sert vingt et un outils : quinze, un par commande du moteur (une commande et son outil partagent le même cœur, les mêmes arguments et la même enveloppe JSON ; `backend detect --save` reste réservé à la CLI, un agent ne réécrit jamais la configuration de l'opérateur), `surgeon_files` pour les fichiers de travail d'un agent, `surgeon_causal_trace` (MCP seulement), et quatre outils du studio (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
+`surgeon mcp` sert vingt-trois outils : quinze, un par commande du moteur (une commande et son outil partagent le même cœur, les mêmes arguments et la même enveloppe JSON ; `backend detect --save` reste réservé à la CLI, un agent ne réécrit jamais la configuration de l'opérateur), `surgeon_files` pour les fichiers de travail d'un agent, `surgeon_causal_trace`, `surgeon_checkpoint` et `surgeon_sweep` (MCP seulement), et quatre outils du studio (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
 
 | Outil | Rôle |
 | --- | --- |
@@ -2221,6 +2221,8 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 | `surgeon_graph` | Graphe écritures/lectures du flux résiduel avec bornes spectrales certifiées ; synthèse bornée, ou fichiers avec `out_dir`. |
 | `surgeon_backends` | GPU et moteurs d'inférence Rust de la machine (hipfire pour AMD, mistralrs pour NVIDIA, Apple Silicon ou CPU, native en secours), configuration utilisateur et backend recommandé ; lecture seule. |
 | `surgeon_files` | Fichiers de travail d'un agent sans outils de fichiers : `list` et `read` dans les dossiers autorisés, racines en lecture seule comprises, `write` de fichiers texte sous `work/` seulement. |
+| `surgeon_checkpoint` | Instantanés d'une copie de travail sous `work/checkpoints/<id>/` : `action` `create` (liens physiques, copie sur un autre volume, manifeste SHA-256, étiquette, métriques et parent), `list` (l'arbre et l'empreinte disque réelle, un fichier partagé compté une fois) et `restore` (checkpoint vérifié, puis échange atomique du dossier). Un apply recopie un fichier partagé avec un checkpoint avant de l'écrire : un checkpoint ne change jamais, et aucun outil n'écrit sous le store. |
+| `surgeon_sweep` | Balayage Pareto automatique : chaque point de vecteurs x fenêtres `layers` x `alphas` est appliqué à la copie, mesuré (taux de succès cible, dérive contre le départ), gardé en checkpoint s'il améliore le front sous `max_drift`, annulé sinon ; renvoie les points non dominés et laisse la copie sur le meilleur compromis. |
 | `surgeon_workspace` | Projet du studio pour un agent qui travaille hors de l'interface : `action` `init` écrit `project.surgeon.json` avec le modèle d'origine tel que le Studio l'enregistre (chemin canonique, SHA-256 et taille) et crée `runs/`, `artifacts/`, `copies/` et `chat/`. Le modèle n'est que lu ; un manifeste existant n'est remplacé qu'avec `force`. |
 | `record_finding` | Projet du studio seulement : ajoute un constat au journal des preuves (`chat/findings.jsonl`), en citant le `run_id` que renvoie chaque autre outil dans un projet. |
 | `show_in_3d` | Projet du studio seulement : sélectionne un tenseur ou un nœud du graphe dans la vue 3D du studio (`chat/focus.json`). |

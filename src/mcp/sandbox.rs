@@ -167,6 +167,13 @@ impl Sandbox {
         if private {
             return Err(refused());
         }
+        let checkpoints = write
+            && resolved
+                .ancestors()
+                .any(|dir| dir.join(crate::checkpoint::MARKER).is_file());
+        if checkpoints {
+            return Err(refused());
+        }
         let in_read_root = self.read_roots.iter().any(|root| within(&resolved, root));
         match self.roots.iter().any(|root| within(&resolved, root)) || (!write && in_read_root) {
             true => Ok(simplify(resolved)),
@@ -341,6 +348,23 @@ mod tests {
         ] {
             assert!(sb.resolve_work("path", &path).is_err(), "{path:?}");
         }
+    }
+
+    #[test]
+    fn the_checkpoint_store_is_read_but_never_written_through_a_tool() {
+        let (_allowed, _outside, sb) = sandbox();
+        let store = sb.work_dir().join(crate::checkpoint::STORE_DIR);
+        let snapshot = store.join("0001").join("model");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let base = sb.base().to_path_buf();
+        assert!(sb.resolve_work("path", &store.join("notes.json")).is_ok());
+        std::fs::write(store.join(crate::checkpoint::MARKER), b"").unwrap();
+        assert!(sb.resolve_read("model", &snapshot, &base).is_ok());
+        for path in [snapshot.join("config.json"), store.join("notes.json")] {
+            assert!(sb.resolve("out", &path, &base).is_err(), "{path:?}");
+            assert!(sb.resolve_work("path", &path).is_err(), "{path:?}");
+        }
+        assert!(sb.resolve_work("path", Path::new("sets/pos.jsonl")).is_ok());
     }
 
     #[cfg(unix)]

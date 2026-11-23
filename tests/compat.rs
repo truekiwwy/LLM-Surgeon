@@ -130,6 +130,10 @@
 //!   `surgeon_extract`, the twenty-first tool `surgeon_causal_trace` (MCP only, read only).
 //!   Without `--layers` every extraction file is byte for byte what it was; only the CLI
 //!   surface and the tool schema hash moved.
+//! - checkpoints and Pareto sweeps: the twenty-second tool `surgeon_checkpoint` (`action`
+//!   `create`, `list`, `restore`) and the twenty-third `surgeon_sweep`, MCP only, additive.
+//!   An apply on a hard-linked file now copies it first; its bytes are the same. Only the
+//!   tool schema hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
@@ -303,8 +307,8 @@ fn mcp_tools_surface_is_unchanged() {
     let current = mcp_tools_surface();
     assert_eq!(
         current.as_array().unwrap().len(),
-        21,
-        "twenty-one MCP tools"
+        23,
+        "twenty-three MCP tools"
     );
     let reference = read_fixture("mcp_tools_surface.json");
     assert!(

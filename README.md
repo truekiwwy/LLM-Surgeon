@@ -2198,7 +2198,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 <a id="tools"></a>
 ### 4.2 Tools
 
-`surgeon mcp` serves twenty-one tools: fifteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), `surgeon_files` for an agent's working files, `surgeon_causal_trace` (MCP only), and four studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
+`surgeon mcp` serves twenty-three tools: fifteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), `surgeon_files` for an agent's working files, `surgeon_causal_trace`, `surgeon_checkpoint` and `surgeon_sweep` (MCP only), and four studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
 
 | Tool | Role |
 | --- | --- |
@@ -2219,6 +2219,8 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 | `surgeon_graph` | Residual-stream write/read graph with certified spectral bounds; bounded summary, or files with `out_dir`. |
 | `surgeon_backends` | GPUs and Rust inference engines of the machine (hipfire for AMD, mistralrs for NVIDIA, Apple Silicon or CPU, native as fallback), the user configuration and the recommended backend; read only. |
 | `surgeon_files` | Working files of an agent without file tools: `list` and `read` in the allowed folders, read-only roots included, `write` of text files under `work/` only. |
+| `surgeon_checkpoint` | Instant snapshots of a working copy under `work/checkpoints/<id>/`: `action` `create` (hard links, a copy on another volume, SHA-256 manifest, label, metrics and parent), `list` (the tree and the real disk footprint, a shared file counted once) and `restore` (checkpoint verified, then an atomic folder swap). An apply copies a file shared with a checkpoint before writing it, so a checkpoint never changes; tools cannot write under the store. |
+| `surgeon_sweep` | Automatic Pareto sweep: every point of vectors x `layers` windows x `alphas` is applied to the working copy, measured (target success rate, drift against the start), kept as a checkpoint when it improves the front within `max_drift`, rolled back otherwise; returns the non-dominated points and leaves the copy on the best compromise. |
 | `surgeon_workspace` | Studio project for an agent that works outside the GUI: `action` `init` writes `project.surgeon.json` with the origin model as the Studio records it (canonical path, SHA-256 and size) and creates `runs/`, `artifacts/`, `copies/` and `chat/`. The origin is only read; an existing manifest is replaced only with `force`. |
 | `record_finding` | Studio project only: appends a finding to the evidence log (`chat/findings.jsonl`), citing the `run_id` every other tool returns in a project. |
 | `show_in_3d` | Studio project only: selects a tensor or graph node in the studio's 3D view (`chat/focus.json`). |

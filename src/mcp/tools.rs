@@ -446,6 +446,7 @@ pub fn tool_definitions() -> Value {
         list.extend(super::tools_workspace::definitions());
         list.extend(super::tools_session::definitions());
         list.extend(super::tools_trace::definitions());
+        list.extend(super::tools_checkpoint::definitions());
     }
     sorted(tools)
 }
@@ -533,6 +534,7 @@ pub(crate) fn is_known(name: &str) -> bool {
         || super::tools_workspace::NAMES.contains(&name)
         || super::tools_session::NAMES.contains(&name)
         || super::tools_trace::NAMES.contains(&name)
+        || super::tools_checkpoint::NAMES.contains(&name)
 }
 
 pub(crate) struct ToolContext<'a> {
@@ -571,6 +573,9 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         super::tools_files::TOOL_FILES => super::tools_files::call(arguments, ctx),
         super::tools_workspace::TOOL_WORKSPACE => super::tools_workspace::call(arguments, ctx),
         super::tools_trace::TOOL_CAUSAL_TRACE => super::tools_trace::call(arguments, ctx),
+        super::tools_checkpoint::TOOL_CHECKPOINT | super::tools_checkpoint::TOOL_SWEEP => {
+            super::tools_checkpoint::call(name, arguments, ctx)
+        }
         _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);
@@ -609,7 +614,7 @@ fn sandboxed(
 
 /// A read path that may name a built-in probe set (`builtin:<set>`), embedded in the
 /// binary: no file to sandbox then.
-fn readable_or_builtin(
+pub(super) fn readable_or_builtin(
     ctx: &ToolContext,
     argument: &str,
     path: &Path,
@@ -622,7 +627,7 @@ fn readable_or_builtin(
 }
 
 /// A path the tool only reads: the `--allow-read` roots (the source model) count too.
-fn readable(
+pub(super) fn readable(
     ctx: &ToolContext,
     argument: &str,
     path: &Path,
