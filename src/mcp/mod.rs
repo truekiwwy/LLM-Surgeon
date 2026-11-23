@@ -52,6 +52,7 @@ mod tools_p13;
 mod tools_pipeline;
 mod tools_restore;
 mod tools_session;
+mod tools_trace;
 mod tools_workspace;
 
 use std::io::Write;
@@ -71,6 +72,7 @@ pub use tools::{
 };
 pub use tools_files::TOOL_FILES;
 pub use tools_pipeline::PipelineJobs;
+pub use tools_trace::TOOL_CAUSAL_TRACE;
 pub use tools_workspace::TOOL_WORKSPACE;
 
 use crate::app::{exit, AppDeps, ProgressSink};

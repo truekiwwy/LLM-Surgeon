@@ -126,6 +126,10 @@
 //!   `surgeon_lora`. One deliberate relaxation: `--patched` is required unless `--delta` is
 //!   given (exactly one of the two), so every former invocation is still valid. Only the
 //!   tool schema hash moved.
+//! - layer sweeps and causal tracing: `extract --layers` and the property `layers` of
+//!   `surgeon_extract`, the twenty-first tool `surgeon_causal_trace` (MCP only, read only).
+//!   Without `--layers` every extraction file is byte for byte what it was; only the CLI
+//!   surface and the tool schema hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
@@ -297,7 +301,11 @@ fn mcp_tools_surface() -> Value {
 #[test]
 fn mcp_tools_surface_is_unchanged() {
     let current = mcp_tools_surface();
-    assert_eq!(current.as_array().unwrap().len(), 20, "twenty MCP tools");
+    assert_eq!(
+        current.as_array().unwrap().len(),
+        21,
+        "twenty-one MCP tools"
+    );
     let reference = read_fixture("mcp_tools_surface.json");
     assert!(
         current == reference,

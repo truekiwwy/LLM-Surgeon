@@ -16,8 +16,8 @@ use super::server::McpConfig;
 use crate::app::{
     core_apply_routed, core_autotune, core_bench_dump, core_bench_eval, core_bench_judge_eval,
     core_bench_judge_sample, core_bench_logits, core_bench_ppl, core_bench_refusal, core_check,
-    core_eval, core_extract_method, core_inspect, envelope_of, exit, AppDeps, ApplyRequest,
-    CoreResult, Outcome, ProgressSink,
+    core_eval, core_extract_method, core_extract_sweep, core_inspect, envelope_of, exit, AppDeps,
+    ApplyRequest, CoreResult, Outcome, ProgressSink,
 };
 use crate::backend::hipfire;
 use crate::bench;
@@ -301,6 +301,11 @@ pub struct ExtractToolArgs {
         description = "leace : fichier JSON dans un dossier autorisé, un label par prompt (les positifs puis les négatifs) : indice de classe entier, ou tableau de m nombres. Efface tous les labels à la fois ; a et b de <out>.leace.safetensors sont alors de forme [k, hidden], à passer tels quels à project_out."
     )]
     pub labels_file: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "Balayage de couches (remplace layer) : une seule passe avant par prompt, une direction par couche avec AUC, marge et d′ (data.layers), la meilleure couche (data.best_layer) en tenseur `direction` et chaque couche en `layers.<i>` dans out (comparables couche par couche au radar). mean_diff ou svd (PCA des différences appariées), rang 1 seulement."
+    )]
+    pub layers: Option<LayersField>,
 }
 
 /// `method` of `surgeon_extract`: an identifier of the built-in registry. Its schema lists
@@ -440,6 +445,7 @@ pub fn tool_definitions() -> Value {
         list.extend(super::tools_files::definitions());
         list.extend(super::tools_workspace::definitions());
         list.extend(super::tools_session::definitions());
+        list.extend(super::tools_trace::definitions());
     }
     sorted(tools)
 }
@@ -526,6 +532,7 @@ pub(crate) fn is_known(name: &str) -> bool {
         || super::tools_files::NAMES.contains(&name)
         || super::tools_workspace::NAMES.contains(&name)
         || super::tools_session::NAMES.contains(&name)
+        || super::tools_trace::NAMES.contains(&name)
 }
 
 pub(crate) struct ToolContext<'a> {
@@ -563,6 +570,7 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         super::tools_doctor::TOOL_DOCTOR => super::tools_doctor::call(arguments, ctx),
         super::tools_files::TOOL_FILES => super::tools_files::call(arguments, ctx),
         super::tools_workspace::TOOL_WORKSPACE => super::tools_workspace::call(arguments, ctx),
+        super::tools_trace::TOOL_CAUSAL_TRACE => super::tools_trace::call(arguments, ctx),
         _ => ("extract", extract_direction(arguments, ctx)),
     };
     let mut outcome = result.unwrap_or_else(|failure| failure);
@@ -828,7 +836,26 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     };
     let params = extract::params_with_subspace(&options, args.rank.map(|r| r as usize), labels);
     let method = args.method.map_or(DEFAULT_METHOD.to_owned(), |m| m.0);
-    core_extract_method(&request, &method, &params, ctx.deps, &Ui::off(), ctx.sink)
+    let Some(layers) = &args.layers else {
+        return core_extract_method(&request, &method, &params, ctx.deps, &Ui::off(), ctx.sink);
+    };
+    let layers = layers
+        .to_selection()
+        .map_err(|e| invalid("invalid_arguments", format!("layers : {e}")))?;
+    let sweep = extract::SweepRequest {
+        extract: request,
+        layers,
+    };
+    core_extract_sweep(&sweep, &method, &params, ctx.deps, &Ui::off(), ctx.sink)
+}
+
+pub(super) fn trace_prompts(
+    ctx: &ToolContext,
+    set: &str,
+    inline: Option<Vec<String>>,
+    file: Option<&Path>,
+) -> Result<Vec<String>, Outcome> {
+    prompt_set(ctx, set, inline, file, ctx.cfg.sandbox.base())
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

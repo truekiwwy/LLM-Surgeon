@@ -426,14 +426,16 @@ fn extract_cli(cmd: &ExtractCommand, deps: &AppDeps, io: &mut Io) -> CoreResult 
     };
     let rank = cmd.method.rank.map(|r| r as usize);
     let ui = io.ui;
-    core_extract_with(
-        &cmd.args,
-        &cmd.method.method,
-        &extract::params_with_subspace(&cmd.method.options(), rank, labels),
-        deps,
-        &ui,
-        &mut CliSink::new(io),
-    )
+    let params = extract::params_with_subspace(&cmd.method.options(), rank, labels);
+    let method = &cmd.method.method;
+    let Some(layers) = &cmd.method.layers else {
+        return core_extract_with(&cmd.args, method, &params, deps, &ui, &mut CliSink::new(io));
+    };
+    let request = extract::SweepRequest {
+        extract: extract_request(&cmd.args)?,
+        layers: layers.clone(),
+    };
+    core_extract_sweep(&request, method, &params, deps, &ui, &mut CliSink::new(io))
 }
 
 fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
@@ -2782,6 +2784,10 @@ pub fn core_extract_with(
     ui: &Ui,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
+    core_extract_method(&extract_request(args)?, method, params, deps, ui, sink)
+}
+
+fn extract_request(args: &ExtractArgs) -> Result<ExtractRequest, Outcome> {
     let load = |set: &str, path: &Path| {
         extract::load_prompt_texts(path).map_err(|message| {
             extract_failure(&ExtractError::Prompts {
@@ -2790,7 +2796,7 @@ pub fn core_extract_with(
             })
         })
     };
-    let request = ExtractRequest {
+    Ok(ExtractRequest {
         model_dir: args.model.clone(),
         pos_prompts: load("pos", &args.pos_prompts)?,
         neg_prompts: load("neg", &args.neg_prompts)?,
@@ -2802,8 +2808,7 @@ pub fn core_extract_with(
         max_tokens: args.max_tokens,
         dtype: args.dtype,
         overwrite: args.overwrite,
-    };
-    core_extract_method(&request, method, params, deps, ui, sink)
+    })
 }
 
 /// Shared by the CLI and the MCP tool. Cancellation (`deps.interrupted`) is honored
@@ -2849,6 +2854,150 @@ pub fn core_extract_method(
     let mut outcome = Outcome::ok(to_value(&report), extract_text(ui, &report));
     outcome.warnings = report.warnings.clone();
     Ok(outcome)
+}
+
+pub fn core_extract_sweep(
+    request: &extract::SweepRequest,
+    method: &str,
+    params: &Value,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let registry = Registry::with_builtin();
+    let Some(method) = registry.get(method) else {
+        let message = unknown_method_message(method, &registry.ids());
+        return Err(extract_failure(&ExtractError::InvalidArgument(message)));
+    };
+    let mut observer = SinkObserver {
+        sink,
+        interrupted: &deps.interrupted,
+        request: &request.extract,
+    };
+    let report = extract::run_sweep(
+        request,
+        method,
+        params,
+        deps.probe.as_ref(),
+        &mut observer,
+        &deps.interrupted,
+    )
+    .map_err(|e| extract_failure(&e))?;
+    let mut outcome = Outcome::ok(to_value(&report), sweep_text(ui, &report));
+    outcome.warnings = report.warnings.clone();
+    Ok(outcome)
+}
+
+fn sweep_text(ui: &Ui, report: &extract::SweepReport) -> String {
+    let rows: Vec<Vec<String>> = report
+        .layers
+        .iter()
+        .map(|s| {
+            let d_prime = s.d_prime.map_or("∞".to_owned(), |d| format!("{d:.2}"));
+            vec![
+                ui::metric(ui, format!("L{}", s.layer)),
+                ui::metric(ui, format!("{:.3}", s.auc)),
+                ui::metric(ui, format!("{:.3}", s.margin)),
+                ui::metric(ui, d_prime),
+                ui::metric(ui, format!("{:.3}", s.raw_diff_norm)),
+            ]
+        })
+        .collect();
+    let mut text = format!(
+        "{}\n{} meilleure couche L{}\n{} {}\n",
+        ui::table(ui, &["COUCHE", "AUC", "MARGE", "D′", "‖Δ‖"], &rows),
+        ui::badge(ui, "VERDICT"),
+        report.best_layer,
+        ui::badge(ui, "WRITE"),
+        ui::path(ui, &report.out_path),
+    );
+    for w in &report.warnings {
+        text.push_str(&warning_line(ui, w));
+        text.push('\n');
+    }
+    text
+}
+
+pub fn core_causal_trace(
+    request: &extract::TraceRequest,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let mut observer = TraceObserver {
+        sink,
+        interrupted: &deps.interrupted,
+    };
+    let report = extract::run_trace(
+        request,
+        deps.probe.as_ref(),
+        &mut observer,
+        &deps.interrupted,
+    )
+    .map_err(|e| extract_failure(&e))?;
+    let mut outcome = Outcome::ok(to_value(&report), trace_text(ui, &report));
+    outcome.warnings = report.warnings.clone();
+    Ok(outcome)
+}
+
+fn trace_text(ui: &Ui, report: &extract::TraceReport) -> String {
+    let rows: Vec<Vec<String>> = report
+        .layers
+        .iter()
+        .map(|e| {
+            vec![
+                ui::metric(ui, format!("L{}", e.layer)),
+                ui::metric(ui, format!("{:+.3}", e.score)),
+                ui::dim(ui, &format!("[{:+.3}, {:+.3}]", e.min, e.max)),
+            ]
+        })
+        .collect();
+    let mut text = format!(
+        "{}\n{} {} · pic L{} · fenêtre {} ({} paire(s) sur {})\n",
+        ui::table(ui, &["COUCHE", "SCORE", "ÉTENDUE"], &rows),
+        ui::badge(ui, "CAUSAL"),
+        report.component.as_str(),
+        report.peak_layer,
+        ui::metric(ui, &report.window.layers),
+        report.pairs_used,
+        report.n_pairs,
+    );
+    for w in &report.warnings {
+        text.push_str(&warning_line(ui, w));
+        text.push('\n');
+    }
+    text
+}
+
+struct TraceObserver<'a> {
+    sink: &'a mut dyn ProgressSink,
+    interrupted: &'a AtomicBool,
+}
+
+impl ExtractObserver for TraceObserver<'_> {
+    fn on_event(&mut self, event: ExtractEvent) -> ControlFlow<()> {
+        let progress = match event {
+            ExtractEvent::LoadingWeights {
+                done_tensors,
+                total_tensors,
+            } => Some(ProgressEvent::ExtractLoading {
+                done: done_tensors,
+                total: total_tensors,
+            }),
+            ExtractEvent::Forward { done, total } => {
+                Some(ProgressEvent::TraceForward { done, total })
+            }
+            ExtractEvent::Note(note) => Some(ProgressEvent::Info(note)),
+            _ => None,
+        };
+        if let Some(progress) = progress {
+            self.sink.event(progress);
+        }
+        match self.interrupted.load(Ordering::SeqCst) {
+            true => ControlFlow::Break(()),
+            false => ControlFlow::Continue(()),
+        }
+    }
 }
 
 fn extract_failure(e: &ExtractError) -> Outcome {

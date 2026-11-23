@@ -36,7 +36,9 @@ surgeon_compose (une direction faite de plusieurs vecteurs, orthogonale aux dire
 capacité à préserver, et le patch qui la retire), \
 surgeon_doctor (la machine est-elle prête : RAM, cœurs, cache des références, démon hipfire), \
 surgeon_eval (non-régression et export GGUF), surgeon_extract (vecteur de direction depuis \
-une couche Qwen2 ; method est un identifiant du registre du moteur : mean_diff, svd, leace), \
+une couche Qwen2, ou de chaque couche avec layers ; method est un identifiant du registre du \
+moteur : mean_diff, svd, leace), surgeon_causal_trace (couches responsables d'un comportement \
+par restauration d'activation, fenêtre causale au format layers de surgeon_compose), \
 surgeon_bench (mesure d'une chirurgie : mode dump, logits, ppl ou eval), surgeon_autotune \
 (coefficients par couche ajustés par ridge, patch.json en sortie), surgeon_diff (patch \
 .surgery de faible rang entre deux checkpoints), surgeon_lora (fusion ou extraction d'un \

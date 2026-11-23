@@ -2075,6 +2075,24 @@
           ]
         },
         {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "layers",
+          "long": "layers",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "LAYERS"
+          ]
+        },
+        {
           "action": "SetTrue",
           "aliases": null,
           "default_values": [

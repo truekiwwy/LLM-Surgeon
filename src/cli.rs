@@ -353,6 +353,11 @@ pub struct ExtractMethodArgs {
     /// index, or an array of m numbers).
     #[arg(long)]
     pub labels_file: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Layers to sweep (all, A-B or a list): one direction per layer in a single forward pass, the best one as `direction`, every one as `layers.<i>`; replaces --layer"
+    )]
+    pub layers: Option<LayerSelection>,
 }
 
 impl ExtractMethodArgs {
