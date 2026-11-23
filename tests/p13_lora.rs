@@ -761,7 +761,8 @@ fn checkpoints(delta_scale: f32) -> Pair {
 fn extract_args(p: &Pair, out: &Path, rank: usize, dtype: FactorDtype) -> LoraExtractArgs {
     LoraExtractArgs {
         base: p.base.parent().unwrap().to_path_buf(),
-        patched: p.patched.parent().unwrap().to_path_buf(),
+        patched: Some(p.patched.parent().unwrap().to_path_buf()),
+        delta: None,
         out: out.to_path_buf(),
         rank,
         dtype,
@@ -942,7 +943,8 @@ fn f16_overflow_in_extract_is_a_clear_error_with_a_bf16_hint() {
     write_st(&pd.join("model.safetensors"), &[&patched]);
     let args = LoraExtractArgs {
         base: bd,
-        patched: pd,
+        patched: Some(pd),
+        delta: None,
         out: dir.path().join("a.safetensors"),
         rank: 1,
         dtype: FactorDtype::F16,
@@ -971,7 +973,7 @@ fn extract_lists_layout_differences_and_empty_selections() {
     let extra = t("extra.weight", "F32", &[2, 2], 1);
     write_st(&other.join("model.safetensors"), &[&wrong, &extra]);
     let mut args = extract_args(&p, &out, 2, FactorDtype::F32);
-    args.patched = other;
+    args.patched = Some(other);
     let text = err_text_x(extract(&args));
     assert!(
         text.contains(&format!("{V}.weight : absent de --patched")),
@@ -1005,6 +1007,170 @@ fn err_text_x<T>(r: Result<T, SurgeryError>) -> String {
     match r {
         Ok(_) => panic!("expected an error"),
         Err(e) => e.to_string(),
+    }
+}
+
+/// `patched - base` of the two projections, as a `--delta` file (exact in f32: the values
+/// are multiples of 1/64).
+fn write_delta(p: &Pair, path: &Path) {
+    let deltas: Vec<T> = p
+        .patched_t
+        .iter()
+        .zip(&p.base_t)
+        .filter(|(t, _)| t.name.starts_with(Q) || t.name.starts_with(V))
+        .map(|(t, b)| {
+            let vals = t.vals.iter().zip(&b.vals).map(|(x, y)| x - y).collect();
+            t.clone().with_vals(vals)
+        })
+        .collect();
+    write_st(path, &deltas.iter().collect::<Vec<_>>());
+}
+
+#[test]
+fn a_delta_file_gives_the_adapter_of_the_pair_and_a_folder_takes_the_peft_name() {
+    let p = checkpoints(1.0);
+    let (from_pair, from_delta) = (p.dir.path().join("pair"), p.dir.path().join("delta"));
+    std::fs::create_dir_all(&from_pair).unwrap();
+    std::fs::create_dir_all(&from_delta).unwrap();
+    let delta = p.dir.path().join("delta.safetensors");
+    write_delta(&p, &delta);
+
+    let pair = extract(&extract_args(&p, &from_pair, 2, FactorDtype::F32)).unwrap();
+    let mut args = extract_args(&p, &from_delta, 2, FactorDtype::F32);
+    (args.patched, args.delta) = (None, Some(delta.clone()));
+    let report = extract(&args).unwrap();
+    assert_eq!(report.tensors, 2);
+    assert!(
+        report.out.ends_with("adapter_model.safetensors"),
+        "{}",
+        report.out
+    );
+    for file in ["adapter_model.safetensors", "adapter_config.json"] {
+        assert_eq!(
+            std::fs::read(from_pair.join(file)).unwrap(),
+            std::fs::read(from_delta.join(file)).unwrap(),
+            "{file}"
+        );
+    }
+    assert_eq!(pair.per_tensor.len(), report.per_tensor.len());
+
+    // A delta tensor the base does not have, or of another shape, is refused by name.
+    let wrong = p.dir.path().join("wrong.safetensors");
+    let odd = t(&format!("{Q}.weight"), "F32", &[10, 12], 1);
+    let ghost = t("model.layers.0.mlp.down_proj.weight", "F32", &[4, 4], 2);
+    write_st(&wrong, &[&odd, &ghost]);
+    args.delta = Some(wrong);
+    args.overwrite = true;
+    let text = err_text_x(extract(&args));
+    for name in [format!("{Q}.weight"), "mlp.down_proj.weight".to_owned()] {
+        assert!(text.contains(&name), "{name}: {text}");
+    }
+    // Exactly one source of the difference.
+    args.patched = Some(p.patched.parent().unwrap().to_path_buf());
+    args.delta = Some(delta);
+    assert!(err_text_x(extract(&args)).contains("--delta"));
+}
+
+#[test]
+fn the_adapter_follows_the_peft_layout() {
+    let p = checkpoints(1.0);
+    let out = p.dir.path().join("adapter");
+    std::fs::create_dir_all(&out).unwrap();
+    let report = extract(&extract_args(&p, &out, 2, FactorDtype::Bf16)).unwrap();
+    assert_eq!((report.rank, report.dtype.as_str()), (2, "bf16"));
+
+    let bytes = std::fs::read(out.join("adapter_model.safetensors")).unwrap();
+    let (_, meta) = safetensors::SafeTensors::read_metadata(&bytes).unwrap();
+    let format = meta
+        .metadata()
+        .as_ref()
+        .and_then(|m| m.get("format").cloned());
+    assert_eq!(format.as_deref(), Some("pt"));
+    let st = safetensors::SafeTensors::deserialize(&bytes).unwrap();
+    let mut keys: Vec<(String, Vec<usize>)> = st
+        .tensors()
+        .into_iter()
+        .map(|(name, view)| {
+            assert_eq!(view.dtype(), safetensors::Dtype::BF16, "{name}");
+            (name, view.shape().to_vec())
+        })
+        .collect();
+    keys.sort();
+    let key = |module: &str, side: &str| format!("base_model.model.{module}.lora_{side}.weight");
+    assert_eq!(
+        keys,
+        [
+            (key(Q, "A"), vec![2, 10]),
+            (key(Q, "B"), vec![12, 2]),
+            (key(V, "A"), vec![2, 10]),
+            (key(V, "B"), vec![6, 2]),
+        ]
+    );
+
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(out.join("adapter_config.json")).unwrap()).unwrap();
+    let expected = serde_json::json!({
+        "peft_type": "LORA", "task_type": "CAUSAL_LM", "r": 2, "lora_alpha": 2,
+        "lora_dropout": 0.0, "bias": "none", "use_rslora": false, "use_dora": false,
+        "fan_in_fan_out": false, "target_modules": ["q_proj", "v_proj"],
+        "base_model_name_or_path": "base-model",
+    });
+    assert_eq!(config, expected);
+}
+
+/// `‖ΔW − BA‖F / ‖ΔW‖F` recomputed in f64 from the factors the adapter holds.
+fn actual_rel_error(p: &Pair, adapter: &Path, module: &str, rank: usize) -> f64 {
+    let index = |t: &[T]| {
+        t.iter()
+            .position(|x| x.name == format!("{module}.weight"))
+            .unwrap()
+    };
+    let (base, patched) = (
+        &p.base_t[index(&p.base_t)],
+        &p.patched_t[index(&p.patched_t)],
+    );
+    let (m, n) = (base.shape[0], base.shape[1]);
+    let side = |s: &str| {
+        let name = format!("base_model.model.{module}.lora_{s}.weight");
+        decode("F32", &read_tensor(adapter, &name))
+    };
+    let (a, b) = (side("A"), side("B"));
+    let (mut err, mut total) = (0.0f64, 0.0f64);
+    for i in 0..m {
+        for j in 0..n {
+            let delta = f64::from(patched.vals[i * n + j]) - f64::from(base.vals[i * n + j]);
+            let ba: f64 = (0..rank).map(|k| b[i * rank + k] * a[k * n + j]).sum();
+            err += (delta - ba).powi(2);
+            total += delta.powi(2);
+        }
+    }
+    (err / total).sqrt()
+}
+
+#[test]
+fn the_reported_error_is_the_real_one_exact_at_the_true_rank_and_bounded_below() {
+    let p = checkpoints(1.0);
+    for (rank, exact) in [(2, true), (1, false)] {
+        let out = p.dir.path().join(format!("r{rank}"));
+        std::fs::create_dir_all(&out).unwrap();
+        let report = extract(&extract_args(&p, &out, rank, FactorDtype::F32)).unwrap();
+        let adapter = out.join("adapter_model.safetensors");
+        for t in &report.per_tensor {
+            let module = t.name.strip_suffix(".weight").unwrap();
+            let actual = actual_rel_error(&p, &adapter, module, rank);
+            assert!(
+                (actual - t.rel_error).abs() < 1e-5,
+                "{}: {actual} vs {}",
+                t.name,
+                t.rel_error
+            );
+            match exact {
+                // The difference has rank 2: rank 2 rebuilds it up to f32 rounding.
+                true => assert!(t.rel_error < 1e-5, "{}: {}", t.name, t.rel_error),
+                // One of two directions dropped: a real error, below the whole difference.
+                false => assert!(t.rel_error > 1e-3 && t.rel_error < 1.0, "{}", t.rel_error),
+            }
+        }
     }
 }
 

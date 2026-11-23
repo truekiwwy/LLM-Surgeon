@@ -950,7 +950,7 @@ dry-run : 6 tenseur(s) vérifiés (rang 4, échelle effective 1), aucun octet é
 <a id="cmd-lora-extract"></a>
 #### `surgeon lora extract`
 
-Approxime la différence de deux checkpoints par un adaptateur de rang `r` (`B = U sqrt(S)`, `A = sqrt(S) V`) et écrit un `adapter_model.safetensors` PEFT plus un `adapter_config.json` à côté. Le dossier de sortie doit déjà exister.
+Approxime la différence de deux checkpoints par un adaptateur de rang `r` (`B = U sqrt(S)`, `A = sqrt(S) V`) et écrit un `adapter_model.safetensors` PEFT plus un `adapter_config.json` à côté. La différence vient de `--patched`, ou de `--delta`, un `.safetensors` qui la contient par tenseur 2D (chacun vérifié contre la base). Le dossier de sortie doit déjà exister.
 
 ```text
 surgeon lora extract [OPTIONS] --base <BASE> --patched <PATCHED> --out <OUT>
@@ -959,8 +959,9 @@ surgeon lora extract [OPTIONS] --base <BASE> --patched <PATCHED> --out <OUT>
 | Option | Défaut | Rôle |
 | --- | --- | --- |
 | `--base` | obligatoire | Checkpoint de base. |
-| `--patched` | obligatoire | Checkpoint modifié (mêmes noms de tenseurs, formes et dtypes). |
-| `--out` | obligatoire | `adapter_model.safetensors` à écrire. |
+| `--patched` | obligatoire sauf `--delta` | Checkpoint modifié (mêmes noms de tenseurs, formes et dtypes). |
+| `--delta` | aucun | À la place de `--patched` : `patched - base` par tenseur 2D (F32, F16 ou BF16). |
+| `--out` | obligatoire | `adapter_model.safetensors` à écrire, ou un dossier existant où l'écrire. |
 | `--rank` | 16 | Rang de l'adaptateur. |
 | `--dtype` | `f32` | `f16`, `bf16` ou `f32`. |
 | `--target-modules` | projections d'attention et MLP | Seulement les tenseurs 2D dont le nom correspond à cette regex. |

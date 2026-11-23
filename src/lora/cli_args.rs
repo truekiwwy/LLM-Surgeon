@@ -51,13 +51,18 @@ pub struct LoraMergeArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct LoraExtractArgs {
-    /// Base checkpoint.
+    /// Base checkpoint (with --delta: its tensor shapes are checked against the delta).
     #[arg(long)]
     pub base: PathBuf,
     /// Modified checkpoint (same tensor names, shapes and dtypes).
+    #[arg(long, required_unless_present = "delta", conflicts_with = "delta")]
+    pub patched: Option<PathBuf>,
+    /// Instead of --patched: the difference itself, a .safetensors of `patched - base` per
+    /// 2D tensor (a subset of the base's tensors, any of F32, F16, BF16).
     #[arg(long)]
-    pub patched: PathBuf,
-    /// adapter_model.safetensors to write (adapter_config.json is written next to it).
+    pub delta: Option<PathBuf>,
+    /// adapter_model.safetensors to write, or an existing folder to write it in
+    /// (adapter_config.json is written next to it).
     #[arg(long)]
     pub out: PathBuf,
     #[arg(long, default_value_t = 16)]

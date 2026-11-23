@@ -215,6 +215,7 @@ fn tools_list_has_twenty_tools_and_the_new_schemas_are_valid() {
             "alpha",
             "backup_dir",
             "base",
+            "delta",
             "dry_run",
             "dtype",
             "lora",

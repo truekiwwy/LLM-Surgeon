@@ -2723,7 +2723,8 @@ fn checkpoints(base: &[St], patched: &[St]) -> Pair {
 fn extract_args(p: &Pair, rank: usize, dtype: FactorDtype) -> LoraExtractArgs {
     LoraExtractArgs {
         base: p.base.clone(),
-        patched: p.patched.clone(),
+        patched: Some(p.patched.clone()),
+        delta: None,
         out: p.dir.path().join("out").join("adapter_model.safetensors"),
         rank,
         dtype,

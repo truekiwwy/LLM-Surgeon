@@ -116,6 +116,20 @@ Avec `keep`, la direction fusionnée reste orthogonale aux capacités.
  "out": "work/dare_L14.safetensors", "patch_out": "work/patch_dare.json"}
 ```
 
+## Extraction en LoRA (après certification)
+
+La copie certifiée devient un adaptateur PEFT de rang `rank` (8, 16, 32 ou 64) :
+`surgeon_lora` mode `extract`, `base` = l'origine (lue, jamais écrite), `patched` = la
+copie, `out` = un dossier existant qui reçoit `adapter_model.safetensors` et
+`adapter_config.json`. `data.lora.per_tensor` donne l'erreur relative de chaque matrice ;
+`1 − mean_rel_error` est la fidélité de l'adaptateur. Un `.safetensors` de la différence
+elle-même passe en `delta` à la place de `patched`.
+
+```json
+{"mode": "extract", "base": "<ORIGINE>", "patched": "copies/copy-1",
+ "out": "out/lora-r16", "rank": 16}
+```
+
 ## Certification (génération complète)
 
 ```json

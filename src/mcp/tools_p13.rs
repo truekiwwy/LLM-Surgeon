@@ -115,7 +115,7 @@ impl LoraMode {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Arguments de surgeon_lora : mode, puis les champs de ce mode (merge : model, lora, alpha, adapter_config, scale, dry_run, backup_dir ; extract : base, patched, out, rank, dtype, target_modules, seed, overwrite)."
+    description = "Arguments de surgeon_lora : mode, puis les champs de ce mode (merge : model, lora, alpha, adapter_config, scale, dry_run, backup_dir ; extract : base, patched ou delta, out, rank, dtype, target_modules, seed, overwrite)."
 )]
 pub struct LoraToolArgs {
     #[schemars(
@@ -149,11 +149,18 @@ pub struct LoraToolArgs {
     #[schemars(description = "extract : checkpoint de base.")]
     pub base: Option<PathBuf>,
     #[serde(default)]
-    #[schemars(description = "extract : checkpoint modifié, mêmes noms, formes et dtypes.")]
+    #[schemars(
+        description = "extract : checkpoint modifié, mêmes noms, formes et dtypes (ou delta, pas les deux)."
+    )]
     pub patched: Option<PathBuf>,
     #[serde(default)]
     #[schemars(
-        description = "extract : adapter_model.safetensors écrit (adapter_config.json à côté)."
+        description = "extract : à la place de patched, un .safetensors de la différence (copie − base) par tenseur 2D, formes vérifiées contre base."
+    )]
+    pub delta: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "extract : adapter_model.safetensors écrit, ou un dossier existant où l'écrire (adapter_config.json à côté)."
     )]
     pub out: Option<PathBuf>,
     #[serde(default)]
@@ -206,7 +213,7 @@ pub(super) fn definitions() -> Vec<Value> {
         tool(
             TOOL_LORA,
             "Fusion et extraction LoRA",
-            "mode merge : fusionne un adaptateur LoRA PEFT dans les poids EN PLACE (W += scale·alpha/r·B·A), sauvegarde vérifiée imposée avant écriture, rollback automatique en cas d'erreur ou d'annulation ; faire d'abord dry_run: true. mode extract : écrit un adaptateur LoRA de rang r (format PEFT, adapter_config.json à côté) depuis la différence de deux checkpoints, sans toucher aux modèles. Format PEFT non testé contre HuggingFace en CI ; fusion dans un GGUF non supportée.",
+            "mode merge : fusionne un adaptateur LoRA PEFT dans les poids EN PLACE (W += scale·alpha/r·B·A), sauvegarde vérifiée imposée avant écriture, rollback automatique en cas d'erreur ou d'annulation ; faire d'abord dry_run: true. mode extract : écrit un adaptateur LoRA de rang r (format PEFT, adapter_config.json à côté, out peut être un dossier) depuis la différence de deux checkpoints ou d'un fichier delta, avec l'erreur relative de chaque tenseur, sans toucher aux modèles ; base et patched peuvent être en lecture seule. Format PEFT non testé contre HuggingFace en CI ; fusion dans un GGUF non supportée.",
             schema_value::<LoraToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false }),
         ),
@@ -327,7 +334,7 @@ fn diff(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
 /// One issue per missing required field and per field the mode does not take.
 fn lora_issues(a: &LoraToolArgs) -> Vec<ValidationIssue> {
     // (field, present, required in merge, required in extract); None: the mode ignores it.
-    let fields: [(&str, bool, Option<bool>, Option<bool>); 15] = [
+    let fields: [(&str, bool, Option<bool>, Option<bool>); 16] = [
         ("model", a.model.is_some(), Some(true), None),
         ("lora", a.lora.is_some(), Some(true), None),
         ("alpha", a.alpha.is_some(), Some(false), None),
@@ -341,7 +348,8 @@ fn lora_issues(a: &LoraToolArgs) -> Vec<ValidationIssue> {
         ("dry_run", a.dry_run.is_some(), Some(false), None),
         ("backup_dir", a.backup_dir.is_some(), Some(false), None),
         ("base", a.base.is_some(), None, Some(true)),
-        ("patched", a.patched.is_some(), None, Some(true)),
+        ("patched", a.patched.is_some(), None, Some(false)),
+        ("delta", a.delta.is_some(), None, Some(false)),
         ("out", a.out.is_some(), None, Some(true)),
         ("rank", a.rank.is_some(), None, Some(false)),
         ("dtype", a.dtype.is_some(), None, Some(false)),
@@ -355,7 +363,7 @@ fn lora_issues(a: &LoraToolArgs) -> Vec<ValidationIssue> {
         ("overwrite", a.overwrite.is_some(), None, Some(false)),
     ];
     let mode = a.mode.as_str();
-    fields
+    let mut issues: Vec<ValidationIssue> = fields
         .iter()
         .filter_map(|&(path, present, merge, extract)| {
             let role = match a.mode {
@@ -372,7 +380,14 @@ fn lora_issues(a: &LoraToolArgs) -> Vec<ValidationIssue> {
                 message,
             })
         })
-        .collect()
+        .collect();
+    if matches!(a.mode, LoraMode::Extract) && a.patched.is_some() == a.delta.is_some() {
+        issues.push(ValidationIssue {
+            path: "patched".into(),
+            message: "patched ou delta, un seul des deux, est requis en mode extract".into(),
+        });
+    }
+    issues
 }
 
 fn lora(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
@@ -408,7 +423,8 @@ fn lora(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         }),
         LoraMode::Extract => LoraCommand::Extract(LoraExtractArgs {
             base: required_path(ctx, "base", &args.base, Access::Read)?,
-            patched: required_path(ctx, "patched", &args.patched, Access::Read)?,
+            patched: optional_path(ctx, "patched", &args.patched, Access::Read)?,
+            delta: optional_path(ctx, "delta", &args.delta, Access::Read)?,
             out: required_path(ctx, "out", &args.out, Access::Write)?,
             rank: args.rank.unwrap_or(DEFAULT_RANK) as usize,
             dtype: args.dtype.unwrap_or(FactorDtype::F32),

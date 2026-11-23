@@ -122,6 +122,10 @@
 //!   properties in `surgeon_compose`, and the optional `density`, `drop_rate`, `seed` of a
 //!   patch's `composition`. Only the `schema` hash and the tool schema hash moved; every
 //!   other reference output is byte for byte what it was.
+//! - LoRA extraction from a delta file: `lora extract --delta` and the property `delta` of
+//!   `surgeon_lora`. One deliberate relaxation: `--patched` is required unless `--delta` is
+//!   given (exactly one of the two), so every former invocation is still valid. Only the
+//!   tool schema hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

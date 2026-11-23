@@ -2101,6 +2101,13 @@
             "null"
           ]
         },
+        "delta": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "dry_run": {
           "default": null,
           "type": [
