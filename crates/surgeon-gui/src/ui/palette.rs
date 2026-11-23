@@ -46,6 +46,7 @@ pub enum Command {
     CheckUpdate,
     /// The interference radar of the open project's direction files.
     Radar,
+    Vector,
 }
 
 fn label(command: &Command) -> String {
@@ -64,6 +65,7 @@ fn label(command: &Command) -> String {
         Command::ExportLedger => t("cmd.ledger").into(),
         Command::CheckUpdate => t("cmd.update").into(),
         Command::Radar => t("cmd.radar").into(),
+        Command::Vector => t("cmd.vector").into(),
     }
 }
 
@@ -76,6 +78,7 @@ pub fn commands(query: &str) -> Vec<(Command, String)> {
         Command::NewCopy,
         Command::ExportLedger,
         Command::Radar,
+        Command::Vector,
         Command::ResetCamera,
         Command::Settings,
         Command::Backend,
@@ -133,6 +136,7 @@ fn run(ctx: &egui::Context, app: &mut SurgeonApp, command: Command) {
             Some(manager) => app.radar.open_on(&manager.project.dir.join("work")),
             None => app.studio.message = Some((t("radar.no_project").into(), true)),
         },
+        Command::Vector => super::views::vector::open(app),
     }
 }
 

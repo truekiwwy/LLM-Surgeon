@@ -19,6 +19,7 @@ use crate::camera::Orbit;
 use crate::source::Step;
 use crate::studio::bus::RunView;
 use crate::studio::live::Layer;
+use crate::studio::vectors::LayerScores;
 use crate::viewport::{self, node_title, View};
 
 pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
@@ -121,6 +122,10 @@ pub(super) fn viewport(ui: &mut Ui, app: &mut SurgeonApp, live: bool) {
         .ctx()
         .animate_value_with_time(egui::Id::new("layout-blend"), target, time);
     let blend = t_ * t_ * (3.0 - 2.0 * t_);
+    let scores = match live {
+        true => app.layer_scores().clone(),
+        false => LayerScores::default(),
+    };
     let Some(step) = app.timeline.current() else {
         let (title, hint) = match app.feed {
             Some(_) => (t("graph.waiting"), t("graph.waiting.hint")),
@@ -154,7 +159,7 @@ pub(super) fn viewport(ui: &mut Ui, app: &mut SurgeonApp, live: bool) {
     let focus = match live {
         true => {
             let last = app.agents.conversation().and_then(activity::last);
-            super::live::focus(step, layer, last.as_ref())
+            super::live::focus(step, layer, last.as_ref(), &scores)
         }
         false => None,
     };
@@ -359,6 +364,7 @@ fn chronology(ui: &mut Ui, app: &mut SurgeonApp) {
 // ------------------------------------------------------------------ inspector
 
 pub fn inspector(ui: &mut Ui, app: &mut SurgeonApp) {
+    let scores = app.layer_scores().clone();
     let Some(step) = app.timeline.current() else {
         c::empty(
             ui,
@@ -377,6 +383,7 @@ pub fn inspector(ui: &mut Ui, app: &mut SurgeonApp) {
         .show(ui, |ui| match selected {
             Some(i) => {
                 node_inspector(ui, step, &step.report.nodes[i]);
+                layer_scores(ui, &scores, step.report.nodes[i].layer);
                 if let Some(run) = run {
                     run_inspector(ui, run, layer, step, i);
                 }
@@ -433,6 +440,37 @@ fn warnings(ui: &mut Ui, list: &[String]) {
     c::section(ui, t("inspector.warnings"));
     for w in list {
         c::status(ui, State::Warn, w.as_str());
+    }
+}
+
+fn layer_scores(ui: &mut Ui, scores: &LayerScores, layer: Option<usize>) {
+    let Some(layer) = layer else {
+        return;
+    };
+    let causal = scores.causal.get(&layer);
+    let auc = scores.auc.get(&layer);
+    if causal.is_none() && auc.is_none() {
+        return;
+    }
+    c::section(ui, t("inspector.scores"));
+    if let Some(score) = causal {
+        let component = scores.component.as_deref().unwrap_or("-");
+        c::kv(
+            ui,
+            t("inspector.causal"),
+            &format!("{score:+.3} · {component}"),
+        );
+        let window = match scores.lit(Some(layer)) {
+            true => t("inspector.window.in"),
+            false => t("inspector.window.out"),
+        };
+        c::kv(ui, t("inspector.window"), window);
+    }
+    if let Some(auc) = auc {
+        c::kv(ui, "AUC", &format!("{auc:.3}"));
+    }
+    if let Some(margin) = scores.margin.get(&layer) {
+        c::kv(ui, t("inspector.margin"), &format!("{margin:+.3}"));
     }
 }
 

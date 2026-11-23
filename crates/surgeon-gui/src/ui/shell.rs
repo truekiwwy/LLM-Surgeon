@@ -67,6 +67,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp) {
     resize_edges(ui, screen);
     views::system::dialog(&ctx, app);
     views::radar::dialog(&ctx, app);
+    views::vector::dialog(&ctx, app);
     palette::show(&ctx, app);
 }
 

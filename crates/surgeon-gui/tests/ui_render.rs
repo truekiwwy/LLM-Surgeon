@@ -148,6 +148,64 @@ fn the_radar_compares_two_direction_files_of_work() {
 }
 
 #[test]
+fn the_vector_dialog_and_the_causal_scores_of_a_layer_render_in_both_languages() {
+    use surgeon_gui::agent::session::Dirs;
+    use surgeon_gui::studio::vectors::VectorMode;
+
+    for (lang, title, run, causal, inside) in [
+        (
+            Lang::Fr,
+            "Extraire un vecteur",
+            "Lancer",
+            "Score causal",
+            "dedans",
+        ),
+        (
+            Lang::En,
+            "Extract a vector",
+            "Run",
+            "Causal score",
+            "inside",
+        ),
+    ] {
+        let mut b = bench(lang);
+        b.app.vector.open = true;
+        let sweep = b.texts(Tab::Agent);
+        for text in [title, run, "pca (svd)", "work/direction.safetensors"] {
+            assert!(sweep.iter().any(|t| t == text), "{text}: {sweep:?}");
+        }
+        b.app.vector.mode = VectorMode::Trace;
+        let trace = b.texts(Tab::Agent);
+        assert!(trace.iter().any(|t| t == "mlp"), "{trace:?}");
+        let raw: Vec<_> = sweep.iter().chain(&trace).filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+        b.app.vector.open = false;
+
+        let project = b.app.agents.project.clone().unwrap();
+        let data = serde_json::json!({"component": "mlp",
+            "window": {"start": 1, "end": 2, "layers": "1-2"},
+            "layers": [{"layer": 0, "score": 0.1}, {"layer": 1, "score": 0.75},
+                       {"layer": 2, "score": 0.5}]});
+        let line = serde_json::json!({"run_id": "mcp-1", "tool": "surgeon_causal_trace",
+            "ok": true, "exit_code": 0, "data": data, "started_unix": 1, "finished_unix": 2});
+        std::fs::write(Dirs::of(&project).mcp_runs(), format!("{line}\n")).unwrap();
+        let step = b.app.timeline.current().unwrap();
+        let node = step
+            .report
+            .nodes
+            .iter()
+            .find(|n| n.layer == Some(1))
+            .unwrap();
+        b.app.selected = Some(node.id.clone());
+        assert_eq!(b.app.layer_scores().window, Some((1, 2)));
+        let inspector = b.texts(Tab::Graph);
+        for text in [causal, "+0.750 · mlp", inside] {
+            assert!(inspector.iter().any(|t| t == text), "{text}: {inspector:?}");
+        }
+    }
+}
+
+#[test]
 fn the_results_panel_shows_the_ollama_command_of_the_working_copy() {
     use surgeon_gui::agent::{paths::ProjectPaths, session::Dirs};
     use surgeon_gui::studio::ollama;

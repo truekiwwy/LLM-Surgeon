@@ -33,6 +33,7 @@ use crate::studio::bus::RunView;
 use crate::studio::ledger;
 use crate::studio::live::{Layer, Replay};
 use crate::studio::results::{self, Run};
+use crate::studio::vectors::{LayerScores, VectorForm};
 use crate::studio::view::{Studio, Target};
 use crate::task::Task;
 use crate::ui::layout::Columns;
@@ -195,6 +196,7 @@ pub struct SurgeonApp {
     pub palette: Palette,
     /// The vector interference radar over `work/` of the open project.
     pub radar: Radar,
+    pub vector: VectorForm,
     /// The last Ollama export of the Results panel: its command, or why it failed.
     pub ollama: Option<Result<crate::studio::ollama::Export, String>>,
     /// `false` (`--no-motion`): no transition at all.
@@ -220,6 +222,7 @@ pub struct SurgeonApp {
     ledger_cache: RunCache,
     mcp_cache: RunCache,
     results_cache: Option<(RunStamp, Vec<Run>)>,
+    scores_cache: Option<(RunStamp, LayerScores)>,
 }
 
 impl SurgeonApp {
@@ -270,6 +273,7 @@ impl SurgeonApp {
             columns,
             palette: Palette::default(),
             radar: Radar::default(),
+            vector: VectorForm::default(),
             ollama: None,
             motion: true,
             settings: None,
@@ -285,6 +289,7 @@ impl SurgeonApp {
             ledger_cache: None,
             mcp_cache: None,
             results_cache: None,
+            scores_cache: None,
         };
         if app
             .agents
@@ -768,12 +773,28 @@ impl SurgeonApp {
         ledger.iter().chain(mcp).cloned().collect()
     }
 
+    fn run_stamp(&mut self) -> RunStamp {
+        self.run_lists();
+        let stamp = |c: &RunCache| c.as_ref().map(|(p, m, _)| (p.clone(), *m));
+        [stamp(&self.ledger_cache), stamp(&self.mcp_cache)]
+    }
+
+    pub fn layer_scores(&mut self) -> &LayerScores {
+        let stamp = self.run_stamp();
+        if self.scores_cache.as_ref().is_none_or(|(s, _)| *s != stamp) {
+            let entries = [&self.ledger_cache, &self.mcp_cache]
+                .into_iter()
+                .flatten()
+                .flat_map(|(_, _, e)| e);
+            self.scores_cache = Some((stamp, LayerScores::of(entries)));
+        }
+        &self.scores_cache.get_or_insert_default().1
+    }
+
     /// The measuring runs of the project for the Results panel, parsed again only when one
     /// of the files changed.
     pub fn results(&mut self) -> &[Run] {
-        self.run_lists();
-        let stamp = |c: &RunCache| c.as_ref().map(|(p, m, _)| (p.clone(), *m));
-        let stamp = [stamp(&self.ledger_cache), stamp(&self.mcp_cache)];
+        let stamp = self.run_stamp();
         if self.results_cache.as_ref().is_none_or(|(s, _)| *s != stamp) {
             let entries = [&self.ledger_cache, &self.mcp_cache]
                 .into_iter()

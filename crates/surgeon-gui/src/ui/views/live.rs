@@ -18,6 +18,7 @@ use crate::agent::telemetry::{self, Evidence, Progress, Stage};
 use crate::app::SurgeonApp;
 use crate::source::Step;
 use crate::studio::live::Layer;
+use crate::studio::vectors::LayerScores;
 
 /// Share of the body the agent takes; the graph gets the rest.
 const SPLIT: f32 = 0.42;
@@ -64,7 +65,12 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
 /// The nodes Live mode keeps lit: the layers of the agent's newest call, the nodes its run
 /// reached, those the last patch touched and those that differ from the baseline. `None`
 /// when nothing stands out yet: no node steps back then.
-pub fn focus(step: &Step, layer: Option<&Layer>, activity: Option<&Activity>) -> Option<Vec<bool>> {
+pub fn focus(
+    step: &Step,
+    layer: Option<&Layer>,
+    activity: Option<&Activity>,
+    scores: &LayerScores,
+) -> Option<Vec<bool>> {
     let changed: HashSet<&str> = step
         .report
         .baseline_diff
@@ -80,6 +86,7 @@ pub fn focus(step: &Step, layer: Option<&Layer>, activity: Option<&Activity>) ->
         .enumerate()
         .map(|(i, node)| {
             activity.is_some_and(|a| a.covers(node.layer))
+                || scores.lit(node.layer)
                 || layer.is_some_and(|l| l.states.get(i).copied().flatten().is_some())
                 || step.touched.contains_key(&node.id)
                 || changed.contains(node.id.as_str())
@@ -231,12 +238,32 @@ mod tests {
     fn the_newest_call_s_layers_stay_lit_and_nothing_dims_before_it() {
         let timeline = Timeline::from_report(testkit::graph(28));
         let step = timeline.current().unwrap();
-        assert_eq!(focus(step, None, None), None, "nothing stands out yet");
+        let none = LayerScores::default();
+        assert_eq!(
+            focus(step, None, None, &none),
+            None,
+            "nothing stands out yet"
+        );
         let extract =
             crate::agent::activity::of("surgeon_extract", &serde_json::json!({"layer": 2}));
-        let mask = focus(step, None, extract.as_ref()).unwrap();
+        let mask = focus(step, None, extract.as_ref(), &none).unwrap();
         for (lit, node) in mask.iter().zip(&step.report.nodes) {
             assert_eq!(*lit, node.layer == Some(2), "{}", node.id);
+        }
+    }
+
+    #[test]
+    fn the_last_causal_window_stays_lit_between_calls() {
+        let timeline = Timeline::from_report(testkit::graph(28));
+        let step = timeline.current().unwrap();
+        let scores = LayerScores {
+            window: Some((1, 2)),
+            ..LayerScores::default()
+        };
+        let mask = focus(step, None, None, &scores).unwrap();
+        for (lit, node) in mask.iter().zip(&step.report.nodes) {
+            let causal = matches!(node.layer, Some(1 | 2));
+            assert_eq!(*lit, causal, "{}", node.id);
         }
     }
 

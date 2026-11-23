@@ -7,6 +7,7 @@ pub mod live;
 pub mod radar;
 pub mod results;
 pub mod system;
+pub mod vector;
 
 use std::collections::BTreeMap;
 
@@ -215,12 +216,20 @@ pub fn context(ui: &mut Ui, app: &mut SurgeonApp) {
         None => {}
     }
     ui.add_space(T.space.s);
-    if c::button(ui, t("copy.new"), ButtonKind::Secondary)
-        .on_hover_text(t("copy.new.tip"))
-        .clicked()
-    {
-        app.studio.submit_copy();
-    }
+    ui.horizontal_wrapped(|ui| {
+        if c::button(ui, t("copy.new"), ButtonKind::Secondary)
+            .on_hover_text(t("copy.new.tip"))
+            .clicked()
+        {
+            app.studio.submit_copy();
+        }
+        if c::button(ui, t("vector.open"), ButtonKind::Secondary)
+            .on_hover_text(t("vector.open.tip"))
+            .clicked()
+        {
+            vector::open(app);
+        }
+    });
 }
 
 /// The tensors of the graph on screen, by layer; Up / Down walk it, Escape clears.

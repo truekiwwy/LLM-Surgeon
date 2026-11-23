@@ -218,6 +218,24 @@ avec une seule écriture puis `sync`). Chaque entrée contient :
 `Exporter JSON` et `Exporter Markdown` écrivent `ledger.json` et `ledger.md` à la racine
 du projet.
 
+### Extraire un vecteur, couches causales
+
+Le bouton `Extraire un vecteur` du panneau Projet (et la palette, `Ctrl+K`) ouvre un
+dialogue qui lance, sur le modèle d'origine du projet (lu, jamais écrit), l'un de deux jobs
+du gestionnaire (`studio/vectors.rs`) :
+
+- **Balayage contrastif** : `surgeon_extract` avec `layers`, méthode `mean_diff` ou `svd`
+  (PCA des paires), écrit `work/<nom>.safetensors` : `direction` (meilleure couche) et
+  `layers.<i>` par couche, lisibles aussitôt par `surgeon_compose` et le radar d'interférence ;
+- **Traçage causal** : `surgeon_causal_trace` (`resid`, `attn` ou `mlp`), sans fichier.
+
+Les prompts s'écrivent un par ligne ; le dialogue refuse avant le job des ensembles vides,
+des paires inégales (traçage, `svd`), un nom hors `[A-Za-z0-9._-]` et une sélection de
+couches illisible. Le dernier traçage et le dernier balayage réussis du projet (ledger et
+`chat/mcp_runs.jsonl`, donc aussi ceux d'un agent) donnent les scores par couche : le Mode
+Live garde allumées les couches de la fenêtre causale, et l'Inspecteur affiche pour la
+couche du tenseur sélectionné le score causal, sa place dans la fenêtre, l'AUC et la marge.
+
 ## 6. Graphe éphémère
 
 `surgeon-gui graph.json`, `surgeon-gui graph.ndjson` ou le champ `Graphe éphémère` de

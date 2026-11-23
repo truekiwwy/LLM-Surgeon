@@ -14,6 +14,7 @@
 //! - [`ollama`]: the `Modelfile` and the `ollama create` command of the project's artifact.
 //! - [`selftest`]: `surgeon-gui --self-test`, all of the above without a window.
 //! - [`vector_radar`]: the read-only cosine comparison of two direction files.
+//! - [`vectors`]: the extract-a-vector form and the layer scores of the last sweep and trace.
 //! - [`view`]: the Projects workspace of the window.
 
 pub mod bus;
@@ -30,4 +31,5 @@ pub mod project;
 pub mod results;
 pub mod selftest;
 pub mod vector_radar;
+pub mod vectors;
 pub mod view;
