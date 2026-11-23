@@ -1343,6 +1343,10 @@ pub enum ProgressEvent {
     },
     /// `autotune`: responses measured, ridge being solved.
     AutotuneSolve,
+    TraceForward {
+        done: usize,
+        total: usize,
+    },
     /// `autotune --refusal-prompts`: one candidate scale measured (`probe` or `generation`).
     AutotuneScale {
         scale: f64,
@@ -1712,6 +1716,7 @@ impl ProgressSink for CliSink<'_, '_> {
             ProgressEvent::AutotuneForward { done, total } => {
                 Some(("autotune", *done, Some(*total)))
             }
+            ProgressEvent::TraceForward { done, total } => Some(("trace", *done, Some(*total))),
             _ => None,
         };
         if let Some((label, done, total)) = bench {
@@ -1909,6 +1914,7 @@ impl ProgressSink for CliSink<'_, '_> {
             | ProgressEvent::BenchJudgeVerdict { .. }
             | ProgressEvent::AutotuneForward { .. }
             | ProgressEvent::AutotuneSolve
+            | ProgressEvent::TraceForward { .. }
             | ProgressEvent::AutotuneSelection { .. }
             | ProgressEvent::Surgery(_) => {}
         }
@@ -2871,10 +2877,11 @@ impl ExtractObserver for SinkObserver<'_> {
             ExtractEvent::Planned {
                 dtype_used,
                 weight_bytes,
+                layer,
                 ..
             } => ProgressEvent::ExtractStart {
                 model: self.request.model_dir.clone(),
-                layer: self.request.layer,
+                layer,
                 site: self.request.site.as_str().into(),
                 pooling: self.request.pooling.as_str().into(),
                 dtype: dtype_used,
@@ -2894,6 +2901,7 @@ impl ExtractObserver for SinkObserver<'_> {
             }
             ExtractEvent::Writing => ProgressEvent::ExtractWriting,
             ExtractEvent::Note(note) => ProgressEvent::Info(note),
+            ExtractEvent::Forward { done, total } => ProgressEvent::TraceForward { done, total },
         };
         self.sink.event(progress);
         match self.interrupted.load(Ordering::SeqCst) {

@@ -81,6 +81,7 @@ mod prompts;
 mod stats;
 mod subspace;
 mod svd;
+mod sweep;
 mod weights;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -120,6 +121,10 @@ pub use stats::{
 };
 pub use subspace::{load_labels, parse_labels, SubspaceDiagnostics, SubspaceOptions};
 pub use svd::{svd_direction, svd_subspace, SvdDiagnostics};
+pub use sweep::{
+    auc, best_layer_index, margin, resolve_layers, run_sweep, LayerSeparation, SweepReport,
+    SweepRequest,
+};
 pub use weights::{
     check_tensors, load_tensors, required_tensors, required_tensors_full, RawTensor,
     SafetensorsDir, TensorSource, TensorTotals,
@@ -245,6 +250,7 @@ pub enum ExtractEvent {
         dtype_used: String,
         weight_bytes: u64,
         tensors: usize,
+        layer: usize,
     },
     LoadingWeights {
         done_tensors: usize,
@@ -258,6 +264,10 @@ pub enum ExtractEvent {
     Writing,
     /// A decision worth a log line (the dtype, the free RAM it was taken on).
     Note(String),
+    Forward {
+        done: usize,
+        total: usize,
+    },
 }
 
 /// Progress and cancellation: `Break` stops the run (checked between tensors and between
@@ -406,6 +416,214 @@ pub(crate) fn dtype_name(dtype: DType) -> &'static str {
     }
 }
 
+struct ModelInput<'a> {
+    model_dir: &'a Path,
+    chat_template: ChatTemplate,
+    max_tokens: usize,
+    dtype: DTypeChoice,
+}
+
+impl ExtractRequest {
+    fn model_input(&self) -> ModelInput<'_> {
+        ModelInput {
+            model_dir: &self.model_dir,
+            chat_template: self.chat_template,
+            max_tokens: self.max_tokens,
+            dtype: self.dtype,
+        }
+    }
+}
+
+fn check_layer(cfg: &Qwen2Config, layer: usize) -> Result<()> {
+    match layer < cfg.num_hidden_layers {
+        true => Ok(()),
+        false => Err(ExtractError::InvalidArgument(format!(
+            "couche {layer} hors bornes : le modèle a num_hidden_layers = {} (couches 0 à {})",
+            cfg.num_hidden_layers,
+            cfg.num_hidden_layers - 1
+        ))),
+    }
+}
+
+struct Session {
+    depth: forward::Depth,
+    required: Vec<(String, Vec<usize>)>,
+    dtype: DType,
+    dtype_used: String,
+    tokenizer: tokenizers::Tokenizer,
+    format: PromptFormat,
+    max_tokens: usize,
+    warnings: Vec<String>,
+    truncated: usize,
+}
+
+fn open_session(
+    input: ModelInput,
+    cfg: &Qwen2Config,
+    depth: forward::Depth,
+    source: &dyn TensorSource,
+    probe: &dyn HardwareProbe,
+    observer: &mut dyn ExtractObserver,
+) -> Result<Session> {
+    let (layer, required) = match depth {
+        forward::Depth::UpTo(layer) => {
+            check_layer(cfg, layer)?;
+            (layer, required_tensors(cfg, layer))
+        }
+        forward::Depth::Full => (cfg.num_hidden_layers - 1, required_tensors_full(cfg)),
+    };
+    let totals = check_tensors(source, &required)?;
+    let decision = dtype_decision(
+        input.dtype,
+        plan_memory(cfg, totals, input.max_tokens),
+        probe,
+    )?;
+    let dtype_used = dtype_name(decision.dtype).to_owned();
+    let planned = ExtractEvent::Planned {
+        dtype_used: dtype_used.clone(),
+        weight_bytes: totals.elements * decision.dtype.size_in_bytes() as u64,
+        tensors: required.len(),
+        layer,
+    };
+    for event in [planned, ExtractEvent::Note(decision.note())] {
+        if observer.on_event(event).is_break() {
+            return Err(ExtractError::Cancelled);
+        }
+    }
+    Ok(Session {
+        depth,
+        required,
+        dtype: decision.dtype,
+        dtype_used,
+        tokenizer: load_tokenizer(input.model_dir)?,
+        format: input
+            .chat_template
+            .resolve(input.model_dir, ChatTemplate::NoTemplate),
+        max_tokens: input.max_tokens,
+        warnings: decision.fallback().into_iter().collect(),
+        truncated: 0,
+    })
+}
+
+impl Session {
+    fn encode(&mut self, set: &str, prompts: &[String]) -> Result<Vec<Vec<u32>>> {
+        let mut ids = Vec::with_capacity(prompts.len());
+        for (i, prompt) in prompts.iter().enumerate() {
+            let t = tokenize(&self.tokenizer, &self.format.apply(prompt), self.max_tokens)?;
+            if t.ids.is_empty() {
+                return Err(ExtractError::Prompts {
+                    set: set.into(),
+                    message: format!("prompt {i} : aucun token"),
+                });
+            }
+            self.truncated += usize::from(t.truncated);
+            ids.push(t.ids);
+        }
+        Ok(ids)
+    }
+
+    fn load(
+        &self,
+        cfg: &Qwen2Config,
+        source: &dyn TensorSource,
+        observer: &mut dyn ExtractObserver,
+    ) -> Result<Box<dyn forward::ResidualForward>> {
+        let device = Device::Cpu;
+        let tensors = load_tensors(
+            source,
+            &self.required,
+            self.dtype,
+            &device,
+            &mut |done, total| {
+                observer.on_event(ExtractEvent::LoadingWeights {
+                    done_tensors: done,
+                    total_tensors: total,
+                })
+            },
+        )?;
+        forward::build(cfg, tensors, self.depth, self.dtype, &device)
+    }
+}
+
+struct Captured {
+    pos: Vec<Vec<Vec<f64>>>,
+    neg: Vec<Vec<Vec<f64>>>,
+    session: Session,
+}
+
+fn capture_sets(
+    req: &ExtractRequest,
+    cfg: &Qwen2Config,
+    layers: &[usize],
+    source: &dyn TensorSource,
+    probe: &dyn HardwareProbe,
+    observer: &mut dyn ExtractObserver,
+) -> Result<Captured> {
+    let deepest = layers.iter().copied().max().unwrap_or(req.layer);
+    let depth = forward::Depth::UpTo(deepest);
+    let mut session = open_session(req.model_input(), cfg, depth, source, probe, observer)?;
+    let pos_ids = session.encode(PromptSet::Pos.as_str(), &req.pos_prompts)?;
+    let neg_ids = session.encode(PromptSet::Neg.as_str(), &req.neg_prompts)?;
+    let model = session.load(cfg, source, observer)?;
+    let pos = pool_layers(
+        model.as_ref(),
+        &pos_ids,
+        PromptSet::Pos,
+        layers,
+        req,
+        observer,
+    )?;
+    let neg = pool_layers(
+        model.as_ref(),
+        &neg_ids,
+        PromptSet::Neg,
+        layers,
+        req,
+        observer,
+    )?;
+    Ok(Captured { pos, neg, session })
+}
+
+fn pool_layers(
+    model: &dyn forward::ResidualForward,
+    ids: &[Vec<u32>],
+    set: PromptSet,
+    layers: &[usize],
+    req: &ExtractRequest,
+    observer: &mut dyn ExtractObserver,
+) -> Result<Vec<Vec<Vec<f64>>>> {
+    let point = req.site.hook_point();
+    let mut pooled = vec![Vec::with_capacity(ids.len()); layers.len()];
+    for (i, prompt_ids) in ids.iter().enumerate() {
+        let input = Tensor::new(prompt_ids.as_slice(), &Device::Cpu)?.unsqueeze(0)?;
+        let mut caught: Vec<Option<Tensor>> = vec![None; layers.len()];
+        model.forward_hooked(&input, &mut |layer, at, t| {
+            if let (true, Some(k)) = (at == point, layers.iter().position(|&l| l == layer)) {
+                caught[k] = Some(t.clone());
+            }
+            Ok(t)
+        })?;
+        for (rows, activation) in pooled.iter_mut().zip(caught) {
+            let activation =
+                activation.ok_or_else(|| ExtractError::Compute("couche cible absente".into()))?;
+            rows.push(pool(
+                &activation,
+                req.pooling,
+                &format!("{}[{i}]", set.as_str()),
+            )?);
+        }
+        let event = ExtractEvent::Prompt {
+            set,
+            done: i + 1,
+            total: ids.len(),
+        };
+        if observer.on_event(event).is_break() {
+            return Err(ExtractError::Cancelled);
+        }
+    }
+    Ok(pooled)
+}
+
 /// Opens the model directory and runs `mean_diff`.
 pub fn run_extraction(
     req: &ExtractRequest,
@@ -515,97 +733,19 @@ fn run_pipeline(
     validate_request(req)?;
     let info = validate_method(req, method, params)?;
     let cfg = load_config(&req.model_dir)?;
-    if req.layer >= cfg.num_hidden_layers {
-        return Err(ExtractError::InvalidArgument(format!(
-            "couche {} hors bornes : le modèle a num_hidden_layers = {} (couches 0 à {})",
-            req.layer,
-            cfg.num_hidden_layers,
-            cfg.num_hidden_layers - 1
-        )));
-    }
-    let required = required_tensors(&cfg, req.layer);
-    let totals = check_tensors(source, &required)?;
-    let mut warnings = Vec::new();
-    let decision = dtype_decision(req.dtype, plan_memory(&cfg, totals, req.max_tokens), probe)?;
-    warnings.extend(decision.fallback());
-    let dtype = decision.dtype;
-    let tensor_bytes = totals.elements * dtype.size_in_bytes() as u64;
-    let dtype_used = dtype_name(dtype).to_owned();
-    let planned = ExtractEvent::Planned {
-        dtype_used: dtype_used.clone(),
-        weight_bytes: tensor_bytes,
-        tensors: required.len(),
-    };
-    for event in [planned, ExtractEvent::Note(decision.note())] {
-        if observer.on_event(event).is_break() {
-            return Err(ExtractError::Cancelled);
-        }
-    }
-
-    let tokenizer = load_tokenizer(&req.model_dir)?;
-    let format = req
-        .chat_template
-        .resolve(&req.model_dir, ChatTemplate::NoTemplate);
-    let mut truncated = 0;
-    let mut encode_set = |set: PromptSet, prompts: &[String]| -> Result<Vec<Vec<u32>>> {
-        prompts
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let t = tokenize(&tokenizer, &format.apply(p), req.max_tokens)?;
-                if t.ids.is_empty() {
-                    return Err(ExtractError::Prompts {
-                        set: set.as_str().into(),
-                        message: format!("prompt {i} : aucun token"),
-                    });
-                }
-                truncated += usize::from(t.truncated);
-                Ok(t.ids)
-            })
-            .collect()
-    };
-    let pos_ids = encode_set(PromptSet::Pos, &req.pos_prompts)?;
-    let neg_ids = encode_set(PromptSet::Neg, &req.neg_prompts)?;
-
-    let device = Device::Cpu;
-    let tensors = load_tensors(source, &required, dtype, &device, &mut |done, total| {
-        observer.on_event(ExtractEvent::LoadingWeights {
-            done_tensors: done,
-            total_tensors: total,
-        })
-    })?;
-    let model = forward::build(
-        &cfg,
-        tensors,
-        forward::Depth::UpTo(req.layer),
-        dtype,
-        &device,
-    )?;
-
-    let mut activations = |set: PromptSet, ids: &[Vec<u32>]| -> Result<Vec<Vec<f64>>> {
-        let mut pooled = Vec::with_capacity(ids.len());
-        for (i, prompt_ids) in ids.iter().enumerate() {
-            let input = Tensor::new(prompt_ids.as_slice(), &device)?.unsqueeze(0)?;
-            let activation = model.forward_capture(&input, req.site)?;
-            pooled.push(pool(
-                &activation,
-                req.pooling,
-                &format!("{}[{i}]", set.as_str()),
-            )?);
-            let event = ExtractEvent::Prompt {
-                set,
-                done: i + 1,
-                total: ids.len(),
-            };
-            if observer.on_event(event).is_break() {
-                return Err(ExtractError::Cancelled);
-            }
-        }
-        Ok(pooled)
-    };
-    let pos = activations(PromptSet::Pos, &pos_ids)?;
-    let neg = activations(PromptSet::Neg, &neg_ids)?;
-    drop(model);
+    let Captured {
+        mut pos,
+        mut neg,
+        session,
+    } = capture_sets(req, &cfg, &[req.layer], source, probe, observer)?;
+    let (pos, neg) = (pos.remove(0), neg.remove(0));
+    let Session {
+        format,
+        dtype_used,
+        mut warnings,
+        truncated,
+        ..
+    } = session;
 
     let ctx = ExtractContext {
         hidden_size: cfg.hidden_size,
@@ -630,19 +770,7 @@ fn run_pipeline(
         pos_projections,
         neg_projections,
     } = separation;
-    for (set, n) in [("positifs", pos.len()), ("négatifs", neg.len())] {
-        if n < MIN_RECOMMENDED_PROMPTS {
-            warnings.push(format!(
-                "seulement {n} prompts {set} (au moins {MIN_RECOMMENDED_PROMPTS} recommandés)"
-            ));
-        }
-    }
-    if truncated > 0 {
-        warnings.push(format!(
-            "{truncated} prompt(s) tronqué(s) à {} tokens",
-            req.max_tokens
-        ));
-    }
+    prompt_warnings(&mut warnings, req, truncated);
     if stats.d_prime.is_some_and(|d| d < 1.0) {
         warnings.push("séparation faible (d′ < 1) : direction peu fiable".into());
     }
@@ -688,6 +816,7 @@ fn run_pipeline(
         pooling: req.pooling.as_str(),
         hidden_size: cfg.hidden_size,
         method_diagnostics: method_diagnostics.as_ref(),
+        layer_scores: None,
     };
     let mut companion_bytes =
         serde_json::to_vec_pretty(&companion).map_err(|e| ExtractError::Compute(e.to_string()))?;
@@ -835,6 +964,25 @@ fn holdout_report(
     }
 }
 
+fn prompt_warnings(warnings: &mut Vec<String>, req: &ExtractRequest, truncated: usize) {
+    for (set, n) in [
+        ("positifs", req.pos_prompts.len()),
+        ("négatifs", req.neg_prompts.len()),
+    ] {
+        if n < MIN_RECOMMENDED_PROMPTS {
+            warnings.push(format!(
+                "seulement {n} prompts {set} (au moins {MIN_RECOMMENDED_PROMPTS} recommandés)"
+            ));
+        }
+    }
+    if truncated > 0 {
+        warnings.push(format!(
+            "{truncated} prompt(s) tronqué(s) à {} tokens",
+            req.max_tokens
+        ));
+    }
+}
+
 fn invalid_output(message: String) -> ExtractError {
     PluginError::InvalidOutput(message).into()
 }
@@ -979,6 +1127,8 @@ struct Companion<'a> {
     /// svd / leace only: absent for mean_diff, so its companion is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     method_diagnostics: Option<&'a Diagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layer_scores: Option<&'a [LayerSeparation]>,
 }
 
 /// Name of the model directory (absolute form first, so `.` still gets a name).

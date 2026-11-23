@@ -590,7 +590,8 @@ impl<W: Write> ProgressSink for McpProgress<'_, W> {
             ProgressEvent::BenchJudgeVerdict { done, total } => {
                 (done, total, format!("verdict {done}/{total}"))
             }
-            ProgressEvent::AutotuneForward { done, total } => {
+            ProgressEvent::AutotuneForward { done, total }
+            | ProgressEvent::TraceForward { done, total } => {
                 (done, total, format!("forward {done}/{total}"))
             }
             ProgressEvent::GraphNode { id, done, total } => {

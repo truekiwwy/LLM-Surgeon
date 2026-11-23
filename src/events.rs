@@ -226,6 +226,7 @@ pub fn from_progress(event: &ProgressEvent) -> Vec<SurgeonEvent> {
         P::BenchJudgeVerdict { done, total } => one(S::progress(*done, Some(*total), "verdict")),
         P::AutotuneForward { done, total } => one(S::progress(*done, Some(*total), "forward")),
         P::AutotuneSolve => one(S::info("régression ridge".into())),
+        P::TraceForward { done, total } => one(S::progress(*done, Some(*total), "forward")),
         P::AutotuneScale {
             scale,
             stage,
