@@ -15,22 +15,23 @@ use crate::app::{SurgeonApp, Tab};
 use crate::studio::ledger::{self, Verdict};
 use crate::studio::ollama::{self, Artifact};
 use crate::studio::project::now_unix;
-use crate::studio::results::{Answer, Bench, Mode, Run, Score};
+use crate::studio::results::{self as runs, Answer, Bench, Lora, Mode, Run, Score};
 
 pub fn show(ui: &mut Ui, app: &mut SurgeonApp) {
     let entries = app.runs();
     let runs = app.results().to_vec();
-    if runs.is_empty() {
-        c::empty(ui, Icon::Check, t("results.none"), t("results.none.hint"));
-        return;
-    }
     let title = app
         .studio
         .manager
         .as_ref()
         .map(|m| m.project.manifest.name.clone())
         .unwrap_or_default();
+    // The exports need a working copy, not a measuring run: they come first.
     export_buttons(ui, app, &title, &entries);
+    if runs.is_empty() {
+        c::empty(ui, Icon::Check, t("results.none"), t("results.none.hint"));
+        return;
+    }
     let mut open3d = None;
     ScrollArea::vertical()
         .id_salt("results")
@@ -69,8 +70,52 @@ fn export_buttons(ui: &mut Ui, app: &mut SurgeonApp, title: &str, entries: &[led
             app.ollama = Some(export_ollama(app, title));
         }
     });
+    // The rank and its button on a row of their own, so that they wrap together.
+    ui.horizontal_wrapped(|ui| lora_export(ui, app));
     ollama_command(ui, app);
     ui.add_space(T.space.s);
+}
+
+/// The rank of the adapter, then "Extract as LoRA": a studio job of the working copy against
+/// the origin, listed below with its SVD fidelity once it ends.
+fn lora_export(ui: &mut Ui, app: &mut SurgeonApp) {
+    let id = egui::Id::new("lora-rank");
+    let mut rank: u32 = ui.data(|d| d.get_temp(id)).unwrap_or(16);
+    c::select(
+        ui,
+        "lora-rank",
+        &format!("r = {rank}"),
+        6.0 * T.space.l,
+        |ui| {
+            for r in runs::LORA_RANKS {
+                c::option(ui, &mut rank, r, &format!("r = {r}"));
+            }
+        },
+    );
+    ui.data_mut(|d| d.insert_temp(id, rank));
+    if !c::button(ui, t("lora.extract"), c::ButtonKind::Secondary)
+        .on_hover_text(t("lora.extract.tip"))
+        .clicked()
+    {
+        return;
+    }
+    let paths = app.agents.project.as_deref().map(ProjectPaths::of);
+    let job = match paths {
+        Some(ProjectPaths {
+            project,
+            origin: Some(origin),
+            copy: Some(copy),
+            ..
+        }) => runs::lora_job(&project, &origin, &copy, rank),
+        _ => Err(t("lora.none").to_owned()),
+    };
+    let submitted = job.and_then(|job| match app.studio.manager.as_mut() {
+        Some(manager) => manager.submit(job).map(drop),
+        None => Err(t("lora.none").to_owned()),
+    });
+    if let Err(e) = submitted {
+        app.studio.message = Some((e, true));
+    }
 }
 
 fn export_ollama(app: &SurgeonApp, title: &str) -> Result<ollama::Export, String> {
@@ -144,9 +189,13 @@ fn run_block(ui: &mut Ui, run: &Run) -> Option<std::path::PathBuf> {
         Verdict::Cancelled | Verdict::Interrupted => State::Warn,
     };
     let tool = run.tool.trim_start_matches("surgeon_");
-    let title = match run.bench.as_ref().and_then(|b| b.dataset.as_deref()) {
-        Some(dataset) => format!("{tool} · {dataset}"),
-        None => tool.to_owned(),
+    let title = match (
+        &run.lora,
+        run.bench.as_ref().and_then(|b| b.dataset.as_deref()),
+    ) {
+        (Some(l), _) => format!("{tool} · r{} · {:.1} %", l.rank, l.fidelity * 100.0),
+        (None, Some(dataset)) => format!("{tool} · {dataset}"),
+        (None, None) => tool.to_owned(),
     };
     let when = format!(
         "{} · {}",
@@ -172,6 +221,9 @@ fn run_block(ui: &mut Ui, run: &Run) -> Option<std::path::PathBuf> {
         if let Some(bench) = &run.bench {
             bench_block(ui, id, bench);
         }
+        if let Some(lora) = &run.lora {
+            lora_block(ui, lora);
+        }
         let opened = run
             .graph
             .as_ref()
@@ -180,6 +232,25 @@ fn run_block(ui: &mut Ui, run: &Run) -> Option<std::path::PathBuf> {
         opened.cloned()
     })
     .inner
+}
+
+/// The fidelity of the adapter's SVD, its rank and size, the tensor it fits worst, its file.
+fn lora_block(ui: &mut Ui, l: &Lora) {
+    c::kv(
+        ui,
+        t("lora.fidelity"),
+        &format!("{:.2} %", l.fidelity * 100.0),
+    );
+    c::kv(
+        ui,
+        t("lora.rank"),
+        &tf("lora.rank.value", &[("rank", &l.rank), ("n", &l.tensors)]),
+    );
+    if let Some((name, error)) = &l.worst {
+        c::kv(ui, t("lora.worst"), &format!("{:.2} %", error * 100.0));
+        c::mono_secondary(ui, name.as_str());
+    }
+    c::mono_secondary(ui, l.out.display().to_string());
 }
 
 fn rate(s: &Score) -> String {

@@ -1,8 +1,9 @@
 //! The results of the project's measuring runs, as the Results panel shows them: every
-//! `surgeon_bench`, `surgeon_graph`, `surgeon_extract` and `surgeon_autotune` run of the
-//! ledger (studio jobs) and of `chat/mcp_runs.jsonl` (CLI agents), newest first. A bench run
-//! is read from its report: dataset, score of the copy against the origin with their 95 %
-//! intervals, gained and lost items, and each item with its question when the set is known.
+//! `surgeon_bench`, `surgeon_graph`, `surgeon_extract`, `surgeon_autotune` and
+//! `surgeon_lora` run of the ledger (studio jobs) and of `chat/mcp_runs.jsonl` (CLI agents),
+//! newest first. A bench run is read from its report: dataset, score of the copy against the
+//! origin with their 95 % intervals, gained and lost items, and each item with its question
+//! when the set is known. A LoRA extraction gives its rank and the fidelity of its SVD.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,15 +12,69 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use weight_surgeon::bench::{builtin, dataset};
 
+use super::jobs::{Budgets, JobSpec};
 use super::ledger::{Entry, Verdict};
 
 /// The tools whose runs the panel lists.
-pub const TOOLS: [&str; 4] = [
+pub const TOOLS: [&str; 5] = [
     "surgeon_bench",
     "surgeon_graph",
     "surgeon_extract",
     "surgeon_autotune",
+    "surgeon_lora",
 ];
+
+/// The ranks the Results panel offers for a LoRA extraction.
+pub const LORA_RANKS: [u32; 4] = [8, 16, 32, 64];
+
+/// The job that extracts the working copy `copy` against the origin `origin` as a rank-`rank`
+/// PEFT adapter, written in `out/lora-r<rank>/` of the project (created here) and replaced
+/// by the next extraction of that rank. The origin is only read.
+pub fn lora_job(project: &Path, origin: &Path, copy: &Path, rank: u32) -> Result<JobSpec, String> {
+    let out = project.join("out").join(format!("lora-r{rank}"));
+    std::fs::create_dir_all(&out).map_err(|e| format!("{} : {e}", out.display()))?;
+    Ok(JobSpec {
+        tool: "surgeon_lora".into(),
+        label: format!("LoRA r{rank}"),
+        args: serde_json::json!({"mode": "extract", "base": origin, "patched": copy,
+                                 "out": out, "rank": rank, "overwrite": true}),
+        priority: 0,
+        budgets: Budgets::default(),
+        resumed_from: None,
+        read_only: false,
+    })
+}
+
+/// What a LoRA extraction wrote.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lora {
+    pub rank: u64,
+    pub tensors: u64,
+    /// `1 − mean ‖ΔW − BA‖F / ‖ΔW‖F` over the tensors: how much of the difference the
+    /// adapter rebuilds.
+    pub fidelity: f64,
+    /// The tensor the rank fits worst, and its relative error.
+    pub worst: Option<(String, f64)>,
+    pub out: PathBuf,
+}
+
+/// `data.lora` of an extraction (a merge reports no error: `None`).
+fn lora(data: &Value) -> Option<Lora> {
+    let l = &data["lora"];
+    let worst = l["per_tensor"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| Some((t["name"].as_str()?.to_owned(), t["rel_error"].as_f64()?)))
+        .max_by(|a, b| a.1.total_cmp(&b.1));
+    Some(Lora {
+        rank: l["rank"].as_u64()?,
+        tensors: l["tensors"].as_u64()?,
+        fidelity: 1.0 - l["mean_rel_error"].as_f64()?,
+        worst,
+        out: PathBuf::from(l["out"].as_str()?),
+    })
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Run {
@@ -32,6 +87,7 @@ pub struct Run {
     /// The graph file a `surgeon_graph` run wrote, still on disk.
     pub graph: Option<PathBuf>,
     pub bench: Option<Bench>,
+    pub lora: Option<Lora>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +154,9 @@ pub fn runs<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Vec<Run> {
             graph: graph_output(e),
             bench: (e.tool == "surgeon_bench")
                 .then(|| bench(&e.result, &e.params))
+                .flatten(),
+            lora: (e.tool == "surgeon_lora")
+                .then(|| lora(&e.result))
                 .flatten(),
         })
         .collect();

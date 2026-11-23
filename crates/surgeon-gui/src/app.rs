@@ -1210,6 +1210,56 @@ mod tests {
         assert_eq!(first.before.as_ref().unwrap().text, "5");
     }
 
+    /// The Results panel's LoRA export end to end: the studio job reads the origin (a
+    /// read-only root of its sandbox), writes the PEFT pair under `out/`, and the run reads
+    /// back with the fidelity of its SVD. The origin is never written.
+    #[test]
+    fn the_lora_export_extracts_the_copy_against_the_origin_with_its_fidelity() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("model");
+        write_model(&source);
+        let origin_bytes = std::fs::read(source.join("model.safetensors")).unwrap();
+        let (ctx, mut app, project) = app_on(dir.path(), &source);
+        app.studio.submit_copy().unwrap();
+        poll_until(&mut app, &ctx, |a| {
+            ProjectPaths::of(a.agents.project.as_deref().unwrap())
+                .copy
+                .is_some_and(|c| c.join("model.safetensors").is_file())
+                && a.studio.manager.as_ref().unwrap().running.is_empty()
+        });
+        // A rank-1 change of the first matrix (layer 0 q_proj, [4, 4] f32 at offset 0).
+        let paths = ProjectPaths::of(&project);
+        let file = paths.copy.as_ref().unwrap().join("model.safetensors");
+        let mut bytes = std::fs::read(&file).unwrap();
+        let start = 8 + u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+        let (u, v) = ([1.0f32, 2.0, 3.0, 4.0], [0.5f32, -1.0, 0.25, 2.0]);
+        for (k, value) in (0..16).map(|k| (k, u[k / 4] * v[k % 4])) {
+            bytes[start + 4 * k..start + 4 * k + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(&file, bytes).unwrap();
+
+        let (origin, copy) = (paths.origin.unwrap(), paths.copy.unwrap());
+        let job = results::lora_job(&project, &origin, &copy, 8).unwrap();
+        let id = app.studio.manager.as_mut().unwrap().submit(job).unwrap();
+        poll_until(&mut app, &ctx, |a| {
+            let m = a.studio.manager.as_ref().unwrap();
+            m.running.is_empty() && m.queue.is_empty()
+        });
+        let run = app.results().iter().find(|r| r.id == id).cloned().unwrap();
+        assert_eq!(run.verdict, ledger::Verdict::Ok, "{:?}", run.error);
+        let lora = run.lora.expect("an extraction reports its fidelity");
+        // Every matrix is 4 × 4: the rank is lowered to 4, which rebuilds rank 1 exactly.
+        assert_eq!((lora.rank, lora.tensors), (4, 14));
+        assert!(lora.fidelity > 1.0 - 1e-6, "{}", lora.fidelity);
+        assert!(lora.out.ends_with("out/lora-r8/adapter_model.safetensors"));
+        assert!(project.join("out/lora-r8/adapter_config.json").is_file());
+        assert_eq!(
+            std::fs::read(source.join("model.safetensors")).unwrap(),
+            origin_bytes,
+            "the origin is only read"
+        );
+    }
+
     #[test]
     fn starting_without_a_working_copy_makes_one_then_starts() {
         let dir = tempfile::tempdir().unwrap();

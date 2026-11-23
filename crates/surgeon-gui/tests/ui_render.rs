@@ -528,3 +528,29 @@ fn no_screen_spends_more_than_three_percent_of_its_pixels_on_the_accent() {
     }
     println!("{}", lines.join("\n"));
 }
+
+#[test]
+fn the_results_panel_offers_the_lora_export_and_shows_its_fidelity() {
+    use surgeon_gui::agent::session::Dirs;
+
+    for (lang, button) in [
+        (Lang::Fr, "Extraire en LoRA (.safetensors)"),
+        (Lang::En, "Extract as LoRA (.safetensors)"),
+    ] {
+        let mut b = bench(lang);
+        let project = b.app.agents.project.clone().unwrap();
+        let lora = serde_json::json!({"rank": 16, "tensors": 196, "mean_rel_error": 0.013,
+            "out": "out/lora-r16/adapter_model.safetensors",
+            "per_tensor": [{"name": "model.layers.3.mlp.down_proj.weight", "rel_error": 0.041}]});
+        let line = serde_json::json!({"run_id": "mcp-3", "tool": "surgeon_lora", "ok": true,
+            "exit_code": 0, "data": {"lora": lora}, "started_unix": 1, "finished_unix": 2});
+        std::fs::write(Dirs::of(&project).mcp_runs(), format!("{line}\n")).unwrap();
+        b.app.right = RightPane::Results;
+        let texts = b.texts(Tab::Agent);
+        for text in [button, "r = 16", "lora · r16 · 98.7 %"] {
+            assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
+        }
+        let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+    }
+}
