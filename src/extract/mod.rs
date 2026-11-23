@@ -98,7 +98,7 @@ pub use config::{
     load_config, parse_config, DecoderConfig, Llama3Scaling, Qwen2Config, Variant,
     SUPPORTED_MODEL_TYPES,
 };
-pub use decoder::{HookedDecoder, HookedQwen2, KvCache, Site};
+pub use decoder::{HookPoint, HookedDecoder, HookedQwen2, KvCache, LayerHook, Site};
 pub use error::{ExtractError, Result};
 pub use leace::{cross_cov_norm, erased_stats, fit as leace_fit, LeaceDiagnostics, LeaceFit};
 pub(crate) use method::compute_subspace as compute_method;

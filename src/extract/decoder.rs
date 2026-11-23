@@ -78,7 +78,23 @@ impl Site {
             Site::MlpOut => "mlp_out",
         }
     }
+
+    pub fn hook_point(self) -> HookPoint {
+        match self {
+            Site::ResidPost => HookPoint::ResidPost,
+            Site::MlpOut => HookPoint::MlpOut,
+        }
+    }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookPoint {
+    AttnOut,
+    MlpOut,
+    ResidPost,
+}
+
+pub type LayerHook<'a> = dyn FnMut(usize, HookPoint, Tensor) -> Result<Tensor> + 'a;
 
 struct Mlp {
     gate_proj: Linear,
@@ -347,19 +363,25 @@ impl DecoderLayer {
         })
     }
 
-    /// (residual stream after the layer, MLP output of the layer).
     fn forward(
         &self,
         xs: &Tensor,
         rope: &(Tensor, Tensor),
         mask: Option<&Tensor>,
-    ) -> candle_core::Result<(Tensor, Tensor)> {
+        index: usize,
+        hook: &mut LayerHook,
+    ) -> Result<Tensor> {
         let residual = xs;
         let xs = self.input_layernorm.forward(xs)?;
-        let xs = self.self_attn.forward(&xs, rope, mask)?;
-        let xs = (xs + residual)?;
+        let attn_out = hook(
+            index,
+            HookPoint::AttnOut,
+            self.self_attn.forward(&xs, rope, mask)?,
+        )?;
+        let xs = (attn_out + residual)?;
         let mlp_out = xs.apply(&self.post_attention_layernorm)?.apply(&self.mlp)?;
-        Ok(((&xs + &mlp_out)?, mlp_out))
+        let mlp_out = hook(index, HookPoint::MlpOut, mlp_out)?;
+        hook(index, HookPoint::ResidPost, (&xs + &mlp_out)?)
     }
 
     /// Residual stream after the layer, attention through the KV cache.
@@ -567,11 +589,7 @@ impl HookedDecoder {
             .to_dtype(self.dtype)
     }
 
-    fn run(
-        &self,
-        input_ids: &Tensor,
-        mut visit: impl FnMut(usize, &Tensor, &Tensor),
-    ) -> Result<Tensor> {
+    pub fn forward_hooked(&self, input_ids: &Tensor, hook: &mut LayerHook) -> Result<Tensor> {
         let (_b, seq_len) = input_ids.dims2()?;
         let mask = match seq_len {
             0 => return Err(ExtractError::InvalidArgument("séquence vide".into())),
@@ -581,9 +599,7 @@ impl HookedDecoder {
         let rope = self.rope(seq_len)?;
         let mut xs = self.embed_tokens.forward(input_ids)?;
         for (i, layer) in self.layers.iter().enumerate() {
-            let (resid, mlp_out) = layer.forward(&xs, &rope, mask.as_ref())?;
-            visit(i, &resid, &mlp_out);
-            xs = resid;
+            xs = layer.forward(&xs, &rope, mask.as_ref(), i, hook)?;
         }
         Ok(xs)
     }
@@ -592,10 +608,11 @@ impl HookedDecoder {
     pub fn forward_capture(&self, input_ids: &Tensor, site: Site) -> Result<Tensor> {
         let last = self.layers.len() - 1;
         let mut mlp_last = None;
-        let resid = self.run(input_ids, |i, _, mlp| {
-            if i == last {
-                mlp_last = Some(mlp.clone());
+        let resid = self.forward_hooked(input_ids, &mut |i, point, t| {
+            if i == last && point == HookPoint::MlpOut {
+                mlp_last = Some(t.clone());
             }
+            Ok(t)
         })?;
         match site {
             Site::ResidPost => Ok(resid),
@@ -611,7 +628,7 @@ impl HookedDecoder {
         let head = self.head.as_ref().ok_or_else(|| {
             ExtractError::Compute("modèle chargé sans norme finale ni lm_head".into())
         })?;
-        let hidden = self.run(input_ids, |_, _, _| {})?;
+        let hidden = self.forward_hooked(input_ids, &mut |_, _, t| Ok(t))?;
         let logits = hidden.apply(&head.norm)?.apply(&head.lm_head)?;
         Ok(logits.squeeze(0)?.to_dtype(DType::F32)?)
     }
@@ -764,7 +781,12 @@ impl HookedDecoder {
     #[cfg(test)]
     fn residual_per_layer(&self, input_ids: &Tensor) -> Result<Vec<Tensor>> {
         let mut out = Vec::new();
-        self.run(input_ids, |_, resid, _| out.push(resid.clone()))?;
+        self.forward_hooked(input_ids, &mut |_, point, t| {
+            if point == HookPoint::ResidPost {
+                out.push(t.clone());
+            }
+            Ok(t)
+        })?;
         Ok(out)
     }
 }
