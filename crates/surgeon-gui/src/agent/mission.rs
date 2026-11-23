@@ -156,9 +156,36 @@ impl Tensors {
     }
 }
 
+/// How `surgeon_compose` merges the directions to remove, forced from the advanced panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Merge {
+    /// The protocol's choice (orthogonal-preserve when a capability is kept).
+    #[default]
+    Auto,
+    Linear,
+    Orthogonal,
+    Ties,
+    Dare,
+}
+
+impl Merge {
+    /// The `mode` of `surgeon_compose`; `None`: the agent chooses.
+    pub fn mode(self) -> Option<&'static str> {
+        match self {
+            Merge::Auto => None,
+            Merge::Linear => Some("standard"),
+            Merge::Orthogonal => Some("orthogonal_preserve"),
+            Merge::Ties => Some("ties"),
+            Merge::Dare => Some("dare"),
+        }
+    }
+}
+
 /// What the user forces from the advanced (CLI) panel, kept with the conversation like the
 /// mission: the parts of the patch the agent must not choose. An empty `layers` or `alpha`
-/// stays the protocol's (the probe, the alpha sweep).
+/// stays the protocol's (the probe, the alpha sweep), an empty merge setting the engine's
+/// default.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Forced {
     pub operation: Operation,
@@ -166,6 +193,18 @@ pub struct Forced {
     /// `all`, `12-15` or `3,5`: the `layers` of a patch operation.
     pub layers: String,
     pub alpha: String,
+    /// Absent from the conversations saved before it: the protocol's choice.
+    #[serde(default)]
+    pub merge: Merge,
+    /// TIES: share of each vector kept, in ]0, 1].
+    #[serde(default)]
+    pub density: String,
+    /// DARE: probability of dropping a coordinate, in [0, 0.95].
+    #[serde(default)]
+    pub drop_rate: String,
+    /// DARE: seed of the masks.
+    #[serde(default)]
+    pub seed: String,
 }
 
 impl Forced {
@@ -179,9 +218,33 @@ impl Forced {
         }
         let alpha = self.alpha.trim();
         match alpha.parse::<f32>() {
-            _ if alpha.is_empty() => Ok(()),
-            Ok(a) if a.is_finite() && a > 0.0 => Ok(()),
-            _ => Err(tf("forced.alpha.invalid", &[("value", &alpha)])),
+            _ if alpha.is_empty() => {}
+            Ok(a) if a.is_finite() && a > 0.0 => {}
+            _ => return Err(tf("forced.alpha.invalid", &[("value", &alpha)])),
+        }
+        // Only the settings of the merge on screen are sent: the others are not checked.
+        // `Some(text)`: a value outside `ok` (empty keeps the engine's default).
+        let bad = |text: &str, ok: fn(f64) -> bool| {
+            let text = text.trim();
+            let fine = text.is_empty() || text.parse::<f64>().is_ok_and(ok);
+            (!fine).then(|| text.to_owned())
+        };
+        match self.merge {
+            Merge::Ties => match bad(&self.density, |v| v > 0.0 && v <= 1.0) {
+                Some(v) => Err(tf("forced.density.invalid", &[("value", &v)])),
+                None => Ok(()),
+            },
+            Merge::Dare => {
+                if let Some(v) = bad(&self.drop_rate, |v| (0.0..=0.95).contains(&v)) {
+                    return Err(tf("forced.drop_rate.invalid", &[("value", &v)]));
+                }
+                let seed = self.seed.trim();
+                match seed.is_empty() || seed.parse::<u64>().is_ok() {
+                    true => Ok(()),
+                    false => Err(tf("forced.seed.invalid", &[("value", &seed)])),
+                }
+            }
+            _ => Ok(()),
         }
     }
 
@@ -200,13 +263,33 @@ impl Forced {
             "" => "balayage du protocole",
             a => a,
         };
-        format!(
+        let mut brief = format!(
             "Réglages imposés par l'utilisateur (mode avancé CLI), prioritaires sur tes choix : \
              operation = {operation} ; projections = {} ; layers = {layers} ; alpha = {alpha}. \
              Écris-les tels quels dans chaque opération de surgeon_apply, sans les élargir ni \
              les remplacer ; l'extraction, la sonde et la validation du protocole restent dues.",
             self.tensors.projections()
-        )
+        );
+        if let Some(mode) = self.merge.mode() {
+            let or_default = |v: &str| match v.trim() {
+                "" => "défaut du moteur".to_owned(),
+                v => v.to_owned(),
+            };
+            let settings = match self.merge {
+                Merge::Ties => format!(" ; density = {}", or_default(&self.density)),
+                Merge::Dare => format!(
+                    " ; drop_rate = {} ; seed = {}",
+                    or_default(&self.drop_rate),
+                    or_default(&self.seed)
+                ),
+                _ => String::new(),
+            };
+            brief.push_str(&format!(
+                " Fusion imposée : chaque surgeon_compose prend mode = {mode}{settings}, sans \
+                 changer de méthode."
+            ));
+        }
+        brief
     }
 }
 
@@ -222,11 +305,13 @@ mod tests {
         let brief = forced.brief();
         assert!(brief.contains("project_out") && brief.contains(r#"["o_proj", "down_proj"]"#));
         assert!(brief.contains("sonde") && brief.contains("balayage"));
+        assert!(!brief.contains("Fusion"), "no merge forced by default");
         forced = Forced {
             operation: Operation::Add,
             tensors: Tensors::DownProj,
             layers: "12-15".into(),
             alpha: "0.6".into(),
+            ..Forced::default()
         };
         assert_eq!(forced.check(), Ok(()));
         let brief = forced.brief();
@@ -245,6 +330,50 @@ mod tests {
             forced.alpha = bad.into();
             assert!(forced.check().is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_forced_merge_names_the_compose_mode_and_only_its_own_settings() {
+        crate::ui::i18n::set_lang(crate::settings::Lang::Fr);
+        let mut forced = Forced {
+            merge: Merge::Ties,
+            density: "0.3".into(),
+            drop_rate: "nope".into(),
+            ..Forced::default()
+        };
+        // The DARE field is not the one on screen: it does not block a TIES merge.
+        assert_eq!(forced.check(), Ok(()));
+        let brief = forced.brief();
+        assert!(brief.contains("mode = ties ; density = 0.3"), "{brief}");
+        assert!(!brief.contains("drop_rate"), "{brief}");
+        for bad in ["0", "1.5", "x"] {
+            forced.density = bad.into();
+            assert!(forced.check().unwrap_err().starts_with("Densité"), "{bad}");
+        }
+
+        forced = Forced {
+            merge: Merge::Dare,
+            ..Forced::default()
+        };
+        let brief = forced.brief();
+        assert!(
+            brief.contains("mode = dare ; drop_rate = défaut du moteur ; seed = défaut du moteur"),
+            "{brief}"
+        );
+        forced.drop_rate = "0.96".into();
+        assert!(forced.check().is_err());
+        forced.drop_rate = "0.5".into();
+        forced.seed = "-3".into();
+        assert!(forced.check().is_err());
+        forced.seed = "42".into();
+        assert_eq!(forced.check(), Ok(()));
+        let modes = [Merge::Linear, Merge::Orthogonal].map(|m| m.mode());
+        assert_eq!(modes, [Some("standard"), Some("orthogonal_preserve")]);
+        assert_eq!(Merge::Auto.mode(), None);
+        // A conversation saved before the merge settings still reads.
+        let old = r#"{"operation": "add", "tensors": "both", "layers": "", "alpha": ""}"#;
+        let read: Forced = serde_json::from_str(old).unwrap();
+        assert_eq!(read.merge, Merge::Auto);
     }
 
     #[test]

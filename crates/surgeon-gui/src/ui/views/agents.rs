@@ -16,7 +16,7 @@ use super::super::layout::Regions;
 use super::super::theme::TOKENS as T;
 use super::{age, context, left_column, project_select};
 use crate::agent::evidence::{self, Status};
-use crate::agent::mission::{Mission, Operation, Symptom, Tensors};
+use crate::agent::mission::{Merge, Mission, Operation, Symptom, Tensors};
 use crate::agent::policy::AgentMode;
 use crate::agent::provider::{Block, Role};
 use crate::agent::session::{Choice, Dirs};
@@ -398,6 +398,8 @@ fn advanced(ui: &mut Ui, app: &mut SurgeonApp) {
             c::segmented(ui, &mut forced.tensors, &tensors, c::font_body());
         });
         ui.add_space(T.space.s);
+        merge(ui, forced);
+        ui.add_space(T.space.s);
         let width = ((ui.available_width() - T.space.l) / 2.0).floor();
         ui.horizontal(|ui| {
             c::secondary(ui, t("form.advanced.layers"));
@@ -418,6 +420,64 @@ fn advanced(ui: &mut Ui, app: &mut SurgeonApp) {
         if let Err(e) = forced.check() {
             ui.add_space(T.space.s);
             c::message(ui, &e, true);
+        }
+    });
+}
+
+/// How `surgeon_compose` merges the directions, and the settings of the method picked.
+fn merge(ui: &mut Ui, forced: &mut crate::agent::mission::Forced) {
+    let merges = [
+        Segment {
+            value: Merge::Auto,
+            label: "auto",
+            tooltip: t("forced.merge.auto.tip"),
+        },
+        Segment {
+            value: Merge::Linear,
+            label: t("forced.merge.linear"),
+            tooltip: t("forced.merge.linear.tip"),
+        },
+        Segment {
+            value: Merge::Orthogonal,
+            label: "Orthogonal f64",
+            tooltip: t("forced.merge.orthogonal.tip"),
+        },
+        Segment {
+            value: Merge::Ties,
+            label: "TIES-Merge",
+            tooltip: t("forced.merge.ties.tip"),
+        },
+        Segment {
+            value: Merge::Dare,
+            label: "DARE",
+            tooltip: t("forced.merge.dare.tip"),
+        },
+    ];
+    // A segment's id is its row's id and its label: this row has an "auto" too.
+    ui.push_id("forced-merge", |ui| {
+        ui.horizontal(|ui| {
+            c::secondary(ui, t("form.advanced.merge"));
+            c::segmented(ui, &mut forced.merge, &merges, c::font_body());
+        });
+    });
+    let width = ((ui.available_width() - T.space.l) / 2.0).floor() * 0.6;
+    let fields: Vec<(&str, &mut String, &str)> = match forced.merge {
+        Merge::Ties => vec![("density", &mut forced.density, t("forced.density.hint"))],
+        Merge::Dare => vec![
+            (
+                "drop_rate",
+                &mut forced.drop_rate,
+                t("forced.drop_rate.hint"),
+            ),
+            ("seed", &mut forced.seed, t("forced.seed.hint")),
+        ],
+        _ => return,
+    };
+    ui.add_space(T.space.s);
+    ui.horizontal(|ui| {
+        for (name, value, hint) in fields {
+            c::secondary(ui, name);
+            c::field_mono(ui, value, hint, width);
         }
     });
 }

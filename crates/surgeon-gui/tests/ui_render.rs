@@ -231,6 +231,43 @@ fn live_mode_puts_the_session_beside_the_graph_under_its_telemetry() {
 }
 
 #[test]
+fn the_advanced_panel_forces_a_merge_method_with_its_own_settings() {
+    use surgeon_gui::agent::mission::Merge;
+
+    for (lang, merge) in [(Lang::Fr, "Fusion"), (Lang::En, "Merge")] {
+        let mut b = bench(lang);
+        empty_session(&mut b);
+        b.app.agents.forced_on = true;
+        b.app.agents.forced.merge = Merge::Dare;
+        // The panel sits below the fold of the form: a taller window shows all of it.
+        let tall = |b: &mut Bench| {
+            let app = &mut b.app;
+            raster::render(&b.ctx, [1440, 1800], 1.0, |ui| app.draw(ui)).texts
+        };
+        let texts = tall(&mut b);
+        assert!(!texts.iter().any(|t| t.contains("widget ID")), "{texts:?}");
+        let all = [
+            merge,
+            "auto",
+            "Orthogonal f64",
+            "TIES-Merge",
+            "DARE",
+            "drop_rate",
+            "seed",
+        ];
+        for text in all {
+            assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
+        }
+        assert!(!texts.iter().any(|t| t == "density"), "TIES only");
+        b.app.agents.forced.merge = Merge::Ties;
+        let texts = tall(&mut b);
+        assert!(texts.iter().any(|t| t == "density"), "{texts:?}");
+        let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+    }
+}
+
+#[test]
 fn the_language_switch_repaints_the_window() {
     let mut b = bench(Lang::Fr);
     assert!(b.texts(Tab::Agent).iter().any(|t| t == "Preuves"));
