@@ -71,7 +71,7 @@ pub use gguf::{
 pub use loop_detector::{LoopDetector, LoopDetectorConfig, LoopReason, LoopVerdict};
 pub use prompts::{load_prompts, EvalPrompt};
 pub use runner::{run_eval, EvalConfig, EvalReport, EvalVerdict, PromptResult, PromptStatus};
-pub use safetensors_gguf::{convert_safetensors, WeightType};
+pub use safetensors_gguf::{convert_safetensors, quantize_safetensors, GgufQuant, WeightType};
 
 /// Longest prefix of at most `max_chars` characters; never splits a multi-byte character.
 pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> &str {

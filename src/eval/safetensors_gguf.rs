@@ -14,13 +14,17 @@ use std::collections::HashMap;
 use std::f64::consts::PI;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use half::f16;
+use rayon::prelude::*;
 use serde_json::Value;
 
 use super::error::{EvalError, Result};
 use crate::engine::{DType, ReadOnlyModel};
 use crate::kernel::simd::{bf16_load, f16_load};
+use crate::patch::gguf::quant::{quantize_block, Codec};
+use crate::patch::gguf::GgmlType;
 
 const ALIGNMENT: u64 = 32;
 const GGUF_VERSION: u32 = 3;
@@ -68,12 +72,81 @@ pub enum WeightType {
     F32,
 }
 
-impl WeightType {
-    fn ggml(self) -> u32 {
-        match self {
-            Self::F32 => GGML_F32,
-            Self::F16 => GGML_F16,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GgufQuant {
+    #[serde(rename = "f32")]
+    F32,
+    #[serde(rename = "f16")]
+    F16,
+    #[serde(rename = "q8_0")]
+    Q8_0,
+    #[serde(rename = "q4_k_m")]
+    Q4KM,
+}
+
+impl From<WeightType> for GgufQuant {
+    fn from(weights: WeightType) -> Self {
+        match weights {
+            WeightType::F16 => Self::F16,
+            WeightType::F32 => Self::F32,
         }
+    }
+}
+
+impl GgufQuant {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::F32 => "F32",
+            Self::F16 => "F16",
+            Self::Q8_0 => "Q8_0",
+            Self::Q4KM => "Q4_K_M",
+        }
+    }
+
+    fn file_type(self) -> u64 {
+        match self {
+            Self::F32 => 0,
+            Self::F16 => 1,
+            Self::Q8_0 => 7,
+            Self::Q4KM => 15,
+        }
+    }
+
+    fn tensor_type(self, name: &str, cols: u64, n_layer: u64, has_output: bool) -> GgmlType {
+        let wanted = match self {
+            Self::F32 => return GgmlType::F32,
+            Self::F16 => return GgmlType::F16,
+            Self::Q8_0 => GgmlType::Q8_0,
+            Self::Q4KM => q4_k_m_type(name, n_layer, has_output),
+        };
+        let fitted = match (wanted, cols.is_multiple_of(256)) {
+            (GgmlType::Q4_K, false) => GgmlType::Q5_0,
+            (GgmlType::Q5_K, false) => GgmlType::Q5_1,
+            (GgmlType::Q6_K, false) => GgmlType::Q8_0,
+            (other, _) => other,
+        };
+        match cols.is_multiple_of(32) {
+            true => fitted,
+            false => GgmlType::F16,
+        }
+    }
+}
+
+fn q4_k_m_type(name: &str, n_layer: u64, has_output: bool) -> GgmlType {
+    let layer = name
+        .strip_prefix("blk.")
+        .and_then(|rest| rest.split('.').next()?.parse::<u64>().ok());
+    let more_bits = layer
+        .is_some_and(|i| i < n_layer / 8 || i >= 7 * n_layer / 8 || (i - n_layer / 8) % 3 == 2);
+    if name == "output.weight" || (name == "token_embd.weight" && !has_output) {
+        GgmlType::Q6_K
+    } else if name.ends_with(".attn_qkv.weight") {
+        GgmlType::Q5_K
+    } else if more_bits && (name.ends_with(".attn_v.weight") || name.ends_with(".ffn_down.weight"))
+    {
+        GgmlType::Q6_K
+    } else {
+        GgmlType::Q4_K
     }
 }
 
@@ -162,11 +235,17 @@ struct Planned<'a> {
     source: Source<'a>,
     ne: Vec<u64>,
     ggml: u32,
-    bytes: u64,
     /// Llama Q/K: the number of heads whose rows are regrouped per rotary pair.
     permute_heads: Option<usize>,
     /// Added to every value (Gemma stores its norms as `w` for `1 + w`).
     offset: f32,
+}
+
+impl Planned<'_> {
+    fn bytes(&self) -> u64 {
+        let (elements, bytes) = GgmlType(self.ggml).block().unwrap_or((1, 4));
+        self.ne.iter().product::<u64>() / elements * bytes
+    }
 }
 
 fn io(path: &Path, e: impl std::fmt::Display) -> EvalError {
@@ -533,7 +612,7 @@ fn metadata(
     config: &Value,
     arch: Arch,
     heads: &Heads,
-    weights: WeightType,
+    quant: GgufQuant,
     n_vocab: usize,
 ) -> Result<Meta> {
     let tokenizer = read_json(&dir.join("tokenizer.json"))?;
@@ -548,7 +627,7 @@ fn metadata(
     let mut m = Meta::default();
     m.text("general.architecture", arch.name());
     m.text("general.name", &name);
-    m.u32("general.file_type", u64::from(weights == WeightType::F16));
+    m.u32("general.file_type", quant.file_type());
     m.u32("general.quantization_version", 2);
     model_metadata(&mut m, arch, config, heads)?;
 
@@ -623,12 +702,7 @@ fn safetensors_files(dir: &Path) -> Result<Vec<PathBuf>> {
     }
 }
 
-fn plan<'a>(
-    models: &'a [ReadOnlyModel],
-    arch: Arch,
-    heads: &Heads,
-    weights: WeightType,
-) -> Result<Vec<Planned<'a>>> {
+fn plan<'a>(models: &'a [ReadOnlyModel], arch: Arch, heads: &Heads) -> Result<Vec<Planned<'a>>> {
     let mut planned = Vec::new();
     for model in models {
         for info in &model.index().tensors {
@@ -655,13 +729,6 @@ fn plan<'a>(
                     )));
                 }
             }
-            let ggml = if info.shape.len() == 1 {
-                GGML_F32
-            } else {
-                weights.ggml()
-            };
-            let width = if ggml == GGML_F16 { 2 } else { 4 };
-            let elements: usize = info.shape.iter().product();
             let offset = match arch.is_gemma() && name.ends_with("norm.weight") {
                 true => 1.0,
                 false => 0.0,
@@ -674,8 +741,7 @@ fn plan<'a>(
                 },
                 // GGUF lists the fastest-varying dimension first.
                 ne: info.shape.iter().rev().map(|&d| d as u64).collect(),
-                ggml,
-                bytes: (elements * width) as u64,
+                ggml: GGML_F32,
                 permute_heads,
                 offset,
             });
@@ -718,20 +784,32 @@ fn write_tensor(out: &mut impl Write, t: &Planned) -> Result<()> {
                 .collect()
         }
     };
-    let mut buf = Vec::with_capacity(CHUNK_ELEMENTS * 4);
+    let blocks = Codec::from_type(GgmlType(t.ggml)).filter(|c| c.block_elems() > 1);
+    let (mut values, mut buf) = (Vec::with_capacity(CHUNK_ELEMENTS), Vec::new());
     for chunk in slices.iter().flat_map(|s| s.chunks(CHUNK_ELEMENTS * width)) {
+        values.clear();
+        values.extend(chunk.chunks_exact(width).map(|cell| load(cell) + t.offset));
         buf.clear();
-        for cell in chunk.chunks_exact(width) {
-            let x = load(cell) + t.offset;
-            if t.ggml == GGML_F16 {
-                let h = f16::from_f32(x);
-                if h.is_infinite() && x.is_finite() {
-                    return Err(invalid(format!("{} : {x} dépasse la plage f16", t.name)));
-                }
-                buf.extend_from_slice(&h.to_le_bytes());
-            } else {
-                buf.extend_from_slice(&x.to_le_bytes());
+        match blocks {
+            Some(codec) => {
+                buf.resize(codec.row_bytes(values.len()), 0);
+                buf.par_chunks_mut(codec.block_bytes())
+                    .zip(values.par_chunks(codec.block_elems()))
+                    .try_for_each(|(block, x)| quantize_block(codec, x, block))
+                    .map_err(|_| invalid(format!("{} : échelle hors de la plage f16", t.name)))?;
             }
+            None if t.ggml == GGML_F16 => {
+                for &x in &values {
+                    let h = f16::from_f32(x);
+                    if h.is_infinite() && x.is_finite() {
+                        return Err(invalid(format!("{} : {x} dépasse la plage f16", t.name)));
+                    }
+                    buf.extend_from_slice(&h.to_le_bytes());
+                }
+            }
+            None => values
+                .iter()
+                .for_each(|x| buf.extend_from_slice(&x.to_le_bytes())),
         }
         out.write_all(&buf).map_err(wrote)?;
     }
@@ -751,6 +829,22 @@ pub(crate) fn is_convertible_dir(dir: &Path) -> bool {
 /// Writes `output` from the SafeTensors directory `dir` (Qwen2, Llama, Mistral, Gemma,
 /// Gemma 2 or Phi-3). The model is only read.
 pub fn convert_safetensors(dir: &Path, output: &Path, weights: WeightType) -> Result<()> {
+    quantize_safetensors(
+        dir,
+        output,
+        weights.into(),
+        &AtomicBool::new(false),
+        &mut |_, _| {},
+    )
+}
+
+pub fn quantize_safetensors(
+    dir: &Path,
+    output: &Path,
+    quant: GgufQuant,
+    cancel: &AtomicBool,
+    on_tensor: &mut dyn FnMut(usize, usize),
+) -> Result<()> {
     let config = read_json(&dir.join("config.json"))?;
     let arch = Arch::from_config(&config)?;
     let heads = Heads::read(&config)?;
@@ -758,13 +852,12 @@ pub fn convert_safetensors(dir: &Path, output: &Path, weights: WeightType) -> Re
         .iter()
         .map(|p| ReadOnlyModel::open(p).map_err(|e| invalid(format!("{} : {e}", p.display()))))
         .collect::<Result<Vec<_>>>()?;
-    let mut planned = plan(&models, arch, &heads, weights)?;
+    let mut planned = plan(&models, arch, &heads)?;
     for (name, values) in rope_tensors(arch, &config, &heads)? {
         planned.push(Planned {
             name,
             ne: vec![values.len() as u64],
             ggml: GGML_F32,
-            bytes: 4 * values.len() as u64,
             source: Source::Values(values),
             permute_heads: None,
             offset: 0.0,
@@ -780,7 +873,12 @@ pub fn convert_safetensors(dir: &Path, output: &Path, weights: WeightType) -> Re
     if config["tie_word_embeddings"].as_bool() == Some(true) {
         planned.retain(|t| t.name != "output.weight");
     }
-    let meta = metadata(dir, &config, arch, &heads, weights, n_vocab)?;
+    let has_output = planned.iter().any(|t| t.name == "output.weight");
+    let n_layer = config_u64(&config, "num_hidden_layers")?;
+    for t in planned.iter_mut().filter(|t| t.ne.len() > 1) {
+        t.ggml = quant.tensor_type(&t.name, t.ne[0], n_layer, has_output).0;
+    }
+    let meta = metadata(dir, &config, arch, &heads, quant, n_vocab)?;
 
     let mut head = b"GGUF".to_vec();
     head.extend_from_slice(&GGUF_VERSION.to_le_bytes());
@@ -795,7 +893,7 @@ pub fn convert_safetensors(dir: &Path, output: &Path, weights: WeightType) -> Re
             .for_each(|d| head.extend_from_slice(&d.to_le_bytes()));
         head.extend_from_slice(&t.ggml.to_le_bytes());
         head.extend_from_slice(&offset.to_le_bytes());
-        offset += t.bytes.next_multiple_of(ALIGNMENT);
+        offset += t.bytes().next_multiple_of(ALIGNMENT);
     }
 
     let file = std::fs::File::create(output).map_err(|e| io(output, e))?;
@@ -803,9 +901,13 @@ pub fn convert_safetensors(dir: &Path, output: &Path, weights: WeightType) -> Re
     let wrote = |e: std::io::Error| io(output, e);
     out.write_all(&head).map_err(wrote)?;
     pad_to_alignment(&mut out, head.len() as u64).map_err(wrote)?;
-    for t in &planned {
+    for (done, t) in planned.iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(invalid("conversion GGUF annulée"));
+        }
         write_tensor(&mut out, t)?;
-        pad_to_alignment(&mut out, t.bytes).map_err(wrote)?;
+        pad_to_alignment(&mut out, t.bytes()).map_err(wrote)?;
+        on_tensor(done + 1, planned.len());
     }
     out.flush().map_err(wrote)
 }
@@ -813,6 +915,7 @@ pub fn convert_safetensors(dir: &Path, output: &Path, weights: WeightType) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::patch::gguf::quant::dequantize_row;
     use crate::patch::gguf::{parse, parse::GgufFile, parse::MetaValue};
     use half::bf16;
     use serde_json::json;
@@ -990,6 +1093,182 @@ mod tests {
         );
         // No permutation for Qwen2: q rows stay in order.
         assert_eq!(values(&bytes, &gguf, "blk.0.attn_q.weight")[4], 1.0);
+    }
+
+    fn quant_model(dir: &Path) {
+        let config = json!({
+            "model_type": "qwen2", "num_hidden_layers": 1, "max_position_embeddings": 64,
+            "hidden_size": 256, "intermediate_size": 512, "num_attention_heads": 2,
+            "num_key_value_heads": 1, "rope_theta": 1e6, "rms_norm_eps": 1e-6,
+            "tie_word_embeddings": true, "bos_token_id": 4, "eos_token_id": 5,
+        });
+        let mut shapes = vec![
+            ("model.embed_tokens.weight".to_owned(), vec![6, 256]),
+            ("model.norm.weight".to_owned(), vec![256]),
+        ];
+        shapes.extend(layer(&[
+            ("input_layernorm.weight", vec![256]),
+            ("self_attn.q_proj.weight", vec![256, 256]),
+            ("self_attn.v_proj.weight", vec![128, 256]),
+            ("mlp.down_proj.weight", vec![256, 512]),
+            ("mlp.up_proj.weight", vec![8, 288]),
+            ("mlp.gate_proj.weight", vec![4, 20]),
+        ]));
+        write_model(dir, &config, &byte_level(None), &shapes);
+    }
+
+    fn quantize(dir: &Path, quant: GgufQuant) -> (Vec<u8>, GgufFile, Vec<(usize, usize)>) {
+        let out = dir.join("m.gguf");
+        let mut progress = Vec::new();
+        let cancel = AtomicBool::new(false);
+        quantize_safetensors(dir, &out, quant, &cancel, &mut |d, n| progress.push((d, n))).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        let gguf = parse(&bytes).unwrap();
+        (bytes, gguf, progress)
+    }
+
+    fn fresh_blocks(n: usize, codec: Codec) -> Vec<u8> {
+        let x: Vec<f32> = (0..n)
+            .map(|i| bf16::from_f32(i as f32 * 0.25).to_f32())
+            .collect();
+        let mut out = vec![0; codec.row_bytes(n)];
+        for (b, x) in out
+            .chunks_mut(codec.block_bytes())
+            .zip(x.chunks(codec.block_elems()))
+        {
+            quantize_block(codec, x, b).unwrap();
+        }
+        out
+    }
+
+    fn assert_blocks(bytes: &[u8], gguf: &GgufFile, name: &str, codec: Codec) {
+        let t = gguf.tensor(name).unwrap();
+        assert_eq!(Codec::from_type(t.ggml_type), Some(codec), "{name}");
+        let want = fresh_blocks(t.n_elements() as usize, codec);
+        let start = t.start as usize;
+        assert!(bytes[start..start + want.len()] == want[..], "{name}");
+    }
+
+    #[test]
+    fn q4_k_m_follows_llama_quantize_and_writes_exact_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        quant_model(dir.path());
+        let weights = std::fs::read(dir.path().join("model.safetensors")).unwrap();
+        let (bytes, gguf, progress) = quantize(dir.path(), GgufQuant::Q4KM);
+        assert_eq!(gguf.architecture(), Some("qwen2"));
+        assert_eq!(meta_u64(&gguf, "general.file_type"), Some(15));
+        assert_eq!(meta_u64(&gguf, "general.quantization_version"), Some(2));
+        assert_eq!(
+            progress.last(),
+            Some(&(gguf.tensors.len(), gguf.tensors.len()))
+        );
+        assert_blocks(&bytes, &gguf, "token_embd.weight", Codec::Q6K);
+        assert_blocks(&bytes, &gguf, "blk.0.attn_q.weight", Codec::Q4K);
+        assert_blocks(&bytes, &gguf, "blk.0.attn_v.weight", Codec::Q6K);
+        assert_blocks(&bytes, &gguf, "blk.0.ffn_down.weight", Codec::Q6K);
+        assert_blocks(&bytes, &gguf, "blk.0.ffn_up.weight", Codec::Q5_0);
+        let gate = gguf.tensor("blk.0.ffn_gate.weight").unwrap();
+        assert_eq!(gate.ggml_type, GgmlType::F16, "20 columns: no block fits");
+        assert_eq!(values(&bytes, &gguf, "blk.0.ffn_gate.weight")[3], 0.75);
+        let norm = gguf.tensor("output_norm.weight").unwrap();
+        assert_eq!(norm.ggml_type, GgmlType::F32);
+        let mut decoded = vec![0.0; 65536];
+        let q = gguf.tensor("blk.0.attn_q.weight").unwrap();
+        let start = q.start as usize;
+        dequantize_row(
+            Codec::Q4K,
+            &bytes[start..start + 65536 / 256 * 144],
+            &mut decoded,
+        );
+        let worst = decoded
+            .iter()
+            .enumerate()
+            .map(|(i, y)| (y - bf16::from_f32(i as f32 * 0.25).to_f32()).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst <= 16384.0 / 15.0, "{worst}");
+        assert_eq!(
+            std::fs::read(dir.path().join("model.safetensors")).unwrap(),
+            weights
+        );
+    }
+
+    #[test]
+    fn q8_0_quantizes_every_matrix_across_chunks_and_stops_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        quant_model(dir.path());
+        let (bytes, gguf, _) = quantize(dir.path(), GgufQuant::Q8_0);
+        assert_eq!(meta_u64(&gguf, "general.file_type"), Some(7));
+        assert!(
+            gguf.tensor("blk.0.ffn_down.weight").unwrap().n_elements() as usize > CHUNK_ELEMENTS
+        );
+        for name in [
+            "token_embd.weight",
+            "blk.0.attn_q.weight",
+            "blk.0.attn_v.weight",
+            "blk.0.ffn_down.weight",
+            "blk.0.ffn_up.weight",
+        ] {
+            assert_blocks(&bytes, &gguf, name, Codec::Q8_0);
+        }
+        assert_eq!(
+            gguf.tensor("blk.0.ffn_gate.weight").unwrap().ggml_type,
+            GgmlType::F16
+        );
+        let cancelled = quantize_safetensors(
+            dir.path(),
+            &dir.path().join("c.gguf"),
+            GgufQuant::Q8_0,
+            &AtomicBool::new(true),
+            &mut |_, _| panic!("no tensor after a cancel"),
+        );
+        assert!(cancelled.is_err());
+    }
+
+    #[test]
+    fn q4_k_m_gives_more_bits_to_the_first_last_and_every_third_layer() {
+        let q = GgufQuant::Q4KM;
+        for tensor in ["attn_v", "ffn_down"] {
+            let wide: Vec<u64> = (0..8)
+                .filter(|i| {
+                    q.tensor_type(&format!("blk.{i}.{tensor}.weight"), 256, 8, true)
+                        == GgmlType::Q6_K
+                })
+                .collect();
+            assert_eq!(wide, [0, 3, 6, 7], "{tensor}");
+        }
+        assert_eq!(
+            q.tensor_type("blk.3.attn_q.weight", 256, 8, true),
+            GgmlType::Q4_K
+        );
+        assert_eq!(
+            q.tensor_type("blk.0.attn_qkv.weight", 256, 8, true),
+            GgmlType::Q5_K
+        );
+        assert_eq!(
+            q.tensor_type("blk.0.attn_qkv.weight", 288, 8, true),
+            GgmlType::Q5_1
+        );
+        assert_eq!(q.tensor_type("output.weight", 288, 8, true), GgmlType::Q8_0);
+        assert_eq!(
+            q.tensor_type("token_embd.weight", 256, 8, true),
+            GgmlType::Q4_K
+        );
+        assert_eq!(
+            q.tensor_type("token_embd.weight", 256, 8, false),
+            GgmlType::Q6_K
+        );
+        assert_eq!(
+            GgufQuant::Q8_0.tensor_type("output.weight", 256, 8, true),
+            GgmlType::Q8_0
+        );
+        assert_eq!(
+            GgufQuant::F32.tensor_type("output.weight", 20, 8, true),
+            GgmlType::F32
+        );
+        assert_eq!(
+            serde_json::to_value(GgufQuant::Q4KM).unwrap(),
+            json!("q4_k_m")
+        );
     }
 
     /// Llama 3.1: hidden 8, 2 heads of 4, 1 KV head, untied head, llama3 rope scaling.

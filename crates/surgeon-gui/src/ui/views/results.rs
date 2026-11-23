@@ -126,6 +126,7 @@ fn export_ollama(app: &SurgeonApp, title: &str) -> Result<ollama::Export, String
     ollama::export(
         project,
         title,
+        None,
         paths.copy.as_deref(),
         paths.origin.as_deref(),
     )?

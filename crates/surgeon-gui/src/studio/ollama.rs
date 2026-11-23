@@ -154,15 +154,17 @@ pub fn modelfile(artifact: &Artifact, config: Option<&Path>) -> String {
     lines.join("\n") + "\n"
 }
 
-/// Writes `<project>/Modelfile` for the project's artifact; `None` when there is none yet.
-/// Parameters come from the working copy, else the origin, whichever is a model folder.
+/// Writes `<project>/Modelfile` for `artifact`, else the project's artifact; `None` when
+/// there is none yet. Parameters come from the working copy, else the origin, whichever is a
+/// model folder.
 pub fn export(
     project: &Path,
     project_name: &str,
+    artifact: Option<Artifact>,
     copy: Option<&Path>,
     origin: Option<&Path>,
 ) -> Result<Option<Export>, String> {
-    let Some(artifact) = find_artifact(project, copy) else {
+    let Some(artifact) = artifact.or_else(|| find_artifact(project, copy)) else {
         return Ok(None);
     };
     let config = [copy, origin]
@@ -286,9 +288,9 @@ mod tests {
     #[test]
     fn export_writes_the_modelfile_in_the_project_and_names_the_command() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(export(dir.path(), "p", None, None), Ok(None));
+        assert_eq!(export(dir.path(), "p", None, None, None), Ok(None));
         let copy = model_dir(dir.path());
-        let done = export(dir.path(), "Demo Qwen2", Some(&copy), None)
+        let done = export(dir.path(), "Demo Qwen2", None, Some(&copy), None)
             .unwrap()
             .unwrap();
         assert_eq!(done.artifact, Artifact::SafeTensors(copy));
@@ -300,5 +302,37 @@ mod tests {
         );
         assert!(done.command.starts_with("ollama create demo-qwen2 -f \""));
         assert!(done.command.ends_with("Modelfile\""), "{}", done.command);
+    }
+
+    #[test]
+    fn a_fresh_quantized_export_is_the_modelfile_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let copy = model_dir(dir.path());
+        let fresh = dir.path().join("runs").join("r1").join("out");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let fresh = fresh.join("c1-Q4_K_M.gguf");
+        std::fs::write(&fresh, b"GGUF").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&fresh)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        std::fs::write(dir.path().join("newer.gguf"), b"GGUF").unwrap();
+        let done = export(
+            dir.path(),
+            "p",
+            Some(Artifact::Gguf(fresh.clone())),
+            Some(&copy),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(done.artifact, Artifact::Gguf(fresh));
+        let written = std::fs::read_to_string(dir.path().join(MODELFILE)).unwrap();
+        let from = written.lines().next().unwrap().trim_end_matches('"');
+        assert!(from.ends_with("runs/r1/out/c1-Q4_K_M.gguf"), "{from}");
+        assert!(written.contains("PARAMETER num_ctx 8192"), "{written}");
     }
 }

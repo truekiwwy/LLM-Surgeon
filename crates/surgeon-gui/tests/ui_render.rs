@@ -225,7 +225,7 @@ fn the_results_panel_shows_the_ollama_command_of_the_working_copy() {
         // The demo's copy holds the weights only; a Hugging Face folder has its config.
         let config = copy.unwrap().join("config.json");
         std::fs::write(config, r#"{"max_position_embeddings": 4096}"#).unwrap();
-        let export = ollama::export(&project, "demo-qwen2", copy, origin).unwrap();
+        let export = ollama::export(&project, "demo-qwen2", None, copy, origin).unwrap();
         let export = export.expect("the working copy is a SafeTensors folder");
         let command = export.command.clone();
         b.app.ollama = Some(Ok(export));
