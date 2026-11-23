@@ -18,7 +18,7 @@ surgeon mcp --allow-dir /projet --allow-read /modeles/origine
 | Option | Effet |
 | --- | --- |
 | `--allow-dir <dossier>` | Dossier autorisé, répétable. Défaut : `$SURGEON_MCP_ALLOW_DIRS` (séparateur du système : `;` sous Windows, `:` ailleurs), sinon le dossier courant. |
-| `--allow-read <chemin>` | Dossier ou fichier lisible mais jamais écrit (le modèle d'origine), répétable. Les chemins que les outils d'analyse et de mesure lisent y sont acceptés : `model` de `surgeon_check`, `surgeon_inspect`, `surgeon_eval`, `surgeon_extract`, `surgeon_autotune`, `surgeon_graph` ; `baseline` et `vector` de `surgeon_graph` ; les modèles, jeux, textes, `responses`, `labels` et `baseline_model` de `surgeon_bench` ; `from_origin`, `backup` et `backup_dir` de `surgeon_restore` ; `ablate` et `keep` de `surgeon_compose` ; `refusal_prompts` et `retention_dataset` de `surgeon_autotune` ; les fichiers de prompts, d'étiquettes et `arch_spec`. Tout chemin écrit ou exécuté (`out`, `out_dir`, `cache_dir`, `export_gguf`, `backup_dir` de `surgeon_apply`, `judge_cache`, `llama_cpp_dir`), le `model` de `surgeon_restore`, tout `surgeon_apply`, `surgeon_diff`, `surgeon_lora` et `surgeon_pipeline` restent limités à `--allow-dir` (`error.kind = "path_not_allowed"`, message « dossier en lecture seule »). |
+| `--allow-read <chemin>` | Dossier ou fichier lisible mais jamais écrit (le modèle d'origine), répétable. Les chemins que les outils d'analyse et de mesure lisent y sont acceptés : `model` de `surgeon_check`, `surgeon_inspect`, `surgeon_eval`, `surgeon_extract`, `surgeon_autotune`, `surgeon_graph` ; `baseline` et `vector` de `surgeon_graph` ; les modèles, jeux, textes, `responses`, `labels` et `baseline_model` de `surgeon_bench` ; `from_origin`, `backup` et `backup_dir` de `surgeon_restore` ; `ablate` et `keep` de `surgeon_compose` ; `base` et `tuned` de `surgeon_diff`, `base`, `patched`, `delta`, `lora` et `adapter_config` de `surgeon_lora` ; `refusal_prompts` et `retention_dataset` de `surgeon_autotune` ; les fichiers de prompts, d'étiquettes et `arch_spec`. Tout chemin écrit ou exécuté (`out`, `out_dir`, `cache_dir`, `export_gguf`, `backup_dir` de `surgeon_apply`, `judge_cache`, `llama_cpp_dir`), le `model` de `surgeon_restore`, tout `surgeon_apply`, les écritures de `surgeon_diff` et `surgeon_lora` (`out`, le `model` et le `backup_dir` d'un `merge`) et `surgeon_pipeline` restent limités à `--allow-dir` (`error.kind = "path_not_allowed"`, message « dossier en lecture seule »). |
 | `--read-only` | Refuse `surgeon_apply` (sauf `dry_run`), `surgeon_restore`, `surgeon_compose`, l'action `write` de `surgeon_files`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en modes `dump` et `judge_sample` (et `judge_eval` avec `out`), `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora` (les deux modes), `surgeon_graph` avec `out_dir` ou `cache_dir` et les actions `start`, `cancel`, `promote_patch` de `surgeon_pipeline` (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out` et `surgeon_graph` sans sortie restent permis. |
 | `--allow-no-backup` | Respecte `backup: false` dans un patch. Sans cette option, la sauvegarde est imposée. |
 
@@ -61,7 +61,7 @@ le plus souvent.
 | `surgeon_apply` | Applique un patch en place (`dry_run` pour vérifier d'abord) ; `gguf: true` pour un GGUF quantifié | destructif |
 | `surgeon_restore` | Remet un modèle octet pour octet depuis les sauvegardes de `surgeon_apply` ou depuis le modèle d'origine (`from_origin`), SHA-256 avant et après ([rollback](#rollback-surgeon_restore)) | destructif, idempotent |
 | `surgeon_doctor` | La machine est-elle prête : RAM libre et plus gros modèle en f32 ou bf16 (avec `model` : son besoin exact et son lot natif), cœurs et threads, cache `ref_bench`, démon hipfire (URL, `/health`, `/metrics`, mémoire GPU lue dans son log ; 0 Mo au total = démon figé) ; `data.ready` | lecture seule, idempotent |
-| `surgeon_compose` | Une direction faite de vecteurs extraits (`ablate`, poids `chemin:alpha`), orthogonale aux directions préservées (`keep`, Gram-Schmidt modifié en f64), et le patch `project_out` qui la retire avec sa recette (`composition`) ; refus nommé d'un vecteur nul, non fini, de dimension différente ou quasi colinéaire (`collinear_vectors`) | écrit des fichiers, idempotent |
+| `surgeon_compose` | Une direction faite de vecteurs extraits (`ablate`, poids `chemin:alpha`), orthogonale aux directions préservées (`keep`, Gram-Schmidt modifié en f64), ou fusionnée par TIES (`mode` `ties`, `density`) ou DARE (`mode` `dare`, `drop_rate`, `seed`), et le patch `project_out` qui la retire avec sa recette (`composition`) ; refus nommé d'un vecteur nul, non fini, de dimension différente ou quasi colinéaire (`collinear_vectors`) | écrit des fichiers, idempotent |
 | `surgeon_files` | Fichiers de travail d'un agent : `list`, `read` dans les dossiers autorisés, `write` de fichiers texte sous `work/` ([détail](#fichiers-de-travail-surgeon_files)) | écrit sous `work/` seulement |
 | `surgeon_workspace` | Projet du studio pour un agent hors de l'interface : `action` `init` écrit `project.surgeon.json` (origine : chemin canonique, SHA-256, taille) et crée `runs/`, `artifacts/`, `copies/`, `chat/` ; le modèle n'est que lu, un manifeste existant n'est remplacé qu'avec `force` ([détail](#projet-du-studio-surgeon_workspace)) | écrit le manifeste, non destructif, idempotent |
 | `surgeon_eval` | Non-régression (boucles, attentes) et export GGUF conditionnel | écrit le GGUF |
@@ -578,7 +578,7 @@ Une propriété inconnue du schéma est aussi une `invalid_arguments`.
 | `mode` | Requis | Optionnels |
 | --- | --- | --- |
 | `merge` | `model`, `lora` | `alpha`, `adapter_config`, `scale` (1), `dry_run`, `backup_dir` |
-| `extract` | `base`, `patched`, `out` | `rank` (16), `dtype` (`f32`, `f16`, `bf16`), `target_modules` (regex), `seed` (0), `overwrite` |
+| `extract` | `base`, `patched` ou `delta` (un seul des deux), `out` | `rank` (16), `dtype` (`f32`, `f16`, `bf16`), `target_modules` (regex), `seed` (0), `overwrite` |
 
 `merge` calcule `W <- W + scale * (lora_alpha / r) * B A` en place. `lora_alpha` vient du
 `adapter_config.json` voisin de `lora` (ou de `adapter_config`) ; `alpha` le remplace ; sans
@@ -588,7 +588,9 @@ paramètre pour la sauter, et `--allow-no-backup` ne concerne que `backup: false
 (`error.kind = "cancelled"` dans le second cas). Faire d'abord `dry_run: true`.
 
 `extract` écrit un adaptateur de rang `rank` au format PEFT (`out`, plus `adapter_config.json`
-à côté) sans toucher aux modèles. Limites : le format PEFT n'est pas testé contre HuggingFace en
+à côté ; un `out` qui est un dossier existant reçoit `adapter_model.safetensors`) sans toucher
+aux modèles. La différence vient de `patched`, ou de `delta`, un `.safetensors` qui la contient
+par tenseur 2D, chacun vérifié contre la forme du même tenseur dans `base`. Limites : le format PEFT n'est pas testé contre HuggingFace en
 CI ; la fusion dans un GGUF n'est pas supportée.
 
 ```json
@@ -661,8 +663,10 @@ Exemple d'appel sans écriture :
 
 ## Garde-fous communs aux deux outils
 
-- Tous les chemins (`base`, `tuned`, `out`, `model`, `lora`, `adapter_config`, `backup_dir`,
-  `patched`) sont confinés aux dossiers `--allow-dir`, relatifs au premier dossier autorisé.
+- Tous les chemins sont relatifs au premier dossier autorisé. Ceux qui sont écrits (`out`,
+  `model`, `backup_dir`) sont confinés aux dossiers `--allow-dir` ; ceux qui sont seulement lus
+  (`base`, `tuned`, `patched`, `delta`, `lora`, `adapter_config`) peuvent aussi être dans une
+  racine `--allow-read`, celle du modèle d'origine.
 - Avec un `progressToken` dans `_meta`, un `notifications/progress` est envoyé par tenseur traité.
 - Les erreurs sont des résultats `isError: true` avec l'enveloppe habituelle ; `command` vaut
   `diff`, `lora merge` ou `lora extract`.
