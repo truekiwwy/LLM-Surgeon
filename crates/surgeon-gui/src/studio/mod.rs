@@ -18,6 +18,7 @@
 //! - [`view`]: the Projects workspace of the window.
 
 pub mod bus;
+pub mod checkpoints;
 pub mod copy;
 pub mod estimate;
 pub mod exec;

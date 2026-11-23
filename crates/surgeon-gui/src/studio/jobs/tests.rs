@@ -374,6 +374,12 @@ fn writes_to_the_source_model_are_refused_before_queuing() {
             "out",
             json!({"model": "copies/c1", "out": source.join("v.safetensors")}),
         ),
+        spec(
+            "surgeon_checkpoint",
+            "restore-src",
+            json!({"action": "restore", "model": source, "id": "0001"}),
+        ),
+        spec("surgeon_sweep", "sweep-src", json!({"model": source})),
         spec("frobnicate", "x", json!({})),
     ];
     for s in refused {
@@ -394,6 +400,12 @@ fn writes_to_the_source_model_are_refused_before_queuing() {
             "surgeon_lora",
             "extract",
             json!({"mode": "extract", "base": source}),
+        ),
+        spec("surgeon_checkpoint", "list", json!({"action": "list"})),
+        spec(
+            "surgeon_checkpoint",
+            "restore",
+            json!({"action": "restore", "model": "copies/c1", "id": "0001"}),
         ),
     ];
     for s in allowed {

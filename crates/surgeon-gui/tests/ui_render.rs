@@ -240,6 +240,53 @@ fn the_results_panel_shows_the_ollama_command_of_the_working_copy() {
 }
 
 #[test]
+fn the_checkpoints_panel_shows_the_tree_the_front_and_the_restore_button() {
+    use std::collections::BTreeMap;
+    use surgeon_gui::agent::paths::ProjectPaths;
+
+    for (lang, title, restore) in [
+        (Lang::Fr, "Checkpoints & Pareto", "Restaurer ce checkpoint"),
+        (Lang::En, "Checkpoints & Pareto", "Restore this checkpoint"),
+    ] {
+        let mut b = bench(lang);
+        let project = b.app.agents.project.clone().unwrap();
+        let copy = ProjectPaths::of(&project).copy.unwrap();
+        let store = weight_surgeon::checkpoint::Store::in_work(&project.join("work"));
+        let metrics = |target: f64, gain: f64, drift: f64| {
+            BTreeMap::from([
+                ("target".into(), target),
+                ("gain".into(), gain),
+                ("drift".into(), drift),
+            ])
+        };
+        let base = store.create(&copy, "base", metrics(0.5, 0.0, 0.0)).unwrap();
+        store
+            .create(&copy, "v L4 a1", metrics(0.8, 0.3, 0.2))
+            .unwrap();
+        store.restore(&base.id, &copy).unwrap();
+        b.app.right = RightPane::Checkpoints;
+        b.app.checkpoint_selected = Some("0002".into());
+        let texts = b.texts(Tab::Agent);
+        for text in [
+            title,
+            restore,
+            "0001",
+            "0002",
+            "v L4 a1 · +0.300 / 0.200",
+            "80.0 %",
+            "50.0 %",
+        ] {
+            assert!(
+                texts.iter().any(|t| t == text),
+                "{lang:?} {text}: {texts:?}"
+            );
+        }
+        let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+    }
+}
+
+#[test]
 fn live_mode_puts_the_session_beside_the_graph_under_its_telemetry() {
     for (lang, expected) in [
         (

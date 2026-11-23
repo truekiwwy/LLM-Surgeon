@@ -27,7 +27,13 @@ const STATUS: &str = "status.json";
 const LOCK: &str = "project.lock";
 
 /// Tools that rewrite their `model` in place: only a working copy may be given.
-const IN_PLACE: [&str; 3] = ["surgeon_apply", "surgeon_lora", "surgeon_restore"];
+const IN_PLACE: [&str; 5] = [
+    "surgeon_apply",
+    "surgeon_lora",
+    "surgeon_restore",
+    "surgeon_checkpoint",
+    "surgeon_sweep",
+];
 /// Arguments a tool writes to: never inside the source model.
 const WRITE_KEYS: [&str; 7] = [
     "out",
@@ -446,7 +452,8 @@ impl Manager {
         let resolve = |v: &Value| v.as_str().map(|s| absolute(&self.project.dir, s));
         let in_place = IN_PLACE.contains(&spec.tool.as_str())
             && args["dry_run"] != true
-            && (spec.tool != "surgeon_lora" || args["mode"] == "merge");
+            && (spec.tool != "surgeon_lora" || args["mode"] == "merge")
+            && (spec.tool != "surgeon_checkpoint" || args["action"] != "list");
         if in_place {
             let copies = canonical(&self.project.copies_dir());
             let model = resolve(&args["model"]).map(|m| canonical(&m));

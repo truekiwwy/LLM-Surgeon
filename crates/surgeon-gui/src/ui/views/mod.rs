@@ -2,6 +2,7 @@
 //! column (the project, its working copy, the tensor tree) and number formats.
 
 pub mod agents;
+pub mod checkpoints;
 pub mod graph;
 pub mod live;
 pub mod radar;

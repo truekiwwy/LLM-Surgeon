@@ -92,6 +92,18 @@ pub fn classify(name: &str, input: &Value) -> Option<(Stage, Method)> {
             };
             (Stage::Compose, method(how, None))
         }
+        "surgeon_checkpoint" => {
+            let how = format!("checkpoint · {}", text(&input["action"], "list"));
+            (Stage::Compose, method(how, None))
+        }
+        "surgeon_sweep" => {
+            let how = format!(
+                "sweep · {} · max_drift {}",
+                text(&input["target"]["kind"], "target"),
+                input["max_drift"]
+            );
+            (Stage::Measure, method(how, Some(Evidence::Measured)))
+        }
         "surgeon_restore" | "surgeon_lora" | "surgeon_diff" => (
             Stage::Compose,
             method(tool.trim_start_matches("surgeon_").into(), None),

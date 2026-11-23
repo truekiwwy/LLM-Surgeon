@@ -213,6 +213,19 @@ fn effect(tool: &str, args: &Value) -> Effect {
             "réécrit la copie de travail depuis une sauvegarde ou l'origine (SHA-256 vérifié)"
                 .into(),
         ]),
+        "surgeon_checkpoint" => match args["action"].as_str().unwrap_or("") {
+            "list" => Effect::Read,
+            "create" => Effect::Write(vec![
+                "fige la copie de travail sous work/checkpoints (liens physiques, SHA-256)".into(),
+            ]),
+            _ => Effect::Destructive(vec![
+                "remet la copie de travail dans l'état d'un checkpoint (SHA-256 vérifié)".into(),
+            ]),
+        },
+        "surgeon_sweep" => Effect::Destructive(vec![
+            "réécrit la copie de travail à chaque point de la grille, la laisse sur le meilleur              compromis"
+                .into(),
+        ]),
         "surgeon_lora" if mode == "merge" => {
             Effect::Destructive(vec!["fusionne l'adaptateur dans la copie de travail".into()])
         }

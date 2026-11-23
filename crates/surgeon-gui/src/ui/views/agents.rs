@@ -36,6 +36,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     let title = match app.right {
         RightPane::Evidence => t("panel.evidence"),
         RightPane::Results => t("panel.results"),
+        RightPane::Checkpoints => t("panel.checkpoints"),
     };
     c::Panel::new("evidence").title(title).show_with(
         ui,
@@ -45,12 +46,14 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
             let panes = [
                 (RightPane::Evidence, t("panel.evidence")),
                 (RightPane::Results, t("panel.results")),
+                (RightPane::Checkpoints, t("panel.checkpoints")),
             ];
             c::segmented_small(ui, &mut app.right, &panes, t("pane.tip"));
         },
         |ui, app| match app.right {
             RightPane::Evidence => evidence_log(ui, app),
             RightPane::Results => super::results::show(ui, app),
+            RightPane::Checkpoints => super::checkpoints::show(ui, app),
         },
     );
     consent(ui.ctx(), app);

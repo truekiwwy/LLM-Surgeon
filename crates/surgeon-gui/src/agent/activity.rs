@@ -126,11 +126,21 @@ fn patch(v: &Value) -> (Option<LayerSelection>, Vec<String>) {
     // shortcut: a patch given as a file path is not read here (one read per frame), its
     // layers do not pulse; read it once per call if agents start passing paths.
     let ops = v["operations"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let projections: BTreeSet<String> = ops
+        .iter()
+        .flat_map(|op| names(&op["projections"]))
+        .collect();
+    (
+        union(ops.iter().map(|op| layers(&op["layers"]))),
+        projections.into_iter().collect(),
+    )
+}
+
+fn union(selections: impl IntoIterator<Item = Option<LayerSelection>>) -> Option<LayerSelection> {
     let mut all = false;
     let mut list = BTreeSet::new();
-    let mut projections = BTreeSet::new();
-    for op in ops {
-        match layers(&op["layers"]) {
+    for sel in selections {
+        match sel {
             Some(LayerSelection::All) => all = true,
             Some(LayerSelection::List(l)) => list.extend(l),
             Some(LayerSelection::Range {
@@ -139,14 +149,12 @@ fn patch(v: &Value) -> (Option<LayerSelection>, Vec<String>) {
             }) => list.extend(start..=end_inclusive),
             None => {}
         }
-        projections.extend(names(&op["projections"]));
     }
-    let sel = match (all, list.is_empty()) {
+    match (all, list.is_empty()) {
         (true, _) => Some(LayerSelection::All),
         (false, false) => Some(LayerSelection::List(list.into_iter().collect())),
         (false, true) => None,
-    };
-    (sel, projections.into_iter().collect())
+    }
 }
 
 /// The activity of a call to `name` (an engine tool, `mcp__<server>__` prefix or not).
@@ -177,6 +185,14 @@ pub fn of(name: &str, input: &Value) -> Option<Activity> {
         "surgeon_apply" => {
             let (sel, what) = patch(&input["patch"]);
             (|t| tf("activity.apply", &[("target", &t)]), sel, what)
+        }
+        "surgeon_sweep" => {
+            let windows = input["layers"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            (
+                |t| tf("activity.sweep", &[("target", &t)]),
+                union(windows.iter().map(layers)),
+                names(&input["operation"]),
+            )
         }
         "surgeon_bench" => {
             let what = names(&input["dataset"])
@@ -231,6 +247,13 @@ mod tests {
 
         let a = of("surgeon_extract", &json!({"layer": 20, "layers": "4-6"})).unwrap();
         assert_eq!(a.label, "Extraction L4–L6…");
+        let a = of(
+            "surgeon_sweep",
+            &json!({"layers": ["4-6", "10"], "operation": "project_out"}),
+        )
+        .unwrap();
+        assert_eq!(a.label, "Balayage Pareto project_out L4, L5, L6, L10…");
+        assert!(a.covers(Some(10)) && !a.covers(Some(7)));
         let a = of("surgeon_causal_trace", &json!({"component": "mlp"})).unwrap();
         assert_eq!(a.label, "Traçage causal mlp toutes les couches…");
         assert!(a.covers(Some(0)) && a.covers(Some(27)));

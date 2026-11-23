@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use eframe::egui::{self, Key};
 use weight_surgeon::backend::{self, config::BackendConfig, detect::BackendReport, hipfire};
 use weight_surgeon::bench::score::Backend;
+use weight_surgeon::checkpoint::{Listing, Manifest};
 use weight_surgeon::graph::output::GraphReport;
 use weight_surgeon::graph::stream::GraphPatch;
 use weight_surgeon::graph::GraphRole;
@@ -30,6 +31,7 @@ use crate::logging;
 use crate::platform::Picker;
 use crate::source::{self, Input, Timeline};
 use crate::studio::bus::RunView;
+use crate::studio::checkpoints;
 use crate::studio::ledger;
 use crate::studio::live::{Layer, Replay};
 use crate::studio::results::{self, Run};
@@ -115,6 +117,7 @@ impl Section {
 pub enum RightPane {
     Evidence,
     Results,
+    Checkpoints,
 }
 
 /// A file read again only when its modification time changed: path, time, entries.
@@ -223,6 +226,9 @@ pub struct SurgeonApp {
     mcp_cache: RunCache,
     results_cache: Option<(RunStamp, Vec<Run>)>,
     scores_cache: Option<(RunStamp, LayerScores)>,
+    pub checkpoint_selected: Option<String>,
+    checkpoints_cache: Option<(PathBuf, Option<SystemTime>, Result<Listing, String>)>,
+    restore_pending: Option<String>,
 }
 
 impl SurgeonApp {
@@ -290,6 +296,9 @@ impl SurgeonApp {
             mcp_cache: None,
             results_cache: None,
             scores_cache: None,
+            checkpoint_selected: None,
+            checkpoints_cache: None,
+            restore_pending: None,
         };
         if app
             .agents
@@ -805,6 +814,63 @@ impl SurgeonApp {
         self.results_cache.as_ref().map_or(&[], |(_, r)| r)
     }
 
+    pub fn checkpoints(&mut self) -> Option<&Result<Listing, String>> {
+        let project = self.agents.project.clone()?;
+        let stamp = checkpoints::stamp(&project);
+        let stale = self
+            .checkpoints_cache
+            .as_ref()
+            .is_none_or(|(p, s, _)| *p != project || *s != stamp);
+        if stale {
+            let listing = checkpoints::load(&project);
+            self.checkpoints_cache = Some((project, stamp, listing));
+        }
+        self.checkpoints_cache.as_ref().map(|(_, _, l)| l)
+    }
+
+    pub fn restore_checkpoint(&mut self, m: &Manifest) {
+        let Some(manager) = self.studio.manager.as_mut() else {
+            return;
+        };
+        match manager.submit(checkpoints::restore_job(m, i18n::t("checkpoints.restore"))) {
+            Ok(run) => {
+                self.restore_pending = Some(run);
+                self.studio.message =
+                    Some((i18n::tf("checkpoints.submitted", &[("id", &m.id)]), false));
+            }
+            Err(e) => self.studio.message = Some((e, true)),
+        }
+    }
+
+    fn follow_restore(&mut self) {
+        let Some(run) = self.restore_pending.clone() else {
+            return;
+        };
+        let entries = self.runs();
+        let Some(done) = entries.iter().find(|e| e.run_id == run) else {
+            return;
+        };
+        self.restore_pending = None;
+        let Some(manager) = self.studio.manager.as_mut() else {
+            return;
+        };
+        if done.verdict != ledger::Verdict::Ok {
+            let error = done.error.clone().unwrap_or_default();
+            self.studio.message =
+                Some((i18n::tf("checkpoints.failed", &[("error", &error)]), true));
+            return;
+        }
+        let jobs = checkpoints::followups(&manager.project.dir, &entries, done);
+        let n = jobs.len();
+        for job in jobs {
+            if let Err(e) = manager.submit(job) {
+                self.studio.message = Some((e, true));
+                return;
+            }
+        }
+        self.studio.message = Some((i18n::tf("checkpoints.synced", &[("n", &n)]), false));
+    }
+
     /// Drains the background channels and runs the debounced validation.
     fn poll(&mut self, ctx: &egui::Context) {
         if let Some(feed) = &self.feed {
@@ -837,6 +903,7 @@ impl SurgeonApp {
         self.agents.tick(&mut self.studio, &ended);
         self.start_after_copy(&ended);
         self.follow_project_graph(ctx);
+        self.follow_restore();
         if let Some(target) = self.agents.take_focus() {
             self.show_focus(target);
         }

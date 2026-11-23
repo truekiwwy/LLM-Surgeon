@@ -56,7 +56,7 @@ const AGY_OPTIONS: [&str; 4] = ["--print", "--output-format", "--input-format", 
 /// The sign-in files of Antigravity, in `~/.gemini`, copied into its isolated profile.
 const AGY_SIGN_IN: [&str; 2] = ["oauth_creds.json", "google_accounts.json"];
 /// The engine tools an "Ask" runtime may call (its server also runs `--read-only`).
-const READ_TOOLS: [&str; 8] = [
+const READ_TOOLS: [&str; 9] = [
     "surgeon_check",
     "surgeon_inspect",
     "surgeon_causal_trace",
@@ -65,6 +65,7 @@ const READ_TOOLS: [&str; 8] = [
     "surgeon_backends",
     "surgeon_autotune",
     "surgeon_files",
+    "surgeon_checkpoint",
 ];
 
 #[derive(Debug, Clone, PartialEq)]

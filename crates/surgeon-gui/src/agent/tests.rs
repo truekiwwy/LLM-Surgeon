@@ -1078,6 +1078,37 @@ fn forbidden_calls_are_answered_without_running_anything() {
             ..
         }
     ));
+    let checkpoint =
+        |args: Value, mode| policy::classify("surgeon_checkpoint", &args, mode, &scope);
+    assert_eq!(checkpoint(json!({"action": "list"}), a), Decision::Safe);
+    assert!(matches!(
+        checkpoint(json!({"action": "create", "model": "copies/c1"}), m),
+        Decision::Approval {
+            allow_always: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        checkpoint(json!({"action": "create", "model": "copies/c1"}), a),
+        Decision::Forbidden(_)
+    ));
+    assert!(matches!(
+        checkpoint(
+            json!({"action": "restore", "model": "copies/c1", "id": "0001"}),
+            m
+        ),
+        Decision::Approval {
+            allow_always: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        policy::classify("surgeon_sweep", &json!({"model": "copies/c1"}), m, &scope),
+        Decision::Approval {
+            allow_always: false,
+            ..
+        }
+    ));
 
     // Through the loop: the answer is an error result and no run exists.
     e.mock = Arc::new(Mock::new(vec![]));
