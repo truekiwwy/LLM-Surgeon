@@ -68,6 +68,10 @@ pub fn classify(name: &str, input: &Value) -> Option<(Stage, Method)> {
             (Stage::Probe, method(how, None))
         }
         "surgeon_autotune" => (Stage::Probe, method("autotune · ridge".into(), None)),
+        "surgeon_causal_trace" => {
+            let how = format!("causal · {}", text(&input["component"], "resid"));
+            (Stage::Probe, method(how, None))
+        }
         "surgeon_bench" if input["mode"] == "refusal_probe" => {
             let probe = text(&input["probe_method"], "first-token-prob");
             let how = format!("refusal_probe · {probe}");

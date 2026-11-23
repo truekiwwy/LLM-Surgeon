@@ -166,7 +166,7 @@ dépendance réseau (`tests/deps_purity.rs`). Voir [GUI_DEPENDENCIES.md](GUI_DEP
 
 | Mode | Ce que l'agent peut faire |
 | --- | --- |
-| Demander | Lecture seule : `surgeon_check`, `surgeon_inspect`, `surgeon_backends`, `surgeon_graph` sans écriture, `surgeon_bench` en lecture (logits, refusal, eval native) sur une copie de `copies/`. Le moteur reçoit en plus le job en `--read-only`. |
+| Demander | Lecture seule : `surgeon_check`, `surgeon_inspect`, `surgeon_backends`, `surgeon_causal_trace`, `surgeon_graph` sans écriture, `surgeon_bench` en lecture (logits, refusal, eval native) sur une copie de `copies/`. Le moteur reçoit en plus le job en `--read-only`. |
 | Modifier | Propose et lance des écritures sur les copies, chacune approuvée. |
 
 | Questions | `ask_user` |

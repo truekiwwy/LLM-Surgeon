@@ -161,8 +161,13 @@ pub fn of(name: &str, input: &Value) -> Option<Activity> {
         ),
         "surgeon_extract" => (
             |t| tf("activity.extract", &[("target", &t)]),
-            layers(&input["layer"]),
+            layers(&input["layers"]).or_else(|| layers(&input["layer"])),
             Vec::new(),
+        ),
+        "surgeon_causal_trace" => (
+            |t| tf("activity.trace", &[("target", &t)]),
+            layers(&input["layers"]).or(Some(LayerSelection::All)),
+            names(&input["component"]),
         ),
         "surgeon_autotune" => (
             |t| tf("activity.autotune", &[("target", &t)]),
@@ -223,6 +228,12 @@ mod tests {
 
         let a = of("surgeon_inspect", &json!({"layers": "all"})).unwrap();
         assert!(a.covers(Some(0)) && a.covers(Some(40)));
+
+        let a = of("surgeon_extract", &json!({"layer": 20, "layers": "4-6"})).unwrap();
+        assert_eq!(a.label, "Extraction L4–L6…");
+        let a = of("surgeon_causal_trace", &json!({"component": "mlp"})).unwrap();
+        assert_eq!(a.label, "Traçage causal mlp toutes les couches…");
+        assert!(a.covers(Some(0)) && a.covers(Some(27)));
 
         let a = of(
             "surgeon_bench",
