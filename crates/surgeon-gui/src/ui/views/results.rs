@@ -10,8 +10,10 @@ use super::super::icons::{self, Icon, State};
 use super::super::theme::TOKENS as T;
 use super::{age, duration};
 use crate::agent::experiments;
+use crate::agent::paths::ProjectPaths;
 use crate::app::{SurgeonApp, Tab};
 use crate::studio::ledger::{self, Verdict};
+use crate::studio::ollama::{self, Artifact};
 use crate::studio::project::now_unix;
 use crate::studio::results::{Answer, Bench, Mode, Run, Score};
 
@@ -46,9 +48,10 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp) {
     }
 }
 
-/// "Copy Markdown" and "Copy JSON": the pure exports of the experiment report, to the clipboard.
+/// "Copy Markdown" and "Copy JSON": the pure exports of the experiment report, to the
+/// clipboard; "Export to Ollama": the project's `Modelfile` and its `ollama create` command.
 fn export_buttons(ui: &mut Ui, app: &mut SurgeonApp, title: &str, entries: &[ledger::Entry]) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if c::button(ui, t("results.export.md"), c::ButtonKind::Secondary).clicked() {
             let text = experiments::export_experiments_markdown(title, entries);
             to_clipboard(ui, app, text);
@@ -62,8 +65,51 @@ fn export_buttons(ui: &mut Ui, app: &mut SurgeonApp, title: &str, entries: &[led
                 }
             }
         }
+        if c::button(ui, t("ollama.export"), c::ButtonKind::Secondary).clicked() {
+            app.ollama = Some(export_ollama(app, title));
+        }
     });
+    ollama_command(ui, app);
     ui.add_space(T.space.s);
+}
+
+fn export_ollama(app: &SurgeonApp, title: &str) -> Result<ollama::Export, String> {
+    let Some(project) = app.agents.project.as_deref() else {
+        return Err(t("ollama.none").into());
+    };
+    let paths = ProjectPaths::of(project);
+    ollama::export(
+        project,
+        title,
+        paths.copy.as_deref(),
+        paths.origin.as_deref(),
+    )?
+    .ok_or_else(|| t("ollama.none").into())
+}
+
+/// The artifact the last export points at, its command and the button that copies it.
+fn ollama_command(ui: &mut Ui, app: &mut SurgeonApp) {
+    let command = match &app.ollama {
+        None => return,
+        Some(Err(e)) => {
+            c::status(ui, State::Error, e.as_str());
+            return;
+        }
+        Some(Ok(export)) => {
+            let (kind, path) = match &export.artifact {
+                Artifact::Gguf(path) => ("GGUF", path),
+                Artifact::SafeTensors(path) => ("SafeTensors", path),
+            };
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            c::kv(ui, t("ollama.artifact"), &format!("{kind} · {name}"));
+            c::mono_wrapped(ui, export.command.as_str(), T.color.text);
+            export.command.clone()
+        }
+    };
+    if c::button(ui, t("ollama.copy"), c::ButtonKind::Secondary).clicked() {
+        ui.ctx().copy_text(command);
+        app.desktop.message = Some(t("ollama.copied").into());
+    }
 }
 
 fn to_clipboard(ui: &Ui, app: &mut SurgeonApp, text: String) {

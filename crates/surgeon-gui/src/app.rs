@@ -191,6 +191,8 @@ pub struct SurgeonApp {
     pub palette: Palette,
     /// The vector interference radar over `work/` of the open project.
     pub radar: Radar,
+    /// The last Ollama export of the Results panel: its command, or why it failed.
+    pub ollama: Option<Result<crate::studio::ollama::Export, String>>,
     /// `false` (`--no-motion`): no transition at all.
     pub motion: bool,
     /// The settings dialog, open on this section.
@@ -262,6 +264,7 @@ impl SurgeonApp {
             columns,
             palette: Palette::default(),
             radar: Radar::default(),
+            ollama: None,
             motion: true,
             settings: None,
             harness_note: None,

@@ -6,7 +6,7 @@
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, RawInput, Rect, Vec2};
 use surgeon_gui::actions::Env;
 use surgeon_gui::agent::policy::AgentMode;
-use surgeon_gui::app::{Mode, Section, SurgeonApp, Tab};
+use surgeon_gui::app::{Mode, RightPane, Section, SurgeonApp, Tab};
 use surgeon_gui::desktop::Desktop;
 use surgeon_gui::settings::{Lang, Settings};
 use surgeon_gui::ui::{components, fonts, theme};
@@ -140,6 +140,40 @@ fn the_radar_compares_two_direction_files_of_work() {
         let texts = b.texts(Tab::Agent);
         // The layer comes from the metadata, the row reads in full inside the panel.
         for text in [title, "L14 · direction", "+0.8000", strong] {
+            assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
+        }
+        let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+    }
+}
+
+#[test]
+fn the_results_panel_shows_the_ollama_command_of_the_working_copy() {
+    use surgeon_gui::agent::{paths::ProjectPaths, session::Dirs};
+    use surgeon_gui::studio::ollama;
+
+    for (lang, button) in [
+        (Lang::Fr, "Exporter vers Ollama"),
+        (Lang::En, "Export to Ollama"),
+    ] {
+        let mut b = bench(lang);
+        let project = b.app.agents.project.clone().unwrap();
+        // A measuring run, so that the panel lists something and offers its exports.
+        let line = serde_json::json!({"run_id": "mcp-1", "tool": "surgeon_extract", "ok": true,
+            "exit_code": 0, "data": null, "started_unix": 1, "finished_unix": 2});
+        std::fs::write(Dirs::of(&project).mcp_runs(), format!("{line}\n")).unwrap();
+        let paths = ProjectPaths::of(&project);
+        let (copy, origin) = (paths.copy.as_deref(), paths.origin.as_deref());
+        // The demo's copy holds the weights only; a Hugging Face folder has its config.
+        let config = copy.unwrap().join("config.json");
+        std::fs::write(config, r#"{"max_position_embeddings": 4096}"#).unwrap();
+        let export = ollama::export(&project, "demo-qwen2", copy, origin).unwrap();
+        let export = export.expect("the working copy is a SafeTensors folder");
+        let command = export.command.clone();
+        b.app.ollama = Some(Ok(export));
+        b.app.right = RightPane::Results;
+        let texts = b.texts(Tab::Agent);
+        for text in [button, "SafeTensors · c1", command.as_str()] {
             assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
         }
         let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
