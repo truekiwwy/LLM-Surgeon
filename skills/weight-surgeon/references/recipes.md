@@ -101,6 +101,32 @@ Direction de capacité à préserver, même couche : `pos_prompts_file` `builtin
  "refusal_prompts": "builtin:refusals", "eval_dataset": "builtin:math"}
 ```
 
+## Balayage Pareto et checkpoints
+
+`surgeon_checkpoint` avant une série d'essais :
+
+```json
+{"action": "create", "model": "copies/copy-1", "label": "avant patch"}
+```
+
+`surgeon_sweep` (la copie finit sur le meilleur compromis) :
+
+```json
+{"model": "copies/copy-1", "vectors": ["work/dir_L14.safetensors"],
+ "operation": "project_out", "alphas": [0.4, 0.6, 0.8, 1.0], "layers": ["all", "10-14"],
+ "max_drift": 0.05,
+ "target": {"kind": "unblocking", "dataset": "builtin:refusals", "max_new_tokens": 40},
+ "drift": {"kind": "kl", "dataset": "builtin:general"}}
+```
+
+Passer sur un autre point du front (`data.points[i].checkpoint`) :
+
+```json
+{"action": "restore", "model": "copies/copy-1", "id": "0003"}
+```
+
+`surgeon_checkpoint` `list` : `{"action": "list"}`
+
 ## Composition orthogonale
 
 `surgeon_compose` :

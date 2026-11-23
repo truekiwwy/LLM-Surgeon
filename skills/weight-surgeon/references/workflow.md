@@ -10,6 +10,7 @@ Les chemins relatifs partent du dossier projet (le premier dossier autorisé du 
 | `project.surgeon.json` | `surgeon_workspace` `init` (une fois) ou le Studio | marque le projet et son origine (chemin, SHA-256) ; sans lui, rien n'est journalisé |
 | `copies/<id>/` | l'agent (copie du dossier du modèle) ou le Studio | la copie de travail, la plus récente sert par défaut |
 | `work/` | `surgeon_files`, les sorties `out` / `patch_out` | prompts, jeux de sécurité, directions, `patch_*.json` |
+| `work/checkpoints/` | `surgeon_checkpoint`, `surgeon_sweep` | instantanés de la copie par liens physiques (manifeste SHA-256, métriques, parent) ; aucun autre outil n'y écrit |
 | `chat/mcp_runs.jsonl` | le serveur | un run par appel d'outil : `run_id`, outil, arguments, `ok`, `data` |
 | `chat/findings.jsonl` | le serveur (`record_finding`) | le journal des preuves |
 | `chat/plan.json`, `chat/focus.json` | le serveur (`update_plan`, `show_in_3d`) | plan et sélection 3D |
@@ -57,6 +58,23 @@ modèle>` (ou mets le modèle sous le dossier projet). `surgeon_files` action `l
 
 Garde le plus petit alpha qui atteint l'objectif. Après une baisse de rétention, n'augmente
 pas alpha sur les mêmes couches : réduis-le, change de couches ou compose la direction.
+
+## 3 bis. Balayage Pareto (`surgeon_sweep`)
+
+- Cible (`target.kind`) : `unblocking` pour des refus excessifs (gain = plus de réponses),
+  `safety` pour un comportement à renforcer, `gsm8k` pour une capacité. Le jeu de la cible
+  et celui de la dérive (`drift.dataset`, des prompts neutres) sont distincts.
+- `max_drift` : la dérive moyenne acceptée contre la copie de départ (KL par défaut). Un
+  budget trop serré donne `drift_exceeded` partout : la copie revient à la base, aucun
+  checkpoint n'est gardé, dis-le au lieu de relâcher le budget seul.
+- Lis `data.points[].decision` (`kept`, `dominated`, `drift_exceeded`), `data.front` (indices
+  par dérive croissante) et `data.best`. Consigne le front avec `record_finding`, une valeur
+  par point cité, et le `run_id` du sweep.
+- Le sweep a déjà mis la copie sur `data.restored`. Pour comparer un autre point du front :
+  `surgeon_checkpoint` `restore` avec son `checkpoint`, puis certifie (section 5).
+- `surgeon_checkpoint` `create` avant une série manuelle de `surgeon_apply` donne un retour
+  sûr à cet état, quel que soit le nombre d'applies ; `list` donne `disk_bytes`, ce que
+  l'arbre coûte vraiment sur disque.
 
 ## 4. Composition orthogonale (`surgeon_compose`)
 

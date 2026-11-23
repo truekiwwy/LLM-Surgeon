@@ -18,8 +18,8 @@ surgeon mcp --allow-dir /projet --allow-read /modeles/origine
 | Option | Effet |
 | --- | --- |
 | `--allow-dir <dossier>` | Dossier autorisé, répétable. Défaut : `$SURGEON_MCP_ALLOW_DIRS` (séparateur du système : `;` sous Windows, `:` ailleurs), sinon le dossier courant. |
-| `--allow-read <chemin>` | Dossier ou fichier lisible mais jamais écrit (le modèle d'origine), répétable. Les chemins que les outils d'analyse et de mesure lisent y sont acceptés : `model` de `surgeon_check`, `surgeon_inspect`, `surgeon_eval`, `surgeon_extract`, `surgeon_causal_trace`, `surgeon_autotune`, `surgeon_graph` ; `baseline` et `vector` de `surgeon_graph` ; les modèles, jeux, textes, `responses`, `labels` et `baseline_model` de `surgeon_bench` ; `from_origin`, `backup` et `backup_dir` de `surgeon_restore` ; `ablate` et `keep` de `surgeon_compose` ; `base` et `tuned` de `surgeon_diff`, `base`, `patched`, `delta`, `lora` et `adapter_config` de `surgeon_lora` ; `refusal_prompts` et `retention_dataset` de `surgeon_autotune` ; les fichiers de prompts, d'étiquettes et `arch_spec`. Tout chemin écrit ou exécuté (`out`, `out_dir`, `cache_dir`, `export_gguf`, `backup_dir` de `surgeon_apply`, `judge_cache`, `llama_cpp_dir`), le `model` de `surgeon_restore`, tout `surgeon_apply`, les écritures de `surgeon_diff` et `surgeon_lora` (`out`, le `model` et le `backup_dir` d'un `merge`) et `surgeon_pipeline` restent limités à `--allow-dir` (`error.kind = "path_not_allowed"`, message « dossier en lecture seule »). |
-| `--read-only` | Refuse `surgeon_apply` (sauf `dry_run`), `surgeon_restore`, `surgeon_compose`, l'action `write` de `surgeon_files`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en modes `dump` et `judge_sample` (et `judge_eval` avec `out`), `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora` (les deux modes), `surgeon_graph` avec `out_dir` ou `cache_dir` et les actions `start`, `cancel`, `promote_patch` de `surgeon_pipeline` (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out`, `surgeon_graph` sans sortie et `surgeon_causal_trace` restent permis. |
+| `--allow-read <chemin>` | Dossier ou fichier lisible mais jamais écrit (le modèle d'origine), répétable. Les chemins que les outils d'analyse et de mesure lisent y sont acceptés : `model` de `surgeon_check`, `surgeon_inspect`, `surgeon_eval`, `surgeon_extract`, `surgeon_causal_trace`, `surgeon_autotune`, `surgeon_graph` ; `baseline` et `vector` de `surgeon_graph` ; les modèles, jeux, textes, `responses`, `labels` et `baseline_model` de `surgeon_bench` ; `from_origin`, `backup` et `backup_dir` de `surgeon_restore` ; `ablate` et `keep` de `surgeon_compose` ; `base` et `tuned` de `surgeon_diff`, `base`, `patched`, `delta`, `lora` et `adapter_config` de `surgeon_lora` ; `refusal_prompts` et `retention_dataset` de `surgeon_autotune` ; `vectors`, `target.dataset` et `drift.dataset` de `surgeon_sweep` ; les fichiers de prompts, d'étiquettes et `arch_spec`. Tout chemin écrit ou exécuté (`out`, `out_dir`, `cache_dir`, `export_gguf`, `backup_dir` de `surgeon_apply`, `judge_cache`, `llama_cpp_dir`), le `model` de `surgeon_restore`, de `surgeon_checkpoint` et de `surgeon_sweep`, tout `surgeon_apply`, les écritures de `surgeon_diff` et `surgeon_lora` (`out`, le `model` et le `backup_dir` d'un `merge`) et `surgeon_pipeline` restent limités à `--allow-dir` (`error.kind = "path_not_allowed"`, message « dossier en lecture seule »). |
+| `--read-only` | Refuse `surgeon_apply` (sauf `dry_run`), `surgeon_restore`, `surgeon_compose`, l'action `write` de `surgeon_files`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en modes `dump` et `judge_sample` (et `judge_eval` avec `out`), `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora` (les deux modes), `surgeon_graph` avec `out_dir` ou `cache_dir` et les actions `start`, `cancel`, `promote_patch` de `surgeon_pipeline`, les actions `create` et `restore` de `surgeon_checkpoint` et `surgeon_sweep` (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out`, `surgeon_graph` sans sortie, `surgeon_causal_trace` et `surgeon_checkpoint` `list` restent permis. |
 | `--allow-no-backup` | Respecte `backup: false` dans un patch. Sans cette option, la sauvegarde est imposée. |
 
 `$LLAMA_CPP_DIR`, défini par l'opérateur, sert de dossier llama.cpp par défaut pour
@@ -51,7 +51,7 @@ et `--mcp-config`) ; voir [AGENTS.md](AGENTS.md) section 8 bis.
 
 ## Outils
 
-Le serveur expose vingt et un outils (`tools/list`), décrits ici dans l'ordre où un agent les appelle
+Le serveur expose vingt-trois outils (`tools/list`), décrits ici dans l'ordre où un agent les appelle
 le plus souvent.
 
 | Outil | Rôle | Annotations |
@@ -60,6 +60,8 @@ le plus souvent.
 | `surgeon_inspect` | Couches et matrices MLP (et `o_proj`, `embed_tokens` sur demande), statistiques en option, `max_tensors` (défaut 500), architecture détectée (`data.arch`), `arch_spec` | lecture seule |
 | `surgeon_apply` | Applique un patch en place (`dry_run` pour vérifier d'abord) ; `gguf: true` pour un GGUF quantifié | destructif |
 | `surgeon_restore` | Remet un modèle octet pour octet depuis les sauvegardes de `surgeon_apply` ou depuis le modèle d'origine (`from_origin`), SHA-256 avant et après ([rollback](#rollback-surgeon_restore)) | destructif, idempotent |
+| `surgeon_checkpoint` | Checkpoints instantanés d'une copie de travail sous `work/checkpoints/` : `action` `create` (liens physiques, manifeste SHA-256, étiquette, métriques, parent), `list` (arbre, empreinte disque réelle), `restore` (SHA-256 vérifié, échange atomique du dossier) ([détail](#checkpoints-et-balayage-pareto-surgeon_checkpoint-surgeon_sweep)) | `list` en lecture ; `create` écrit sous `work/checkpoints/` ; `restore` destructif |
+| `surgeon_sweep` | Balayage Pareto : grille vecteurs x fenêtres `layers` x `alphas` appliquée à la copie, cible et dérive mesurées, checkpoint pour chaque point qui améliore le front sous `max_drift`, rollback sinon ; front non dominé, copie laissée sur le meilleur compromis ([détail](#checkpoints-et-balayage-pareto-surgeon_checkpoint-surgeon_sweep)) | destructif |
 | `surgeon_doctor` | La machine est-elle prête : RAM libre et plus gros modèle en f32 ou bf16 (avec `model` : son besoin exact et son lot natif), cœurs et threads, cache `ref_bench`, démon hipfire (URL, `/health`, `/metrics`, mémoire GPU lue dans son log ; 0 Mo au total = démon figé) ; `data.ready` | lecture seule, idempotent |
 | `surgeon_compose` | Une direction faite de vecteurs extraits (`ablate`, poids `chemin:alpha`), orthogonale aux directions préservées (`keep`, Gram-Schmidt modifié en f64), ou fusionnée par TIES (`mode` `ties`, `density`) ou DARE (`mode` `dare`, `drop_rate`, `seed`), et le patch `project_out` qui la retire avec sa recette (`composition`) ; refus nommé d'un vecteur nul, non fini, de dimension différente ou quasi colinéaire (`collinear_vectors`) | écrit des fichiers, idempotent |
 | `surgeon_files` | Fichiers de travail d'un agent : `list`, `read` dans les dossiers autorisés, `write` de fichiers texte sous `work/` ([détail](#fichiers-de-travail-surgeon_files)) | écrit sous `work/` seulement |
@@ -111,8 +113,8 @@ aucun argument libre vers llama.cpp, aucune option `--allow-*` du pipeline).
 Exception voulue : `backend detect --save` reste en ligne de commande, car un agent ne
 réécrit jamais la configuration de l'opérateur. `tui`, `schema`, `mcp`, `plugins` et `arch`
 servent l'opérateur et n'ont pas d'outil (`surgeon_inspect` rapporte l'architecture
-détectée dans `data.arch`). À l'inverse, `surgeon_causal_trace` n'a pas de commande : il ne
-sert qu'aux agents et au Studio.
+détectée dans `data.arch`). À l'inverse, `surgeon_causal_trace`, `surgeon_checkpoint` et
+`surgeon_sweep` n'ont pas de commande : ils ne servent qu'aux agents et au Studio.
 
 ## Extraction puis chirurgie
 
@@ -366,6 +368,60 @@ Cycle complet, régression comprise :
 {"name": "surgeon_bench", "arguments": {"mode": "logits", "before": "before.safetensors", "after": "after.safetensors", "warn_kl": 0.05}}
 {"name": "surgeon_restore", "arguments": {"model": "copies/c1"}}
 {"name": "surgeon_restore", "arguments": {"model": "copies/c1", "from_origin": "/models/qwen2"}}
+```
+
+## Checkpoints et balayage Pareto (`surgeon_checkpoint`, `surgeon_sweep`)
+
+Un checkpoint fige l'état d'une copie de travail sans recopier ses poids :
+`work/checkpoints/<id>/model/` contient un lien physique vers chaque fichier de premier niveau
+de la copie (sauvegardes `.bak-*` exceptées), et `work/checkpoints/<id>/manifest.json` leur
+SHA-256, celui de l'ensemble (même formule que l'origine d'un projet), l'étiquette, les
+métriques et le parent. Sur un autre volume, le lien devient une copie
+(`files[].linked = false`). Les identifiants sont croissants : `0001`, `0002`...
+
+| `action` | Arguments | Effet |
+| --- | --- | --- |
+| `create` | `model`, `label`, `metrics` | Instantané de la copie. Le parent est le dernier checkpoint créé ou restauré de cette copie (`work/checkpoints/heads.json`). `data` : le manifeste. |
+| `list` | aucun | `data.checkpoints` (manifeste, `children`, `exclusive_bytes` : ce que libérerait sa suppression), `heads`, `logical_bytes`, `disk_bytes` (un fichier partagé par liens physiques compté une fois). |
+| `restore` | `model`, `id` | Vérifie le SHA-256 de chaque fichier du checkpoint (sinon `checksum_mismatch`, copie intacte), remplit de liens un dossier voisin `<copie>.ws-restore`, puis l'échange avec la copie par deux renommages ; les `.bak-*` et sous-dossiers de la copie suivent. Un checkpoint pris sur une autre copie est refusé. |
+
+Un checkpoint ne change jamais : chaque écrivain en place du moteur (`surgeon_apply`, `gguf`
+compris, `surgeon_lora` `merge`, un `.surgery`) recopie d'abord un fichier qui a plus d'un
+lien physique, puis écrit sa copie privée. Aucun outil ne peut écrire sous
+`work/checkpoints/` (`path_not_allowed`), et le modèle d'origine (`--allow-read`) ne peut
+être ni figé ni restauré.
+
+`surgeon_sweep` automatise le balayage d'alpha. La grille est le produit `vectors` x
+`layers` (des fenêtres au format `layers`, par exemple `data.window.layers` de
+`surgeon_causal_trace`) x `alphas`, 64 points au plus, chacun un patch d'une opération
+(`operation` obligatoire, `projections` par défaut `o_proj` et `down_proj`, tenseur
+`direction` ou `vector_tensor`). Chaque point passe un dry-run avant la première écriture.
+Ensuite :
+
+1. la copie de départ est mesurée : `target`, taux de succès d'un pilier du pipeline
+   (`unblocking`, `safety` ou `gsm8k`) en génération gloutonne native, et un dump de logits
+   pour `drift` ; elle devient le checkpoint `base` ;
+2. chaque point est appliqué puis mesuré : `drift.kind` `kl` (défaut) donne la KL(base‖point)
+   moyenne par prompt, `logits` la part des positions dont le token le plus probable change ;
+   `gain` vaut la cible du point moins celle de la base ;
+3. au-delà de `max_drift`, le point est `drift_exceeded` ; s'il ne fait pas mieux que la base
+   ou un point déjà gardé (gain inférieur ou égal et dérive supérieure ou égale), il est
+   `dominated` ; sinon il est `kept` et devient un checkpoint. Dans tous les cas la copie
+   revient à la base ;
+4. à la fin, `data.front` liste les points non dominés par dérive croissante, `data.best`
+   celui de plus grand gain (à égalité, la plus petite dérive), et la copie est restaurée sur
+   son checkpoint (`data.restored`). Sans aucun gain, elle reste sur la base.
+
+Une erreur ou une annulation remet la copie sur la base avant de rendre la main. Les dumps
+vivent dans `work/.sweep-<pid>/`, supprimé à la fin. `data` : `model`, `base_checkpoint`,
+`base_target`, `max_drift`, `points` (`index`, `vector`, `layers`, `alpha`, `target`, `gain`,
+`drift`, `decision`, `checkpoint`), `front`, `best`, `restored`. Le sweep mesure, il ne
+certifie pas : le meilleur compromis passe ensuite la génération complète de `surgeon_bench`.
+
+```json
+{"name": "surgeon_sweep", "arguments": {"model": "copies/c1", "vectors": ["work/dir_L14.safetensors"], "operation": "subtract", "alphas": [0.5, 0.8, 1.0, 1.2], "layers": ["10-14", "8-16"], "max_drift": 0.05, "target": {"kind": "unblocking", "dataset": "builtin:refusals", "max_new_tokens": 40}, "drift": {"kind": "kl", "dataset": "builtin:general"}}}
+{"name": "surgeon_checkpoint", "arguments": {"action": "list"}}
+{"name": "surgeon_checkpoint", "arguments": {"action": "restore", "model": "copies/c1", "id": "0003"}}
 ```
 
 ## Fichiers de travail (`surgeon_files`)
@@ -769,6 +825,9 @@ Serveur lancé avec `--read-only` :
   `builtin:<jeu>` n'est pas un fichier : il est lu dans le binaire, hors sandbox.
 - **Sauvegarde imposée** avant toute écriture, vérifiée par SHA-256 ; une sauvegarde ratée
   bloque l'écriture.
+- **Checkpoints intouchables** : un fichier partagé avec un checkpoint (plus d'un lien
+  physique) est recopié avant toute écriture en place, et aucun outil n'écrit sous
+  `work/checkpoints/`.
 - **Rollback automatique** sur erreur, NaN/Inf, annulation (`notifications/cancelled`,
   `error.kind = "cancelled"`) ou panic. Un panic devient une erreur `-32603` et le
   serveur continue.

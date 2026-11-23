@@ -81,7 +81,8 @@ qu'il ait fini d'écrire, même si la fenêtre se ferme entre-temps.
 Le modèle d'origine n'est jamais écrit par le studio.
 
 1. Il n'est jamais passé à un outil qui écrit un modèle en place. `surgeon_apply` (hors
-   `dry_run: true`) et `surgeon_lora` en `mode: merge` exigent un `model` situé sous
+   `dry_run: true`), `surgeon_lora` en `mode: merge`, `surgeon_restore`,
+   `surgeon_checkpoint` (hors `list`) et `surgeon_sweep` exigent un `model` situé sous
    `copies/` du projet ; sinon le job est refusé avant d'être mis en file.
 2. Aucun argument de sortie (`out`, `out_dir`, `backup_dir`, `export_gguf`, `judge_cache`,
    `cache_dir`, `job_dir`) ne peut viser le modèle d'origine ou son dossier.
@@ -235,6 +236,23 @@ couches illisible. Le dernier traçage et le dernier balayage réussis du projet
 `chat/mcp_runs.jsonl`, donc aussi ceux d'un agent) donnent les scores par couche : le Mode
 Live garde allumées les couches de la fenêtre causale, et l'Inspecteur affiche pour la
 couche du tenseur sélectionné le score causal, sa place dans la fenêtre, l'AUC et la marge.
+
+### Checkpoints et front de Pareto
+
+Le volet `Pareto` du panneau de droite de l'agent (à côté de `Résultats` et `Preuves`) lit
+`work/checkpoints/` du projet (`studio/checkpoints.rs`), relu seulement quand
+`heads.json` change :
+
+- l'arbre des checkpoints, l'état actuel de la copie marqué `actuel`, et l'empreinte disque
+  réelle (un fichier partagé par liens physiques compté une fois) ;
+- les checkpoints mesurés (gain en ordonnée, dérive en abscisse) et leur front non dominé ;
+- pour le checkpoint sélectionné : parent, SHA-256, taille propre, cible avant et après,
+  gain et dérive.
+
+`Restaurer ce checkpoint` lance le job `surgeon_checkpoint` `restore`. Une fois ce run
+réussi, le studio relance le dernier `surgeon_graph` et le dernier `surgeon_bench` réussis
+de cette copie avec leurs propres arguments : la vue 3D, qui suit le graphe le plus récent,
+et le banc Avant/Après du volet `Résultats` décrivent alors les poids restaurés.
 
 ## 6. Graphe éphémère
 

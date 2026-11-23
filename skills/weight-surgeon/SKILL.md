@@ -28,7 +28,8 @@ premier `--allow-dir`. Ce dossier est le projet : surgeon-gui le rouvre tel quel
   d'origine. Copie son dossier dans `copies/` avec ton outil shell, ou demande à
   l'utilisateur de le faire ; l'origine se lit par `--allow-read`.
 - `work/` : tes fichiers (prompts, jeux de sécurité, directions, `patch_*.json`), écrits par
-  `surgeon_files` ou en sortie des outils.
+  `surgeon_files` ou en sortie des outils. `work/checkpoints/` est tenu par
+  `surgeon_checkpoint` et `surgeon_sweep` seuls : aucun autre outil n'y écrit.
 - `chat/` et `ledger.jsonl` : tenus par le serveur et par le Studio. N'y écris jamais à la
   main : une ligne invalide masque tout le journal.
 
@@ -65,9 +66,15 @@ et `data.checks`.
 4. Crible chaque alpha avec `surgeon_bench` mode `refusal_probe` (`probe_method`
    `first-token-prob`, `prompts` `builtin:refusals`) : écarte ceux dont le refus sondé ne
    baisse pas ; seuls les deux plus petits alpha retenus passent en génération complète.
-5. `surgeon_autotune` avec `refusal_prompts` (sans `out`, il ne fait que mesurer) calibre de
+5. Balayage automatique : `surgeon_sweep` sur la copie prend les directions (`vectors`),
+   les fenêtres (`layers`, dont la fenêtre causale) et les `alphas`, avec un budget
+   `max_drift`. Il applique chaque point, mesure la cible et la dérive, garde un checkpoint
+   par point du front de Pareto, annule les autres et laisse la copie sur le meilleur
+   compromis (`data.best`, `data.restored`). `surgeon_checkpoint` `list` montre l'arbre,
+   `restore` passe la copie sur un autre point du front. Le sweep mesure, il ne certifie pas.
+6. `surgeon_autotune` avec `refusal_prompts` (sans `out`, il ne fait que mesurer) calibre de
    la même façon l'échelle d'un patch de steering.
-6. Préserver une capacité (maths, logique, code) : extrais sa direction à la même couche
+7. Préserver une capacité (maths, logique, code) : extrais sa direction à la même couche
    (`builtin:math` ou `builtin:logic` contre des prompts neutres), puis `surgeon_compose` avec
    `ablate` = la direction du comportement, `keep` = les directions de capacité, `mode`
    `orthogonal_preserve` (CLI `--mode orthogonal-preserve`), `out` et `patch_out` dans
@@ -86,8 +93,9 @@ et `data.checks`.
   `builtin:logic` et `builtin:general` (rétention) ; contrôle de sécurité : mode `refusal` sur
   au moins 10 demandes réellement dangereuses écrites une fois dans `work/`, dont le taux de
   refus ne doit pas baisser.
-- Toute écriture (`surgeon_apply` réel, `surgeon_restore`, `surgeon_lora` en `merge`) rend
-  caduques les mesures d'avant : certifie à nouveau.
+- Toute écriture (`surgeon_apply` réel, `surgeon_restore`, `surgeon_lora` en `merge`,
+  `surgeon_checkpoint` `restore`, `surgeon_sweep`) rend caduques les mesures d'avant :
+  certifie à nouveau.
 - Garde les défauts : `max_new_tokens` (refusal 40, eval 512) et `chat_template` `auto`.
 - Si tu ne peux pas certifier, écris que le résultat n'est « pas certifié ».
 
@@ -99,7 +107,8 @@ et `data.checks`.
   complète donne « Mesuré », une sonde « Heuristique », un raisonnement seul (`reasoning`)
   « Déduit ».
 - `update_plan` affiche ton plan, `show_in_3d` sélectionne un tenseur dans la vue 3D.
-- Régression mesurée : `surgeon_restore` (`model` = la copie) et vérifie `data.identical`.
+- Régression mesurée : `surgeon_restore` (`model` = la copie) et vérifie `data.identical`,
+  ou `surgeon_checkpoint` `restore` vers un checkpoint déjà certifié.
 - Aucune affirmation sans chiffre mesuré et l'outil qui l'a produit ; sinon « non mesuré ».
 - À la fin, dis à l'utilisateur d'ouvrir le dossier parent du projet dans surgeon-gui (il
   devient l'espace de travail) : le projet y montre ses résultats, ses constats et leurs

@@ -166,7 +166,7 @@ dépendance réseau (`tests/deps_purity.rs`). Voir [GUI_DEPENDENCIES.md](GUI_DEP
 
 | Mode | Ce que l'agent peut faire |
 | --- | --- |
-| Demander | Lecture seule : `surgeon_check`, `surgeon_inspect`, `surgeon_backends`, `surgeon_causal_trace`, `surgeon_graph` sans écriture, `surgeon_bench` en lecture (logits, refusal, eval native) sur une copie de `copies/`. Le moteur reçoit en plus le job en `--read-only`. |
+| Demander | Lecture seule : `surgeon_check`, `surgeon_inspect`, `surgeon_backends`, `surgeon_causal_trace`, `surgeon_checkpoint` `list`, `surgeon_graph` sans écriture, `surgeon_bench` en lecture (logits, refusal, eval native) sur une copie de `copies/`. Le moteur reçoit en plus le job en `--read-only`. |
 | Modifier | Propose et lance des écritures sur les copies, chacune approuvée. |
 
 | Questions | `ask_user` |
@@ -193,7 +193,8 @@ Les règles « toujours » (`chat/agent.json` : même outil, même ensemble d'ar
 identiques, et pour un chemin du projet le même dossier, `copies/c1/*`) restent lues par la
 politique, mais l'interface n'en crée plus depuis G7 : sans panneau Contrat, elles ne
 pourraient plus être révoquées. Elles n'ont jamais été proposées pour une action destructrice
-(apply en place, fusion LoRA, `surgeon_restore`, annulation de pipeline) ni pour un
+(apply en place, fusion LoRA, `surgeon_restore`, `surgeon_checkpoint` `restore`,
+`surgeon_sweep`, annulation de pipeline) ni pour un
 dépassement de budget.
 
 Rollback : le brief système (`agent/paths.rs`) dit à l'agent que, dès qu'une contre-mesure
