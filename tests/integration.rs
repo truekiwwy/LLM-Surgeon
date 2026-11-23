@@ -4240,10 +4240,13 @@ fn bench_human_output_golden_in_truecolor() {
     assert_eq!(code, 0, "{err}");
     let text = strip_ansi(&out);
     let lines: Vec<&str> = text.lines().collect();
-    assert!(lines[0].starts_with("[BENCH]    ppl · ctx 512  "), "{text}");
+    assert!(
+        lines[0].starts_with("[BENCH]    ppl · llama · ctx 512  "),
+        "{text}"
+    );
     assert_eq!(
         lines[1],
-        "[PPL]      7.2000 ± 0.04 → 7.2500 ± 0.04 · Δ +0.0500 (dans le bruit)"
+        "[PPL]      7.2000 ± 0.04 → 7.2500 ± 0.04 · Δ +0.0500 (dans le bruit) · +0.69 %"
     );
     assert_eq!(lines[2], "[VERDICT]  ok · seuils respectés");
 

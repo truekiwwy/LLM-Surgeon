@@ -112,6 +112,11 @@ pub fn cli_line(
             line.push_str(&shell(v));
         }
     };
+    let default = match command {
+        "bench eval" => Some(EVAL_BACKEND),
+        "bench refusal" => Some(REFUSAL_BACKEND),
+        _ => None,
+    };
     let mut names: Vec<&String> = fields.keys().collect();
     names.sort_by_key(|n| n.as_str() != "model");
     for name in names {
@@ -119,8 +124,10 @@ pub fn cli_line(
         let skipped = value.is_null()
             || value == &Value::Bool(false)
             || MCP_ONLY.contains(&(command, name.as_str()))
-            // The bench mode is the subcommand, its backend is written after the loop.
-            || (bench_fields.is_some() && matches!(name.as_str(), "mode" | "backend"))
+            // The bench mode is the subcommand; an eval or refusal backend is written after
+            // the loop.
+            || (bench_fields.is_some()
+                && (name == "mode" || (name == "backend" && default.is_some())))
             || bench_fields.is_some_and(|(required, optional)| {
                 !required.contains(&name.as_str()) && !optional.contains(&name.as_str())
             });
@@ -152,11 +159,6 @@ pub fn cli_line(
             other => push(&option, Some(&scalar(other))),
         }
     }
-    let default = match command {
-        "bench eval" => Some(EVAL_BACKEND),
-        "bench refusal" => Some(REFUSAL_BACKEND),
-        _ => None,
-    };
     let mut hipfire_set_aside = false;
     // Written even when implicit: the terminal's own configuration must not change the run.
     if let Some(default) = default {
@@ -366,6 +368,14 @@ mod tests {
             .command,
             "surgeon bench eval --model m --backend llama"
         );
+        let ppl = json!({"mode": "ppl", "model": "copies/copy-1", "text": "builtin:wikitext",
+            "backend": "native", "stride": 256});
+        let line = cli_line("surgeon_bench", &ppl, Some(Backend::Hipfire), base).unwrap();
+        assert_eq!(
+            line.command,
+            "surgeon bench ppl --model copies/copy-1 --backend native --stride 256 --text builtin:wikitext"
+        );
+        assert!(!line.hipfire_set_aside);
     }
 
     #[test]
