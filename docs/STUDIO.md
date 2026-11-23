@@ -254,6 +254,52 @@ réussi, le studio relance le dernier `surgeon_graph` et le dernier `surgeon_ben
 de cette copie avec leurs propres arguments : la vue 3D, qui suit le graphe le plus récent,
 et le banc Avant/Après du volet `Résultats` décrivent alors les poids restaurés.
 
+### Perplexité et export Ollama (volet Résultats)
+
+Un run `surgeon_bench` `ppl` affiche dans son titre « Perplexité <avant> → <après> · <Δ %> »
+(2 décimales, delta signé). Le point d'état est vert quand Δ <= +2 %, ambre jusqu'à +5 %,
+rouge au-dessus. Sans référence (`baseline_model`), seule la valeur est affichée.
+
+Un sélecteur de format se trouve à côté du bouton « Exporter vers Ollama » :
+
+| Format | Ce que fait l'export |
+| --- | --- |
+| `SafeTensors` (défaut) | Le Modelfile pointe sur le dossier de la copie de travail (`ollama create` le convertit). Pour un projet GGUF, sans copie SafeTensors, il pointe comme avant sur le `.gguf` le plus récent du projet. |
+| `GGUF Q8_0`, `GGUF Q4_K_M` | Le job `studio_export` quantifie la copie SafeTensors en `runs/<id>/out/<copie>-Q8_0.gguf` ou `<copie>-Q4_K_M.gguf`. |
+
+`studio_export` est un job interne du studio, pas un outil MCP (le nombre d'outils reste 23).
+Il prend la place du job lourd, affiche sa progression par tenseur et s'annule. Il quantifie en
+Rust (pas de llama.cpp ni de python), tenseur par tenseur depuis les shards mappés en mémoire ;
+la copie et l'origine ne sont que lues. Le fichier s'écrit dans `out.partial/` et n'est renommé
+qu'au succès : un échec ou une annulation ne laisse aucun fichier partiel. À la fin,
+`<projet>/Modelfile` est écrit avec ce nouveau `.gguf` (paramètres d'échantillonnage, contexte
+et stops lus depuis la copie, comme avant) et la commande
+`ollama create <nom> -f "<projet>/Modelfile"` s'affiche avec son bouton de copie.
+
+Il faut une copie SafeTensors (dossier avec `config.json`) d'une famille convertie nativement :
+Qwen2, Llama 2/3/3.1/3.2, Mistral, Gemma, Gemma 2, Phi-3. Sinon le panneau le dit.
+
+Quantification (`weight_surgeon::eval::quantize_safetensors`, le convertisseur de la conversion
+native SafeTensors vers GGUF) :
+
+- `Q8_0` : toutes les matrices en Q8_0 (`quantize_row_q8_0_ref`) ; `general.file_type` 7.
+- `Q4_K_M` : le mélange de types de llama-quantize ; Q6_K pour `output.weight` (ou
+  `token_embd.weight` quand la tête est liée), Q6_K pour `attn_v` et `ffn_down` sur le premier
+  et le dernier huitième des couches puis une couche sur trois entre les deux, Q5_K pour
+  `attn_qkv` fusionné de Phi-3, Q4_K ailleurs ; `general.file_type` 15.
+- Repli quand la longueur d'une ligne n'est pas un multiple de 256 : Q4_K devient Q5_0, Q5_K
+  devient Q5_1, Q6_K devient Q8_0 ; pas un multiple de 32 : F16. Les tenseurs à une dimension
+  (normes, biais) restent en F32.
+
+Limite : les K-quants utilisent un quantificateur min/max (échelles arrondies vers le haut),
+pas la recherche itérative d'échelle de llama-quantize, et aucune matrice d'importance.
+
+Mesuré sur Qwen2.5-0.5B-Instruct (extrait wikitext, ctx 512, 12 blocs, `llama-perplexity` sur
+CPU) : F16 17.07, Q8_0 17.18, Q4_K_M 17.50, contre 17.44 pour le Q4_K_M de llama-quantize
+depuis le même F16. Le fichier Q4_K_M a exactement la taille de celui de llama-quantize
+(397 807 232 octets), donc le même mélange de types. La quantification a pris environ 2 s pour
+ce modèle, en build release.
+
 ## 6. Graphe éphémère
 
 `surgeon-gui graph.json`, `surgeon-gui graph.ndjson` ou le champ `Graphe éphémère` de

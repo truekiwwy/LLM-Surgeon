@@ -232,7 +232,7 @@ est une erreur JSON-RPC `-32602` (les cinq autres outils la signalent en
 | `mode` | Requis | Optionnels |
 | --- | --- | --- |
 | `logits` | `before`, `after` | `tensor`, `top_k` (5), `worst` (5), `warn_kl`, `warn_top1_shift`, `fail_on_warn` |
-| `ppl` | `model`, `text` | `baseline_model` ou `baseline_ppl` (+ `baseline_ppl_err`), `ctx` (512), `chunks`, `threads`, `n_gpu_layers` (0), `llama_cpp_dir`, `warn_delta` (0.2), `timeout_secs`, `fail_on_warn` |
+| `ppl` | `model`, `text` (un fichier, ou `builtin:wikitext` en `native`) | `backend` (`llama` par défaut, `native`), `stride` (`native` seulement, défaut `ctx` / 2), `baseline_model` ou `baseline_ppl` (+ `baseline_ppl_err`), `ctx` (512), `chunks` (nombre de fenêtres en `native`), `threads`, `n_gpu_layers` (0), `llama_cpp_dir`, `warn_delta` (0.2), `timeout_secs`, `fail_on_warn` |
 | `eval` | `model`, `dataset` | `backend` (`llama`, `llama-completion`, `llama-server`, `mistralrs`, `hipfire`, `native`), `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `chat_template` (voir ci-dessous), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn`, options de génération |
 | `refusal` | `model`, `prompts` (fichier) | `backend` (`native`, `llama-server`, `llama-completion`, `mistralrs`, `hipfire`), `baseline_model`, `max_new_tokens` (40), `chat_template` (voir ci-dessous), `marker_langs`, `markers_file`, `judge` (`rules`, `llm`, `both`), `judge_model`, `judge_role` (`refusal`, `harm`), `judge_template`, `judge_cache`, `judge_calibration`, `min_calibration_n` (100), `min_kappa` (0.6), `partial_as_refusal`, `max_unparsable`, `llama_cpp_dir`, `timeout_secs`, `fail_on_warn`, options de génération |
 | `refusal_probe` | `model`, `prompts` (fichier) | `probe_method` (`first-token-prob` par défaut, `direction-projection`), `direction_path` (direction de `surgeon_extract`, requis en `direction-projection`), `threshold` (0.5, ou celui de la direction), `chat_template` |
@@ -311,7 +311,10 @@ Recette d'un agent :
 4. `surgeon_bench` `mode: "logits"` : KL(before‖after), top-1, top-k ; `worst_prompts`
    montre où le modèle a le plus changé.
 5. `surgeon_bench` `mode: "ppl"` avec `baseline_model` (l'original) : delta arrondi à 4
-   décimales, `within_noise`.
+   décimales, `within_noise`. Sans llama.cpp : `backend: "native"` et `text: "builtin:wikitext"`
+   (forward Rust sur le CPU, dossier SafeTensors, lecture seule, permis avec `--read-only`).
+   Lire le delta relatif : jusqu'à +2 % correct, jusqu'à +5 % à surveiller, au-dessus une
+   régression à examiner.
 6. `surgeon_bench` `mode: "eval"` avec `baseline_model` : Pass@1, intervalle de Wilson,
    questions perdues et gagnées.
 7. Décider : garder la copie, ajuster `alpha` ou les couches, ou abandonner. En cas de
@@ -842,7 +845,8 @@ Serveur lancé avec `--read-only` :
 - **Progression** : avec `_meta.progressToken`, une `notifications/progress` par tenseur
   (apply), par prompt (eval), ou une pour les poids puis une par prompt (extract) ; pour
   `surgeon_bench`, par prompt (`dump`), par bloc de 64 positions (`logits`), par chunk de
-  llama-perplexity (`ppl`, `total` absent tant qu'il n'est pas annoncé) et par question
+  llama-perplexity (`ppl`, `total` absent tant qu'il n'est pas annoncé ; en `native`, par
+  fenêtre) et par question
   (`eval`) ; pour `surgeon_autotune`, une par forward.
 - **Annulation de `surgeon_bench`** : `notifications/cancelled` tue et attend le processus
   llama.cpp en cours (aucun zombie) ; un dump annulé ne laisse aucun fichier.

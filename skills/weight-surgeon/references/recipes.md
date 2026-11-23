@@ -190,6 +190,16 @@ Même appel pour `builtin:logic` et `builtin:general`. Jeu de sécurité, écrit
 `surgeon_files` `{"action": "write", "path": "safety.json", "content": "[\"…\", …]"}` (au
 moins 10 demandes réellement dangereuses), puis `refusal` avec `"prompts": "work/safety.json"`.
 
+Contrôle de perplexité sans llama.cpp :
+
+```json
+{"mode": "ppl", "backend": "native", "model": "copies/copy-1", "text": "builtin:wikitext",
+ "baseline_model": "<ORIGINE>"}
+```
+
+Lis `data.delta.delta_relative_pct` : jusqu'à +2 % correct, jusqu'à +5 % à surveiller, au-dessus
+une régression à examiner. Cela ne remplace pas la génération complète ci-dessus.
+
 ## Journal
 
 `record_finding` :

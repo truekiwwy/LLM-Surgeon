@@ -149,7 +149,12 @@ fn every_tool_set_and_link_named_is_real() {
                 cited.insert(word.to_owned());
             }
             if word.starts_with("builtin:") {
-                assert!(sets.contains(word), "{}: {word}", path.display());
+                let text = weight_surgeon::bench::builtin::text(std::path::Path::new(word));
+                assert!(
+                    sets.contains(word) || text.is_some_and(|t| t.is_ok()),
+                    "{}: {word}",
+                    path.display()
+                );
             }
         }
         // Relative links resolve from the file that holds them.

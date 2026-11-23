@@ -437,6 +437,7 @@ consent next to the URL, size and SHA-256, and nothing is sent anywhere.
 - **First run**: language, machine diagnostic, llama.cpp (Vulkan GPU or CPU, recorded as your
   trusted toolchain), workspace folder, optional sample model (Qwen2.5-0.5B-Instruct), tour.
   Replay it from the home screen; the **Diagnostics** page repairs or reinstalls each part.
+- **Results and model export**: a perplexity run in the Results tab shows `before → after · Δ %` with a green, amber or red dot (up to +2 %, up to +5 %, above). The export button offers `SafeTensors` (the Modelfile points at the working copy), `GGUF Q8_0` or `GGUF Q4_K_M`: the Studio then quantizes the SafeTensors copy natively in Rust (no llama.cpp, no python), as a cancellable job; see [docs/STUDIO.md](docs/STUDIO.md).
 - **Check it works**: run the self-test below (exit code 0 or 1).
 - **Your own agent instead**: Claude Code, Codex or OpenCode can drive the same engine with
   the `weight-surgeon` skill; see [two ways to work](#two-modes).
@@ -1032,7 +1033,7 @@ surgeon bench logits [OPTIONS] --before <BEFORE> --after <AFTER>
 <a id="cmd-bench-ppl"></a>
 #### `surgeon bench ppl`
 
-Perplexity of a GGUF (or of a SafeTensors folder converted to a temporary GGUF) with llama.cpp's `llama-perplexity`.
+Perplexity of a GGUF (or of a SafeTensors folder converted to a temporary GGUF) with llama.cpp's `llama-perplexity`, or, with `--backend native`, of a SafeTensors folder with a pure Rust forward on the CPU (Qwen2, Llama/Mistral or Qwen3, read only, no llama.cpp).
 
 ```text
 surgeon bench ppl [OPTIONS] --model <MODEL> --text <TEXT>
@@ -1040,13 +1041,15 @@ surgeon bench ppl [OPTIONS] --model <MODEL> --text <TEXT>
 
 | Option | Default | Role |
 | --- | --- | --- |
-| `--model` | required | `.gguf`, or a SafeTensors folder. |
-| `--text` | required | Text file evaluated by `llama-perplexity`. |
-| `--baseline-model` | none | Reference model, measured first. |
+| `--model` | required | `.gguf`, or a SafeTensors folder (only a folder with `--backend native`). |
+| `--text` | required | Text file evaluated by `llama-perplexity`, or `builtin:wikitext` (native backend only): an embedded excerpt of WikiText-2 (116 lines, CC BY-SA 3.0, license in `src/bench/builtin/wikitext.LICENSE.txt`), the same bytes on every OS, so its perplexity is reproducible. |
+| `--backend` | `llama` | `llama` (`llama-perplexity`) or `native`. In `native` the text is tokenized once and scored with sliding windows of `--ctx` tokens; every token after the first is scored exactly once, in f64 with compensated sums. `ppl` is `exp` of the mean negative log-likelihood and `ppl_err` is `ppl` times the standard error of that mean. `native` refuses a `.gguf`, `--n-gpu-layers`, `--threads` (the pool follows `RAYON_NUM_THREADS`) and `--llama-arg`. |
+| `--stride` | `--ctx` / 2 | `native` only: tokens between the starts of two consecutive windows, from 1 to `--ctx`. Refused with `llama` (use `--llama-arg --ppl-stride=N`). |
+| `--baseline-model` | none | Reference model, measured first (in `native`, the two models are loaded one after the other, never together). |
 | `--baseline-ppl` | none | Reference perplexity, already known. |
 | `--baseline-ppl-err` | none | Uncertainty (±) of `--baseline-ppl`. |
 | `--ctx` | 512 | Context size. |
-| `--chunks` | llama.cpp default | Number of chunks. |
+| `--chunks` | llama.cpp default | Number of chunks (windows in `native`). |
 | `--threads` | llama.cpp default | Threads. |
 | `--n-gpu-layers` | 0 | Layers offloaded to the GPU (0 is CPU only, reproducible). |
 | `--llama-cpp-dir` | `$LLAMA_CPP_DIR` | llama.cpp folder. |
@@ -1130,10 +1133,18 @@ surgeon bench eval --model tiny-q8.patched.gguf --dataset ds.json --baseline-mod
 ```
 
 ```text
-[BENCH]    ppl · ctx 512  tiny-q8.patched.gguf
-[PPL]      6.2060 ± 0.04 → 7.3840 ± 0.04 · Δ +1.1780 (hors du bruit)
+[BENCH]    ppl · llama · ctx 512  tiny-q8.patched.gguf
+[PPL]      6.2060 ± 0.04 → 7.3840 ± 0.04 · Δ +1.1780 (hors du bruit) · +18.98 %
 [VERDICT]  avertissement : ΔPPL 1.1780 > 0.2
 ```
+
+The `[PPL]` line ends with the relative delta. A reading: up to +2 % is fine, up to +5 % is to watch, above +5 % is a regression to investigate (then `surgeon restore` on the copy if confirmed). The Studio uses the same thresholds for its colors. Without llama.cpp, on a SafeTensors copy and its origin (the first line reads `[BENCH]    ppl · native · ctx 512 · pas 256 · <N> tokens  <model>`):
+
+```bash
+surgeon bench ppl --backend native --model copies/c1 --baseline-model /models/Qwen2.5-0.5B-Instruct --text builtin:wikitext --ctx 512
+```
+
+The report (`--json`) gains `backend` (`llama` or `native`), `stride` and `tokens` (the number of scored tokens, native only); `stride` is null with `llama`. In `native`, `binary` is null and `args` is empty.
 
 ```text
 [BENCH]    eval · 2 questions · auto  ds.json

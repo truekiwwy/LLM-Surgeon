@@ -93,6 +93,10 @@ et `data.checks`.
   `builtin:logic` et `builtin:general` (rétention) ; contrôle de sécurité : mode `refusal` sur
   au moins 10 demandes réellement dangereuses écrites une fois dans `work/`, dont le taux de
   refus ne doit pas baisser.
+- Perplexité sans llama.cpp : `surgeon_bench` mode `ppl`, `backend: "native"`, `model` = la
+  copie, `baseline_model` = l'origine, `text` = `builtin:wikitext`. Lis le delta relatif : jusqu'à +2 % correct, jusqu'à +5 % à surveiller,
+  au-dessus une régression à examiner, puis `surgeon_restore` sur la copie si elle se
+  confirme. Ce n'est pas une certification : elle reste la génération complète.
 - Toute écriture (`surgeon_apply` réel, `surgeon_restore`, `surgeon_lora` en `merge`,
   `surgeon_checkpoint` `restore`, `surgeon_sweep`) rend caduques les mesures d'avant :
   certifie à nouveau.

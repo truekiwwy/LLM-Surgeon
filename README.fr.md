@@ -439,6 +439,7 @@ taille et du SHA-256, et rien n'est envoyé nulle part.
   enregistré comme votre toolchain de confiance), dossier de travail, modèle d'exemple
   facultatif (Qwen2.5-0.5B-Instruct), visite guidée. Rejouable depuis l'accueil ; la page
   **Diagnostics** répare ou réinstalle chaque composant.
+- **Résultats et export du modèle** : un run de perplexité dans l'onglet Résultats affiche `avant → après · Δ %` avec un point vert, ambre ou rouge (jusqu'à +2 %, jusqu'à +5 %, au-dessus). Le bouton d'export propose `SafeTensors` (le Modelfile pointe sur la copie de travail), `GGUF Q8_0` ou `GGUF Q4_K_M` : le Studio quantifie alors la copie SafeTensors nativement en Rust (sans llama.cpp ni python), dans un job annulable ; voir [docs/STUDIO.md](docs/STUDIO.md).
 - **Vérifier que ça marche** : lancez l'auto-test ci-dessous (code de sortie 0 ou 1).
 - **Votre propre agent à la place** : Claude Code, Codex ou OpenCode peuvent piloter le même
   moteur avec le Skill `weight-surgeon` ; voir [deux façons de travailler](#two-modes).
@@ -1034,7 +1035,7 @@ surgeon bench logits [OPTIONS] --before <BEFORE> --after <AFTER>
 <a id="cmd-bench-ppl"></a>
 #### `surgeon bench ppl`
 
-Perplexité d'un GGUF (ou d'un dossier SafeTensors converti en GGUF temporaire) avec `llama-perplexity` de llama.cpp.
+Perplexité d'un GGUF (ou d'un dossier SafeTensors converti en GGUF temporaire) avec `llama-perplexity` de llama.cpp, ou, avec `--backend native`, d'un dossier SafeTensors par un forward en Rust pur sur le CPU (Qwen2, Llama/Mistral ou Qwen3, lecture seule, sans llama.cpp).
 
 ```text
 surgeon bench ppl [OPTIONS] --model <MODEL> --text <TEXT>
@@ -1042,13 +1043,15 @@ surgeon bench ppl [OPTIONS] --model <MODEL> --text <TEXT>
 
 | Option | Défaut | Rôle |
 | --- | --- | --- |
-| `--model` | obligatoire | `.gguf`, ou un dossier SafeTensors. |
-| `--text` | obligatoire | Fichier texte évalué par `llama-perplexity`. |
-| `--baseline-model` | aucun | Modèle de référence, mesuré en premier. |
+| `--model` | obligatoire | `.gguf`, ou un dossier SafeTensors (seulement un dossier avec `--backend native`). |
+| `--text` | obligatoire | Fichier texte évalué par `llama-perplexity`, ou `builtin:wikitext` (backend natif seulement) : un extrait intégré de WikiText-2 (116 lignes, CC BY-SA 3.0, licence dans `src/bench/builtin/wikitext.LICENSE.txt`), les mêmes octets sur tous les OS, donc une perplexité reproductible. |
+| `--backend` | `llama` | `llama` (`llama-perplexity`) ou `native`. En `native`, le texte est tokenisé une fois et noté par fenêtres glissantes de `--ctx` tokens ; chaque token après le premier est noté exactement une fois, en f64 avec des sommes compensées. `ppl` vaut `exp` de la moyenne de la log-vraisemblance négative et `ppl_err` vaut `ppl` fois l'erreur standard de cette moyenne. `native` refuse un `.gguf`, `--n-gpu-layers`, `--threads` (le pool suit `RAYON_NUM_THREADS`) et `--llama-arg`. |
+| `--stride` | `--ctx` / 2 | `native` seulement : tokens entre les débuts de deux fenêtres consécutives, de 1 à `--ctx`. Refusé avec `llama` (utilisez `--llama-arg --ppl-stride=N`). |
+| `--baseline-model` | aucun | Modèle de référence, mesuré en premier (en `native`, les deux modèles sont chargés l'un après l'autre, jamais ensemble). |
 | `--baseline-ppl` | aucun | Perplexité de référence déjà connue. |
 | `--baseline-ppl-err` | aucun | Incertitude (±) de `--baseline-ppl`. |
 | `--ctx` | 512 | Taille du contexte. |
-| `--chunks` | défaut de llama.cpp | Nombre de blocs. |
+| `--chunks` | défaut de llama.cpp | Nombre de blocs (fenêtres en `native`). |
 | `--threads` | défaut de llama.cpp | Threads. |
 | `--n-gpu-layers` | 0 | Couches déportées sur le GPU (0 : CPU seul, reproductible). |
 | `--llama-cpp-dir` | `$LLAMA_CPP_DIR` | Dossier de llama.cpp. |
@@ -1132,10 +1135,18 @@ surgeon bench eval --model tiny-q8.patched.gguf --dataset ds.json --baseline-mod
 ```
 
 ```text
-[BENCH]    ppl · ctx 512  tiny-q8.patched.gguf
-[PPL]      6.2060 ± 0.04 → 7.3840 ± 0.04 · Δ +1.1780 (hors du bruit)
+[BENCH]    ppl · llama · ctx 512  tiny-q8.patched.gguf
+[PPL]      6.2060 ± 0.04 → 7.3840 ± 0.04 · Δ +1.1780 (hors du bruit) · +18.98 %
 [VERDICT]  avertissement : ΔPPL 1.1780 > 0.2
 ```
+
+La ligne `[PPL]` finit par le delta relatif. Une lecture : jusqu'à +2 % c'est correct, jusqu'à +5 % à surveiller, au-dessus de +5 % une régression à examiner (puis `surgeon restore` sur la copie si elle se confirme). Le Studio utilise les mêmes seuils pour ses couleurs. Sans llama.cpp, sur une copie SafeTensors et son origine (la première ligne devient `[BENCH]    ppl · native · ctx 512 · pas 256 · <N> tokens  <modèle>`) :
+
+```bash
+surgeon bench ppl --backend native --model copies/c1 --baseline-model /models/Qwen2.5-0.5B-Instruct --text builtin:wikitext --ctx 512
+```
+
+Le rapport (`--json`) gagne `backend` (`llama` ou `native`), `stride` (null avec `llama`) et `tokens` (le nombre de tokens notés, en `native` seulement). En `native`, `binary` est null et `args` est vide.
 
 ```text
 [BENCH]    eval · 2 questions · auto  ds.json
