@@ -8,8 +8,11 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Value};
+use weight_surgeon::eval::GgufQuant;
 use weight_surgeon::graph::model::plain_path;
+
+use super::jobs::{Budgets, JobSpec, EXPORT_TOOL, OUT};
 
 pub const MODELFILE: &str = "Modelfile";
 
@@ -152,6 +155,22 @@ pub fn modelfile(artifact: &Artifact, config: Option<&Path>) -> String {
         }
     }
     lines.join("\n") + "\n"
+}
+
+pub fn export_job(copy: &Path, quant: GgufQuant) -> JobSpec {
+    let name = copy
+        .file_name()
+        .map_or_else(|| "model".into(), |n| n.to_string_lossy());
+    JobSpec {
+        tool: EXPORT_TOOL.into(),
+        label: format!("GGUF {}", quant.label()),
+        args: json!({"model": copy, "format": quant,
+                     "out": format!("{OUT}/{name}-{}.gguf", quant.label())}),
+        priority: 0,
+        budgets: Budgets::default(),
+        resumed_from: None,
+        read_only: false,
+    }
 }
 
 /// Writes `<project>/Modelfile` for `artifact`, else the project's artifact; `None` when

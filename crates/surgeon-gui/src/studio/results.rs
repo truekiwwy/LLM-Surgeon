@@ -88,6 +88,22 @@ pub struct Run {
     pub graph: Option<PathBuf>,
     pub bench: Option<Bench>,
     pub lora: Option<Lora>,
+    pub ppl: Option<Ppl>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ppl {
+    pub before: Option<f64>,
+    pub after: f64,
+    pub delta_pct: Option<f64>,
+}
+
+fn ppl(data: &Value) -> Option<Ppl> {
+    Some(Ppl {
+        before: data["baseline"]["ppl"].as_f64(),
+        after: data["ppl"].as_f64()?,
+        delta_pct: data["delta"]["delta_relative_pct"].as_f64(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +173,9 @@ pub fn runs<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Vec<Run> {
                 .flatten(),
             lora: (e.tool == "surgeon_lora")
                 .then(|| lora(&e.result))
+                .flatten(),
+            ppl: (e.tool == "surgeon_bench")
+                .then(|| ppl(&e.result))
                 .flatten(),
         })
         .collect();
@@ -421,5 +440,33 @@ mod tests {
         assert_eq!(ids, ["d", "c", "a"]);
         assert_eq!(newest_graph(&entries), Some(("a".into(), file)));
         assert!(runs(&entries)[0].bench.is_none(), "no detail for a ppl run");
+        assert!(
+            runs(&entries)[0].ppl.is_none(),
+            "no ppl value in that report"
+        );
+    }
+
+    #[test]
+    fn a_ppl_run_reads_its_value_its_baseline_and_the_relative_delta() {
+        let report = json!({"backend": "native", "ppl": 17.4998, "ppl_err": 0.9,
+                            "baseline": {"source": "model", "ppl": 17.0724},
+                            "delta": {"delta": 0.4274, "delta_relative_pct": 2.5034}});
+        let runs = runs(&[
+            entry("p1", "surgeon_bench", 10, report),
+            entry("p2", "surgeon_bench", 5, json!({"ppl": 9.5})),
+        ]);
+        let with_baseline = Ppl {
+            before: Some(17.0724),
+            after: 17.4998,
+            delta_pct: Some(2.5034),
+        };
+        assert_eq!(runs[0].ppl, Some(with_baseline));
+        let alone = Ppl {
+            before: None,
+            after: 9.5,
+            delta_pct: None,
+        };
+        assert_eq!(runs[1].ppl, Some(alone));
+        assert!(runs[0].bench.is_none());
     }
 }

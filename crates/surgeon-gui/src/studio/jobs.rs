@@ -20,6 +20,7 @@ use super::project::{now_unix, write_atomic, Project, ProjectState, SourceModel,
 
 /// The working-copy job (not an engine tool).
 pub const COPY_TOOL: &str = "studio_copy";
+pub const EXPORT_TOOL: &str = "studio_export";
 /// Replaced in every string argument by the run's output folder.
 pub const OUT: &str = "{out}";
 const PARAMS: &str = "params.json";
@@ -435,7 +436,7 @@ impl Manager {
     /// Why a job may not be submitted, if it may not: unknown tool, an in-place tool on
     /// anything but a working copy, an output inside the source model, a pipeline budget.
     pub fn check(&self, spec: &JobSpec) -> Result<(), String> {
-        if spec.tool != COPY_TOOL
+        if ![COPY_TOOL, EXPORT_TOOL].contains(&spec.tool.as_str())
             && !weight_surgeon::mcp::tool_definitions()
                 .as_array()
                 .is_some_and(|tools| tools.iter().any(|t| t["name"] == spec.tool.as_str()))

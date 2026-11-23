@@ -12,6 +12,7 @@ use eframe::egui::{self, Key};
 use weight_surgeon::backend::{self, config::BackendConfig, detect::BackendReport, hipfire};
 use weight_surgeon::bench::score::Backend;
 use weight_surgeon::checkpoint::{Listing, Manifest};
+use weight_surgeon::eval::GgufQuant;
 use weight_surgeon::graph::output::GraphReport;
 use weight_surgeon::graph::stream::GraphPatch;
 use weight_surgeon::graph::GraphRole;
@@ -32,8 +33,10 @@ use crate::platform::Picker;
 use crate::source::{self, Input, Timeline};
 use crate::studio::bus::RunView;
 use crate::studio::checkpoints;
+use crate::studio::jobs::EXPORT_TOOL;
 use crate::studio::ledger;
 use crate::studio::live::{Layer, Replay};
+use crate::studio::ollama::{self, Artifact};
 use crate::studio::results::{self, Run};
 use crate::studio::vectors::{LayerScores, VectorForm};
 use crate::studio::view::{Studio, Target};
@@ -635,6 +638,71 @@ impl SurgeonApp {
         }
     }
 
+    pub fn export_ollama(&mut self, quant: Option<GgufQuant>) {
+        let copy = self
+            .agents
+            .project
+            .as_deref()
+            .and_then(|p| ProjectPaths::of(p).copy)
+            .filter(|c| c.join("config.json").is_file());
+        self.ollama = match (quant, copy) {
+            (None, copy) => Some(self.modelfile(copy.map(Artifact::SafeTensors))),
+            (Some(_), None) => Some(Err(i18n::t("ollama.quant.none").into())),
+            (Some(quant), Some(copy)) => {
+                let job = ollama::export_job(&copy, quant);
+                match self.studio.manager.as_mut().map(|m| m.submit(job)) {
+                    Some(Ok(_)) => {
+                        let format = quant.label();
+                        self.studio.message = Some((
+                            i18n::tf("ollama.quant.running", &[("format", &format)]),
+                            false,
+                        ));
+                        None
+                    }
+                    Some(Err(e)) => Some(Err(e)),
+                    None => Some(Err(i18n::t("ollama.none").into())),
+                }
+            }
+        };
+    }
+
+    fn modelfile(&self, artifact: Option<Artifact>) -> Result<ollama::Export, String> {
+        let project = self
+            .agents
+            .project
+            .as_deref()
+            .ok_or_else(|| i18n::t("ollama.none").to_owned())?;
+        let paths = ProjectPaths::of(project);
+        let title = self
+            .studio
+            .manager
+            .as_ref()
+            .map(|m| m.project.manifest.name.clone())
+            .unwrap_or_default();
+        ollama::export(
+            project,
+            &title,
+            artifact,
+            paths.copy.as_deref(),
+            paths.origin.as_deref(),
+        )?
+        .ok_or_else(|| i18n::t("ollama.none").into())
+    }
+
+    fn follow_export(&mut self, ended: &[crate::studio::jobs::Ended]) {
+        for e in ended.iter().filter(|e| e.spec.tool == EXPORT_TOOL) {
+            let gguf = e.envelope["data"]["gguf"]
+                .as_str()
+                .filter(|_| e.verdict == ledger::Verdict::Ok);
+            self.ollama = Some(match gguf {
+                Some(gguf) => self.modelfile(Some(Artifact::Gguf(gguf.into()))),
+                None => Err(e.envelope["error"]["message"]
+                    .as_str()
+                    .map_or_else(|| format!("{:?}", e.verdict), str::to_owned)),
+            });
+        }
+    }
+
     /// Looks at the backends again (the hipfire daemon started, mistral.rs installed).
     pub fn reprobe(&mut self, ctx: &egui::Context) {
         if self.probe.is_none() {
@@ -902,6 +970,7 @@ impl SurgeonApp {
         let ended = self.studio.tick(ctx);
         self.agents.tick(&mut self.studio, &ended);
         self.start_after_copy(&ended);
+        self.follow_export(&ended);
         self.follow_project_graph(ctx);
         self.follow_restore();
         if let Some(target) = self.agents.take_focus() {
@@ -1341,6 +1410,85 @@ mod tests {
         assert!(lora.fidelity > 1.0 - 1e-6, "{}", lora.fidelity);
         assert!(lora.out.ends_with("out/lora-r8/adapter_model.safetensors"));
         assert!(project.join("out/lora-r8/adapter_config.json").is_file());
+        assert_eq!(
+            std::fs::read(source.join("model.safetensors")).unwrap(),
+            origin_bytes,
+            "the origin is only read"
+        );
+    }
+
+    fn write_qwen2(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let config = serde_json::json!({
+            "model_type": "qwen2", "num_hidden_layers": 1, "max_position_embeddings": 64,
+            "hidden_size": 32, "intermediate_size": 32, "num_attention_heads": 2,
+            "num_key_value_heads": 1, "rope_theta": 1e6, "rms_norm_eps": 1e-6,
+            "tie_word_embeddings": true, "bos_token_id": 4, "eos_token_id": 4,
+        });
+        let tokenizer = serde_json::json!({
+            "added_tokens": [{"id": 4, "content": "<|endoftext|>", "special": true}],
+            "model": {"type": "BPE", "vocab": {"a": 0, "b": 1, "ab": 2, "Ġ": 3},
+                      "merges": ["a b"]},
+        });
+        std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+        std::fs::write(dir.join("tokenizer.json"), tokenizer.to_string()).unwrap();
+        let tensors = [
+            ("model.embed_tokens.weight", [5, 32]),
+            ("model.layers.0.self_attn.q_proj.weight", [32, 32]),
+        ];
+        let (mut header, mut data) = (serde_json::Map::new(), Vec::new());
+        for (name, shape) in tensors {
+            let start = data.len();
+            let n = shape[0] * shape[1];
+            data.extend((0..n).flat_map(|i| (i as f32 / 64.0).to_le_bytes()));
+            let info = serde_json::json!({"dtype": "F32", "shape": shape,
+                                          "data_offsets": [start, data.len()]});
+            header.insert(name.into(), info);
+        }
+        let header = serde_json::Value::Object(header).to_string();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&data);
+        std::fs::write(dir.join("model.safetensors"), bytes).unwrap();
+    }
+
+    #[test]
+    fn the_gguf_export_quantizes_the_copy_and_the_modelfile_points_at_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("model");
+        write_qwen2(&source);
+        let origin_bytes = std::fs::read(source.join("model.safetensors")).unwrap();
+        let (ctx, mut app, project) = app_on(dir.path(), &source);
+        app.studio.submit_copy().unwrap();
+        poll_until(&mut app, &ctx, |a| {
+            ProjectPaths::of(a.agents.project.as_deref().unwrap())
+                .copy
+                .is_some_and(|c| c.join("model.safetensors").is_file())
+                && a.studio.manager.as_ref().unwrap().running.is_empty()
+        });
+
+        app.export_ollama(Some(GgufQuant::Q8_0));
+        assert!(app.ollama.is_none(), "the job runs first");
+        poll_until(&mut app, &ctx, |a| a.ollama.is_some());
+        let export = app.ollama.clone().unwrap().unwrap();
+        let Artifact::Gguf(gguf) = &export.artifact else {
+            panic!("{:?}", export.artifact);
+        };
+        let name = gguf.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.ends_with("-Q8_0.gguf"), "{name}");
+        assert!(gguf.starts_with(project.join("runs")), "{}", gguf.display());
+        assert!(!gguf.to_string_lossy().contains("out.partial"));
+        assert_eq!(&std::fs::read(gguf).unwrap()[..4], b"GGUF");
+        let modelfile = std::fs::read_to_string(project.join("Modelfile")).unwrap();
+        let from = modelfile.lines().next().unwrap().trim_end_matches('"');
+        assert!(from.starts_with("FROM ") && from.ends_with(&name), "{from}");
+
+        app.export_ollama(None);
+        let export = app.ollama.clone().unwrap().unwrap();
+        assert!(
+            matches!(export.artifact, Artifact::SafeTensors(_)),
+            "{export:?}"
+        );
         assert_eq!(
             std::fs::read(source.join("model.safetensors")).unwrap(),
             origin_bytes,

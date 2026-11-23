@@ -3,6 +3,7 @@
 //! intervals, the items gained and lost, then each item; a graph run opens in 3D.
 
 use eframe::egui::{self, ScrollArea, Sense, Ui, Vec2};
+use weight_surgeon::eval::GgufQuant;
 
 use super::super::components as c;
 use super::super::i18n::{t, tf};
@@ -13,9 +14,9 @@ use crate::agent::experiments;
 use crate::agent::paths::ProjectPaths;
 use crate::app::{SurgeonApp, Tab};
 use crate::studio::ledger::{self, Verdict};
-use crate::studio::ollama::{self, Artifact};
+use crate::studio::ollama::Artifact;
 use crate::studio::project::now_unix;
-use crate::studio::results::{self as runs, Answer, Bench, Lora, Mode, Run, Score};
+use crate::studio::results::{self as runs, Answer, Bench, Lora, Mode, Ppl, Run, Score};
 
 pub fn show(ui: &mut Ui, app: &mut SurgeonApp) {
     let entries = app.runs();
@@ -66,8 +67,22 @@ fn export_buttons(ui: &mut Ui, app: &mut SurgeonApp, title: &str, entries: &[led
                 }
             }
         }
+        let id = egui::Id::new("ollama-format");
+        let mut format = ui.data(|d| d.get_temp::<Option<GgufQuant>>(id)).flatten();
+        c::select(
+            ui,
+            "ollama-format",
+            &format_label(format),
+            8.0 * T.space.l,
+            |ui| {
+                for choice in [None, Some(GgufQuant::Q8_0), Some(GgufQuant::Q4KM)] {
+                    c::option(ui, &mut format, choice, &format_label(choice));
+                }
+            },
+        );
+        ui.data_mut(|d| d.insert_temp(id, format));
         if c::button(ui, t("ollama.export"), c::ButtonKind::Secondary).clicked() {
-            app.ollama = Some(export_ollama(app, title));
+            app.export_ollama(format);
         }
     });
     // The rank and its button on a row of their own, so that they wrap together.
@@ -118,19 +133,11 @@ fn lora_export(ui: &mut Ui, app: &mut SurgeonApp) {
     }
 }
 
-fn export_ollama(app: &SurgeonApp, title: &str) -> Result<ollama::Export, String> {
-    let Some(project) = app.agents.project.as_deref() else {
-        return Err(t("ollama.none").into());
-    };
-    let paths = ProjectPaths::of(project);
-    ollama::export(
-        project,
-        title,
-        None,
-        paths.copy.as_deref(),
-        paths.origin.as_deref(),
-    )?
-    .ok_or_else(|| t("ollama.none").into())
+fn format_label(format: Option<GgufQuant>) -> String {
+    match format {
+        None => "SafeTensors".into(),
+        Some(quant) => format!("GGUF {}", quant.label()),
+    }
 }
 
 /// The artifact the last export points at, its command and the button that copies it.
@@ -182,21 +189,39 @@ fn fold(ui: &mut Ui, id: egui::Id, label: &str, head: impl FnOnce(&mut Ui)) -> b
     open
 }
 
+fn ppl_state(delta_pct: f64) -> State {
+    match delta_pct {
+        d if d <= 2.0 => State::Ok,
+        d if d <= 5.0 => State::Warn,
+        _ => State::Error,
+    }
+}
+
+fn ppl_text(p: &Ppl) -> String {
+    match (p.before, p.delta_pct) {
+        (Some(before), Some(delta)) => format!("{before:.2} → {:.2} · {delta:+.2} %", p.after),
+        _ => format!("{:.2}", p.after),
+    }
+}
+
 /// One run; the graph to open when its button was clicked.
 fn run_block(ui: &mut Ui, run: &Run) -> Option<std::path::PathBuf> {
-    let state = match run.verdict {
-        Verdict::Ok => State::Ok,
-        Verdict::Failed => State::Error,
-        Verdict::Cancelled | Verdict::Interrupted => State::Warn,
+    let state = match (run.verdict, run.ppl.and_then(|p| p.delta_pct)) {
+        (Verdict::Ok, Some(delta_pct)) => ppl_state(delta_pct),
+        (Verdict::Ok, None) => State::Ok,
+        (Verdict::Failed, _) => State::Error,
+        (Verdict::Cancelled | Verdict::Interrupted, _) => State::Warn,
     };
     let tool = run.tool.trim_start_matches("surgeon_");
     let title = match (
         &run.lora,
+        &run.ppl,
         run.bench.as_ref().and_then(|b| b.dataset.as_deref()),
     ) {
-        (Some(l), _) => format!("{tool} · r{} · {:.1} %", l.rank, l.fidelity * 100.0),
-        (None, Some(dataset)) => format!("{tool} · {dataset}"),
-        (None, None) => tool.to_owned(),
+        (Some(l), _, _) => format!("{tool} · r{} · {:.1} %", l.rank, l.fidelity * 100.0),
+        (None, Some(p), _) => format!("{tool} · {} {}", t("results.ppl"), ppl_text(p)),
+        (None, None, Some(dataset)) => format!("{tool} · {dataset}"),
+        (None, None, None) => tool.to_owned(),
     };
     let when = format!(
         "{} · {}",
@@ -325,4 +350,40 @@ fn answer_state(a: &Answer) -> State {
 fn answer(ui: &mut Ui, model: &str, a: &Answer) {
     let first = a.text.lines().next().unwrap_or_default();
     c::status(ui, answer_state(a), format!("{model} : {first}")).on_hover_text(a.text.as_str());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_perplexity_turns_amber_past_two_percent_and_red_past_five() {
+        let states: Vec<State> = [-3.0, 0.0, 2.0, 2.01, 5.0, 5.01]
+            .into_iter()
+            .map(ppl_state)
+            .collect();
+        assert_eq!(
+            states,
+            [
+                State::Ok,
+                State::Ok,
+                State::Ok,
+                State::Warn,
+                State::Warn,
+                State::Error
+            ]
+        );
+        let paired = Ppl {
+            before: Some(17.0724),
+            after: 17.4998,
+            delta_pct: Some(2.5034),
+        };
+        assert_eq!(ppl_text(&paired), "17.07 → 17.50 · +2.50 %");
+        let alone = Ppl {
+            before: None,
+            after: 9.5,
+            delta_pct: None,
+        };
+        assert_eq!(ppl_text(&alone), "9.50");
+    }
 }
