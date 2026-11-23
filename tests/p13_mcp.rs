@@ -868,6 +868,48 @@ fn lora_extract_writes_a_peft_adapter_that_rebuilds_the_delta() {
     }
 }
 
+/// The studio serves the source model as an `--allow-read` root: lora extract and diff read
+/// their checkpoints there, and still never write in it.
+#[test]
+fn lora_extract_and_diff_read_checkpoints_from_a_read_only_root() {
+    let (origin, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    checkpoints(origin.path());
+    let before = std::fs::read(origin.path().join("base.safetensors")).unwrap();
+    let config = cfg(project.path())
+        .with_read_roots(&[origin.path().to_path_buf()])
+        .unwrap();
+    let source = |name: &str| origin.path().join(name).display().to_string();
+    let (is_error, env) = one_call(
+        &config,
+        "surgeon_lora",
+        json!({"mode": "extract", "base": source("base.safetensors"),
+               "patched": source("tuned.safetensors"), "out": "adapter_model.safetensors",
+               "rank": 2}),
+    );
+    assert!(!is_error, "{env}");
+    assert!(project.path().join("adapter_config.json").is_file());
+    let (is_error, env) = one_call(
+        &config,
+        "surgeon_diff",
+        json!({"base": source("base.safetensors"), "tuned": source("tuned.safetensors"),
+               "out": "delta.surgery", "rank": 2}),
+    );
+    assert!(!is_error, "{env}");
+    let (is_error, env) = one_call(
+        &config,
+        "surgeon_lora",
+        json!({"mode": "extract", "base": source("base.safetensors"),
+               "patched": source("tuned.safetensors"), "out": source("adapter.safetensors")}),
+    );
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "path_not_allowed", "{env}");
+    assert_eq!(
+        std::fs::read(origin.path().join("base.safetensors")).unwrap(),
+        before
+    );
+    assert!(!origin.path().join("adapter.safetensors").exists());
+}
+
 #[test]
 fn progress_notifications_follow_the_token_for_diff_and_merge() {
     let dir = tempfile::tempdir().unwrap();

@@ -222,20 +222,36 @@ fn parse<T: serde::de::DeserializeOwned>(arguments: Value) -> Result<T, Outcome>
         .map_err(|e| invalid("invalid_arguments", format!("arguments invalides : {e}")))
 }
 
-fn sandboxed(ctx: &ToolContext, argument: &str, path: &Path) -> Result<PathBuf, Outcome> {
-    ctx.cfg
-        .sandbox
-        .resolve(argument, path, ctx.cfg.sandbox.base())
-        .map_err(|e| invalid("path_not_allowed", e))
+/// Whether the tool writes the path (`--allow-dir` only) or only reads it (an
+/// `--allow-read` root as well: the source model is read there, never written).
+#[derive(Clone, Copy)]
+enum Access {
+    Write,
+    Read,
+}
+
+fn sandboxed(
+    ctx: &ToolContext,
+    argument: &str,
+    path: &Path,
+    access: Access,
+) -> Result<PathBuf, Outcome> {
+    let (sandbox, base) = (&ctx.cfg.sandbox, ctx.cfg.sandbox.base());
+    match access {
+        Access::Write => sandbox.resolve(argument, path, base),
+        Access::Read => sandbox.resolve_read(argument, path, base),
+    }
+    .map_err(|e| invalid("path_not_allowed", e))
 }
 
 fn required_path(
     ctx: &ToolContext,
     argument: &str,
     path: &Option<PathBuf>,
+    access: Access,
 ) -> Result<PathBuf, Outcome> {
     match path {
-        Some(path) => sandboxed(ctx, argument, path),
+        Some(path) => sandboxed(ctx, argument, path, access),
         None => Err(invalid("invalid_arguments", format!("{argument} requis"))),
     }
 }
@@ -244,9 +260,10 @@ fn optional_path(
     ctx: &ToolContext,
     argument: &str,
     path: &Option<PathBuf>,
+    access: Access,
 ) -> Result<Option<PathBuf>, Outcome> {
     path.as_ref()
-        .map(|p| sandboxed(ctx, argument, p))
+        .map(|p| sandboxed(ctx, argument, p, access))
         .transpose()
 }
 
@@ -287,9 +304,9 @@ fn diff(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     refuse_read_only(ctx, TOOL_DIFF)?;
     let args: DiffToolArgs = parse(arguments)?;
     let core_args = DiffArgs {
-        base: sandboxed(ctx, "base", &args.base)?,
-        tuned: sandboxed(ctx, "tuned", &args.tuned)?,
-        out: sandboxed(ctx, "out", &args.out)?,
+        base: sandboxed(ctx, "base", &args.base, Access::Read)?,
+        tuned: sandboxed(ctx, "tuned", &args.tuned, Access::Read)?,
+        out: sandboxed(ctx, "out", &args.out, Access::Write)?,
         rank: args.rank.unwrap_or(DEFAULT_RANK) as usize,
         factor_dtype: args.factor_dtype.unwrap_or(FactorDtype::F16),
         include: args.include,
@@ -374,20 +391,25 @@ fn lora(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     }
     let command = match args.mode {
         LoraMode::Merge => LoraCommand::Merge(LoraMergeArgs {
-            model: required_path(ctx, "model", &args.model)?,
-            lora: required_path(ctx, "lora", &args.lora)?,
+            model: required_path(ctx, "model", &args.model, Access::Write)?,
+            lora: required_path(ctx, "lora", &args.lora, Access::Read)?,
             alpha: args.alpha,
-            adapter_config: optional_path(ctx, "adapter_config", &args.adapter_config)?,
+            adapter_config: optional_path(
+                ctx,
+                "adapter_config",
+                &args.adapter_config,
+                Access::Read,
+            )?,
             scale: args.scale.unwrap_or(1.0),
             dry_run: args.dry_run.unwrap_or(false),
             // An agent never decides to skip the backup: there is no argument for it.
             no_backup: false,
-            backup_dir: optional_path(ctx, "backup_dir", &args.backup_dir)?,
+            backup_dir: optional_path(ctx, "backup_dir", &args.backup_dir, Access::Write)?,
         }),
         LoraMode::Extract => LoraCommand::Extract(LoraExtractArgs {
-            base: required_path(ctx, "base", &args.base)?,
-            patched: required_path(ctx, "patched", &args.patched)?,
-            out: required_path(ctx, "out", &args.out)?,
+            base: required_path(ctx, "base", &args.base, Access::Read)?,
+            patched: required_path(ctx, "patched", &args.patched, Access::Read)?,
+            out: required_path(ctx, "out", &args.out, Access::Write)?,
             rank: args.rank.unwrap_or(DEFAULT_RANK) as usize,
             dtype: args.dtype.unwrap_or(FactorDtype::F32),
             target_modules: args.target_modules,
