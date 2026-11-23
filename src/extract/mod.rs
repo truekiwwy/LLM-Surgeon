@@ -69,6 +69,7 @@
 //! ```
 
 mod capture;
+mod causal;
 mod config;
 mod decoder;
 mod error;
@@ -95,6 +96,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use capture::{pool, Pooling};
+pub use causal::{
+    argmax, causal_window, log_prob, ranking, run_trace, CausalWindow, Component, LayerEffect,
+    TraceReport, TraceRequest, DEFAULT_WINDOW_THRESHOLD, MIN_LOG_PROB_GAP,
+};
 pub use config::{
     load_config, parse_config, DecoderConfig, Llama3Scaling, Qwen2Config, Variant,
     SUPPORTED_MODEL_TYPES,

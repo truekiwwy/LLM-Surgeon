@@ -317,7 +317,9 @@ mod tests {
     const DIM: usize = 6;
     const PAIRS: usize = 12;
 
-    fn paired_layers(strengths: &[f64]) -> (Vec<Vec<Vec<f64>>>, Vec<Vec<Vec<f64>>>) {
+    type LayerRows = Vec<Vec<Vec<f64>>>;
+
+    fn paired_layers(strengths: &[f64]) -> (LayerRows, LayerRows) {
         let mut rng = Lcg(7);
         let mut pos = Vec::new();
         let mut neg = Vec::new();
