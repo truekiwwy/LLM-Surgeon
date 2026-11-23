@@ -28,6 +28,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 /// The WSL distribution and log file `start-hipfire.ps1` uses.
 const HIPFIRE_DISTRO: &str = "Ubuntu-24.04";
 const HIPFIRE_LOG: &str = "hipfire-serve.log";
+const WSL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Default)]
 pub struct DoctorRequest {
@@ -376,7 +377,36 @@ fn get(port: u16, path: &str) -> Option<String> {
     body.text().ok()
 }
 
-fn hipfire_check(req: &DoctorRequest, user: &BackendConfig) -> Option<(HipfireReport, Check)> {
+fn wsl_output() -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let mut cmd = crate::process::quiet("wsl.exe", &["-d", HIPFIRE_DISTRO, "-e", "true"]);
+    cmd.env("WSL_UTF8", "1");
+    crate::process::run_capture(cmd, WSL_TIMEOUT)
+        .ok()
+        .filter(|(code, _)| *code != Some(0))
+        .map(|(_, out)| out)
+}
+
+fn down_advice(wsl_output: Option<&str>) -> String {
+    match wsl_output.and_then(hipfire::wsl_vm_error) {
+        Some(code) => format!(
+            "WSL2 ne démarre pas sa machine virtuelle ({code}) : vérifiez que la virtualisation \
+             du CPU est activée dans le BIOS/UEFI (SVM Mode sur AMD, VT-x sur Intel), que \
+             l'hyperviseur Windows se lance (bcdedit /set hypervisorlaunchtype auto en \
+             administrateur) et redémarrez Windows après l'activation de VirtualMachinePlatform ; \
+             en attendant, passez le moteur d'inférence sur llama.cpp (Vulkan)"
+        ),
+        None => "lance .\\start-hipfire.ps1 (ou corrige hipfire_url)".into(),
+    }
+}
+
+fn hipfire_check(
+    req: &DoctorRequest,
+    user: &BackendConfig,
+    wsl: fn() -> Option<String>,
+) -> Option<(HipfireReport, Check)> {
     let configured = req.hipfire_url.is_some()
         || user.hipfire_url.is_some()
         || user.hipfire_bin.is_some()
@@ -406,10 +436,8 @@ fn hipfire_check(req: &DoctorRequest, user: &BackendConfig) -> Option<(HipfireRe
     let restart = "arrête le démon dans WSL puis relance .\\start-hipfire.ps1 (il ne relance pas \
                    un démon qui répond encore)";
     let Some(health) = health else {
-        let check = fail(format!(
-            "{url} ne répond pas : lance .\\start-hipfire.ps1 (ou corrige hipfire_url)"
-        ));
-        return Some((report, check));
+        let advice = down_advice(wsl().as_deref());
+        return Some((report, fail(format!("{url} ne répond pas : {advice}"))));
     };
     report.up = true;
     report.status = health["status"].as_str().map(String::from);
@@ -495,7 +523,7 @@ pub fn run(req: &DoctorRequest, probe: &dyn HardwareProbe, user: &BackendConfig)
     let (cpu, cpu_check) = cpu(memory.model.as_ref());
     let dir = req.cache_dir.clone().or_else(ref_cache::default_dir);
     let (cache, cache_check) = cache(dir, req.clean_cache);
-    let hipfire = hipfire_check(req, user);
+    let hipfire = hipfire_check(req, user, wsl_output);
     let mut checks = vec![memory_check, cpu_check, cache_check];
     let hipfire = hipfire.map(|(report, check)| {
         checks.push(check);
@@ -683,7 +711,7 @@ mod tests {
             hipfire_log: Some(path),
             ..DoctorRequest::default()
         };
-        hipfire_check(&req, &BackendConfig::default()).unwrap()
+        hipfire_check(&req, &BackendConfig::default(), || None).unwrap()
     }
 
     #[test]
@@ -742,15 +770,32 @@ mod tests {
             hipfire_url: Some(format!("http://127.0.0.1:{port}")),
             ..DoctorRequest::default()
         };
-        let (report, check) = hipfire_check(&req, &BackendConfig::default()).unwrap();
+        let (report, check) = hipfire_check(&req, &BackendConfig::default(), || None).unwrap();
         assert!(!report.up);
         assert_eq!(check.level, Level::Fail);
         assert!(check.message.contains("ne répond pas"));
+        assert!(check.message.contains("start-hipfire.ps1"));
+        let hcs = || {
+            Some(String::from(
+                "Wsl/Service/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE",
+            ))
+        };
+        let (_, check) = hipfire_check(&req, &BackendConfig::default(), hcs).unwrap();
+        assert_eq!(check.level, Level::Fail);
+        for hint in [
+            "HCS_E_SERVICE_NOT_AVAILABLE",
+            "SVM Mode",
+            "hypervisorlaunchtype auto",
+            "VirtualMachinePlatform",
+            "llama.cpp (Vulkan)",
+        ] {
+            assert!(check.message.contains(hint), "{hint}: {}", check.message);
+        }
         let remote = DoctorRequest {
             hipfire_url: Some("http://10.0.0.2:11435".into()),
             ..DoctorRequest::default()
         };
-        let (_, check) = hipfire_check(&remote, &BackendConfig::default()).unwrap();
+        let (_, check) = hipfire_check(&remote, &BackendConfig::default(), || None).unwrap();
         assert!(check.message.contains("boucle locale"));
         // Neither configured nor answering on a free port: no hipfire section.
         let user = BackendConfig {
@@ -759,7 +804,7 @@ mod tests {
         };
         let unconfigured = DoctorRequest::default();
         if get(hipfire::DEFAULT_PORT, "/health").is_none() {
-            assert!(hipfire_check(&unconfigured, &user).is_none());
+            assert!(hipfire_check(&unconfigured, &user, || None).is_none());
         }
     }
 

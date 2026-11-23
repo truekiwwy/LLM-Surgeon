@@ -6,6 +6,8 @@ param(
     [string]$User = $env:USERNAME
 )
 $ErrorActionPreference = 'Stop'
+$env:WSL_UTF8 = '1'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $distro = 'Ubuntu-24.04'
 $health = 'http://127.0.0.1:11435/health'

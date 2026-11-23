@@ -22,7 +22,7 @@ use weight_surgeon::backend::config::BackendConfig;
 
 use crate::platform;
 use crate::task::{self, Handle};
-use crate::ui::i18n::t;
+use crate::ui::i18n::{t, tf};
 
 pub const DISTRO: &str = weight_surgeon::backend::hipfire::WSL_DISTRO;
 pub const HIPFIRE_TAG: &str = "v0.4.6";
@@ -100,12 +100,9 @@ pub fn workarounds(gpu: &str) -> Option<&'static Workarounds> {
     wsl_gpu(gpu).flatten()
 }
 
-/// The distributions `wsl -l -q` lists: UTF-16 read as UTF-8, so NUL bytes and a mangled
-/// byte-order mark are dropped (the names are ASCII).
 pub fn parse_distros(text: &str) -> Vec<String> {
-    text.replace('\0', "")
-        .lines()
-        .map(|l| l.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}' || c == '\u{fffd}'))
+    text.lines()
+        .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(str::to_owned)
         .collect()
@@ -230,7 +227,14 @@ pkill -9 -f '[h]ipfire' || true
 const USER_SERVE: &str = r#"exec "$HOME/start-hipfire.sh" > "$HOME/hipfire-serve.log" 2>&1"#;
 
 fn wsl() -> std::process::Command {
-    platform::command(PathBuf::from("wsl.exe"))
+    let mut cmd = platform::command(PathBuf::from("wsl.exe"));
+    cmd.env("WSL_UTF8", "1");
+    cmd
+}
+
+fn vm_unavailable(output: &str) -> Option<String> {
+    weight_surgeon::backend::hipfire::wsl_vm_error(output)
+        .map(|code| tf("hipfire.wsl.vm", &[("code", &code)]))
 }
 
 /// `-e` hands the script to bash as is: `--` would run it through another shell first,
@@ -271,10 +275,10 @@ pub fn run(handle: &Handle, gpu: &str) -> Result<(), String> {
         task::run_streamed(install, handle)?;
     }
     // A fresh distro may still want its first interactive start (or Windows a reboot).
-    let (code, _) = platform::run_capture(as_root("true"), Duration::from_secs(120))
+    let (code, out) = platform::run_capture(as_root("true"), Duration::from_secs(120))
         .map_err(|e| e.to_string())?;
     if code != Some(0) {
-        return Err(t("hipfire.distro.not_ready").into());
+        return Err(vm_unavailable(&out).unwrap_or_else(|| t("hipfire.distro.not_ready").into()));
     }
     task::run_streamed(as_root(&install_script(workarounds)), handle)?;
     serve(handle, as_root(&serve_script(workarounds)))
@@ -285,13 +289,7 @@ pub fn run(handle: &Handle, gpu: &str) -> Result<(), String> {
 /// user's models), else with what [`run`] installed as root. Nothing is installed here.
 pub fn restart(handle: &Handle, gpu: &str) -> Result<(), String> {
     handle.report(t("hipfire.step.stop"), 0, None);
-    let (code, out) = platform::run_capture(as_root(STOP_SCRIPT), Duration::from_secs(60))
-        .map_err(|e| e.to_string())?;
-    if code != Some(0) {
-        return Err(format!(
-            "{DISTRO} : arrêt de hipfire en échec ({code:?}) : {out}"
-        ));
-    }
+    let _ = platform::run_capture(as_root(STOP_SCRIPT), Duration::from_secs(60));
     let user = std::env::var("USERNAME").ok().filter(|u| {
         let test = as_user(u, r#"test -x "$HOME/start-hipfire.sh""#);
         platform::run_capture(test, Duration::from_secs(30)).is_ok_and(|(code, _)| code == Some(0))
@@ -307,10 +305,12 @@ pub fn restart(handle: &Handle, gpu: &str) -> Result<(), String> {
 /// runs) and waits for it to answer.
 fn serve(handle: &Handle, mut command: std::process::Command) -> Result<(), String> {
     handle.report(t("hipfire.step.serve"), 0, None);
-    command
+    let log = std::env::temp_dir().join("surgeon-hipfire-serve.log");
+    let file = std::fs::File::create(&log).map_err(|e| format!("{} : {e}", log.display()))?;
+    let mut child = command
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(file.try_clone().map_err(|e| e.to_string())?)
+        .stderr(file)
         .spawn()
         .map_err(|e| e.to_string())?;
     let config = BackendConfig {
@@ -324,6 +324,13 @@ fn serve(handle: &Handle, mut command: std::process::Command) -> Result<(), Stri
         }
         if weight_surgeon::backend::hipfire::probe(&config).is_ok() {
             return Ok(());
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let out = std::fs::read(&log).unwrap_or_default();
+            let out = weight_surgeon::process::decode_windows_output(&out);
+            return Err(vm_unavailable(&out).unwrap_or_else(|| {
+                format!("{DISTRO} : hipfire arrêté au démarrage ({status}) : {out}")
+            }));
         }
         std::thread::sleep(Duration::from_secs(2));
     }
@@ -450,7 +457,7 @@ mod tests {
             .encode_utf16()
             .flat_map(|u| u.to_le_bytes())
             .collect();
-        let read = String::from_utf8_lossy(&raw);
+        let read = weight_surgeon::process::decode_windows_output(&raw);
         assert_eq!(parse_distros(&read), ["docker-desktop", "Ubuntu-24.04"]);
     }
 

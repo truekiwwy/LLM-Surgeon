@@ -233,6 +233,7 @@
   "hipfire.step.distro": "WSL2: Ubuntu 24.04",
   "hipfire.step.serve": "Starting the hipfire daemon",
   "hipfire.step.stop": "Stopping the hipfire daemon",
+  "hipfire.wsl.vm": "WSL2 cannot start its virtual machine ({code}). Check in Windows: CPU virtualization enabled in the BIOS/UEFI (SVM Mode on AMD, VT-x on Intel), the hypervisor active (bcdedit /set hypervisorlaunchtype auto in an administrator terminal), then restart Windows after enabling VirtualMachinePlatform. Meanwhile, switch the inference engine to llama.cpp (Vulkan).",
   "idea.advance.layers": "Look at the last layers first",
   "idea.advance.origin": "Compare the copy with the original model",
   "idea.hallucination": "It makes up paper references",

@@ -256,6 +256,16 @@ const QUANT_FORMAT: &str = "q8f16";
 /// The distribution hipfire runs in on Windows (the one surgeon-gui installs).
 pub const WSL_DISTRO: &str = "Ubuntu-24.04";
 
+pub fn wsl_vm_error(output: &str) -> Option<&'static str> {
+    [
+        "HCS_E_SERVICE_NOT_AVAILABLE",
+        "WSL_E_WSL2_NEEDED",
+        "CreateVm",
+    ]
+    .into_iter()
+    .find(|code| output.contains(code))
+}
+
 /// The content of [`ALIAS_FILE`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AliasRecord {
@@ -448,7 +458,7 @@ fn shell(script: &str) -> std::process::Command {
         false => ("bash", &[]),
     };
     let mut cmd = std::process::Command::new(program);
-    cmd.args(prefix).args(["-lc", script]);
+    cmd.args(prefix).args(["-lc", script]).env("WSL_UTF8", "1");
     cmd
 }
 
@@ -504,6 +514,22 @@ pub fn detect(config: &BackendConfig) -> HipfireDetection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wsl_vm_that_cannot_start_is_recognised() {
+        let hcs = "Le service de calcul hôte n'est pas disponible.\n\
+                   Code d'erreur : Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE";
+        assert_eq!(wsl_vm_error(hcs), Some("HCS_E_SERVICE_NOT_AVAILABLE"));
+        assert_eq!(
+            wsl_vm_error("Error code: Wsl/WSL_E_WSL2_NEEDED"),
+            Some("WSL_E_WSL2_NEEDED")
+        );
+        assert_eq!(
+            wsl_vm_error("Wsl/Service/CreateInstance/CreateVm/E_FAIL"),
+            Some("CreateVm")
+        );
+        assert_eq!(wsl_vm_error("Wsl/Service/WSL_E_DISTRO_NOT_FOUND"), None);
+    }
 
     #[test]
     fn only_a_loopback_url_is_accepted() {

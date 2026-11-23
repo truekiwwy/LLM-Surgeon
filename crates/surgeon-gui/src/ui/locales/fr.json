@@ -233,6 +233,7 @@
   "hipfire.step.distro": "WSL2 : Ubuntu 24.04",
   "hipfire.step.serve": "Démarrage du démon hipfire",
   "hipfire.step.stop": "Arrêt du démon hipfire",
+  "hipfire.wsl.vm": "WSL2 ne démarre pas sa machine virtuelle ({code}). Vérifiez dans Windows : la virtualisation du CPU activée dans le BIOS/UEFI (SVM Mode sur AMD, VT-x sur Intel), l'hyperviseur actif (bcdedit /set hypervisorlaunchtype auto dans un terminal administrateur), puis redémarrez Windows après l'activation de VirtualMachinePlatform. En attendant, passez le moteur d'inférence sur llama.cpp (Vulkan).",
   "idea.advance.layers": "Regarde surtout les dernières couches",
   "idea.advance.origin": "Compare la copie au modèle d'origine",
   "idea.hallucination": "Il invente des références d'articles",

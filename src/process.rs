@@ -28,8 +28,64 @@ pub fn kill_tree(child: &mut Child) -> Result<(), String> {
     tree
 }
 
+pub fn decode_windows_output(bytes: &[u8]) -> String {
+    let utf16 = |body: &[u8]| {
+        let units: Vec<u16> = body
+            .chunks_exact(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    let zero_high = bytes.iter().skip(1).step_by(2).filter(|b| **b == 0).count();
+    let text = match bytes.strip_prefix(&[0xFF, 0xFE]) {
+        Some(body) => utf16(body),
+        None if bytes.len() >= 2 && zero_high * 4 >= bytes.len() => utf16(bytes),
+        None => String::from_utf8_lossy(bytes).into_owned(),
+    };
+    text.replace(['\0', '\u{feff}'], "").trim().to_owned()
+}
+
+pub fn run_capture(mut cmd: Command, timeout: Duration) -> std::io::Result<(Option<i32>, String)> {
+    use std::io::Read;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let out = drain(child.stdout.take().map(|p| Box::new(p) as _));
+    let err = drain(child.stderr.take().map(|p| Box::new(p) as _));
+    let deadline = Instant::now() + timeout;
+    let code = loop {
+        if let Some(status) = child.try_wait()? {
+            break status.code();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let text = [out, err]
+        .map(|t| decode_windows_output(&t.join().unwrap_or_default()))
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((code, text))
+}
+
 /// `program args` with no console window (a GUI has none) and no output.
-fn quiet(program: &str, args: &[&str]) -> Command {
+pub(crate) fn quiet(program: &str, args: &[&str]) -> Command {
     let mut cmd = Command::new(program);
     cmd.args(args)
         .stdin(Stdio::null())
@@ -116,6 +172,25 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         false
+    }
+
+    fn utf16le(text: &str) -> Vec<u8> {
+        text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    #[test]
+    fn windows_output_is_read_as_utf8_or_utf16le() {
+        let message = "L'opération a échoué : HCS_E_SERVICE_NOT_AVAILABLE";
+        assert_eq!(
+            decode_windows_output(format!("  {message}\r\n").as_bytes()),
+            message
+        );
+        let bom = [&[0xFF, 0xFE][..], &utf16le(&format!("{message}\r\n"))].concat();
+        assert_eq!(decode_windows_output(&bom), message);
+        assert_eq!(decode_windows_output(&utf16le(message)), message);
+        assert_eq!(decode_windows_output(b"a\0b\0"), "ab");
+        assert_eq!(decode_windows_output(b"\xEF\xBB\xBFok\n"), "ok");
+        assert_eq!(decode_windows_output(b""), "");
     }
 
     #[test]

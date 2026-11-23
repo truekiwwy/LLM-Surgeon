@@ -253,6 +253,15 @@ dépend de l'installation : l'emplacement de `models.toml` et du dossier `models
 clés `[aliases]` et la prise en compte d'un nouvel alias par un démon déjà lancé, vérifiés sur
 hipfire 0.4.6 seulement. Les anciens alias ne sont jamais supprimés : `hipfire rm` les retire.
 
+Sous Windows, quand le démon hipfire ne répond pas, `surgeon doctor` (et l'onglet « Moteur et
+machine » de surgeon-gui, qui lance le même contrôle) exécute `wsl.exe -d Ubuntu-24.04 -e true` :
+une sortie contenant `HCS_E_SERVICE_NOT_AVAILABLE`, `WSL_E_WSL2_NEEDED` ou `CreateVm` remplace le
+conseil par un diagnostic (virtualisation du CPU dans le BIOS, SVM Mode ou VT-x ;
+`bcdedit /set hypervisorlaunchtype auto` ; redémarrage de Windows après l'activation de
+VirtualMachinePlatform ; llama.cpp (Vulkan) comme moteur en attendant). Le bouton « Démarrer
+hipfire » ne s'arrête plus sur un arrêt préalable en échec : si `wsl.exe` se termine avant que le
+démon réponde, l'erreur affichée est cette sortie (ou le même diagnostic).
+
 - **CLI.** `bench eval` et `bench refusal` refusent avant la première génération (modèle et
   `--baseline-model`), code 2 ; `--allow-stale-hipfire` laisse passer, avec un avertissement dans
   le rapport, une copie enregistrée à la main sous son nom. Avec `--baseline-model`, l'original et
