@@ -642,7 +642,7 @@ surgeon doctor [OPTIONS]
 <a id="cmd-compose"></a>
 #### `surgeon compose`
 
-Fabrique une direction à partir de plusieurs vecteurs extraits, et le patch qui la retire. En mode `orthogonal-preserve` (défaut), les directions à préserver (`--keep`, vecteurs de capacité comme les maths ou la logique) sont orthonormées par Gram-Schmidt modifié en f64, et chaque vecteur à retirer est projeté hors de leur sous-espace avant la somme pondérée : retirer le résultat laisse les directions préservées intactes, linéairement. Le mode `standard` est la somme pondérée directe. Un vecteur nul, non fini ou de dimension différente, et un vecteur dont la projection laisse moins de 1e-6 de sa norme (presque dans le sous-espace préservé), sont refusés avec leur nom, leur couche et le ratio, plutôt que de normaliser du bruit d'arrondi. Le fichier composé contient `direction` et `a` = `b` = sa direction unitaire ; `--patch-out` écrit un patch `project_out` dont `composition` garde les sources, leurs SHA-256 et poids, le mode, et les cosinus avant et après. L'orthogonalité linéaire n'exclut pas une interférence non linéaire : mesurer les deux capacités avec `bench` après application.
+Fabrique une direction à partir de plusieurs vecteurs extraits, et le patch qui la retire. En mode `orthogonal-preserve` (défaut), les directions à préserver (`--keep`, vecteurs de capacité comme les maths ou la logique) sont orthonormées par Gram-Schmidt modifié en f64, et chaque vecteur à retirer est projeté hors de leur sous-espace avant la somme pondérée : retirer le résultat laisse les directions préservées intactes, linéairement. Le mode `standard` est la somme pondérée directe. `ties` fusionne les vecteurs par TIES (chacun garde sa part `--density` des plus grandes magnitudes, le signe de la somme pondérée est élu par coordonnée, les contributions qui le portent sont moyennées) et `dare` par DARE (chaque coordonnée abandonnée avec la probabilité `--drop-rate` selon une `--seed`, les autres remises à l'échelle par 1/(1-p), puis la somme pondérée) ; les deux sont calculés en f64 et la direction fusionnée est ensuite projetée hors des directions préservées. Un vecteur nul, non fini ou de dimension différente, et un vecteur dont la projection laisse moins de 1e-6 de sa norme (presque dans le sous-espace préservé), sont refusés avec leur nom, leur couche et le ratio, plutôt que de normaliser du bruit d'arrondi. Le fichier composé contient `direction` et `a` = `b` = sa direction unitaire ; `--patch-out` écrit un patch `project_out` dont `composition` garde les sources, leurs SHA-256 et poids, le mode, et les cosinus avant et après. L'orthogonalité linéaire n'exclut pas une interférence non linéaire : mesurer les deux capacités avec `bench` après application.
 
 ```text
 surgeon compose [OPTIONS] --ablate <ABLATE> --out <OUT>
@@ -652,7 +652,10 @@ surgeon compose [OPTIONS] --ablate <ABLATE> --out <OUT>
 | --- | --- | --- |
 | `--ablate` | requis | Vecteur à retirer, `fichier` ou `fichier:alpha` (poids dans la somme, défaut 1) ; répétable. |
 | `--keep` | aucun | Direction à préserver ; répétable. |
-| `--mode` | `orthogonal-preserve` | `orthogonal-preserve` ou `standard`. |
+| `--mode` | `orthogonal-preserve` | `orthogonal-preserve`, `standard`, `ties` ou `dare`. |
+| `--density` | 0.2 | `ties` : part gardée de chaque vecteur, dans ]0, 1]. |
+| `--drop-rate` | 0.5 | `dare` : probabilité d'abandon d'une coordonnée, dans [0, 0.95]. |
+| `--seed` | 0 | `dare` : graine des masques (même graine, même direction). |
 | `--out` | requis | Direction composée (`.safetensors`). |
 | `--patch-out` | aucun | Écrit aussi le patch `project_out` (`.json`) avec la recette. |
 | `--layers` | `all` | Couches du patch : `all`, `A-B` ou une liste. |

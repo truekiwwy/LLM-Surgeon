@@ -137,6 +137,84 @@ fn the_composed_direction_is_orthogonal_to_the_kept_one_and_its_patch_applies() 
 }
 
 #[test]
+fn ties_and_dare_merge_the_vectors_and_their_patches_apply() {
+    let dir = workspace();
+    let compose = |out: &str, extra: &[&str]| {
+        let mut args = vec![
+            "compose",
+            "--ablate",
+            "refusal.safetensors:0.8",
+            "--ablate",
+            "math.json:0.5",
+            "--out",
+            out,
+        ];
+        args.extend(extra);
+        surgeon(dir.path(), &args)
+    };
+    let (code, v) = compose(
+        "ties.safetensors",
+        &[
+            "--mode",
+            "ties",
+            "--density",
+            "0.5",
+            "--patch-out",
+            "ties.json",
+        ],
+    );
+    assert_eq!(code, 0, "{v}");
+    let c = &v["data"]["composition"];
+    assert_eq!(
+        (c["mode"].as_str(), c["density"].as_f64()),
+        (Some("ties"), Some(0.5))
+    );
+    assert!(
+        c.get("drop_rate").is_none() && c.get("seed").is_none(),
+        "{c}"
+    );
+    let patch: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("ties.json")).unwrap())
+            .unwrap();
+    assert_eq!(patch["composition"]["density"], 0.5);
+    let (code, applied) = surgeon(
+        dir.path(),
+        &[
+            "apply",
+            "--model",
+            "qwen2-mini",
+            "--patch",
+            "ties.json",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(code, 0, "{applied}");
+
+    // DARE: the same seed gives the same file, another seed another one.
+    let dare = |out: &str, seed: &str| {
+        let (code, v) = compose(
+            out,
+            &["--mode", "dare", "--drop-rate", "0.3", "--seed", seed],
+        );
+        assert_eq!(code, 0, "{v}");
+        assert_eq!(
+            v["data"]["composition"]["seed"],
+            seed.parse::<u64>().unwrap()
+        );
+        std::fs::read(dir.path().join(out)).unwrap()
+    };
+    assert_eq!(dare("d1.safetensors", "7"), dare("d2.safetensors", "7"));
+    assert_ne!(dare("d3.safetensors", "7"), dare("d4.safetensors", "8"));
+
+    let (code, refused) = compose(
+        "bad.safetensors",
+        &["--mode", "dare", "--drop-rate", "0.99"],
+    );
+    assert_eq!(code, 2, "{refused}");
+    assert!(!dir.path().join("bad.safetensors").exists());
+}
+
+#[test]
 fn collinear_null_and_mismatched_vectors_are_refused_by_name() {
     let dir = workspace();
     let refuse = |args: &[&str], kind: &str, name: &str| {
@@ -204,6 +282,10 @@ fn mcp_composes_the_same_way() {
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
             "name": "surgeon_compose", "arguments": {
                 "ablate": ["../outside.safetensors"], "out": "x.safetensors"}}}),
+        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "surgeon_compose", "arguments": {
+                "ablate": ["refusal.safetensors"], "keep": ["math.json"], "mode": "dare",
+                "drop_rate": 0.2, "seed": 5, "out": "dare.safetensors"}}}),
     ];
     let (replies, _) = mcp_client::exchange(&mut child, &lines);
     let reply = |id: u64| replies.iter().find(|r| r["id"] == id).unwrap()["result"].clone();
@@ -220,5 +302,17 @@ fn mcp_composes_the_same_way() {
     assert_eq!(
         outside["structuredContent"]["error"]["kind"],
         "path_not_allowed"
+    );
+    // DARE over MCP: the merged direction is still projected out of the kept one.
+    let dare = reply(3);
+    let c = &dare["structuredContent"]["data"]["composition"];
+    assert_eq!(
+        (c["mode"].as_str(), c["seed"].as_u64()),
+        (Some("dare"), Some(5)),
+        "{dare}"
+    );
+    assert!(
+        c["result_cos_keep"][0].as_f64().unwrap().abs() < 1e-6,
+        "{c}"
     );
 }

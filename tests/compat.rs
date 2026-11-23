@@ -117,6 +117,11 @@
 //!   additive; only the tool schema hash moved.
 //! - studio projects from external agents: the twentieth tool `surgeon_workspace` (`action`
 //!   `init`, `model`, `name`, `force`), MCP only, additive; only the tool schema hash moved.
+//! - TIES and DARE merges in `compose`: the values `ties` and `dare` of `--mode`, the
+//!   options `--density`, `--drop-rate` and `--seed`, the same values and three optional
+//!   properties in `surgeon_compose`, and the optional `density`, `drop_rate`, `seed` of a
+//!   patch's `composition`. Only the `schema` hash and the tool schema hash moved; every
+//!   other reference output is byte for byte what it was.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

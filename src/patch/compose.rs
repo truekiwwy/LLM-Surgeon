@@ -8,6 +8,14 @@
 //!          Q = modified Gram-Schmidt of k_1..k_m (twice, f64): an orthonormal basis
 //!          v_i⊥ = v_i − Σ_j ⟨v_i, u_j⟩ u_j (twice), refused when ‖v_i⊥‖ / ‖v_i‖ < 1e-6
 //!          d = Σ α_i v_i⊥, so ⟨d, k_j⟩ = 0: removing d leaves the kept directions alone
+//! ties     TIES-Merging (Yadav et al., 2023) of the task vectors τ_i = v_i:
+//!          trim   τ̂_i = the ⌈density·n⌉ coordinates of τ_i largest in magnitude, others 0
+//!          elect  γ_e = sgn(Σ_i α_i τ̂_i,e) per coordinate
+//!          merge  d_e = mean of the α_i τ̂_i,e whose sign is γ_e (0 when none is)
+//!          then d is projected out of the kept subspace, as above, when keep is given
+//! dare     DARE (Yu et al., 2024): each coordinate of τ_i dropped with probability p
+//!          (xoshiro256++, stream i of the seed), the others scaled by 1 / (1 − p), then
+//!          d = Σ α_i τ̃_i, projected out of the kept subspace when keep is given
 //! output   direction = d, a = b = d / ‖d‖ (f32, for subtract or project_out), and the
 //!          recipe: sources with their SHA-256 and α, mode, cosines before and after
 //! ```
@@ -74,6 +82,108 @@ pub enum ComposeMode {
     #[default]
     #[value(name = "orthogonal-preserve", alias = "orthogonal_preserve")]
     OrthogonalPreserve,
+    /// TIES-Merging : top density des magnitudes, signe élu, moyenne des contributions
+    /// alignées.
+    Ties,
+    /// DARE : coordonnées abandonnées avec la probabilité drop_rate (graine), les autres
+    /// remises à l'échelle par 1 / (1 − drop_rate), puis somme pondérée.
+    Dare,
+}
+
+/// TIES keeps 20 % of each vector by default (the paper's k).
+pub const DEFAULT_DENSITY: f64 = 0.2;
+pub const DEFAULT_DROP_RATE: f64 = 0.5;
+/// Past this, the 1 / (1 − p) rescale turns the few survivors into noise.
+pub const MAX_DROP_RATE: f64 = 0.95;
+
+/// The settings of the TIES and DARE modes (the other modes ignore them).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MergeParams {
+    /// TIES: share of each vector's coordinates kept, the largest in magnitude, in (0, 1].
+    pub density: f64,
+    /// DARE: probability of dropping a coordinate, in [0, MAX_DROP_RATE].
+    pub drop_rate: f64,
+    /// DARE: seed of the masks; vector i draws from its own stream.
+    pub seed: u64,
+}
+
+impl Default for MergeParams {
+    fn default() -> Self {
+        Self {
+            density: DEFAULT_DENSITY,
+            drop_rate: DEFAULT_DROP_RATE,
+            seed: 0,
+        }
+    }
+}
+
+impl MergeParams {
+    pub fn check(&self) -> Result<()> {
+        if !(self.density > 0.0 && self.density <= 1.0) {
+            return Err(ComposeError::InvalidArgument(format!(
+                "--density {} : dans ]0, 1]",
+                self.density
+            )));
+        }
+        if !(0.0..=MAX_DROP_RATE).contains(&self.drop_rate) {
+            return Err(ComposeError::InvalidArgument(format!(
+                "--drop-rate {} : dans [0, {MAX_DROP_RATE}]",
+                self.drop_rate
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// TIES trim: the `⌈density · n⌉` coordinates of `v` largest in magnitude (ties broken by
+/// index, so the result never depends on the sort), the others zero.
+pub fn trim(v: &[f64], density: f64) -> Vec<f64> {
+    let keep = ((density * v.len() as f64).ceil() as usize).clamp(1, v.len().max(1));
+    let mut order: Vec<usize> = (0..v.len()).collect();
+    order.sort_by(|&a, &b| v[b].abs().total_cmp(&v[a].abs()).then(a.cmp(&b)));
+    let mut out = vec![0.0; v.len()];
+    for &i in order.iter().take(keep) {
+        out[i] = v[i];
+    }
+    out
+}
+
+/// TIES elect and disjoint merge of the weighted, trimmed vectors `c_i = α_i τ̂_i`: per
+/// coordinate, the sign of `Σ c_i`, then the mean of the `c_i` that carry it. Every non-zero
+/// coordinate of the result has the elected sign.
+pub fn ties_merge(contributions: &[Vec<f64>]) -> Vec<f64> {
+    let width = contributions.first().map_or(0, Vec::len);
+    (0..width)
+        .map(|e| {
+            let total: f64 = contributions.iter().map(|c| c[e]).sum();
+            if total == 0.0 {
+                return 0.0;
+            }
+            let agreeing = contributions
+                .iter()
+                .map(|c| c[e])
+                .filter(|x| *x != 0.0 && x.signum() == total.signum());
+            let (sum, count) = agreeing.fold((0.0, 0usize), |(s, n), x| (s + x, n + 1));
+            match count {
+                0 => 0.0,
+                n => sum / n as f64,
+            }
+        })
+        .collect()
+}
+
+/// DARE: each coordinate of `v` dropped with probability `p`, the others scaled by
+/// `1 / (1 − p)`, so that the expectation is `v`. The mask is stream `index` of `seed`:
+/// one draw per coordinate, the same seed always gives the same mask.
+pub fn dare(v: &[f64], p: f64, seed: u64, index: u64) -> Vec<f64> {
+    let mut rng = crate::eval::sampling::Xoshiro256pp::for_sequence(seed, index);
+    let scale = 1.0 / (1.0 - p);
+    v.iter()
+        .map(|x| match rng.next_f64() < p {
+            true => 0.0,
+            false => x * scale,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -118,9 +228,10 @@ pub struct AblateDiagnostics {
     pub path: PathBuf,
     /// cos(v, k_j) avant projection, dans l'ordre des directions préservées.
     pub cos_before: Vec<f64>,
-    /// cos(v⊥, k_j) après projection (≈ 0 en mode orthogonal_preserve).
+    /// cos(v', k_j), v' le vecteur tel qu'il entre dans la somme : projeté
+    /// (orthogonal_preserve, ≈ 0), tronqué (ties), masqué (dare), tel quel (standard).
     pub cos_after: Vec<f64>,
-    /// ‖v⊥‖ / ‖v‖ : part de la norme conservée par la projection (1 en mode standard).
+    /// ‖v'‖ / ‖v‖ : part de la norme conservée (1 en mode standard).
     pub norm_ratio: f64,
 }
 
@@ -129,6 +240,15 @@ pub struct AblateDiagnostics {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Composition {
     pub mode: ComposeMode,
+    /// Mode ties : part des coordonnées gardées par vecteur.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub density: Option<f64>,
+    /// Mode dare : probabilité d'abandon d'une coordonnée.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_rate: Option<f64>,
+    /// Mode dare : graine des masques.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
     pub sources: Vec<SourceVector>,
     /// Un bloc par vecteur retiré.
     pub diagnostics: Vec<AblateDiagnostics>,
@@ -225,13 +345,24 @@ pub fn orthonormal_basis(keep: &[ComposeVector]) -> Result<Vec<Vec<f64>>> {
     Ok(basis)
 }
 
-/// The composed direction of `ablate` (weighted by their α), kept orthogonal to `keep` in
-/// `OrthogonalPreserve` mode, with the diagnostics of the recipe (`output` and its sha256
-/// are the caller's to fill once written).
+/// [`compose_with`] with the default TIES and DARE settings.
 pub fn compose(
     ablate: &[ComposeVector],
     keep: &[ComposeVector],
     mode: ComposeMode,
+) -> Result<Composed> {
+    compose_with(ablate, keep, mode, &MergeParams::default())
+}
+
+/// The composed direction of `ablate` (weighted by their α): their sum, projected out of
+/// `keep` vector by vector (`OrthogonalPreserve`), or merged by TIES or DARE and then
+/// projected out of `keep` (when given), with the diagnostics of the recipe (`output` and
+/// its sha256 are the caller's to fill once written).
+pub fn compose_with(
+    ablate: &[ComposeVector],
+    keep: &[ComposeVector],
+    mode: ComposeMode,
+    merge: &MergeParams,
 ) -> Result<Composed> {
     let first = ablate.first().ok_or_else(|| {
         ComposeError::InvalidArgument("au moins un vecteur à retirer (--ablate)".into())
@@ -240,16 +371,26 @@ pub fn compose(
     for v in ablate.iter().chain(keep) {
         check(v, width)?;
     }
+    merge.check()?;
     let basis = match mode {
-        ComposeMode::OrthogonalPreserve => orthonormal_basis(keep)?,
         ComposeMode::Standard => Vec::new(),
+        _ => orthonormal_basis(keep)?,
     };
-    let mut direction = vec![0.0; width];
+    // Each vector as it enters the sum.
+    let entering: Vec<Vec<f64>> = ablate
+        .iter()
+        .enumerate()
+        .map(|(i, v)| match mode {
+            ComposeMode::Standard => v.values.clone(),
+            ComposeMode::OrthogonalPreserve => project_out(&v.values, &basis),
+            ComposeMode::Ties => trim(&v.values, merge.density),
+            ComposeMode::Dare => dare(&v.values, merge.drop_rate, merge.seed, i as u64),
+        })
+        .collect();
     let mut diagnostics = Vec::with_capacity(ablate.len());
-    for v in ablate {
-        let projected = project_out(&v.values, &basis);
-        let ratio = norm(&projected) / norm(&v.values);
-        if ratio < COLLINEAR_RATIO {
+    for (v, e) in ablate.iter().zip(&entering) {
+        let ratio = norm(e) / norm(&v.values);
+        if mode == ComposeMode::OrthogonalPreserve && ratio < COLLINEAR_RATIO {
             return Err(ComposeError::Collinear {
                 path: v.path.clone(),
                 layer: v.layer,
@@ -257,16 +398,39 @@ pub fn compose(
                 ratio,
             });
         }
-        direction
-            .iter_mut()
-            .zip(&projected)
-            .for_each(|(d, p)| *d += v.alpha * p);
         diagnostics.push(AblateDiagnostics {
             path: v.path.clone(),
             cos_before: keep.iter().map(|k| cosine(&v.values, &k.values)).collect(),
-            cos_after: keep.iter().map(|k| cosine(&projected, &k.values)).collect(),
+            cos_after: keep.iter().map(|k| cosine(e, &k.values)).collect(),
             norm_ratio: ratio,
         });
+    }
+    let weighted = ablate
+        .iter()
+        .zip(&entering)
+        .map(|(v, e)| e.iter().map(|x| v.alpha * x).collect::<Vec<f64>>());
+    let mut direction = match mode {
+        ComposeMode::Ties => ties_merge(&weighted.collect::<Vec<_>>()),
+        _ => weighted.fold(vec![0.0; width], |mut d, c| {
+            d.iter_mut().zip(&c).for_each(|(d, c)| *d += c);
+            d
+        }),
+    };
+    // A merge is projected once, after it: trimming or masking a projected vector would
+    // undo its orthogonality.
+    if matches!(mode, ComposeMode::Ties | ComposeMode::Dare) && !basis.is_empty() {
+        let before = norm(&direction);
+        let projected = project_out(&direction, &basis);
+        let ratio = norm(&projected) / before;
+        if before > ZERO_NORM && ratio < COLLINEAR_RATIO {
+            return Err(ComposeError::Collinear {
+                path: first.path.clone(),
+                layer: first.layer,
+                what: "(direction fusionnée) au sous-espace des directions préservées",
+                ratio,
+            });
+        }
+        direction = projected;
     }
     let result_norm = norm(&direction);
     if result_norm <= ZERO_NORM {
@@ -289,7 +453,9 @@ pub fn compose(
                 .into(),
         );
     }
-    for d in &diagnostics {
+    // A trim or a mask drops most of a vector by design: only a projection's loss warns.
+    let projected = mode == ComposeMode::OrthogonalPreserve;
+    for d in diagnostics.iter().filter(|_| projected) {
         if d.norm_ratio < 0.5 {
             warnings.push(format!(
                 "{} : la projection n'en garde que {:.0} % (‖v⊥‖/‖v‖ = {:.3})",
@@ -320,9 +486,13 @@ pub fn compose(
         .map(|v| source(v, SourceRole::Ablate))
         .chain(keep.iter().map(|v| source(v, SourceRole::Keep)))
         .collect();
+    let (ties, dare) = (mode == ComposeMode::Ties, mode == ComposeMode::Dare);
     Ok(Composed {
         composition: Composition {
             mode,
+            density: ties.then_some(merge.density),
+            drop_rate: dare.then_some(merge.drop_rate),
+            seed: dare.then_some(merge.seed),
             sources,
             diagnostics,
             result_cos_keep: keep.iter().map(|k| cosine(&direction, &k.values)).collect(),
@@ -414,6 +584,17 @@ pub fn encode_composed(composed: &Composed, first: &ComposeVector) -> Result<Vec
         "compose_sources".into(),
         composed.composition.sources.len().to_string(),
     );
+    let c = &composed.composition;
+    let settings = [
+        ("compose_density", c.density.map(|x| x.to_string())),
+        ("compose_drop_rate", c.drop_rate.map(|x| x.to_string())),
+        ("compose_seed", c.seed.map(|x| x.to_string())),
+    ];
+    for (key, value) in settings {
+        if let Some(value) = value {
+            metadata.insert(key.into(), value);
+        }
+    }
     metadata.insert("surgeon_version".into(), env!("CARGO_PKG_VERSION").into());
     crate::extract::encode_tensors(&[("direction", &d), ("a", &unit), ("b", &unit)], &metadata)
         .map_err(|e| ComposeError::InvalidArgument(e.to_string()))
@@ -470,7 +651,12 @@ pub fn core_compose(args: &crate::cli::ComposeArgs) -> crate::app::CoreResult {
             .iter()
             .map(|path| read_vector(path, 0.0))
             .collect::<Result<Vec<_>>>()?;
-        Ok((compose(&ablate, &keep, args.mode)?, ablate))
+        let merge = MergeParams {
+            density: args.density,
+            drop_rate: args.drop_rate,
+            seed: args.seed,
+        };
+        Ok((compose_with(&ablate, &keep, args.mode, &merge)?, ablate))
     };
     let (mut composed, ablate) = prepare().map_err(outcome_error)?;
     let bytes = encode_composed(&composed, &ablate[0]).map_err(outcome_error)?;
@@ -816,5 +1002,179 @@ mod tests {
         );
         let unit = crate::engine::load_direction_vector(&path, Some("a")).unwrap();
         assert!((unit[0] - 0.6).abs() < 1e-7 && (unit[1] - 0.8).abs() < 1e-7);
+    }
+
+    #[test]
+    fn ties_trim_keeps_the_largest_magnitudes_ties_broken_by_index() {
+        assert_eq!(trim(&[0.1, -3.0, 2.0, -0.5], 0.5), [0.0, -3.0, 2.0, 0.0]);
+        assert_eq!(trim(&[0.1, -3.0, 2.0], 1.0), [0.1, -3.0, 2.0]);
+        assert_eq!(trim(&[1.0, -1.0, 1.0, -1.0], 0.5), [1.0, -1.0, 0.0, 0.0]);
+        // ⌈0.2 · 3⌉ = 1: never an empty vector.
+        assert_eq!(trim(&[0.5, -0.7, 0.1], 0.2), [0.0, -0.7, 0.0]);
+    }
+
+    #[test]
+    fn ties_merge_by_hand_and_every_merged_sign_is_the_elected_one() {
+        let c = [
+            vec![1.0, -2.0, 0.5, 0.0],
+            vec![-3.0, -1.0, 0.5, 0.0],
+            vec![1.0, 0.0, -2.0, 0.0],
+        ];
+        // Sums -1, -3, -1, 0: the elected signs keep -3; -2 and -1; -2; nothing.
+        assert_eq!(ties_merge(&c), [-3.0, -1.5, -2.0, 0.0]);
+
+        // Five weighted, trimmed task vectors: each merged coordinate is exactly the mean of
+        // the contributions carrying the sign of their sum, and has that sign.
+        let alphas = [1.0, -0.5, 2.0, 0.75, -1.25];
+        let c: Vec<Vec<f64>> = alphas
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                trim(&noise(64, i as u64 + 3), 0.4)
+                    .iter()
+                    .map(|x| a * x)
+                    .collect()
+            })
+            .collect();
+        let merged = ties_merge(&c);
+        for (e, m) in merged.iter().enumerate() {
+            let total: f64 = c.iter().map(|v| v[e]).sum();
+            let agreeing: Vec<f64> = c
+                .iter()
+                .map(|v| v[e])
+                .filter(|x| *x != 0.0 && x.signum() == total.signum())
+                .collect();
+            match agreeing.is_empty() || total == 0.0 {
+                true => assert_eq!(*m, 0.0, "coordinate {e}"),
+                false => {
+                    assert_eq!(m.signum(), total.signum(), "coordinate {e}");
+                    let mean = agreeing.iter().sum::<f64>() / agreeing.len() as f64;
+                    assert_eq!(*m, mean, "coordinate {e}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ties_mode_records_its_density_and_stays_orthogonal_to_the_kept_directions() {
+        let ablate = [
+            vector("a", &noise(32, 1), 1.0),
+            vector("b", &noise(32, 2), 0.5),
+        ];
+        let keep = [vector("k", &noise(32, 9), 0.0)];
+        let merge = MergeParams {
+            density: 0.3,
+            ..MergeParams::default()
+        };
+        let out = compose_with(&ablate, &keep, ComposeMode::Ties, &merge).unwrap();
+        let c = &out.composition;
+        assert_eq!((c.density, c.drop_rate, c.seed), (Some(0.3), None, None));
+        assert!(
+            c.result_cos_keep[0].abs() < 1e-12,
+            "{:?}",
+            c.result_cos_keep
+        );
+        // ⌈0.3 · 32⌉ = 10 coordinates of each vector enter the merge.
+        for d in &c.diagnostics {
+            assert!(d.norm_ratio < 1.0 && d.norm_ratio > 0.3, "{}", d.norm_ratio);
+        }
+        // Without keep, the merge is the direction as is.
+        let free = compose_with(&ablate, &[], ComposeMode::Ties, &merge).unwrap();
+        let by_hand: Vec<Vec<f64>> = ablate
+            .iter()
+            .map(|v| trim(&v.values, 0.3).iter().map(|x| v.alpha * x).collect())
+            .collect();
+        assert_eq!(free.direction, ties_merge(&by_hand));
+    }
+
+    #[test]
+    fn dare_is_unbiased_reproducible_by_seed_and_drops_its_share() {
+        let v = noise(16, 5);
+        assert_eq!(dare(&v, 0.0, 7, 0), v, "p = 0 is the identity");
+        assert_eq!(
+            dare(&v, 0.5, 7, 0),
+            dare(&v, 0.5, 7, 0),
+            "same seed, same mask"
+        );
+        assert_ne!(dare(&v, 0.5, 7, 0), dare(&v, 0.5, 8, 0), "another seed");
+        assert_ne!(
+            dare(&v, 0.5, 7, 0),
+            dare(&v, 0.5, 7, 1),
+            "another vector's stream"
+        );
+        // The survivors are rescaled exactly by 1 / (1 − p).
+        for (x, y) in v.iter().zip(dare(&v, 0.75, 3, 0)) {
+            assert!(y == 0.0 || y == x * 4.0, "{x} -> {y}");
+        }
+        // Its share is dropped.
+        let wide = vec![1.0; 100_000];
+        let dropped = dare(&wide, 0.9, 11, 0)
+            .iter()
+            .filter(|x| **x == 0.0)
+            .count();
+        assert!((dropped as f64 / 1e5 - 0.9).abs() < 0.01, "{dropped}");
+        // Unbiased: the mean over 2000 seeds is v (sd |x| / √2000 ≈ 0.022 |x| at p = 0.5).
+        let runs = 2000;
+        let mut mean = vec![0.0; v.len()];
+        for seed in 0..runs {
+            for (m, x) in mean.iter_mut().zip(dare(&v, 0.5, seed, 0)) {
+                *m += x / runs as f64;
+            }
+        }
+        for (m, x) in mean.iter().zip(&v) {
+            assert!((m - x).abs() <= 0.1 * x.abs() + 1e-9, "{m} vs {x}");
+        }
+    }
+
+    #[test]
+    fn dare_mode_is_a_seeded_weighted_sum_and_bad_settings_are_refused() {
+        let ablate = [
+            vector("a", &noise(24, 1), 1.0),
+            vector("b", &noise(24, 2), -0.5),
+        ];
+        let merge = MergeParams {
+            drop_rate: 0.3,
+            seed: 42,
+            ..MergeParams::default()
+        };
+        let out = compose_with(&ablate, &[], ComposeMode::Dare, &merge).unwrap();
+        let again = compose_with(&ablate, &[], ComposeMode::Dare, &merge).unwrap();
+        assert_eq!(out.direction, again.direction);
+        let by_hand: Vec<f64> = (0..24)
+            .map(|e| {
+                let a = dare(&ablate[0].values, 0.3, 42, 0)[e];
+                let b = dare(&ablate[1].values, 0.3, 42, 1)[e];
+                a - 0.5 * b
+            })
+            .collect();
+        for (d, h) in out.direction.iter().zip(&by_hand) {
+            assert!((d - h).abs() < 1e-15);
+        }
+        let c = &out.composition;
+        assert_eq!(
+            (c.density, c.drop_rate, c.seed),
+            (None, Some(0.3), Some(42))
+        );
+        for bad in [
+            MergeParams {
+                density: 0.0,
+                ..merge
+            },
+            MergeParams {
+                density: 1.5,
+                ..merge
+            },
+            MergeParams {
+                drop_rate: 0.96,
+                ..merge
+            },
+            MergeParams {
+                drop_rate: -0.1,
+                ..merge
+            },
+        ] {
+            let e = compose_with(&ablate, &[], ComposeMode::Dare, &bad).unwrap_err();
+            assert_eq!(e.kind(), "invalid_input", "{e}");
+        }
     }
 }

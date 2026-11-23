@@ -1063,12 +1063,74 @@
           "positional": false,
           "possible_values": [
             "standard",
-            "orthogonal-preserve"
+            "orthogonal-preserve",
+            "ties",
+            "dare"
           ],
           "required": false,
           "short": null,
           "value_names": [
             "MODE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0.2"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "density",
+          "long": "density",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "DENSITY"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0.5"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "drop_rate",
+          "long": "drop-rate",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "DROP_RATE"
+          ]
+        },
+        {
+          "action": "Set",
+          "aliases": null,
+          "default_values": [
+            "0"
+          ],
+          "env": null,
+          "global": false,
+          "hidden": false,
+          "id": "seed",
+          "long": "seed",
+          "num_args": "1",
+          "positional": false,
+          "possible_values": [],
+          "required": false,
+          "short": null,
+          "value_names": [
+            "SEED"
           ]
         },
         {

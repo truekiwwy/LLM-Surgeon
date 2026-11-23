@@ -180,6 +180,13 @@
             },
             "composition": {
               "properties": {
+                "density": {
+                  "format": "double",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
                 "diagnostics": {
                   "items": {
                     "properties": {
@@ -215,6 +222,13 @@
                   },
                   "type": "array"
                 },
+                "drop_rate": {
+                  "format": "double",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
                 "mode": {
                   "oneOf": [
                     {
@@ -226,6 +240,18 @@
                     {
                       "enum": [
                         "orthogonal_preserve"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "enum": [
+                        "ties"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "enum": [
+                        "dare"
                       ],
                       "type": "string"
                     }
@@ -247,6 +273,14 @@
                 "result_norm": {
                   "format": "double",
                   "type": "number"
+                },
+                "seed": {
+                  "format": "uint64",
+                  "minimum": 0.0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 },
                 "sources": {
                   "items": {
@@ -2572,6 +2606,26 @@
             "null"
           ]
         },
+        "density": {
+          "default": null,
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "drop_rate": {
+          "default": null,
+          "format": "double",
+          "maximum": 0.95,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "keep": {
           "default": null,
           "items": {
@@ -2602,6 +2656,18 @@
                 {
                   "enum": [
                     "orthogonal_preserve"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "ties"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "dare"
                   ],
                   "type": "string"
                 }
@@ -2637,6 +2703,15 @@
           },
           "type": [
             "array",
+            "null"
+          ]
+        },
+        "seed": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
             "null"
           ]
         }

@@ -966,9 +966,19 @@ pub struct ComposeArgs {
     #[arg(long)]
     pub keep: Vec<PathBuf>,
     /// orthogonal-preserve: the vectors to remove are projected out of the subspace of the
-    /// kept directions; standard: their plain weighted sum.
+    /// kept directions; standard: their plain weighted sum; ties and dare: a TIES or DARE
+    /// merge of them, then projected out of the kept directions when --keep is given.
     #[arg(long, value_enum, default_value_t = crate::patch::compose::ComposeMode::OrthogonalPreserve)]
     pub mode: crate::patch::compose::ComposeMode,
+    /// ties: share of each vector's coordinates kept (the largest in magnitude), in ]0, 1].
+    #[arg(long, default_value_t = crate::patch::compose::DEFAULT_DENSITY)]
+    pub density: f64,
+    /// dare: probability of dropping a coordinate, in [0, 0.95]; survivors scaled by 1/(1-p).
+    #[arg(long, default_value_t = crate::patch::compose::DEFAULT_DROP_RATE)]
+    pub drop_rate: f64,
+    /// dare: seed of the drop masks (the same seed gives the same direction).
+    #[arg(long, default_value_t = 0)]
+    pub seed: u64,
     /// Composed direction (.safetensors): `direction`, and `a` = `b` = its unit vector.
     #[arg(long)]
     pub out: PathBuf,

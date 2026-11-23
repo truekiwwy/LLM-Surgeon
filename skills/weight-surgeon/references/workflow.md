@@ -58,6 +58,9 @@ pas alpha sur les mêmes couches : réduis-le, change de couches ou compose la d
 - Lis `data.composition` (cosinus avant et après, ratio de norme) : un cosinus résiduel
   proche de 0 avec chaque direction gardée est attendu.
 - `collinear_vectors` : les directions ne se séparent pas linéairement à cette couche.
+- Plusieurs directions à retirer : `mode` `ties` (`density`) ou `dare` (`drop_rate`,
+  `seed`) les fusionnent en limitant leurs interférences ; la recette du patch garde ces
+  réglages. Une seule direction : reste en `orthogonal_preserve`.
 - L'orthogonalité est linéaire : seule la génération complète dit si la capacité tient.
 
 ## 5. Certification

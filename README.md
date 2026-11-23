@@ -640,7 +640,7 @@ surgeon doctor [OPTIONS]
 <a id="cmd-compose"></a>
 #### `surgeon compose`
 
-Makes one direction out of several extracted vectors, and the patch that removes it. In `orthogonal-preserve` mode (the default), the directions to preserve (`--keep`, capability vectors such as math or logic) are orthonormalized by modified Gram-Schmidt in f64, and every vector to remove is projected out of their subspace before the weighted sum: removing the result leaves the kept directions untouched, linearly. `standard` mode is the plain weighted sum. A zero, non-finite or mismatched vector, and one that the projection leaves below 1e-6 of its norm (nearly inside the kept subspace), are refused by name, layer and ratio rather than normalizing rounding noise. The composed file holds `direction` and `a` = `b` = its unit vector; `--patch-out` writes a `project_out` patch whose `composition` records the sources, their SHA-256 and weights, the mode, and the cosines before and after. Linear orthogonality does not rule out a nonlinear interference: measure both abilities with `bench` after applying.
+Makes one direction out of several extracted vectors, and the patch that removes it. In `orthogonal-preserve` mode (the default), the directions to preserve (`--keep`, capability vectors such as math or logic) are orthonormalized by modified Gram-Schmidt in f64, and every vector to remove is projected out of their subspace before the weighted sum: removing the result leaves the kept directions untouched, linearly. `standard` mode is the plain weighted sum. `ties` merges the vectors by TIES (each keeps its `--density` share of largest magnitudes, the sign of the weighted sum is elected per coordinate, the contributions that carry it are averaged) and `dare` by DARE (each coordinate dropped with probability `--drop-rate` from a `--seed`, the others rescaled by 1/(1-p), then the weighted sum); both are computed in f64 and the merged direction is then projected out of the kept ones. A zero, non-finite or mismatched vector, and one that the projection leaves below 1e-6 of its norm (nearly inside the kept subspace), are refused by name, layer and ratio rather than normalizing rounding noise. The composed file holds `direction` and `a` = `b` = its unit vector; `--patch-out` writes a `project_out` patch whose `composition` records the sources, their SHA-256 and weights, the mode, and the cosines before and after. Linear orthogonality does not rule out a nonlinear interference: measure both abilities with `bench` after applying.
 
 ```text
 surgeon compose [OPTIONS] --ablate <ABLATE> --out <OUT>
@@ -650,7 +650,10 @@ surgeon compose [OPTIONS] --ablate <ABLATE> --out <OUT>
 | --- | --- | --- |
 | `--ablate` | required | Vector to remove, `file` or `file:alpha` (weight in the sum, default 1); repeatable. |
 | `--keep` | none | Direction to preserve; repeatable. |
-| `--mode` | `orthogonal-preserve` | `orthogonal-preserve` or `standard`. |
+| `--mode` | `orthogonal-preserve` | `orthogonal-preserve`, `standard`, `ties` or `dare`. |
+| `--density` | 0.2 | `ties`: share of each vector kept, in ]0, 1]. |
+| `--drop-rate` | 0.5 | `dare`: probability of dropping a coordinate, in [0, 0.95]. |
+| `--seed` | 0 | `dare`: seed of the masks (same seed, same direction). |
 | `--out` | required | Composed direction (`.safetensors`). |
 | `--patch-out` | none | Also write the `project_out` patch (`.json`) with the recipe. |
 | `--layers` | `all` | Layers of the patch: `all`, `A-B` or a list. |

@@ -96,6 +96,26 @@ Direction de capacité à préserver, même couche : `pos_prompts_file` `builtin
 Puis `surgeon_apply` avec le contenu de `work/patch_compose.json` en `patch` (lu par
 `surgeon_files` action `read`), `dry_run: true` d'abord.
 
+## Fusion TIES / DARE de plusieurs directions
+
+Plusieurs directions à retirer qui se contredisent par endroits (extraites sur des jeux
+différents) : `mode` `ties` garde le top `density` de chacune, élit le signe majoritaire
+par coordonnée et moyenne les contributions alignées ; `dare` abandonne une part
+`drop_rate` des coordonnées (graine `seed`, reproductible) et remet le reste à l'échelle.
+Avec `keep`, la direction fusionnée reste orthogonale aux capacités.
+
+```json
+{"ablate": ["work/dir_L14.safetensors", "work/dir_harm_L14.safetensors:0.5"],
+ "keep": ["work/math_L14.safetensors"], "mode": "ties", "density": 0.2,
+ "out": "work/ties_L14.safetensors", "patch_out": "work/patch_ties.json"}
+```
+
+```json
+{"ablate": ["work/dir_L14.safetensors", "work/dir_harm_L14.safetensors"],
+ "mode": "dare", "drop_rate": 0.5, "seed": 0,
+ "out": "work/dare_L14.safetensors", "patch_out": "work/patch_dare.json"}
+```
+
 ## Certification (génération complète)
 
 ```json

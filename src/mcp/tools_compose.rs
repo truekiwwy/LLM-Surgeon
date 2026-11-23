@@ -35,9 +35,26 @@ pub struct ComposeToolArgs {
     pub keep: Option<Vec<PathBuf>>,
     #[serde(default)]
     #[schemars(
-        description = "orthogonal_preserve (défaut) : vecteurs retirés projetés hors du sous-espace des directions préservées (Gram-Schmidt modifié, f64), refus explicite d'un vecteur quasi colinéaire ; standard : somme pondérée directe."
+        description = "orthogonal_preserve (défaut) : vecteurs retirés projetés hors du sous-espace des directions préservées (Gram-Schmidt modifié, f64), refus explicite d'un vecteur quasi colinéaire ; standard : somme pondérée directe ; ties : TIES-Merging (top density des magnitudes, signe élu, moyenne des contributions alignées) ; dare : DARE (abandon aléatoire à drop_rate, remise à l'échelle 1/(1-p), graine seed). En ties et dare, la direction fusionnée est projetée hors des directions préservées si keep est donné."
     )]
     pub mode: Option<ComposeMode>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 0.0, max = 1.0),
+        description = "ties : part des coordonnées gardées par vecteur, les plus grandes en magnitude, dans ]0, 1] (défaut 0.2)."
+    )]
+    pub density: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 0.0, max = 0.95),
+        description = "dare : probabilité d'abandon d'une coordonnée, dans [0, 0.95] (défaut 0.5)."
+    )]
+    pub drop_rate: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        description = "dare : graine des masques (défaut 0) ; même graine, même direction."
+    )]
+    pub seed: Option<u64>,
     #[schemars(
         description = "Direction composée (.safetensors) : tenseurs direction, a et b (= direction unitaire), dans un dossier autorisé en écriture."
     )]
@@ -72,7 +89,7 @@ pub(super) fn definitions() -> Vec<Value> {
         .into_root_schema_for::<ComposeToolArgs>();
     vec![json!({
         "name": TOOL_COMPOSE,
-        "description": "Compose une direction à partir de plusieurs vecteurs extraits : retirer le refus en préservant des directions de capacité (maths, logique). En mode orthogonal_preserve, les directions préservées sont orthonormées (Gram-Schmidt modifié en f64) et chaque vecteur retiré est projeté hors de leur sous-espace ; un vecteur nul, non fini, de dimension différente ou quasi colinéaire est refusé avec son nom. Écrit la direction composée et, avec patch_out, un patch project_out qui porte la recette. L'orthogonalité est linéaire : mesurer ensuite avec surgeon_bench (refusal et eval). Ne modifie aucun modèle.",
+        "description": "Compose une direction à partir de plusieurs vecteurs extraits : retirer le refus en préservant des directions de capacité (maths, logique). En mode orthogonal_preserve, les directions préservées sont orthonormées (Gram-Schmidt modifié en f64) et chaque vecteur retiré est projeté hors de leur sous-espace ; un vecteur nul, non fini, de dimension différente ou quasi colinéaire est refusé avec son nom. Les modes ties (TIES-Merging, density) et dare (DARE, drop_rate et seed reproductibles) fusionnent les vecteurs retirés en f64 en réduisant leurs interférences, puis projettent le résultat hors des directions préservées. Écrit la direction composée et, avec patch_out, un patch project_out qui porte la recette. L'orthogonalité est linéaire : mesurer ensuite avec surgeon_bench (refusal et eval). Ne modifie aucun modèle.",
         "inputSchema": serde_json::to_value(schema).unwrap_or(Value::Null),
         "annotations": {
             "title": "Composition de directions",
@@ -142,6 +159,13 @@ fn compose(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         ablate,
         keep,
         mode: args.mode.unwrap_or_default(),
+        density: args
+            .density
+            .unwrap_or(crate::patch::compose::DEFAULT_DENSITY),
+        drop_rate: args
+            .drop_rate
+            .unwrap_or(crate::patch::compose::DEFAULT_DROP_RATE),
+        seed: args.seed.unwrap_or(0),
         out: write("out", &args.out)?,
         patch_out: args.patch_out.map(|p| write("patch_out", &p)).transpose()?,
         layers: args.layers.unwrap_or_else(|| "all".into()),
