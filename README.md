@@ -559,6 +559,7 @@ surgeon extract [OPTIONS] --model <MODEL> --pos-prompts <POS_PROMPTS> --neg-prom
 | `--holdout-frac` | 0 | Held-out fraction (by index) for out-of-sample diagnostics; needs 10 or more prompts per set. |
 | `--rank` | 1 for `svd`, all for `leace` | Directions of the subspace, 1 to 64: `svd` keeps that many singular vectors, `leace` with `--labels-file` at most that many. `mean_diff` stays rank 1. |
 | `--labels-file` | none | `leace`: JSON array with one label per prompt, positives then negatives: an integer class index, or an array of `m` numbers. All labels are erased at once. |
+| `--layers` | none | Layer sweep instead of `--layer` (`all`, `A-B` or `3,5,7`): one forward pass per prompt, one direction per layer with its AUC, margin and d′ (`data.layers`), the best layer (`data.best_layer`) written as `direction` and every layer as `layers.<i>`. `mean_diff` or `svd`, rank 1. |
 
 Outputs: the direction, `<out>.stats.json` (projection of every prompt, read by the dashboard) and, for `leace`, `<out>.leace.safetensors` (`a`, `b`, `mean`, `u_whitened`). With `svd --rank` above 1, `<out>.subspace.safetensors` holds `a = b = V_k`; with `leace --labels-file`, `a` and `b` of the `.leace.safetensors` have shape `[k, hidden]`. Both go as they are to a `project_out` operation, and `data.method_diagnostics.subspace` gives each component (`sigma_t`, `explained_variance_cumulative`, `d_prime`, `gram_BtA_error`). Writes are atomic. `data`: `out_path`, `stats_path`, `layer`, `method`, `hidden_size`, `n_pos`, `n_neg`, `dtype_used`, `duration_ms`, `stats`, `warnings`. Exit codes: 7 for model or computation failures; 2 for invalid arguments, including `unpaired_prompts` for `svd`.
 
@@ -2197,7 +2198,7 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 <a id="tools"></a>
 ### 4.2 Tools
 
-`surgeon mcp` serves twenty tools: fifteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), `surgeon_files` for an agent's working files, and four studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
+`surgeon mcp` serves twenty-one tools: fifteen, one per engine command (a command and its tool share the same core, arguments and JSON envelope; `backend detect --save` stays CLI only, an agent never rewrites the operator's configuration), `surgeon_files` for an agent's working files, `surgeon_causal_trace` (MCP only), and four studio tools (real answer of `tools/list`, also printed by `surgeon schema --kind tools`):
 
 | Tool | Role |
 | --- | --- |
@@ -2208,7 +2209,8 @@ The Model Context Protocol (MCP) lets an AI assistant call external tools throug
 | `surgeon_doctor` | Whether the machine is ready for a campaign: RAM and the largest model in f32 or bf16, cores, reference cache, hipfire daemon (a GPU at 0 MB means a restart). Read only. |
 | `surgeon_compose` | One direction from several extracted vectors, orthogonal to the capability directions to preserve (modified Gram-Schmidt, f64), and the `project_out` patch that removes it with its recipe. Writes files, never a model. |
 | `surgeon_eval` | Loop and expectation checks, conditional GGUF export. |
-| `surgeon_extract` | Steering vector from a Qwen2, Llama/Mistral or Qwen3 layer. |
+| `surgeon_extract` | Steering vector from a Qwen2, Llama/Mistral or Qwen3 layer, or from every layer of a sweep (`layers`). |
+| `surgeon_causal_trace` | Causal tracing: the clean output of the residual stream, attention or MLP restored layer by layer at the last token of a corrupted prompt; per-layer score, ranking and the causal window as a `layers` spec for `surgeon_compose` and `surgeon_graph`. Read only. |
 | `surgeon_bench` | Measurement, with `mode` `dump`, `logits`, `ppl`, `eval` or `refusal`, the heuristic `refusal_probe` (no generation, never a final proof), and the judge calibration `judge_sample`, `judge_eval`; built-in probe sets need no file: `builtin:math`, `builtin:logic`, `builtin:general` (eval) and `builtin:refusals` (refusal). |
 | `surgeon_autotune` | Per-layer coefficients by ridge regression, and with `refusal_prompts` the smallest scale of them that reaches a target refusal rate in generation (probe first, then the finalists generated). |
 | `surgeon_diff` | Difference of two checkpoints written to a new `.surgery`. |

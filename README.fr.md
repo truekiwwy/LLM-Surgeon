@@ -561,6 +561,7 @@ surgeon extract [OPTIONS] --model <MODEL> --pos-prompts <POS_PROMPTS> --neg-prom
 | `--holdout-frac` | 0 | Fraction mise de côté (par index) pour des diagnostics hors échantillon ; demande 10 prompts ou plus par jeu. |
 | `--rank` | 1 pour `svd`, toutes pour `leace` | Directions du sous-espace, de 1 à 64 : `svd` garde autant de vecteurs singuliers, `leace` avec `--labels-file` au plus autant. `mean_diff` reste de rang 1. |
 | `--labels-file` | aucun | `leace` : tableau JSON avec un label par prompt, les positifs puis les négatifs : un indice de classe entier, ou un tableau de `m` nombres. Tous les labels sont effacés à la fois. |
+| `--layers` | aucun | Balayage de couches à la place de `--layer` (`all`, `A-B` ou `3,5,7`) : une passe avant par prompt, une direction par couche avec son AUC, sa marge et son d′ (`data.layers`), la meilleure couche (`data.best_layer`) écrite en `direction` et chaque couche en `layers.<i>`. `mean_diff` ou `svd`, rang 1. |
 
 Sorties : la direction, `<out>.stats.json` (projection de chaque prompt, lue par le tableau de bord) et, pour `leace`, `<out>.leace.safetensors` (`a`, `b`, `mean`, `u_whitened`). Avec `svd --rank` au-delà de 1, `<out>.subspace.safetensors` contient `a = b = V_k` ; avec `leace --labels-file`, `a` et `b` du `.leace.safetensors` sont de forme `[k, hidden]`. Les deux se passent tels quels à une opération `project_out`, et `data.method_diagnostics.subspace` détaille chaque composante (`sigma_t`, `explained_variance_cumulative`, `d_prime`, `gram_BtA_error`). Les écritures sont atomiques. `data` : `out_path`, `stats_path`, `layer`, `method`, `hidden_size`, `n_pos`, `n_neg`, `dtype_used`, `duration_ms`, `stats`, `warnings`. Codes de sortie : 7 pour les échecs de modèle ou de calcul ; 2 pour des arguments invalides, dont `unpaired_prompts` pour `svd`.
 
@@ -2199,7 +2200,7 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 <a id="tools"></a>
 ### 4.2 Outils
 
-`surgeon mcp` sert vingt outils : quinze, un par commande du moteur (une commande et son outil partagent le même cœur, les mêmes arguments et la même enveloppe JSON ; `backend detect --save` reste réservé à la CLI, un agent ne réécrit jamais la configuration de l'opérateur), `surgeon_files` pour les fichiers de travail d'un agent, et quatre outils du studio (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
+`surgeon mcp` sert vingt et un outils : quinze, un par commande du moteur (une commande et son outil partagent le même cœur, les mêmes arguments et la même enveloppe JSON ; `backend detect --save` reste réservé à la CLI, un agent ne réécrit jamais la configuration de l'opérateur), `surgeon_files` pour les fichiers de travail d'un agent, `surgeon_causal_trace` (MCP seulement), et quatre outils du studio (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
 
 | Outil | Rôle |
 | --- | --- |
@@ -2210,7 +2211,8 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 | `surgeon_doctor` | La machine est-elle prête pour une campagne : RAM et plus gros modèle en f32 ou bf16, cœurs, cache des références, démon hipfire (un GPU à 0 Mo demande un redémarrage). Lecture seule. |
 | `surgeon_compose` | Une direction faite de plusieurs vecteurs extraits, orthogonale aux directions de capacité à préserver (Gram-Schmidt modifié, f64), et le patch `project_out` qui la retire avec sa recette. Écrit des fichiers, jamais un modèle. |
 | `surgeon_eval` | Contrôles de boucles et d'attentes, export GGUF conditionnel. |
-| `surgeon_extract` | Vecteur de steering depuis une couche Qwen2, Llama/Mistral ou Qwen3. |
+| `surgeon_extract` | Vecteur de steering depuis une couche Qwen2, Llama/Mistral ou Qwen3, ou depuis chaque couche d'un balayage (`layers`). |
+| `surgeon_causal_trace` | Traçage causal : la sortie propre du flux résiduel, de l'attention ou du MLP restaurée couche par couche au dernier token d'un prompt corrompu ; score par couche, classement et fenêtre causale au format `layers` de `surgeon_compose` et de `surgeon_graph`. Lecture seule. |
 | `surgeon_bench` | Mesure, avec `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal`, la sonde heuristique `refusal_probe` (sans génération, jamais une preuve finale), et la calibration du juge `judge_sample`, `judge_eval` ; les jeux de sondes intégrés se passent de fichier : `builtin:math`, `builtin:logic`, `builtin:general` (eval) et `builtin:refusals` (refusal). |
 | `surgeon_autotune` | Coefficients par couche par régression ridge, et avec `refusal_prompts` leur plus petite échelle qui atteint un taux de refus cible en génération (sonde d'abord, puis génération des finalistes). |
 | `surgeon_diff` | Différence de deux checkpoints écrite dans un nouveau `.surgery`. |

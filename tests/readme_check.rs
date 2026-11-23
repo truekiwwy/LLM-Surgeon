@@ -252,11 +252,12 @@ fn nested_bench_commands_and_mcp_tool_count_are_checked() {
         "eighteen",
         "nineteen",
         "twenty",
+        "twenty-one",
     ];
     let mots = [
         "zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf", "dix",
         "onze", "douze", "treize", "quatorze", "quinze", "seize", "dix-sept", "dix-huit",
-        "dix-neuf", "vingt",
+        "dix-neuf", "vingt", "vingt et un",
     ];
     let (en, fr) = (read("README.md"), read("README.fr.md"));
     assert!(
