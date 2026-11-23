@@ -18,8 +18,8 @@ surgeon mcp --allow-dir /projet --allow-read /modeles/origine
 | Option | Effet |
 | --- | --- |
 | `--allow-dir <dossier>` | Dossier autorisé, répétable. Défaut : `$SURGEON_MCP_ALLOW_DIRS` (séparateur du système : `;` sous Windows, `:` ailleurs), sinon le dossier courant. |
-| `--allow-read <chemin>` | Dossier ou fichier lisible mais jamais écrit (le modèle d'origine), répétable. Les chemins que les outils d'analyse et de mesure lisent y sont acceptés : `model` de `surgeon_check`, `surgeon_inspect`, `surgeon_eval`, `surgeon_extract`, `surgeon_autotune`, `surgeon_graph` ; `baseline` et `vector` de `surgeon_graph` ; les modèles, jeux, textes, `responses`, `labels` et `baseline_model` de `surgeon_bench` ; `from_origin`, `backup` et `backup_dir` de `surgeon_restore` ; `ablate` et `keep` de `surgeon_compose` ; `base` et `tuned` de `surgeon_diff`, `base`, `patched`, `delta`, `lora` et `adapter_config` de `surgeon_lora` ; `refusal_prompts` et `retention_dataset` de `surgeon_autotune` ; les fichiers de prompts, d'étiquettes et `arch_spec`. Tout chemin écrit ou exécuté (`out`, `out_dir`, `cache_dir`, `export_gguf`, `backup_dir` de `surgeon_apply`, `judge_cache`, `llama_cpp_dir`), le `model` de `surgeon_restore`, tout `surgeon_apply`, les écritures de `surgeon_diff` et `surgeon_lora` (`out`, le `model` et le `backup_dir` d'un `merge`) et `surgeon_pipeline` restent limités à `--allow-dir` (`error.kind = "path_not_allowed"`, message « dossier en lecture seule »). |
-| `--read-only` | Refuse `surgeon_apply` (sauf `dry_run`), `surgeon_restore`, `surgeon_compose`, l'action `write` de `surgeon_files`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en modes `dump` et `judge_sample` (et `judge_eval` avec `out`), `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora` (les deux modes), `surgeon_graph` avec `out_dir` ou `cache_dir` et les actions `start`, `cancel`, `promote_patch` de `surgeon_pipeline` (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out` et `surgeon_graph` sans sortie restent permis. |
+| `--allow-read <chemin>` | Dossier ou fichier lisible mais jamais écrit (le modèle d'origine), répétable. Les chemins que les outils d'analyse et de mesure lisent y sont acceptés : `model` de `surgeon_check`, `surgeon_inspect`, `surgeon_eval`, `surgeon_extract`, `surgeon_causal_trace`, `surgeon_autotune`, `surgeon_graph` ; `baseline` et `vector` de `surgeon_graph` ; les modèles, jeux, textes, `responses`, `labels` et `baseline_model` de `surgeon_bench` ; `from_origin`, `backup` et `backup_dir` de `surgeon_restore` ; `ablate` et `keep` de `surgeon_compose` ; `base` et `tuned` de `surgeon_diff`, `base`, `patched`, `delta`, `lora` et `adapter_config` de `surgeon_lora` ; `refusal_prompts` et `retention_dataset` de `surgeon_autotune` ; les fichiers de prompts, d'étiquettes et `arch_spec`. Tout chemin écrit ou exécuté (`out`, `out_dir`, `cache_dir`, `export_gguf`, `backup_dir` de `surgeon_apply`, `judge_cache`, `llama_cpp_dir`), le `model` de `surgeon_restore`, tout `surgeon_apply`, les écritures de `surgeon_diff` et `surgeon_lora` (`out`, le `model` et le `backup_dir` d'un `merge`) et `surgeon_pipeline` restent limités à `--allow-dir` (`error.kind = "path_not_allowed"`, message « dossier en lecture seule »). |
+| `--read-only` | Refuse `surgeon_apply` (sauf `dry_run`), `surgeon_restore`, `surgeon_compose`, l'action `write` de `surgeon_files`, `surgeon_extract`, `export_gguf`, `surgeon_bench` en modes `dump` et `judge_sample` (et `judge_eval` avec `out`), `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora` (les deux modes), `surgeon_graph` avec `out_dir` ou `cache_dir` et les actions `start`, `cancel`, `promote_patch` de `surgeon_pipeline` (`error.kind = "read_only"`) ; `surgeon_autotune` sans `out`, `surgeon_graph` sans sortie et `surgeon_causal_trace` restent permis. |
 | `--allow-no-backup` | Respecte `backup: false` dans un patch. Sans cette option, la sauvegarde est imposée. |
 
 `$LLAMA_CPP_DIR`, défini par l'opérateur, sert de dossier llama.cpp par défaut pour
@@ -51,7 +51,7 @@ et `--mcp-config`) ; voir [AGENTS.md](AGENTS.md) section 8 bis.
 
 ## Outils
 
-Le serveur expose vingt outils (`tools/list`), décrits ici dans l'ordre où un agent les appelle
+Le serveur expose vingt et un outils (`tools/list`), décrits ici dans l'ordre où un agent les appelle
 le plus souvent.
 
 | Outil | Rôle | Annotations |
@@ -65,7 +65,8 @@ le plus souvent.
 | `surgeon_files` | Fichiers de travail d'un agent : `list`, `read` dans les dossiers autorisés, `write` de fichiers texte sous `work/` ([détail](#fichiers-de-travail-surgeon_files)) | écrit sous `work/` seulement |
 | `surgeon_workspace` | Projet du studio pour un agent hors de l'interface : `action` `init` écrit `project.surgeon.json` (origine : chemin canonique, SHA-256, taille) et crée `runs/`, `artifacts/`, `copies/`, `chat/` ; le modèle n'est que lu, un manifeste existant n'est remplacé qu'avec `force` ([détail](#projet-du-studio-surgeon_workspace)) | écrit le manifeste, non destructif, idempotent |
 | `surgeon_eval` | Non-régression (boucles, attentes) et export GGUF conditionnel | écrit le GGUF |
-| `surgeon_extract` | Vecteur de direction depuis une couche Qwen2 (Rust pur, CPU) | écrit le `.safetensors`, idempotent |
+| `surgeon_extract` | Vecteur de direction depuis une couche Qwen2 (Rust pur, CPU), ou depuis chaque couche d'un balayage (`layers` : AUC, marge et d′ par couche, meilleure couche) | écrit le `.safetensors`, idempotent |
+| `surgeon_causal_trace` | Couches responsables d'un comportement par restauration d'activation au dernier token (`component` `resid`, `attn` ou `mlp`) : score par couche, classement, fenêtre causale au format `layers` de `surgeon_compose` et `surgeon_graph` ([détail](#balayage-de-couches-et-traçage-causal)) | lecture seule, idempotent |
 | `surgeon_bench` | Mesure d'une chirurgie : `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal` ; sonde heuristique `refusal_probe` ; calibration du juge : `judge_sample`, `judge_eval` | non destructif, idempotent |
 | `surgeon_autotune` | Coefficients α par couche ajustés par ridge, patch.json en sortie ; avec `refusal_prompts`, la plus petite échelle c·α qui atteint `target_refusal_rate` en génération (sonde `first-token-prob` des `scales`, puis génération des `probe_top_k` finalistes, ou de toutes avec `no_probe_prefilter` ; `retention_dataset`, `retention_limit`), détail dans `data.selection` | non destructif, idempotent ; écrit `out` seulement s'il est fourni |
 | `surgeon_diff` | Différence de deux checkpoints, approximée à rang `r`, écrite dans un `.surgery` neuf | écrit un fichier, non destructif, idempotent |
@@ -110,7 +111,8 @@ aucun argument libre vers llama.cpp, aucune option `--allow-*` du pipeline).
 Exception voulue : `backend detect --save` reste en ligne de commande, car un agent ne
 réécrit jamais la configuration de l'opérateur. `tui`, `schema`, `mcp`, `plugins` et `arch`
 servent l'opérateur et n'ont pas d'outil (`surgeon_inspect` rapporte l'architecture
-détectée dans `data.arch`).
+détectée dans `data.arch`). À l'inverse, `surgeon_causal_trace` n'a pas de commande : il ne
+sert qu'aux agents et au Studio.
 
 ## Extraction puis chirurgie
 
@@ -151,6 +153,70 @@ colonnes, donc `axis: "rows"`.
   ]
 }
 ```
+
+## Balayage de couches et traçage causal
+
+**Balayage contrastif** (`surgeon_extract` avec `layers`, ou `surgeon extract --layers`). Une
+seule passe avant par prompt capture toutes les couches choisies (`"all"`, `"A-B"`, `"3,5,7"`,
+un tableau ou `{start, end}` ; `layer` est alors ignoré). Chaque couche reçoit sa direction,
+calculée en f64 par la méthode du registre : `mean_diff` (μ₊ − μ₋ normalisé) ou `svd`, la
+première composante principale des différences appariées (prompts appariés par index). Une
+méthode qui écrit des fichiers annexes (`leace`, `svd` avec `rank` > 1) est refusée, et
+`holdout_frac` est ignoré avec un avertissement. `data.layers` donne pour chaque couche
+`raw_diff_norm`, `auc` (probabilité qu'un prompt positif projette plus haut qu'un négatif),
+`margin` (plus petite projection positive moins plus grande négative : > 0 si la direction
+sépare linéairement les deux ensembles), `d_prime` et `threshold_accuracy`, mesurés sur tous
+les prompts. La meilleure couche (AUC, puis d′, puis la plus basse) est `data.best_layer`.
+
+Le fichier `out` contient `direction` (la meilleure couche, avec ses métadonnées habituelles
+dont `layer` : `surgeon_compose`, `surgeon_autotune`, `refusal_probe` et un patch le lisent
+tel quel), un tenseur 1D `layers.<i>` par couche (le radar des vecteurs du Studio compare deux
+balayages couche par couche ; `vector_tensor: "layers.14"` le cible dans un patch) et la
+métadonnée `layer_scores` (le JSON de `data.layers`). `<out>.stats.json` décrit la meilleure
+couche et ajoute `layer_scores`.
+
+```bash
+surgeon extract --model ./Qwen2.5-0.5B-Instruct --pos-prompts builtin:refusals \
+    --neg-prompts builtin:general --layers all --method svd --out work/refusal_sweep.safetensors
+```
+
+**Traçage causal** (`surgeon_causal_trace`, MCP seulement, lecture seule). Des paires (prompt
+propre, prompt corrompu ou neutre) appariées par index : `clean_prompts` ou
+`clean_prompts_file`, `corrupted_prompts` ou `corrupted_prompts_file`. Pour chaque paire, la
+passe propre enregistre la sortie du composant choisi au dernier token, à chaque couche :
+`component` `resid` (flux résiduel après la couche, défaut), `attn` (après `o_proj`) ou `mlp`
+(après `down_proj`). Puis, couche par couche, la passe corrompue est rejouée avec cette seule
+sortie restaurée. La cible est le premier token de `target` (encodé sans token spécial), ou
+à défaut le token le plus probable de la passe propre. Score de la couche :
+
+```text
+(log p_restauré − log p_corrompu) / (log p_propre − log p_corrompu)
+```
+
+0 : la couche ne porte rien de la différence ; 1 : la restaurer suffit à rendre la sortie
+propre. En `resid`, la dernière couche vaut 1 par construction. Une paire dont la cible a la
+même log-probabilité des deux côtés (écart sous 0,01) est ignorée avec un avertissement ;
+aucune paire utile est une erreur `invalid_input`.
+
+`data` : `layers` (`layer`, `score` moyen, `min` et `max` sur les paires), `ranking` (couches
+par score décroissant), `peak_layer`, `window` (`start`, `end` et `layers`, la plage contiguë
+autour du pic dont le score reste au moins `window_threshold` fois le pic, 0,5 par défaut),
+`pairs_used`, `clean_log_prob` et `corrupted_log_prob` moyens, `forwards`. `window.layers`
+(`"12-18"`) se passe tel quel à `layers` de `surgeon_compose` et de `surgeon_graph`. Coût :
+2 + nombre de couches passes avant par paire, sur le modèle entier (`lm_head` compris).
+
+```json
+{"name": "surgeon_causal_trace", "arguments": {
+  "model": "copies/c1", "clean_prompts_file": "work/refused.json",
+  "corrupted_prompts_file": "work/accepted.json", "component": "mlp", "target": "I"}}
+```
+
+Le Studio relit le dernier traçage réussi du projet : le Mode Live allume les couches de la
+fenêtre causale dans la colonne 3D, et l'Inspecteur affiche, pour la couche du tenseur
+sélectionné, le score causal et l'AUC du dernier balayage.
+
+Les activations viennent du moteur natif (candle, CPU) : hipfire et llama.cpp ne les exposent
+pas.
 
 ## Mesure d'une chirurgie (`surgeon_bench`)
 

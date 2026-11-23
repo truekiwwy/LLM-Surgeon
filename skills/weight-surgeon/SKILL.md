@@ -50,9 +50,15 @@ et `data.checks`.
 
 1. `surgeon_check` puis `surgeon_inspect` (`projections` `["o_proj", "down_proj"]`).
 2. `surgeon_extract` contrastive : `pos_prompts_file` `builtin:refusals`, `neg_prompts_file`
-   `builtin:general`, `method` `mean_diff`, `holdout_frac` 0.2, `out` dans `work/`. Sonde
-   toutes les couches (une sur deux au-delà de 32), classe-les par `d_prime` et
-   `threshold_accuracy`, consigne le classement avec `record_finding`.
+   `builtin:general`, `method` `mean_diff` (ou `svd`, la PCA des paires), `layers` `"all"`,
+   `out` dans `work/` : une seule passe avant par prompt sonde toutes les couches.
+   `data.layers` donne `auc`, `margin` et `d_prime` par couche, `data.best_layer` la
+   meilleure. Refais la couche retenue seule avec `holdout_frac` 0.2 (ignoré en balayage)
+   pour un d′ hors échantillon, consigne le classement avec `record_finding`.
+   Puis localise causalement : `surgeon_causal_trace` (lecture seule) avec des paires
+   refusées / acceptées (`clean_prompts_file`, `corrupted_prompts_file`), `component` `mlp`
+   puis `attn` ; `data.window.layers` est la plage causale à passer en `layers` du patch ou
+   de `surgeon_compose`. Une fenêtre qui contredit le balayage : dis-le avant de choisir.
 3. `surgeon_apply` sur la copie, `dry_run: true` puis réel : `project_out` sur `o_proj` et
    `down_proj`, `layers` `all` sauf si la sonde justifie une plage, alpha de 0.4 à 1.0,
    `surgeon_restore` entre deux essais.

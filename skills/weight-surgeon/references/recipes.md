@@ -45,13 +45,31 @@ ou `~/.agents/skills/weight-surgeon/` (Studio : Installer le Skill ; CLI : `surg
 
 `surgeon_inspect` : `{"model": "copies/copy-1", "projections": ["o_proj", "down_proj"]}`
 
-`surgeon_extract` (une fois par couche sondée) :
+`surgeon_extract` en balayage (toutes les couches en un appel) :
+
+```json
+{"model": "<ORIGINE>", "layers": "all", "pos_prompts_file": "builtin:refusals",
+ "neg_prompts_file": "builtin:general", "method": "mean_diff",
+ "out": "work/refusal_sweep.safetensors"}
+```
+
+La couche retenue, seule, pour le d′ hors échantillon :
 
 ```json
 {"model": "<ORIGINE>", "layer": 14, "pos_prompts_file": "builtin:refusals",
  "neg_prompts_file": "builtin:general", "method": "mean_diff", "holdout_frac": 0.2,
  "out": "work/dir_L14.safetensors"}
 ```
+
+`surgeon_causal_trace` (paires appariées par index, autant de chaque côté) :
+
+```json
+{"model": "<ORIGINE>", "clean_prompts_file": "work/refused.json",
+ "corrupted_prompts_file": "work/accepted.json", "component": "mlp", "layers": "all"}
+```
+
+`data.window.layers` (`"12-18"`) va tel quel dans `layers` d'une opération ou de
+`surgeon_compose`.
 
 Direction de capacité à préserver, même couche : `pos_prompts_file` `builtin:math` (ou
 `builtin:logic`), `neg_prompts_file` `builtin:general`, `out` `work/math_L14.safetensors`.

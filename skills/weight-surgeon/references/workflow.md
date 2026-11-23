@@ -32,11 +32,18 @@ modèle>` (ou mets le modèle sous le dossier projet). `surgeon_files` action `l
 
 ## 2. Sonde des couches (`surgeon_extract`)
 
-- Une extraction par couche, mêmes jeux, `holdout_frac` 0.2 : `d_prime` et
-  `threshold_accuracy` sont mesurés hors échantillon. Un avertissement `d′ < 1` signale une
-  direction peu fiable : dis-le.
-- La couche retenue est celle au plus fort signal. Ne choisis jamais une couche ou une plage
-  sans cette sonde. Consigne le classement (`record_finding`, une valeur par run cité).
+- Un balayage (`layers` `"all"`) : une direction par couche en une passe avant par prompt,
+  `auc`, `margin` et `d_prime` par couche dans `data.layers`, mesurés sur tous les prompts.
+  Une AUC de 1 sur beaucoup de couches est normale en petit échantillon : départage par d′.
+- La couche retenue (`data.best_layer` ou ton choix motivé) est refaite seule avec
+  `holdout_frac` 0.2 : `d_prime` et `threshold_accuracy` hors échantillon. Un avertissement
+  `d′ < 1` signale une direction peu fiable : dis-le.
+- `surgeon_causal_trace` (lecture seule) dit où le comportement se joue : score de
+  restauration par couche, `ranking`, `window.layers`. Un pic en `mlp` désigne `down_proj`,
+  un pic en `attn` désigne `o_proj`. En `resid`, la dernière couche vaut 1 par construction :
+  lis la montée, pas la fin.
+- Ne choisis jamais une couche ou une plage sans cette sonde. Consigne le classement et la
+  fenêtre (`record_finding`, une valeur par run cité).
 
 ## 3. Balayage d'alpha en entonnoir
 
