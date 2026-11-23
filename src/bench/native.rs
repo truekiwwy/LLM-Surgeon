@@ -210,6 +210,10 @@ impl NativeGenerator {
         &self.tokenizer
     }
 
+    pub fn teacher_logits(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        Ok(self.state.teacher_logits(ids)?)
+    }
+
     /// Swaps the weights; the tokenizer, the sampling and the batching stay.
     pub fn set_state(&mut self, state: Qwen2State) {
         self.state = state;

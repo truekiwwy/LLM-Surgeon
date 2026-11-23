@@ -1548,6 +1548,15 @@
             "null"
           ]
         },
+        "stride": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "temperature": {
           "default": null,
           "format": "float",

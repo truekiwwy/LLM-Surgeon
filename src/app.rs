@@ -3418,6 +3418,8 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 timeout: timeout(a.timeout_secs)?,
                 llama_args: bench::ppl_runner::validate_llama_args(&a.llama_args)
                     .map_err(invalid)?,
+                backend: a.backend.unwrap_or_default(),
+                stride: a.stride,
             };
             core_bench_ppl(&req, a.fail_on_warn, deps, &ui, &mut sink)
         }
@@ -3621,6 +3623,7 @@ pub fn core_bench_ppl(
     let run = bench::ppl_runner::run(
         req,
         deps.runner.as_ref(),
+        deps.probe.as_ref(),
         &deps.interrupted,
         &mut |done, total| sink.event(ProgressEvent::BenchPplChunk { done, total }),
     )

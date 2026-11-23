@@ -12,16 +12,22 @@
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::error::{BenchError, Result};
+use super::native::NativeGenerator;
+use super::ppl_native::{self, WindowPlan};
 use super::ppl_parse::{self, PplEstimate};
 use super::report::{BenchPplReport, BenchRun, PplBaselineReport, PplDelta, PplTiming, Verdict};
-use super::sha256_file;
+use super::score::Backend;
+use super::{builtin, sha256_file, sha256_hex};
 use crate::eval::{
-    ensure_gguf, last_lines, locate_binary, CommandRunner, EvalError, StreamControl,
+    ensure_gguf, is_gguf, last_lines, locate_binary, CommandRunner, EvalError, StreamControl,
     LLAMA_DIR_REQUIRED,
 };
+use crate::extract::DTypeChoice;
+use crate::hardware::HardwareProbe;
 
 const STDERR_TAIL_LINES: usize = 20;
 
@@ -61,6 +67,14 @@ pub struct PplRequest {
     pub timeout: Option<Duration>,
     /// Validated by [`validate_llama_args`]; always empty from MCP.
     pub llama_args: Vec<String>,
+    pub backend: Backend,
+    pub stride: Option<u32>,
+}
+
+impl PplRequest {
+    fn stride(&self) -> u32 {
+        self.stride.unwrap_or((self.ctx / 2).max(1))
+    }
 }
 
 /// `FLAG=VALUE` or `FLAG` from the whitelists, re-rendered as separate arguments with the
@@ -145,6 +159,37 @@ fn validate(req: &PplRequest) -> Result<()> {
             return bad("--baseline-ppl-err doit être un nombre positif");
         }
     }
+    let native = match req.backend {
+        Backend::Llama => false,
+        Backend::Native => true,
+        other => {
+            return Err(BenchError::InvalidArgument(format!(
+                "--backend {} : ppl mesure avec llama ou native",
+                other.label()
+            )))
+        }
+    };
+    if native {
+        if req.ctx < 2 {
+            return bad("--ctx doit être >= 2 en native");
+        }
+        if req.stride.is_some_and(|s| s == 0 || s > req.ctx) {
+            return bad("--stride doit être entre 1 et --ctx");
+        }
+        if req.n_gpu_layers > 0 || req.threads.is_some() || !req.llama_args.is_empty() {
+            return bad(
+                "--n-gpu-layers, --threads et --llama-arg pilotent llama-perplexity : \
+                 inutilisés en native (RAYON_NUM_THREADS fixe les threads)",
+            );
+        }
+    } else {
+        if req.stride.is_some() {
+            return bad("--stride : backend native seulement (llama : --llama-arg --ppl-stride=N)");
+        }
+        if builtin::is_builtin(&req.text) {
+            return bad("texte intégré (builtin:) : backend native seulement");
+        }
+    }
     for model in std::iter::once(&req.model).chain(match &req.baseline {
         Some(PplBaseline::Model(m)) => Some(m),
         _ => None,
@@ -152,11 +197,18 @@ fn validate(req: &PplRequest) -> Result<()> {
         if !model.exists() {
             return Err(BenchError::input(model, "modèle introuvable"));
         }
+        if native && is_gguf(model) {
+            return Err(BenchError::input(
+                model,
+                "le backend native lit un dossier SafeTensors, pas un .gguf",
+            ));
+        }
     }
-    if !req.text.is_file() {
-        return Err(BenchError::input(&req.text, "fichier texte introuvable"));
+    match builtin::text(&req.text) {
+        Some(found) => found.map(drop).map_err(BenchError::InvalidArgument),
+        None if req.text.is_file() => Ok(()),
+        None => Err(BenchError::input(&req.text, "fichier texte introuvable")),
     }
-    Ok(())
 }
 
 /// Rounded to the 4 decimals llama.cpp prints.
@@ -232,28 +284,69 @@ fn gguf_error(e: EvalError) -> BenchError {
     }
 }
 
-/// Baseline (if a model) then patched model; a SafeTensors model is converted to a
-/// temporary GGUF first and that file is removed on every path.
+/// Baseline (if a model) then patched model. llama: a SafeTensors model is converted to a
+/// temporary GGUF first and that file is removed on every path. native: each model is loaded
+/// in turn, never both at once.
 pub fn run(
     req: &PplRequest,
     runner: &dyn CommandRunner,
+    probe: &dyn HardwareProbe,
     cancel: &AtomicBool,
     on_chunk: &mut dyn FnMut(usize, Option<usize>),
 ) -> Result<BenchRun<BenchPplReport>> {
     validate(req)?;
-    let binary = locate_perplexity(req.llama_cpp_dir.as_deref())?;
-    let text_sha256 = sha256_file(&req.text)?;
+    let builtin_text = builtin::text(&req.text)
+        .transpose()
+        .map_err(BenchError::InvalidArgument)?;
+    let binary = match req.backend {
+        Backend::Native => None,
+        _ => Some(locate_perplexity(req.llama_cpp_dir.as_deref())?),
+    };
+    let (text_sha256, native_text) = match (builtin_text, &binary) {
+        (Some(text), _) => (sha256_hex(text.as_bytes()), Some(text.to_owned())),
+        (None, Some(_)) => (sha256_file(&req.text)?, None),
+        (None, None) => {
+            let text =
+                std::fs::read_to_string(&req.text).map_err(|e| BenchError::input(&req.text, e))?;
+            (sha256_hex(text.as_bytes()), Some(text))
+        }
+    };
     let control = StreamControl {
         timeout: req.timeout,
         cancel: Some(cancel),
     };
-    let mut measure = |model: &Path, tag: &str| -> Result<(PplEstimate, Vec<String>, u64)> {
+    let plan = WindowPlan {
+        ctx: req.ctx as usize,
+        stride: req.stride() as usize,
+        max_windows: req.chunks.map(|c| c as usize),
+    };
+    let (mut args, mut tokens, mut load_warnings) = (Vec::new(), None, Vec::new());
+    let mut measure = |model: &Path, tag: &str| -> Result<(PplEstimate, u64)> {
         let started = Instant::now();
-        let gguf =
-            ensure_gguf(model, req.llama_cpp_dir.as_deref(), tag, runner).map_err(gguf_error)?;
-        let args = build_args(gguf.path(), req)?;
-        let estimate = run_one(runner, &binary, &args, control, on_chunk)?;
-        Ok((estimate, args, started.elapsed().as_millis() as u64))
+        let estimate = match (&binary, &native_text) {
+            (Some(binary), _) => {
+                let gguf = ensure_gguf(model, req.llama_cpp_dir.as_deref(), tag, runner)
+                    .map_err(gguf_error)?;
+                args = build_args(gguf.path(), req)?;
+                run_one(runner, binary, &args, control, on_chunk)?
+            }
+            (None, text) => {
+                let generator = NativeGenerator::load(
+                    model,
+                    DTypeChoice::Auto,
+                    probe,
+                    Arc::new(AtomicBool::new(false)),
+                )?;
+                load_warnings.extend(generator.warnings().iter().cloned());
+                let deadline = req.timeout.map(|t| started + t);
+                let text = text.as_deref().unwrap_or_default();
+                let measured =
+                    ppl_native::measure(&generator, text, plan, deadline, cancel, on_chunk)?;
+                tokens = Some(measured.scored as u64);
+                measured.estimate
+            }
+        };
+        Ok((estimate, started.elapsed().as_millis() as u64))
     };
     let (baseline, baseline_ms) = match &req.baseline {
         None => (None, None),
@@ -268,15 +361,16 @@ pub fn run(
             None,
         ),
         Some(PplBaseline::Model(model)) => {
-            let (estimate, _, ms) = measure(model, "bench-ppl-base")?;
+            let (estimate, ms) = measure(model, "bench-ppl-base")?;
             (Some((estimate, Some(model.clone()))), Some(ms))
         }
     };
-    let (patched, args, patched_ms) = measure(&req.model, "bench-ppl")?;
+    let (patched, patched_ms) = measure(&req.model, "bench-ppl")?;
     let delta = baseline
         .as_ref()
         .map(|(b, _)| delta(patched, *b, req.warn_delta));
-    let mut warnings = Vec::new();
+    let mut warnings = load_warnings;
+    warnings.dedup();
     if req.n_gpu_layers > 0 {
         warnings.push(
             "-ngl > 0 : le calcul GPU peut faire varier les derniers chiffres d'un run à l'autre"
@@ -297,6 +391,9 @@ pub fn run(
         chunks: req.chunks,
         threads: req.threads,
         n_gpu_layers: req.n_gpu_layers,
+        backend: req.backend,
+        stride: (req.backend == Backend::Native).then(|| req.stride()),
+        tokens,
         binary,
         args,
         ppl: patched.ppl,
@@ -358,6 +455,87 @@ mod tests {
     }
 
     #[test]
+    fn native_and_llama_options_do_not_mix() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("t.txt");
+        std::fs::write(&text, "hello").unwrap();
+        let gguf = dir.path().join("m.gguf");
+        std::fs::write(&gguf, "GGUF").unwrap();
+        let base = PplRequest {
+            model: dir.path().into(),
+            text,
+            baseline: None,
+            ctx: 8,
+            chunks: None,
+            threads: None,
+            n_gpu_layers: 0,
+            llama_cpp_dir: None,
+            warn_delta: 0.2,
+            timeout: None,
+            llama_args: vec![],
+            backend: Backend::Native,
+            stride: None,
+        };
+        assert!(validate(&base).is_ok());
+        assert_eq!(base.stride(), 4);
+        let builtin = PplRequest {
+            text: "builtin:wikitext".into(),
+            ..base.clone()
+        };
+        assert!(validate(&builtin).is_ok());
+        let refused = [
+            PplRequest {
+                stride: Some(9),
+                ..base.clone()
+            },
+            PplRequest {
+                stride: Some(0),
+                ..base.clone()
+            },
+            PplRequest {
+                ctx: 1,
+                ..base.clone()
+            },
+            PplRequest {
+                n_gpu_layers: 1,
+                ..base.clone()
+            },
+            PplRequest {
+                threads: Some(2),
+                ..base.clone()
+            },
+            PplRequest {
+                llama_args: vec!["--no-mmap".into()],
+                ..base.clone()
+            },
+            PplRequest {
+                backend: Backend::LlamaServer,
+                ..base.clone()
+            },
+            PplRequest {
+                backend: Backend::Llama,
+                stride: Some(4),
+                ..base.clone()
+            },
+            PplRequest {
+                backend: Backend::Llama,
+                ..builtin.clone()
+            },
+            PplRequest {
+                text: "builtin:poetry".into(),
+                ..base.clone()
+            },
+            PplRequest {
+                model: gguf,
+                ..base.clone()
+            },
+        ];
+        for req in refused {
+            assert!(validate(&req).is_err(), "{req:?}");
+        }
+    }
+
+    #[test]
     fn llama_args_whitelist() {
         let ok = validate_llama_args(&["--batch-size=512".into(), "--no-mmap".into()]).unwrap();
         assert_eq!(ok, ["--batch-size", "512", "--no-mmap"]);
@@ -388,6 +566,8 @@ mod tests {
             warn_delta: 0.2,
             timeout: None,
             llama_args: vec!["--seed".into(), "7".into()],
+            backend: Backend::Llama,
+            stride: None,
         };
         let args = build_args(Path::new("-evil.gguf"), &req).unwrap();
         assert_eq!(args[0], "-m");

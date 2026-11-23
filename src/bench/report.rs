@@ -178,8 +178,14 @@ pub struct BenchPplReport {
     pub threads: Option<u32>,
     /// -ngl (0 : CPU seul, reproductible).
     pub n_gpu_layers: u32,
-    /// Binaire llama-perplexity utilisé.
-    pub binary: PathBuf,
+    /// llama (llama-perplexity sur un GGUF) ou native (passe avant Rust, log-softmax en f64).
+    pub backend: super::score::Backend,
+    /// native : pas des fenêtres glissantes de ctx tokens.
+    pub stride: Option<u32>,
+    /// native : tokens notés du texte (le premier n'a pas de contexte).
+    pub tokens: Option<u64>,
+    /// Binaire llama-perplexity utilisé ; null en native.
+    pub binary: Option<PathBuf>,
     /// Arguments exacts du run sur le modèle évalué.
     pub args: Vec<String>,
     /// Perplexité finale (« Final estimate »).
@@ -700,14 +706,33 @@ pub fn ppl_text(ui: &Ui, run: &BenchRun<BenchPplReport>) -> String {
         }
         _ => ui::metric(ui, ppl_value(r.ppl, r.ppl_err)),
     };
+    let window = match (r.stride, r.tokens) {
+        (Some(stride), Some(tokens)) => format!(
+            " · pas {} · {} tokens",
+            ui::metric(ui, stride),
+            ui::metric(ui, tokens)
+        ),
+        _ => String::new(),
+    };
+    let relative = r
+        .delta
+        .as_ref()
+        .map(|d| {
+            format!(
+                " · {}",
+                ui::metric(ui, format!("{:+.2} %", d.delta_relative_pct))
+            )
+        })
+        .unwrap_or_default();
     let lines = vec![
         format!(
-            "{} ppl · ctx {}  {}",
+            "{} ppl · {} · ctx {}{window}  {}",
             ui::badge(ui, "BENCH"),
+            r.backend.label(),
             ui::metric(ui, r.ctx),
             ui::path(ui, &r.model)
         ),
-        format!("{} {value}", ui::badge(ui, "PPL")),
+        format!("{} {value}{relative}", ui::badge(ui, "PPL")),
         verdict_line(ui, r.verdict, &run.threshold_warnings),
     ];
     finish(ui, lines, &run.warnings, &run.threshold_warnings)

@@ -1151,7 +1151,7 @@ fn normalize_prompts(mut prompts: Vec<EvalPrompt>) -> Result<Vec<EvalPrompt>, Ou
 pub enum BenchMode {
     /// Compare deux dumps de logits (before, after).
     Logits,
-    /// Perplexité via llama-perplexity (model, text).
+    /// Perplexité via llama-perplexity, ou le moteur natif en f64 avec backend native (model, text).
     Ppl,
     /// Pass@1 exact match glouton sur un dataset (model, dataset).
     Eval,
@@ -1209,11 +1209,13 @@ pub struct BenchToolArgs {
     pub fail_on_warn: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "ppl, eval : .gguf ou dossier SafeTensors (converti en GGUF temporaire, sauf eval avec backend native) ; dump, refusal : dossier Qwen2, Llama/Mistral ou Qwen3."
+        description = "ppl, eval : .gguf ou dossier SafeTensors (converti en GGUF temporaire, sauf avec backend native qui lit le dossier) ; dump, refusal : dossier Qwen2, Llama/Mistral ou Qwen3."
     )]
     pub model: Option<PathBuf>,
     #[serde(default)]
-    #[schemars(description = "ppl : fichier texte évalué.")]
+    #[schemars(
+        description = "ppl : fichier texte évalué, ou builtin:wikitext (extrait WikiText-2 intégré, backend native)."
+    )]
     pub text: Option<PathBuf>,
     #[serde(default)]
     #[schemars(description = "ppl, eval, refusal : modèle de référence, mesuré en premier.")]
@@ -1233,8 +1235,17 @@ pub struct BenchToolArgs {
     )]
     pub ctx: Option<u32>,
     #[serde(default)]
-    #[schemars(range(min = 1), description = "ppl : --chunks.")]
+    #[schemars(
+        range(min = 1),
+        description = "ppl : --chunks de llama-perplexity, ou nombre maximal de fenêtres en native."
+    )]
     pub chunks: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "ppl en native : pas entre deux fenêtres de ctx tokens (défaut ctx / 2, au plus ctx) ; chaque token est noté une fois."
+    )]
+    pub stride: Option<u32>,
     #[serde(default)]
     #[schemars(
         range(min = 1),
@@ -1330,7 +1341,7 @@ pub struct BenchToolArgs {
     pub min_accuracy: Option<f64>,
     #[serde(default)]
     #[schemars(
-        description = "eval : llama (défaut, llama.cpp sur un GGUF), llama-completion (idem), llama-server (serveur local, GPU selon le build) ou native (Rust pur sur un dossier Qwen2, Llama/Mistral ou Qwen3) ; refusal : native (défaut), llama-server ou llama-completion."
+        description = "eval : llama (défaut, llama.cpp sur un GGUF), llama-completion (idem), llama-server (serveur local, GPU selon le build) ou native (Rust pur sur un dossier Qwen2, Llama/Mistral ou Qwen3) ; refusal : native (défaut), llama-server ou llama-completion ; ppl : llama (défaut, llama-perplexity) ou native (passe avant Rust par fenêtres glissantes, log-softmax en f64, lecture seule)."
     )]
     pub backend: Option<crate::bench::score::Backend>,
     #[serde(default)]
@@ -1518,6 +1529,8 @@ pub(super) const BENCH_FIELDS: [(&str, &[&str], &[&str]); 8] = [
             "warn_delta",
             "timeout_secs",
             "fail_on_warn",
+            "backend",
+            "stride",
         ],
     ),
     (
@@ -1887,7 +1900,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             };
             let req = PplRequest {
                 model: path(ctx, "model", &args.model)?,
-                text: path(ctx, "text", &args.text)?,
+                text: source(ctx, "text", &args.text)?,
                 baseline,
                 ctx: args.ctx.unwrap_or(bench::DEFAULT_CTX),
                 chunks: args.chunks,
@@ -1898,6 +1911,8 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 timeout,
                 // Never from an agent: no free-form argument reaches llama.cpp over MCP.
                 llama_args: Vec::new(),
+                backend: args.backend.unwrap_or_default(),
+                stride: args.stride,
             };
             core_bench_ppl(&req, fail_on_warn, ctx.deps, &ui, ctx.sink)
         }

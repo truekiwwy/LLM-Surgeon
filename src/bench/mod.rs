@@ -3,7 +3,8 @@
 //!
 //! - `dump`: full Qwen2 forward (candle, CPU) on prompts, logits written to a SafeTensors.
 //! - `logits`: KL(before‖after), cosine, top-1 / top-k shifts between two dumps.
-//! - `ppl`: perplexity of a GGUF through `llama-perplexity`, delta against a baseline.
+//! - `ppl`: perplexity through `llama-perplexity` on a GGUF, or the native forward on a
+//!   SafeTensors folder (`--backend native`), delta against a baseline.
 //! - `eval`: exact-match Pass@1 on GSM8K / MATH style datasets through `llama-cli`, or
 //!   through the native generator (`--backend native`, Qwen2 SafeTensors, CPU).
 //! - `refusal`: refusal rate on prompts (native generator, canonical refusal markers),
@@ -76,6 +77,7 @@ pub mod logits_io;
 pub mod logits_metrics;
 pub mod markers;
 pub mod native;
+pub mod ppl_native;
 pub mod ppl_parse;
 pub mod ppl_runner;
 pub mod prompt;

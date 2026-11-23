@@ -432,6 +432,16 @@ impl DecoderState {
         Ok(resid.squeeze(0)?.to_dtype(DType::F32)?.to_vec2::<f32>()?)
     }
 
+    pub fn teacher_logits(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        self.check_ids(ids)?;
+        let input = Tensor::new(ids, &Device::Cpu)?.unsqueeze(0)?;
+        Ok(self
+            .model
+            .forward_logits(&input)?
+            .flatten_all()?
+            .to_vec1::<f32>()?)
+    }
+
     /// Mean over the prompt positions of the L2 norm of the residual stream after layer
     /// `layer`: the scale of the relative steering strength.
     pub fn mean_residual_norm(&mut self, prompt_ids: &[u32], layer: usize) -> Result<f32> {

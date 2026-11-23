@@ -18,6 +18,21 @@ const SETS: [(&str, &str, bool); 4] = [
     ("refusals", include_str!("builtin/refusals.json"), false),
 ];
 
+const TEXTS: [(&str, &str); 1] = [("wikitext", include_str!("builtin/wikitext.txt"))];
+
+pub fn text(path: &Path) -> Option<Result<&'static str, String>> {
+    let name = path.to_str()?.strip_prefix(PREFIX)?;
+    Some(
+        TEXTS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, text)| *text)
+            .ok_or_else(|| {
+                format!("texte intégré inconnu « {name} » ; disponible : {PREFIX}wikitext")
+            }),
+    )
+}
+
 /// The set names, for the tool descriptions and the agent prompts.
 pub fn names() -> String {
     SETS.iter()

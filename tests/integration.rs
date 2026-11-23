@@ -4780,6 +4780,96 @@ fn bench_ppl_failures_are_typed_and_the_temporary_gguf_is_removed() {
     }
 }
 
+#[test]
+fn bench_ppl_native_scores_the_safetensors_folder_without_any_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let model = write_fake_qwen2_dir(root, "F32", false);
+    let text = root.join("text.txt");
+    std::fs::write(
+        &text,
+        "le soleil est une joie et la nuit est tres froid ".repeat(3),
+    )
+    .unwrap();
+    let weights = std::fs::read(model.join("model.safetensors")).unwrap();
+    let native = |extra: &[&str]| -> (i32, Value) {
+        let (deps, calls) = ppl_deps(ColorMode::Plain, vec![]);
+        let mut args = vec![
+            "bench",
+            "ppl",
+            "--model",
+            s(&model),
+            "--text",
+            s(&text),
+            "--backend",
+            "native",
+            "--ctx",
+            "8",
+        ];
+        args.extend_from_slice(extra);
+        let out = run_json(&deps, &args);
+        assert!(calls.borrow().is_empty(), "no llama.cpp process");
+        out
+    };
+
+    let (code, v) = native(&[]);
+    assert_eq!(code, 0, "{v}");
+    let data = &v["data"];
+    assert_eq!(data["backend"], "native");
+    assert!(data["binary"].is_null() && data["args"].as_array().unwrap().is_empty());
+    assert_eq!(
+        (data["stride"].as_u64(), data["tokens"].as_u64()),
+        (Some(4), Some(32))
+    );
+    let ppl = data["ppl"].as_f64().unwrap();
+    assert!(ppl.is_finite() && ppl > 1.0, "{ppl}");
+    assert!(data["ppl_err"].as_f64().unwrap() > 0.0);
+    assert_eq!(native(&[]).1["data"]["ppl"], data["ppl"], "deterministic");
+
+    let (code, v) = native(&["--chunks", "1", "--baseline-model", s(&model)]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["data"]["tokens"], 7, "one window of 8 tokens");
+    assert_eq!(v["data"]["baseline"]["source"], "model");
+    assert_eq!(v["data"]["delta"]["delta"], 0.0);
+
+    let (code, v) = native(&["--threads", "2"]);
+    assert_eq!(code, exit::INVALID_INPUT, "{v}");
+    assert_eq!(
+        std::fs::read(model.join("model.safetensors")).unwrap(),
+        weights
+    );
+
+    let (deps, calls) = ppl_deps(ColorMode::Plain, vec![]);
+    let read_only = McpConfig::new(&[root.to_path_buf()], true, false).unwrap();
+    let responses = session(
+        &deps,
+        &read_only,
+        &[
+            init("2025-06-18"),
+            call(
+                1,
+                "surgeon_bench",
+                json!({"mode": "ppl", "model": "qwen2-mini", "text": "builtin:wikitext", "backend": "native", "ctx": 16, "chunks": 2}),
+            ),
+            call(
+                2,
+                "surgeon_bench",
+                json!({"mode": "ppl", "model": "qwen2-mini", "text": "builtin:wikitext"}),
+            ),
+        ],
+    );
+    let (is_error, env) = envelope(&responses, 1);
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["backend"], "native");
+    assert_eq!(env["data"]["tokens"], 23, "15 then 8 new tokens");
+    assert_eq!(env["data"]["text_sha256"].as_str().unwrap().len(), 64);
+    assert!(
+        envelope(&responses, 2).0,
+        "builtin text needs the native backend"
+    );
+    assert!(calls.borrow().is_empty());
+}
+
 // -------------------------------------------------------------- bench eval
 
 struct Fixed(&'static str);

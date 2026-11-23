@@ -1,2 +1,4 @@
 # Run by bash inside WSL or on Linux: a CRLF checkout would break them.
 *.sh text eol=lf
+# Embedded with include_str!: the same bytes, hash and perplexity on every OS.
+src/bench/builtin/*.txt text eol=lf

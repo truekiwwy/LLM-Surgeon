@@ -3319,6 +3319,49 @@
               ]
             },
             {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "backend",
+              "long": "backend",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [
+                "llama",
+                "native",
+                "llama-completion",
+                "llama-server",
+                "hipfire",
+                "mistralrs"
+              ],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "BACKEND"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "stride",
+              "long": "stride",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "STRIDE"
+              ]
+            },
+            {
               "action": "SetTrue",
               "aliases": null,
               "default_values": [

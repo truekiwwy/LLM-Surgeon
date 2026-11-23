@@ -571,7 +571,7 @@ pub struct BenchPplArgs {
     /// .gguf, or a SafeTensors directory converted to a temporary GGUF.
     #[arg(long)]
     pub model: PathBuf,
-    /// Text file evaluated by llama-perplexity.
+    /// Text file evaluated, or builtin:wikitext (embedded WikiText-2 excerpt, --backend native).
     #[arg(long)]
     pub text: PathBuf,
     /// Reference model, measured first.
@@ -607,6 +607,17 @@ pub struct BenchPplArgs {
     /// Exit with code 9 when the delta exceeds --warn-delta.
     #[arg(long)]
     pub fail_on_warn: bool,
+    #[arg(
+        long,
+        value_enum,
+        help = "llama (default: llama-perplexity on a GGUF) or native (pure Rust forward on a SafeTensors folder, f64 log-softmax, sliding windows)"
+    )]
+    pub backend: Option<crate::bench::score::Backend>,
+    #[arg(
+        long,
+        help = "native: step between the sliding windows of --ctx tokens (default --ctx / 2); each token is scored once"
+    )]
+    pub stride: Option<u32>,
 }
 
 #[derive(Debug, Clone, Args)]

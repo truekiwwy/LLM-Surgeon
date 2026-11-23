@@ -134,6 +134,8 @@
 //!   `create`, `list`, `restore`) and the twenty-third `surgeon_sweep`, MCP only, additive.
 //!   An apply on a hard-linked file now copies it first; its bytes are the same. Only the
 //!   tool schema hash moved.
+//! - native perplexity: `bench ppl --backend` and `--stride`, the property `stride` of
+//!   `surgeon_bench`, additive. Only the tool schema hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what
