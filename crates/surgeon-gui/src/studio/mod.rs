@@ -12,6 +12,7 @@
 //! - [`live`]: the 3D layer of a run, live or replayed with a time cursor.
 //! - [`lock`]: the kernel lock that keeps the source model read-only while its project is open.
 //! - [`selftest`]: `surgeon-gui --self-test`, all of the above without a window.
+//! - [`vector_radar`]: the read-only cosine comparison of two direction files.
 //! - [`view`]: the Projects workspace of the window.
 
 pub mod bus;
@@ -26,4 +27,5 @@ pub mod lock;
 pub mod project;
 pub mod results;
 pub mod selftest;
+pub mod vector_radar;
 pub mod view;

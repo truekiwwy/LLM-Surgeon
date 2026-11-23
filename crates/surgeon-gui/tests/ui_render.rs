@@ -122,6 +122,32 @@ fn every_view_and_section_renders_in_both_languages_without_a_raw_key() {
 }
 
 #[test]
+fn the_radar_compares_two_direction_files_of_work() {
+    for (lang, title, strong) in [
+        (Lang::Fr, "Radar d'interférence", "Forte collision"),
+        (Lang::En, "Interference radar", "Strong collision"),
+    ] {
+        let mut b = bench(lang);
+        let project = b.app.studio.manager.as_ref().unwrap().project.dir.clone();
+        let work = project.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let meta = [("layer".to_owned(), "14".to_owned())].into();
+        for (name, v) in [("a.safetensors", [1.0, 0.0]), ("b.safetensors", [0.8, 0.6])] {
+            let bytes = weight_surgeon::extract::encode_tensors(&[("direction", &v)], &meta);
+            std::fs::write(work.join(name), bytes.unwrap()).unwrap();
+        }
+        b.app.radar.open_on(&work);
+        let texts = b.texts(Tab::Agent);
+        // The layer comes from the metadata, the row reads in full inside the panel.
+        for text in [title, "L14 · direction", "+0.8000", strong] {
+            assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
+        }
+        let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+    }
+}
+
+#[test]
 fn the_language_switch_repaints_the_window() {
     let mut b = bench(Lang::Fr);
     assert!(b.texts(Tab::Agent).iter().any(|t| t == "Preuves"));

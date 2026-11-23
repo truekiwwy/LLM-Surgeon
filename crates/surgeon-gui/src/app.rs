@@ -37,6 +37,7 @@ use crate::studio::view::{Studio, Target};
 use crate::task::Task;
 use crate::ui::layout::Columns;
 use crate::ui::palette::Palette;
+use crate::ui::views::radar::Radar;
 use crate::ui::{fonts, i18n, shell, theme};
 use crate::viewport;
 
@@ -188,6 +189,8 @@ pub struct SurgeonApp {
     pub buffers: viewport::Buffers,
     pub columns: Columns,
     pub palette: Palette,
+    /// The vector interference radar over `work/` of the open project.
+    pub radar: Radar,
     /// `false` (`--no-motion`): no transition at all.
     pub motion: bool,
     /// The settings dialog, open on this section.
@@ -258,6 +261,7 @@ impl SurgeonApp {
             buffers: viewport::Buffers::default(),
             columns,
             palette: Palette::default(),
+            radar: Radar::default(),
             motion: true,
             settings: None,
             harness_note: None,

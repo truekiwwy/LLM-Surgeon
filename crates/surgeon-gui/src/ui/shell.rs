@@ -62,6 +62,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp) {
     titlebar(ui, app, regions.titlebar, !wizard);
     resize_edges(ui, screen);
     views::system::dialog(&ctx, app);
+    views::radar::dialog(&ctx, app);
     palette::show(&ctx, app);
 }
 
