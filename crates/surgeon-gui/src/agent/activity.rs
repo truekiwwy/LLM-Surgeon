@@ -14,6 +14,8 @@ use crate::ui::i18n::{t, tf};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Activity {
     pub label: String,
+    /// What the call works on, without its verb: `down_proj L11–L14`, `builtin:math`.
+    pub target: String,
     /// `None`: the whole model (a benchmark), no layer stands out.
     pub layers: Option<LayerSelection>,
 }
@@ -53,6 +55,19 @@ pub fn current(conv: &Conversation) -> Option<Activity> {
         })
         .next_back()
         .and_then(|(name, input)| of(name, input))
+}
+
+/// The newest call of `conv` the 3D view can show, running or answered: what Live mode keeps
+/// in focus between two calls.
+pub fn last(conv: &Conversation) -> Option<Activity> {
+    conv.messages
+        .iter()
+        .flat_map(|m| &m.blocks)
+        .rev()
+        .find_map(|b| match b {
+            Block::ToolUse { name, input, .. } => of(name, input),
+            _ => None,
+        })
 }
 
 /// `14`, `"11-14"`, `"3,5"`, `"all"`, `[3, 5]` or `{"start", "end"}`.
@@ -170,8 +185,10 @@ pub fn of(name: &str, input: &Value) -> Option<Activity> {
     };
     let mut target = what;
     target.extend(sel.as_ref().map(layers_text));
+    let target = target.join(" ");
     Some(Activity {
-        label: label(&target.join(" ")).trim().replace(" …", "…"),
+        label: label(&target).trim().replace(" …", "…"),
+        target,
         layers: sel,
     })
 }
@@ -242,10 +259,13 @@ mod tests {
             blocks: vec![result("a")],
         });
         assert!(current(&conv).is_none());
+        // Answered, the call stays the last one Live mode keeps in focus.
+        assert_eq!(last(&conv).unwrap().target, "L3");
         conv.messages.push(Message {
             role: Role::Assistant,
             blocks: vec![call("b", 7)],
         });
         assert_eq!(current(&conv).unwrap().label, "Extraction L7…");
+        assert_eq!(last(&conv).unwrap().target, "L7");
     }
 }

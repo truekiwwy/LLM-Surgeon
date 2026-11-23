@@ -17,6 +17,7 @@
 //! - [`mission`]: what a session is for (`Advance` full scan, `Scalping` one symptom).
 //! - [`session`]: the loop, budgets, pause and stop, persistence in `chat/`.
 //! - [`config`]: connections, consents, per-project settings (no secret).
+//! - [`telemetry`]: the stage, method, target and measured progress Live mode shows.
 //! - [`view`]: the Agents page; [`selftest`]: the `--self-test` dialogue.
 
 pub mod activity;
@@ -35,6 +36,7 @@ pub mod provider;
 pub mod runtime;
 pub mod selftest;
 pub mod session;
+pub mod telemetry;
 pub mod tools;
 pub mod vault;
 pub mod view;

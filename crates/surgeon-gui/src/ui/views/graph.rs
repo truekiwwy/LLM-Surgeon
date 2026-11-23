@@ -38,7 +38,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         .title(t("panel.graph"))
         .canvas()
         .show_with(ui, parts[0], app, view_controls, |ui, app| {
-            viewport(ui, app)
+            viewport(ui, app, false)
         });
     if has_bar {
         c::Panel::new("graph-bar")
@@ -108,8 +108,9 @@ fn view_controls(ui: &mut Ui, app: &mut SurgeonApp) {
     );
 }
 
-/// The 3D canvas.
-fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
+/// The 3D canvas. `live`: the layers the agent works on stay lit, the others step back, and
+/// the origin is overlaid when asked.
+pub(super) fn viewport(ui: &mut Ui, app: &mut SurgeonApp, live: bool) {
     let target = match app.layout {
         LayoutMode::Column => 0.0,
         LayoutMode::Constellation => 1.0,
@@ -149,6 +150,14 @@ fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
         true => app.agents.conversation().and_then(activity::current),
         false => None,
     };
+    let layer = run.is_some().then_some(&app.layer);
+    let focus = match live {
+        true => {
+            let last = app.agents.conversation().and_then(activity::last);
+            super::live::focus(step, layer, last.as_ref())
+        }
+        false => None,
+    };
     let view = View {
         step,
         blend,
@@ -156,9 +165,11 @@ fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
         visible: &visible,
         selected,
         targets: &targets,
-        layer: run.is_some().then_some(&app.layer),
+        layer,
         activity: activity.as_ref(),
         animate: app.motion,
+        focus: focus.as_deref(),
+        ghost: (live && app.ghost).then(|| app.timeline.get(0)).flatten(),
     };
     if let Some(click) = viewport::show(ui, &view, &mut app.camera, &mut app.buffers) {
         app.selected = click.map(|i| step.report.nodes[i].id.clone());

@@ -3,6 +3,7 @@
 
 pub mod agents;
 pub mod graph;
+pub mod live;
 pub mod radar;
 pub mod results;
 pub mod system;

@@ -182,6 +182,55 @@ fn the_results_panel_shows_the_ollama_command_of_the_working_copy() {
 }
 
 #[test]
+fn live_mode_puts_the_session_beside_the_graph_under_its_telemetry() {
+    for (lang, expected) in [
+        (
+            Lang::Fr,
+            [
+                "Télémétrie Live",
+                "Où",
+                "Quand",
+                "Comment",
+                "Vers où",
+                "3. Compose",
+            ],
+        ),
+        (
+            Lang::En,
+            [
+                "Live telemetry",
+                "Where",
+                "When",
+                "How",
+                "Toward",
+                "3. Compose",
+            ],
+        ),
+    ] {
+        let mut b = bench(lang);
+        b.app.live = true;
+        b.app.ghost = true;
+        let texts = b.texts(Tab::Agent);
+        // The demo agent waits on surgeon_apply of patch.json: the compose stage, its method
+        // and the approval card the user must still reach.
+        for text in expected.iter().chain(&["patch.json", "surgeon_apply"]) {
+            assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
+        }
+        let approve = match lang {
+            Lang::Fr => "Autoriser une fois",
+            Lang::En => "Allow once",
+        };
+        assert!(texts.iter().any(|t| t == approve), "{texts:?}");
+        let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+        // A tab of the activity bar leaves Live mode for that tab.
+        b.press(key(Key::Num2, Modifiers::COMMAND));
+        assert!(!b.app.live);
+        assert_eq!(b.app.tab, Tab::Graph);
+    }
+}
+
+#[test]
 fn the_language_switch_repaints_the_window() {
     let mut b = bench(Lang::Fr);
     assert!(b.texts(Tab::Agent).iter().any(|t| t == "Preuves"));

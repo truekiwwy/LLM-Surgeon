@@ -105,7 +105,10 @@ pub fn commands(query: &str) -> Vec<(Command, String)> {
 
 fn run(ctx: &egui::Context, app: &mut SurgeonApp, command: Command) {
     match command {
-        Command::Tab(tab) => app.tab = tab,
+        Command::Tab(tab) => {
+            app.tab = tab;
+            app.live = false;
+        }
         Command::Session(mode) => {
             app.set_mode(mode);
             app.agents.new_conversation();

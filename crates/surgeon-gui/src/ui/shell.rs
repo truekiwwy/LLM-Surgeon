@@ -51,12 +51,16 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp) {
         let body = Rect::from_min_max(regions.activity.min, regions.right.max);
         super::wizard::show(ui, app, body);
     } else {
-        match app.tab {
-            Tab::Agent => views::agents::show(ui, app, &regions),
-            Tab::Graph => views::graph::show(ui, app, &regions),
+        match (app.live, app.tab) {
+            // Live mode splits the body itself: no columns to separate or drag.
+            (true, _) => views::live::show(ui, app, &regions),
+            (false, Tab::Agent) => views::agents::show(ui, app, &regions),
+            (false, Tab::Graph) => views::graph::show(ui, app, &regions),
         }
-        layout::separators(ui, &regions);
-        splitters(ui, app, &regions);
+        if !app.live {
+            layout::separators(ui, &regions);
+            splitters(ui, app, &regions);
+        }
         activity_bar(ui, app, regions.activity);
     }
     titlebar(ui, app, regions.titlebar, !wizard);
@@ -79,6 +83,7 @@ fn keys(ctx: &egui::Context, app: &mut SurgeonApp) {
     for (tab, key) in Tab::ALL.into_iter().zip([Key::Num1, Key::Num2]) {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key)) {
             app.tab = tab;
+            app.live = false;
         }
     }
 }
@@ -110,19 +115,14 @@ fn activity_bar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
     for (k, tab) in Tab::ALL.into_iter().enumerate() {
         let badge = if tab == Tab::Agent { pending } else { 0 };
         let tip = tab_label(tab);
-        if c::activity(
-            ui,
-            cell(k as f32),
-            tab_icon(tab),
-            app.tab == tab,
-            tip,
-            badge,
-        )
-        .clicked()
-        {
-            match app.tab == tab {
+        let active = app.tab == tab && !app.live;
+        if c::activity(ui, cell(k as f32), tab_icon(tab), active, tip, badge).clicked() {
+            match active {
                 true => app.toggle_left(),
-                false => app.tab = tab,
+                false => {
+                    app.tab = tab;
+                    app.live = false;
+                }
             }
         }
     }
@@ -193,6 +193,13 @@ fn titlebar(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect, controls: bool) {
             if c::icon_button(ui, Icon::Gear, t("settings.open")).clicked() {
                 app.settings = Some(app.settings.unwrap_or(Section::General));
             }
+            c::switch(
+                ui,
+                Icon::Play,
+                t("live.toggle"),
+                &mut app.live,
+                t("live.toggle.tip"),
+            );
             if app.agents.project.is_some() {
                 views::agents::picker(ui, app, T.size.left);
             }

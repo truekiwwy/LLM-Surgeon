@@ -32,23 +32,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         t("panel.sessions"),
         sessions,
     );
-    c::Panel::new("session").center().flush().show_with(
-        ui,
-        regions.center,
-        app,
-        |_, _| {},
-        |ui, app| {
-            let rect = ui.max_rect();
-            match (
-                app.agents.project.is_some(),
-                app.agents.conversation().is_some(),
-            ) {
-                (false, _) => no_project(ui, app, rect),
-                (true, false) => form(ui, app, rect),
-                (true, true) => thread(ui, app, rect),
-            }
-        },
-    );
+    session(ui, app, regions.center);
     let title = match app.right {
         RightPane::Evidence => t("panel.evidence"),
         RightPane::Results => t("panel.results"),
@@ -70,6 +54,28 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         },
     );
     consent(ui.ctx(), app);
+}
+
+/// The center of the agent in `rect`: the new-session form, else the session's thread with
+/// its approvals and message field (Live mode shows it beside the 3D graph).
+pub(super) fn session(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
+    c::Panel::new("session").center().flush().show_with(
+        ui,
+        rect,
+        app,
+        |_, _| {},
+        |ui, app| {
+            let rect = ui.max_rect();
+            match (
+                app.agents.project.is_some(),
+                app.agents.conversation().is_some(),
+            ) {
+                (false, _) => no_project(ui, app, rect),
+                (true, false) => form(ui, app, rect),
+                (true, true) => thread(ui, app, rect),
+            }
+        },
+    );
 }
 
 /// Opens the settings on the AI providers.
@@ -992,7 +998,7 @@ fn evidence_log(ui: &mut Ui, app: &mut SurgeonApp) {
 // ------------------------------------------------------------------ consent
 
 /// Before the first request to a connection: what leaves the machine, and to whom.
-fn consent(ctx: &egui::Context, app: &mut SurgeonApp) {
+pub(super) fn consent(ctx: &egui::Context, app: &mut SurgeonApp) {
     let Some(id) = app.agents.consent_for.clone() else {
         return;
     };

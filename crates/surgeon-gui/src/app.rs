@@ -175,6 +175,10 @@ pub struct SurgeonApp {
     /// The hipfire daemon this window started, if any.
     pub hipfire: HipfireDaemon,
     pub tab: Tab,
+    /// Live mode: the agent and the 3D graph side by side, over whichever tab is selected.
+    pub live: bool,
+    /// Live mode overlays the origin on the 3D graph.
+    pub ghost: bool,
     /// The kind of session the new-session form offers first, kept between launches.
     pub mode: Mode,
     pub studio: Studio,
@@ -253,6 +257,8 @@ impl SurgeonApp {
             hipfire_up: false,
             hipfire: HipfireDaemon::default(),
             tab,
+            live: false,
+            ghost: false,
             mode,
             studio: Studio::new(workspace),
             agents: Hub::system(ctx),
