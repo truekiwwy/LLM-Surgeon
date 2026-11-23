@@ -32,6 +32,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod dispatch;
+pub mod links;
 pub mod metrics;
 pub mod mmap_io;
 pub mod simd;
@@ -41,6 +42,7 @@ mod tests;
 pub use dispatch::{
     choose, from_env, shift_rows, shift_scalar, KernelChoice, KernelConfig, KernelError, Level,
 };
+pub use links::{file_identity, FileIdentity};
 pub use metrics::{page_faults, IoMeter, IoReport, PageFaults};
 pub use mmap_io::{
     available_space, drop_file_cache, map_read, map_write, ChunkFailure, ChunkedPatcher, IoConfig,

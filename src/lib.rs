@@ -5,6 +5,7 @@ pub mod app;
 pub mod arch;
 pub mod backend;
 pub mod bench;
+pub mod checkpoint;
 pub mod cli;
 pub mod doctor;
 pub mod engine;

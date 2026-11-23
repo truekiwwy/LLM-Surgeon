@@ -2177,6 +2177,9 @@ fn core_apply_io(
             touched.push(file);
         }
     }
+    for file in &touched {
+        crate::checkpoint::unshare(file).map_err(|e| PatchError::io(file, &e))?;
+    }
     let mut backup = match patch.backup {
         true => Some(BackupSet::create_many_in(
             &touched,
@@ -2426,6 +2429,9 @@ fn core_apply_gguf(
         options.arch_spec = Some(arch::load_spec(path).map_err(arch_failure)?);
     }
     let dry_run = request.dry_run;
+    if !dry_run {
+        crate::checkpoint::unshare(&model).map_err(|e| PatchError::io(&model, &e))?;
+    }
     let started = Instant::now();
     let meter = IoMeter::start();
     let result = gguf::apply_gguf(

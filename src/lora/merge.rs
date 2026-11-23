@@ -475,10 +475,13 @@ pub fn core_merge(args: &LoraMergeArgs, deps: &AppDeps, sink: &mut dyn ProgressS
         if cancelled(&req) {
             return Err(SurgeryError::Cancelled.into());
         }
+        let touched = prepared
+            .target
+            .shards_holding(prepared.items.iter().map(|i| i.pair.target.as_str()));
+        for file in &touched {
+            crate::checkpoint::unshare(file).map_err(|e| SurgeryError::io(file, &e))?;
+        }
         if !args.no_backup {
-            let touched = prepared
-                .target
-                .shards_holding(prepared.items.iter().map(|i| i.pair.target.as_str()));
             let set = BackupSet::create_many_in(&touched, args.backup_dir.as_deref())?;
             backup_files = set
                 .guards()
