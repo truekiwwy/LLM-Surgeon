@@ -487,17 +487,21 @@ fn swap_dir(source: &Path, manifest: &Manifest, model: &Path) -> Result<bool> {
         let _ = fs::remove_dir_all(&staged);
         return Err(io_error(model)(e));
     }
-    let mut kept_everything = true;
-    for entry in fs::read_dir(&retired).map_err(io_error(&retired))? {
-        let entry = entry.map_err(io_error(&retired))?;
-        let name = entry.file_name();
-        let snapshot = entry.file_type().is_ok_and(|t| t.is_file())
-            && !is_backup_or_temp(&name.to_string_lossy());
-        if !snapshot && fs::rename(entry.path(), model.join(&name)).is_err() {
-            kept_everything = false;
-        }
-    }
-    if kept_everything {
+    let carried = fs::read_dir(&retired).map(|entries| {
+        entries.fold(true, |all, entry| {
+            let moved = entry.and_then(|entry| {
+                let name = entry.file_name();
+                let snapshot = entry.file_type().is_ok_and(|t| t.is_file())
+                    && !is_backup_or_temp(&name.to_string_lossy());
+                match snapshot {
+                    true => Ok(()),
+                    false => fs::rename(entry.path(), model.join(&name)),
+                }
+            });
+            all & moved.is_ok()
+        })
+    });
+    if carried.unwrap_or(false) {
         let _ = fs::remove_dir_all(&retired);
     }
     Ok(linked)
