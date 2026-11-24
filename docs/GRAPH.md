@@ -61,12 +61,15 @@ toujours émises, indépendamment de `--edges` et de `--min-alignment`.
 ## 2. Métriques spectrales et bornes certifiées
 
 Chaque matrice `A` (de taille `m x n`) est lue en flux par `NodeSource` puis décomposée
-par le SVD randomisé partagé (`surgery::rsvd`) : `k = r + oversample` colonnes, `p =
---power-iters` itérations de puissance, graine explicite. Les facteurs sont normalisés en
-signe ; les sommes sont faites dans l'ordre des indices, ce qui rend le résultat
-indépendant du nombre de fils.
+par le SVD randomisé partagé (`surgery::rsvd`, Halko-Martinsson-Tropp) : `k = r + oversample`
+colonnes (par défaut `32 + 8 = 40`), `p = --power-iters` itérations de puissance (2 par
+défaut), graine explicite. Les facteurs sont normalisés en signe ; les sommes sont faites
+dans l'ordre des indices, ce qui rend le résultat indépendant du nombre de fils.
 
-Le SVD fournit aussi deux quantités **exactes** calculées pendant le balayage :
+Une passe linéaire par matrice (blocs de lignes en parallèle, fusion par paires des moments
+à la Pébay, déterministe quel que soit le nombre de fils) calcule `||A||_F`, le kurtosis, les
+statistiques par canal, le nombre de valeurs non finies et `zeros` (zéros exacts parmi les
+entrées finies). Le SVD fournit en plus deux quantités **exactes** calculées pendant le balayage :
 
 - `||A||_F^2`, somme des carrés de toutes les entrées ;
 - `rho = ||Q^T A||_F^2 / ||A||_F^2`, l'énergie capturée par la plage randomisée `Q`.
@@ -91,7 +94,7 @@ Ritz d'une plage orthonormale ne dépassent pas `sigma1(A)`), et la queue majore
 - `sigma1 = s1`, `sigma1_lower = s1`
 - `sigma1_upper = s1 + ||A||_F sqrt(tau)`
 
-Avec un spectre complet exact, les trois champs sont égaux à la valeur exacte.
+Avec le repli exact (section 2.4), les trois champs sont égaux à la valeur exacte.
 
 ### 2.3 Rang stable `D_spec`
 
@@ -111,13 +114,15 @@ renormalisée, vaut `H_c = e H - e ln e`. Les deux extrêmes demandés sont :
 
 puis `erank_energy_lower = exp(H_lower)`, `erank_energy_upper = exp(H_upper)`, bornés
 dans `[0, min(m,n)]`. Si `d = 0` ou `t = 0`, les deux bornes coïncident. Avec un spectre
-complet exact (`full_spectrum: true`), la borne vaut `exp(H)` du spectre entier.
+exact (`full_spectrum: true`), la borne vaut `exp(H)` du spectre entier.
 
-Le rang effectif L1, `erank_l1 = exp(H(sigma / ||sigma||_1))`, n'est calculé qu'en mode
-spectre complet : il n'a pas de borne certifiée à partir d'un spectre tronqué, donc il
-vaut `null` sinon. Le mode spectre complet est actif si
-`min(m,n) <= --full-spectrum-max-dim`, `min(m,n) <= 1024` (limite de `linalg::gram`) et
-`m*n <= 4_000_000` (limite mémoire du chemin exact) ; sinon un avertissement est ajouté.
+Le rang effectif L1, `erank_l1 = exp(H(sigma / ||sigma||_1))`, n'est calculé qu'avec le
+spectre exact : il n'a pas de borne certifiée à partir d'un spectre tronqué, donc il vaut
+`null` sinon. Le spectre exact n'est qu'un **repli** : il est calculé seulement quand
+`min(m,n) <= rank + oversample + 4` (et `min(m,n) <= 1024`), par un SVD randomisé de rang
+plein du plus petit côté, sans copie f64 de la matrice. L'ancien spectre dense (Gram et
+Jacobi) a disparu : il coûtait environ 80 s par matrice 896x896. `--full-spectrum-max-dim`
+reste accepté pour la compatibilité mais n'a aucun effet.
 
 ## 3. Alignement écriture → lecture
 
@@ -218,8 +223,8 @@ Le schéma est généré depuis `GraphReport` (`src/graph/output.rs`) et imprim�
   `arch_source`, `hidden`, `layers`, `tied_lm_head`, `tensor_count` (nombre de nœuds
   retenus), `total_weight_bytes` (somme des tenseurs uniques du graphe), `skipped`,
   `warnings` ;
-- `parameters` : `rank`, `oversample`, `power_iters`, `seed`, `full_spectrum_max_dim`,
-  `edge_mode`, `min_alignment`, `edge_weight`, `vector`, `kurtosis_threshold`,
+- `parameters` : `rank`, `oversample`, `power_iters`, `seed`, `full_spectrum_max_dim`
+  (obsolète, sans effet, répété pour la compatibilité), `edge_mode`, `min_alignment`, `edge_weight`, `vector`, `kurtosis_threshold`,
   `color_scale`, `palette`, `max_nodes`, `formats` ;
 - `global` : `nodes`, `edges`, `structural_edges`, `layers`, `hidden`,
   `outlier_channels`, `kurtosis_median`, `kurtosis_max`, `mean_erank_energy_lower`,
@@ -237,7 +242,7 @@ Le schéma est généré depuis `GraphReport` (`src/graph/output.rs`) et imprim�
 `sigma1_upper`, `d_spec`, `d_spec_lower`, `d_spec_upper`, `erank_energy_lower`,
 `erank_energy_upper`, `erank_l1`, `full_spectrum`, `kurtosis`, `kurtosis_excess`,
 `channels` (`count`, `norm_median`, `norm_max`, `norm_argmax`, `kurtosis_max`,
-`outliers`), `e_write`, `e_read`, `non_finite`, `singular_values`.
+`outliers`), `e_write`, `e_read`, `non_finite`, `zeros`, `singular_values`.
 
 Il n'y a ni horodatage ni durée dans `graph.json` : le rapport est reproductible à partir
 du SHA-256, des paramètres et de la version. Le seul champ non déterministe de
@@ -364,8 +369,17 @@ deltas exactement nuls.
 DOT et Mermaid entourent en orange (`#e6550d`) les nœuds et arêtes modifiés, et le label
 DOT d'un nœud modifié porte `Δ norm` et `Δ erank`.
 
-Limite : les deltas viennent des rapports, pas des poids. Une modification qui garde la
-norme de Frobenius et le spectre (une rotation, par exemple) n'apparaît pas.
+Quand `--baseline` est un modèle, chaque nœud est apparié au même tenseur de la référence.
+Si la forme, le dtype, le facteur de norme Gemma et les octets stockés sont identiques,
+`weight_diff` vaut 0 sans lire les lignes et l'analyse du modèle est réutilisée pour la
+référence (une copie après un petit patch coûte environ une analyse, pas deux). Sinon
+`||W - W_ref||_F` est calculé dans la même passe linéaire. `baseline_diff.nodes[].weight_diff`
+vaut `null` avec un `graph.json` comme référence ou quand les formes diffèrent. Un nœud est
+aussi `changed` quand `weight_diff / ‖W_ref‖_F >= 1e-3` : une rotation qui garde la norme et
+le spectre est donc vue.
+
+Limite : avec un `graph.json` comme référence, les deltas viennent des rapports, pas des
+poids, et une rotation qui garde la norme et le spectre n'apparaît pas.
 
 ### 7.5 `--fast-hash`
 
@@ -474,7 +488,7 @@ orchestrateur y ajoute au fil de l'eau (section 7.3).
 
 Le cache est un fichier JSONL dans `--cache-dir`. La clé contient le SHA-256 complet du
 modèle, l'identité du tenseur (nom, rôle, couche, expert, forme, dtype, octets), `rank`,
-`oversample`, `power_iters`, `seed`, `full_spectrum_max_dim`, `kurtosis_threshold` et le
+`oversample`, `power_iters`, `seed`, `kurtosis_threshold` et le
 digest du vecteur éventuel. Une entrée est ajoutée dès qu'une matrice est finie : une
 interruption laisse donc un cache partiel utilisable.
 
@@ -483,12 +497,14 @@ interruption laisse donc un cache partiel utilisable.
 - Sans `--resume`, un cache existant est invalidé et réécrit.
 - `--no-cache` n'écrit ni ne lit le cache ; il est incompatible avec `--cache-dir`.
 - `--estimate` ouvre et hache le modèle, compte les matrices, les passes
-  (`4 + 2 * power_iters`, plus une passe par spectre complet) et les octets, mesure un
+  (`4 + 2 * power_iters` par matrice : 1 passe linéaire et `3 + 2 * power_iters` passes du
+  SVD ; le repli exact ajoute encore `3 + 2 * power_iters` passes) et les octets, mesure un
   micro-benchmark, puis s'arrête sans SVD ni écriture.
 
 `--jobs N` crée un pool Rayon local pour `metrics::analyze` ; `0` utilise le pool global.
-Le résultat ne dépend pas de `N` : les réductions sont ordonnées et chaque nœud est
-indépendant. Ctrl-C, le drapeau d'interruption du serveur MCP et l'échéance
+Les matrices sont analysées en parallèle dans ce pool ; la progression (fait/total) est
+émise à la fin de chaque matrice, dans l'ordre d'achèvement. Le résultat ne dépend pas de
+`N` : les réductions sont ordonnées et chaque nœud est indépendant. Ctrl-C, le drapeau d'interruption du serveur MCP et l'échéance
 `max_seconds` positionnent un drapeau vérifié avant chaque nœud et à l'intérieur du SVD ;
 l'annulation renvoie le code 1 (`error.kind = "cancelled"`) et ne laisse aucun fichier.
 Le hachage du modèle, lui, n'est pas interruptible (`--fast-hash` le rend quasi instantané).
@@ -500,7 +516,7 @@ Le hachage du modèle, lui, n'est pas interruptible (`--fast-hash` le rend quasi
 | 0 | succès |
 | 1 | annulation (Ctrl-C, `max_seconds`, drapeau MCP) |
 | 2 | argument invalide, modèle illisible, sortie existante sans `--overwrite`, lien symbolique |
-| 7 | échec de calcul (SVD, spectre complet, écriture interne) |
+| 7 | échec de calcul (SVD, spectre exact, écriture interne) |
 | 70 | erreur interne inattendue |
 
 ## 10. Limites connues et éléments non vérifiés
@@ -514,8 +530,13 @@ Le hachage du modèle, lui, n'est pas interruptible (`--fast-hash` le rend quasi
   `--oversample` et `--power-iters`.
 - `cos_theta` est une estimation par 16 itérations de puissance, pas une SVD exacte de
   `C` ; l'erreur est négligeable pour les petites matrices, mais elle n'est pas certifiée.
-- Le mode spectre complet est refusé au-delà de `min(m,n) > 1024` ou `m*n > 4_000_000` :
-  `erank_l1` vaut alors `null` et les autres champs gardent leurs bornes randomisées.
+- Le spectre exact (repli, section 2.4) n'existe que pour `min(m,n) <= rank + oversample + 4`
+  et `min(m,n) <= 1024` : ailleurs `erank_l1` vaut `null` et les autres champs gardent leurs
+  bornes randomisées.
+- Sur un spectre en plateau sous quelques pics (poids entraînés), l'énergie capturée au rang
+  `r` est sous-estimée d'environ 4,5 % en relatif (0,002 en absolu) avec les défauts ; sur un
+  spectre en `1/i` elle vaut 99,98 % de la valeur exacte. `sigma1` est à 1e-5 en relatif de
+  la valeur exacte.
 - Les GGUF sont lus par `patch::gguf::quant::dequantize_row`, donc sur les valeurs
   déquantifiées, pas sur les octets quantifiés ; c'est exactement ce que voit le moteur
   de patch, mais ce n'est pas le poids d'origine en f32.
@@ -531,6 +552,10 @@ Le hachage du modèle, lui, n'est pas interruptible (`--fast-hash` le rend quasi
 
 ## 11. Performance mesurée
 
+Mesure récente (test `spectral_block_benchmark_2048x5632`, build release, 12 fils) : environ
+255 ms pour une matrice 2048x5632 à rang 32 (`k = 40`, `q = 2`). Le tableau suivant date
+d'avant le retrait du spectre dense (anciens défauts, spectre complet sur 16×16).
+
 Sur le mini-modèle `qwen2-mini` (30 matrices 16×16, rang 8, `--oversample 4`,
 `--power-iters 2`, spectre complet), en build `--release` sous Windows :
 
@@ -542,7 +567,7 @@ Sur le mini-modèle `qwen2-mini` (30 matrices 16×16, rang 8, `--oversample 4`,
 | `--estimate` | 442 368 octets lus, 1 843 200 flops, ≈0,0007 s estimées (micro-benchmark) |
 
 Ces chiffres ne préjugent pas du coût sur un 7B : le SVD randomisé lit chaque matrice
-`4 + 2p` fois (plus le spectre complet), et le hachage lit tout le modèle une fois.
+`4 + 2p` fois (plus le repli exact), et le hachage lit tout le modèle une fois.
 `--estimate` donne l'ordre de grandeur avant de lancer le calcul.
 
 ## 12. Réutilisation

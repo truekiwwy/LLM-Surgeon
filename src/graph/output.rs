@@ -1067,6 +1067,7 @@ mod tests {
             e_write: None,
             e_read: None,
             non_finite: 0,
+            zeros: 0,
             singular_values: vec![2.0, 1.0],
         }
     }

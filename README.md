@@ -611,7 +611,7 @@ surgeon restore [OPTIONS] --model <MODEL>
 | `--model` | required | File or folder to put back. |
 | `--backup` | the last checkpoint | A backup written by `apply` (`<name>.bak-<stamp>`, listed in its `data.backups`), repeatable for a sharded model. |
 | `--backup-dir` | next to the model | Where `apply --backup-dir` put the backups, for the detection. |
-| `--from-origin` | none | Origin model (file or folder): each of its files is copied over the model. Excludes `--backup` and `--backup-dir`. |
+| `--from-origin` | none | Origin model (file or folder): each of its files is copied over the model, except hidden entries (names starting with `.`, such as `.git` or `.cache/huggingface`). Excludes `--backup` and `--backup-dir`. |
 
 Without `--backup` nor `--from-origin`, the model goes back to the state before the last `apply`: all the backups of one `apply` share a checkpoint (`<name>.bak-<secs>-<n>`), so this works after any number of them, sharded or not, and running it again changes nothing. An `apply` made while the model is already in the state of the newest checkpoint reuses it instead of copying the weights again. In a folder written by an older version, a single backed up file gets its newest backup; several files, which nothing links, all go back to the state before the first `apply` (`data.checkpoint`: `last_apply` or `first_apply`). A weights file given as `--from-origin` is copied over the file of that name in a model folder. A file already identical to its source is not rewritten. `data`: `mode` (`backup` or `origin`), `checkpoint` (detection only), `model`, `files` (`path`, `source`, `sha256_before` (null if the file was missing), `sha256_source`, `sha256_after`, `rewritten`), `identical`. Exit codes: 2 nothing to restore from or invalid arguments (nothing touched), 3 copy failed or final hash different (the message counts the files already restored; the sources are intact, run it again).
 
@@ -1757,10 +1757,10 @@ surgeon graph [OPTIONS] --model <MODEL>
 | `--layers` | `all` | `all`, a range `1-3`, or a list `0,2,4`. |
 | `--matrices` | every graph role | `q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head`; repeatable or comma-separated. |
 | `--rank` | 32 | Target rank of the randomized SVD (at least 1). |
-| `--oversample` | 10 | Extra random columns of the subspace. |
-| `--power-iters` | 3 | Power iterations of the randomized SVD (0 to 64). |
+| `--oversample` | 8 | Extra random columns of the subspace (`k = rank + 8`). |
+| `--power-iters` | 2 | Power iterations of the randomized SVD (0 to 64). |
 | `--seed` | 0 | SVD seed; same seed, same bytes. |
-| `--full-spectrum-max-dim` | 2048 | Largest `min(m,n)` for the exact spectrum (0 disables it; capped at 1024 and `m*n <= 4_000_000`). |
+| `--full-spectrum-max-dim` | 2048 | Obsolete, no effect (kept for compatibility). The exact spectrum is only a fallback when `min(m,n) <= rank + oversample + 4`. |
 | `--edges` | `adjacent` | `adjacent`, `all` or `topk:N` (adjacent edges plus the `N` strongest long-range edges of each writer). |
 | `--min-alignment` | 0 | Smallest raw alignment kept; 0 keeps everything. |
 | `--edge-weight` | `alignment` | `alignment` or `coupling`. |
@@ -1781,12 +1781,12 @@ surgeon graph [OPTIONS] --model <MODEL>
 `data` is a bounded summary: `model`, `parameters`, `global`, at most 200 `nodes`, at most 20 `top_edges`, `outputs`, `truncated` and, with `--baseline`, the counts and `top_changed_layers` of `baseline_diff`; the complete graph is only in `graph.json`. Exit codes: 2 invalid input or existing output without `--overwrite`, 7 computation failure, 1 cancellation.
 
 ```bash
-# write the four formats on the fake mini-model, exact spectra up to 64
+# write the four formats on the fake mini-model
 surgeon graph --model qwen2-mini --out-dir graph-demo --format json,dot,mmd,csv \
-  --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64
+  --rank 8 --oversample 4 --power-iters 2
 # compare a patched copy with that report; open graph-diff/graph.ndjson in surgeon-gui for the 3D diff view
 surgeon graph --model qwen2-mini-patched --baseline graph-demo/graph.json --out-dir graph-diff \
-  --format json,ndjson --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64 --fast-hash
+  --format json,ndjson --rank 8 --oversample 4 --power-iters 2 --fast-hash
 ```
 
 ```text

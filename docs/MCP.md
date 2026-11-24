@@ -348,7 +348,7 @@ sous une racine `--allow-read`, même imbriquée dans un `--allow-dir`
 | aucun | Le dernier point de restauration à côté du modèle : l'état d'avant le dernier `surgeon_apply`. |
 | `backup_dir` | Idem, dans le `backup_dir` passé à `surgeon_apply`. |
 | `backup` | Les sauvegardes nommées, par exemple `data.backups` d'un `surgeon_apply`. |
-| `from_origin` | Le modèle d'origine (dossier, ou fichier de poids recopié sous son nom dans un dossier `model` ; lisible en `--allow-read`) : chacun de ses fichiers est recopié sur `model`. |
+| `from_origin` | Le modèle d'origine (dossier, ou fichier de poids recopié sous son nom dans un dossier `model` ; lisible en `--allow-read`) : chacun de ses fichiers est recopié sur `model`, sauf les entrées cachées (nom commençant par `.`, comme `.cache/huggingface`, `.git`, `.gitattributes`). |
 
 Toutes les sauvegardes d'un même `surgeon_apply` partagent un point de restauration
 (`<nom>.bak-<secondes>-<n>`) plus récent que tout ce que contient le dossier : sans argument,
@@ -759,8 +759,8 @@ du schéma est dans [docs/GRAPH.md](GRAPH.md).
 | `out_dir` | absent | Écrit `graph.json`, `graph.dot`, `graph.mmd`, `matrices.csv`, `edges.csv`, `graph.ndjson` ; absent : synthèse bornée seulement, aucun fichier |
 | `format` | `["json"]` | `json`, `dot`, `mmd`, `csv`, `ndjson` (`graph.ndjson`, flux `GraphPatch` ouvert par `surgeon-gui`) |
 | `layers`, `matrices` | tout | Filtres de couches (`0`, `1-3`, `0,2,4`, `all`) et de matrices (`q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head`) |
-| `rank`, `oversample`, `power_iters`, `seed` | 32, 10, 3, 0 | SVD randomisé ; même graine, mêmes nombres |
-| `full_spectrum_max_dim` | 2048 | Spectre exact pour `min(m,n)` jusqu'à cette valeur (0 désactive ; plafonds 1024 et `m*n <= 4_000_000`) |
+| `rank`, `oversample`, `power_iters`, `seed` | 32, 8, 2, 0 | SVD randomisé ; même graine, mêmes nombres |
+| `full_spectrum_max_dim` | 2048 | Obsolète, sans effet (accepté pour la compatibilité) ; le spectre exact n'est qu'un repli pour `min(m,n) <= rank + oversample + 4` |
 | `edges` | `adjacent` | `adjacent`, `all` ou `topk:N` |
 | `min_alignment`, `edge_weight` | 0, `alignment` | Filtre d'alignement brut et poids (`alignment` ou `coupling`) |
 | `vector` | absent | Vecteur JSON ou `.bin` f32 pour `e_write`/`e_read` |

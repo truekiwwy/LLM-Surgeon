@@ -181,6 +181,22 @@ mod tests {
     }
 
     #[test]
+    fn the_hugging_face_cache_of_the_origin_is_not_copied() {
+        let ws = tempfile::tempdir().unwrap();
+        let src = model(ws.path());
+        let cache = src.join(".cache").join("huggingface");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("model.safetensors.metadata"), vec![1u8; 4096]).unwrap();
+        let copies = ws.path().join("copies");
+        std::fs::create_dir_all(&copies).unwrap();
+        let never = AtomicBool::new(false);
+        let copy = make(&src, &copies, "copy-1", u64::MAX, &never, |_, _| {}).unwrap();
+        assert!(!copy.join(".cache").exists());
+        assert!(copy.join("model.safetensors").is_file());
+        assert_eq!(copy_plan(&src).unwrap().bytes, 4096 + 2);
+    }
+
+    #[test]
     fn a_single_file_model_is_copied_into_its_own_folder() {
         let ws = tempfile::tempdir().unwrap();
         let src = ws.path().join("m.gguf");

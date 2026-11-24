@@ -4,8 +4,8 @@
 //! already written by `surgeon graph` (no SVD to redo). Nodes are paired by id (`L3.q`,
 //! `embed`, ...), edges by `(source, target)`. Every delta is `model - baseline`, so two runs on
 //! the same weights with the same parameters give exact zeros. The deltas come from the
-//! reports, not from the weights: a change that keeps the Frobenius norm and the spectrum (a
-//! rotation) is not seen.
+//! reports. Against a baseline model, `weight_diff` is `||W - W_baseline||_F` read from the
+//! weights themselves, so a rotation that keeps the norm and the spectrum is seen there.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -62,6 +62,9 @@ pub struct NodeDiff {
     pub relative_change: f64,
     /// Delta of `sigma1` (spectral norm), when both reports have it.
     pub sigma1_delta: Option<f64>,
+    /// `||W - W_baseline||_F`, against a baseline model with the same shape.
+    #[serde(default)]
+    pub weight_diff: Option<f64>,
     pub changed: bool,
 }
 
@@ -141,19 +144,35 @@ pub(crate) fn node_diff(base: &NodeReport, node: &NodeReport) -> NodeDiff {
         norm_delta,
         relative_change,
         sigma1_delta: m.sigma1.zip(b.sigma1).map(|(m, b)| m - b),
+        weight_diff: None,
         changed: relative_change.abs() >= CHANGE_THRESHOLD || rank_change.abs() >= CHANGE_THRESHOLD,
     }
 }
 
-/// Compares `model` with `baseline`; `path` is the `--baseline` argument.
-pub fn compare(baseline: &GraphReport, model: &GraphReport, path: &Path) -> BaselineDiff {
+/// Compares `model` with `baseline`; `path` is the `--baseline` argument, `weight_diffs` the
+/// `||W - W_baseline||_F` of each node id measured on the weights.
+pub fn compare(
+    baseline: &GraphReport,
+    model: &GraphReport,
+    path: &Path,
+    weight_diffs: &BTreeMap<String, f64>,
+) -> BaselineDiff {
     let base_nodes: BTreeMap<&str, &NodeReport> =
         baseline.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let model_ids: BTreeMap<&str, ()> = model.nodes.iter().map(|n| (n.id.as_str(), ())).collect();
     let nodes: Vec<NodeDiff> = model
         .nodes
         .iter()
-        .filter_map(|node| Some(node_diff(base_nodes.get(node.id.as_str())?, node)))
+        .filter_map(|node| {
+            let base = base_nodes.get(node.id.as_str())?;
+            let mut diff = node_diff(base, node);
+            diff.weight_diff = weight_diffs.get(&node.id).copied();
+            if let Some(weight_diff) = diff.weight_diff {
+                diff.changed |=
+                    relative(weight_diff, base.metrics.frobenius_norm) >= CHANGE_THRESHOLD;
+            }
+            Some(diff)
+        })
         .collect();
 
     let base_edges: BTreeMap<(&str, &str), _> = baseline

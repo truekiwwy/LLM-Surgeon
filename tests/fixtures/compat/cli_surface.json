@@ -9711,7 +9711,7 @@
           "action": "Set",
           "aliases": null,
           "default_values": [
-            "10"
+            "8"
           ],
           "env": null,
           "global": false,
@@ -9731,7 +9731,7 @@
           "action": "Set",
           "aliases": null,
           "default_values": [
-            "3"
+            "2"
           ],
           "env": null,
           "global": false,

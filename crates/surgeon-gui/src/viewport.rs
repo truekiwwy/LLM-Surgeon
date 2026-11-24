@@ -913,6 +913,7 @@ mod tests {
             norm_delta: relative,
             relative_change: relative,
             sigma1_delta: None,
+            weight_diff: None,
             changed,
         }
     }

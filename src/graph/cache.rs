@@ -33,7 +33,6 @@ pub struct CacheKey {
     pub oversample: usize,
     pub power_iters: usize,
     pub seed: u64,
-    pub full_spectrum_max_dim: usize,
     pub kurtosis_threshold: String,
     pub vector_sha256: Option<String>,
 }
@@ -146,7 +145,6 @@ pub fn key_for(
         oversample: params.oversample,
         power_iters: params.power_iters,
         seed: params.seed,
-        full_spectrum_max_dim: options.full_spectrum_max_dim,
         kurtosis_threshold: format!("{:?}", options.kurtosis_threshold),
         vector_sha256,
     }

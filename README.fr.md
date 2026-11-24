@@ -613,7 +613,7 @@ surgeon restore [OPTIONS] --model <MODEL>
 | `--model` | requis | Fichier ou dossier à remettre en état. |
 | `--backup` | le dernier point de restauration | Une sauvegarde écrite par `apply` (`<nom>.bak-<horodatage>`, listée dans son `data.backups`), répétable pour un modèle shardé. |
 | `--backup-dir` | à côté du modèle | Où `apply --backup-dir` a mis les sauvegardes, pour la détection. |
-| `--from-origin` | aucun | Modèle d'origine (fichier ou dossier) : chacun de ses fichiers est recopié sur le modèle. Exclut `--backup` et `--backup-dir`. |
+| `--from-origin` | aucun | Modèle d'origine (fichier ou dossier) : chacun de ses fichiers est recopié sur le modèle, sauf les entrées cachées (nom commençant par `.`, comme `.git` ou `.cache/huggingface`). Exclut `--backup` et `--backup-dir`. |
 
 Sans `--backup` ni `--from-origin`, le modèle revient à l'état d'avant le dernier `apply` : toutes les sauvegardes d'un même `apply` partagent un point de restauration (`<nom>.bak-<secondes>-<n>`), ce qui marche après n'importe quel nombre d'`apply`, shardé ou non, et relancer la commande ne change plus rien. Un `apply` lancé alors que le modèle est déjà dans l'état du dernier point de restauration le réutilise au lieu de recopier les poids. Dans un dossier écrit par une version antérieure, un seul fichier sauvegardé reprend sa sauvegarde la plus récente ; plusieurs fichiers, que rien ne relie, reviennent tous à l'état d'avant le premier `apply` (`data.checkpoint` : `last_apply` ou `first_apply`). Un fichier de poids passé à `--from-origin` est recopié sur le fichier de même nom d'un dossier modèle. Un fichier déjà identique à sa source n'est pas réécrit. `data` : `mode` (`backup` ou `origin`), `checkpoint` (détection seulement), `model`, `files` (`path`, `source`, `sha256_before` (null si le fichier manquait), `sha256_source`, `sha256_after`, `rewritten`), `identical`. Codes de sortie : 2 rien à restaurer ou arguments invalides (rien touché), 3 copie échouée ou empreinte finale différente (le message compte les fichiers déjà restaurés ; les sources sont intactes, relancez).
 
@@ -1759,10 +1759,10 @@ surgeon graph [OPTIONS] --model <MODEL>
 | `--layers` | `all` | `all`, une plage `1-3`, ou une liste `0,2,4`. |
 | `--matrices` | tous les rôles du graphe | `q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head` ; répétable ou séparé par des virgules. |
 | `--rank` | 32 | Rang cible du SVD randomisé (au moins 1). |
-| `--oversample` | 10 | Colonnes aléatoires supplémentaires du sous-espace. |
-| `--power-iters` | 3 | Itérations de puissance du SVD randomisé (0 à 64). |
+| `--oversample` | 8 | Colonnes aléatoires supplémentaires du sous-espace (`k = rang + 8`). |
+| `--power-iters` | 2 | Itérations de puissance du SVD randomisé (0 à 64). |
 | `--seed` | 0 | Graine du SVD ; même graine, mêmes octets. |
-| `--full-spectrum-max-dim` | 2048 | Plus grand `min(m,n)` pour le spectre exact (0 le désactive ; plafonné à 1024 et `m*n <= 4_000_000`). |
+| `--full-spectrum-max-dim` | 2048 | Obsolète, sans effet (gardé pour la compatibilité). Le spectre exact n'est qu'un repli quand `min(m,n) <= rank + oversample + 4`. |
 | `--edges` | `adjacent` | `adjacent`, `all` ou `topk:N` (arêtes adjacentes plus les `N` plus fortes arêtes longue portée de chaque écrivain). |
 | `--min-alignment` | 0 | Plus petit alignement brut conservé ; 0 garde tout. |
 | `--edge-weight` | `alignment` | `alignment` ou `coupling`. |
@@ -1783,12 +1783,12 @@ surgeon graph [OPTIONS] --model <MODEL>
 `data` est une synthèse bornée : `model`, `parameters`, `global`, au plus 200 `nodes`, au plus 20 `top_edges`, `outputs`, `truncated` et, avec `--baseline`, les compteurs et `top_changed_layers` de `baseline_diff` ; le graphe complet n'existe que dans `graph.json`. Codes de sortie : 2 entrée invalide ou sortie existante sans `--overwrite`, 7 échec de calcul, 1 annulation.
 
 ```bash
-# écrit les quatre formats sur le mini-modèle factice, spectres exacts jusqu'à 64
+# écrit les quatre formats sur le mini-modèle factice
 surgeon graph --model qwen2-mini --out-dir graph-demo --format json,dot,mmd,csv \
-  --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64
+  --rank 8 --oversample 4 --power-iters 2
 # compare une copie patchée à ce rapport ; ouvrir graph-diff/graph.ndjson dans surgeon-gui pour la vue 3D du diff
 surgeon graph --model qwen2-mini-patched --baseline graph-demo/graph.json --out-dir graph-diff \
-  --format json,ndjson --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64 --fast-hash
+  --format json,ndjson --rank 8 --oversample 4 --power-iters 2 --fast-hash
 ```
 
 ```text

@@ -269,10 +269,14 @@ fn origin_pairs(origin: &Path, model: &Path) -> Result<Pairs, Outcome> {
     }
 }
 
-/// Every file under `from`, with the same relative path under `to`.
+/// Every visible file under `from`, with the same relative path under `to`. Hidden entries
+/// (`.cache/huggingface`, `.git`, `.gitattributes`) are left out, as in a working copy.
 fn walk(from: &Path, to: &Path, pairs: &mut Pairs) -> io::Result<()> {
     for entry in fs::read_dir(from)? {
         let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         let target = to.join(entry.file_name());
         match entry.path().is_dir() {
             true => walk(&entry.path(), &target, pairs)?,
@@ -363,6 +367,30 @@ mod tests {
         assert_eq!(
             origin_pairs(&origin, &copy.join("m.safetensors")).unwrap(),
             vec![(weights, copy.join("m.safetensors"))]
+        );
+    }
+
+    #[test]
+    fn hidden_entries_of_the_origin_are_not_restored() {
+        let root = tempfile::tempdir().unwrap();
+        let (origin, copy) = (root.path().join("origin"), root.path().join("copy"));
+        let cache = origin.join(".cache").join("huggingface");
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(origin.join("sub")).unwrap();
+        touch(&origin, &["m.safetensors", ".gitattributes"]);
+        touch(&cache, &["download.lock"]);
+        touch(&origin.join("sub"), &["extra.json"]);
+        let mut pairs = origin_pairs(&origin, &copy).unwrap();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                (origin.join("m.safetensors"), copy.join("m.safetensors")),
+                (
+                    origin.join("sub").join("extra.json"),
+                    copy.join("sub").join("extra.json")
+                ),
+            ]
         );
     }
 }
