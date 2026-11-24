@@ -18,6 +18,7 @@ use super::tools::ToolContext;
 use crate::app::{exit, CoreResult, Outcome};
 use crate::graph::{
     ColorScaleArg, EdgeMode, EdgeWeight, GraphArgs, MatrixArg, OutputFormat, PaletteArg,
+    DEFAULT_OVERSAMPLE, DEFAULT_POWER_ITERS, DEFAULT_RANK,
 };
 
 pub const TOOL_GRAPH: &str = "surgeon_graph";
@@ -58,13 +59,13 @@ pub struct GraphToolArgs {
     #[serde(default)]
     #[schemars(
         range(min = 0),
-        description = "Colonnes supplémentaires du sous-espace aléatoire (défaut 10)."
+        description = "Colonnes supplémentaires du sous-espace aléatoire (défaut 8)."
     )]
     pub oversample: Option<u32>,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 64),
-        description = "Itérations de puissance du SVD (défaut 3)."
+        description = "Itérations de puissance du SVD (défaut 2)."
     )]
     pub power_iters: Option<u32>,
     #[serde(default)]
@@ -73,7 +74,7 @@ pub struct GraphToolArgs {
     #[serde(default)]
     #[schemars(
         range(min = 0),
-        description = "Dimension maximale pour le spectre complet exact (défaut 2048 ; 0 désactive)."
+        description = "Obsolète, sans effet : le spectre exact n'est calculé que si min(m, n) <= rank + oversample + 4."
     )]
     pub full_spectrum_max_dim: Option<usize>,
     #[serde(default)]
@@ -190,9 +191,9 @@ fn graph(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         format,
         layers: args.layers,
         matrices: args.matrices.unwrap_or_default(),
-        rank: args.rank.unwrap_or(32) as usize,
-        oversample: args.oversample.unwrap_or(10) as usize,
-        power_iters: args.power_iters.unwrap_or(3) as usize,
+        rank: args.rank.map_or(DEFAULT_RANK, |r| r as usize),
+        oversample: args.oversample.map_or(DEFAULT_OVERSAMPLE, |o| o as usize),
+        power_iters: args.power_iters.map_or(DEFAULT_POWER_ITERS, |p| p as usize),
         seed: args.seed.unwrap_or(0),
         full_spectrum_max_dim: args.full_spectrum_max_dim.unwrap_or(2048),
         edges,

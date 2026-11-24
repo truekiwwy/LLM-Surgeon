@@ -94,14 +94,23 @@ prompts. Elles ne sont pas une recommandation.
   - génération : `max_new_tokens`. Pour `gsm8k`, le résultat du pilier compte les
     générations coupées par ce budget avant toute fin de séquence (`truncated_before`,
     `truncated_after`) : une réponse coupée est scorée telle quelle, donc souvent fausse ;
-  - `safety` et `unblocking` : `chat_template` ;
+  - `safety`, `unblocking` et `gsm8k` : `chat_template` (défaut `auto`, le format du modèle) ;
   - `gsm8k` : `prompt_template`, `format`, `limit` ;
   - `kl` et `logits` : `max_tokens`.
 
   Un champ donné à un pilier qui ne le prend pas est refusé.
-- `selection.pillar` : un pilier binaire. Parmi les candidats qui passent toutes les portes
-  Dev, il retient le meilleur effet observé ; à égalité, le plus petit `|valeur|`, puis le
-  premier de la liste.
+- `selection.pillar` : un pilier binaire. Les portes sont des seuils bloquants : un candidat
+  qui manque l'une d'elles (une baisse de `gsm8k` au-delà de la marge, une régression de
+  `safety`) n'est jamais retenu, quel que soit son effet ailleurs. Parmi les candidats qui
+  passent toutes les portes Dev, le pilier de sélection retient le meilleur effet observé ; à
+  égalité, le plus parcimonieux, plus petit `|valeur|`, puis le premier de la liste.
+- `keep_vectors` (optionnel) : directions de capacité à préserver, fichiers de
+  `surgeon extract` (maths, logique). Au début du job, chaque `vector_file` du gabarit est
+  composé orthogonalement à elles (`surgeon compose`, mode `orthogonal-preserve`) sous
+  `<job>/composed/` ; les opérations `project_out` lisent alors ses tenseurs unitaires `a` et
+  `b`, les autres sa direction `d`. Les opérations doivent lire le tenseur `direction`, sans
+  `rank`. La recette (sources, SHA-256, cosinus avant et après) est dans
+  `report.json`, `manifest.composition`, et `promote` écrit le patch composé.
 - `working_copy` :
 
   | Stratégie | Disque | E/S par candidat |
@@ -180,7 +189,8 @@ run        verrou <job>/lock (pid ; un verrou d'un processus mort est repris)
 | `job.json` | configuration résolue et options : le job lui est lié, une autre configuration est refusée |
 | `plan.json` | estimations |
 | `state.json` | statut, étape, unités faites et prévues, durée cumulée, temps restant, portes Dev déjà évaluées |
-| `checkpoints/` | une mesure Dev par (modèle, pilier), réponses comprises |
+| `checkpoints/` | une mesure Dev par (modèle, pilier), réponses comprises, et son empreinte (`fingerprint` : phase, sujet, budget de tokens) |
+| `composed/` | les vecteurs composés pour `keep_vectors` |
 | `private/` | les mesures du Test, réponses comprises ; jamais servi par MCP (marqueur `.surgeon-private` refusé par le bac à sable de tous les outils) |
 | `work/` | copie de travail, dumps, sauvegardes ; supprimé à la fin, à l'annulation, à l'échec |
 | `results.json`, `report.json` | résultats ; le Test n'y figure qu'en agrégats |
@@ -188,9 +198,24 @@ run        verrou <job>/lock (pid ; un verrou d'un processus mort est repris)
 
 Tout fichier est écrit en entier, par un fichier temporaire puis un renommage.
 
-- **Reprise.** Une reprise après un arrêt brutal relit les points de reprise complets et
-  refait le reste. Le décodage étant glouton, elle écrit le même `results.json`, octet pour
-  octet (test `a_resumed_job_writes_the_same_results_byte_for_byte`).
+- **Reprise.** Une reprise après un arrêt brutal supprime d'abord ce qu'un travailleur tué a
+  pu laisser (`work/`, fichiers `.tmp`), relit les points de reprise complets et refait le
+  reste. Un point de reprise n'est réutilisé que si son empreinte est exactement la mesure à
+  faire : même jeu (SHA-256), même phase (`dev` ou `test`, jamais mélangées), même sujet
+  (`base:` et le SHA-256 du modèle d'origine, ou le SHA-256 du patch candidat) et même budget
+  de tokens (`max_new_tokens` ou `max_tokens` effectif, défaut compris). Sinon il est mesuré
+  à nouveau, sur une copie patchée. Un point de reprise d'une version antérieure, sans
+  empreinte, est mesuré à nouveau. Le décodage étant glouton, une reprise écrit le même
+  `results.json`, octet pour octet, sans remesurer un candidat terminé (test
+  `a_resumed_job_writes_the_same_results_byte_for_byte`).
+- **Cache des références.** La mesure du modèle d'origine sur un jeu Dev passe par le cache
+  `ref_bench` (`WEIGHT_SURGEON_CACHE_DIR`), sous la clé que `bench refusal` et `bench eval`
+  donnent aux mêmes entrées : un second job, ou un bench, sur le même modèle et le même jeu la
+  relit. Celle d'un jeu Test n'y passe jamais : ses réponses restent dans `private/`.
+- **Aucun candidat retenu.** Le modèle d'origine est conservé (il n'est jamais écrit) et aucun
+  patch n'est promouvable. `candidates[].failure` donne pour chaque candidat la porte qui l'a
+  arrêté, la borne de son intervalle comparée au seuil et l'écart (`gap`) ; `verdict_reason`
+  les résume, candidat par candidat.
 - **Annulation.** `cancel`, ou la fin de stdin pour un travailleur lancé par MCP, arrête le
   travailleur à sa prochaine vérification. Il supprime alors la copie de travail. Le budget
   `max_wall_time_secs` cumule les reprises.
@@ -261,6 +286,13 @@ Par MCP, `surgeon_pipeline` avec `action` ∈ `plan`, `start`, `status`, `cancel
   `--hipfire-bin`, `--hipfire-url`, ou configuration utilisateur : [BACKENDS.md](BACKENDS.md). Le
   job est lié à son backend ; un moteur introuvable arrête `pipeline run` avant tout calcul ; `kl`
   et `logits` lisent des logits natifs.
+- **hipfire ne mesure un candidat que requantifié.** Le démon sert le fichier quantifié enregistré
+  sous le nom du modèle, jamais la copie patchée : avec `hipfire`, le job échoue avant le premier
+  candidat et avant toute lecture du Test Set (`invalid_input`), sauf avec `hipfire_requantize =
+  "auto"` (`--hipfire-requantize`) : chaque candidat est alors requantifié et mesuré sous son alias
+  `ws-<copie>-<sha8>` (plusieurs minutes et un fichier `q8f16` par candidat, voir BACKENDS.md
+  section 7). `--allow-stale-hipfire` (CLI seulement) passe outre pour une copie enregistrée à la
+  main ; `notes` et `report.json` le disent.
 - **Pas de juges LLM** : les piliers de refus utilisent les marqueurs de `bench refusal`, qui
   manquent les refus doux et comptent une réponse dégradée comme une acceptation.
 - **Pas de stratégie de copie en mémoire** : `copy` et `restore-from-backup` seulement.
@@ -269,10 +301,10 @@ Par MCP, `surgeon_pipeline` avec `action` ∈ `plan`, `start`, `status`, `cancel
   du décodage, et la calibration (8 tokens) dépend de la charge de la machine. Sur
   Qwen2.5-0.5B, l'estimation dépassait la durée réelle de 37 à 41 % pour un job mené à son
   terme. L'estimation disque, elle, compte les positions réelles des dumps.
-- **Gabarit de chat** : `chat_template: chatml` n'ajoute pas le message système par défaut
-  que le gabarit officiel de certains modèles (Qwen) insère. Pour le reproduire, pré-rendre le
-  jeu et passer `chat_template: none` (refus), ou donner le gabarit complet par
-  `prompt_template` (GSM8K).
+- **Gabarit de chat** : `chat_template: auto` (défaut) reproduit le format déclaré par le
+  modèle, message système par défaut compris ; `chatml` l'impose sans message système et `none`
+  garde le texte brut. Une référence mesurée avant ce défaut n'est pas comparable à une mesure
+  faite avec lui : relancer les deux, ou passer `none`.
 - **Détecteur de boucles** : `bench eval` coupe et compte fausse une réponse où un groupe de
   4 mots revient plus de 4 fois, ce qui arrive à des solutions rédigées saines. Surveiller
   `loops_before` / `loops_after` du pilier `gsm8k`.

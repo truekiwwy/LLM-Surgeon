@@ -7,7 +7,9 @@
 #[path = "support/gguf.rs"]
 mod support;
 
-use std::io::{BufRead, BufReader, Write as _};
+#[path = "support/mcp_client.rs"]
+mod mcp_client;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
@@ -657,6 +659,33 @@ fn alpha_zero_leaves_the_file_identical() {
 }
 
 #[test]
+fn add_direction_amplifies_the_read_component_of_every_writer() {
+    let f = Fixture::new(COMBOS[3], 64, 1);
+    let v: Vec<f32> = f.dirs.iter().map(|x| 3.0 * x).collect();
+    std::fs::write(f.dir.path().join("v.json"), json!(v).to_string()).unwrap();
+    let patch = f.dir.path().join("amplify.json");
+    let recipe = json!({"schema_version": 1, "backup": true, "operations": [{
+        "id": "amplify", "layers": "all", "projections": WRITERS,
+        "operation": "add_direction", "vector_file": "v.json", "alpha": 0.5}]});
+    std::fs::write(&patch, recipe.to_string()).unwrap();
+
+    let (code, env) = apply(&f, &patch, &["--requant", "recompute"]);
+
+    assert_eq!(code, 0, "{env}");
+    assert_eq!(env["data"]["gguf"]["verified"], true);
+    assert!(env.to_string().contains("renormalise v"), "{env}");
+    // The read component grows by 1 + alpha; requantization rounds part of it away.
+    for name in writer_names() {
+        let r = tensor(&env, &name)["residual_fraction"].as_f64().unwrap();
+        match name.ends_with("ffn_down.weight") {
+            true => assert!((r - 1.5).abs() < 1e-4, "{name} (F32): {r}"),
+            false => assert!(r > 1.0, "{name}: {r}"),
+        }
+    }
+    assert_ne!(sha(&f.bytes()), sha(&f.original));
+}
+
+#[test]
 fn threads_do_not_change_bytes_nor_residuals() {
     let one = Fixture::new(COMBOS[0], 63, 2);
     let many = Fixture::new(COMBOS[0], 63, 2);
@@ -1039,16 +1068,7 @@ fn mcp(dir: &Path, read_only: bool, calls: &[Value]) -> Vec<Value> {
     for (i, args) in calls.iter().enumerate() {
         lines.push(json!({"jsonrpc": "2.0", "id": i + 1, "method": "tools/call", "params": args}));
     }
-    let mut stdin = child.stdin.take().unwrap();
-    for line in &lines {
-        writeln!(stdin, "{line}").unwrap();
-    }
-    drop(stdin);
-    let replies: Vec<Value> = BufReader::new(child.stdout.take().unwrap())
-        .lines()
-        .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
-        .collect();
-    child.wait().unwrap();
+    let (replies, _) = mcp_client::exchange(&mut child, &lines);
     (1..=calls.len())
         .map(|id| {
             let reply = replies.iter().find(|r| r["id"] == id).unwrap();

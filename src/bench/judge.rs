@@ -1498,6 +1498,7 @@ pub(crate) mod tests {
             markers: Default::default(),
             generation: Default::default(),
             backend: "native".into(),
+            ref_cache: None,
         };
         let mut calls = 0;
         let mut make = |_: &Path| -> Result<Box<dyn TextGenerator>> {

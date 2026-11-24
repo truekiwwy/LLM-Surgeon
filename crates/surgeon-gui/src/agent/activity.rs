@@ -14,6 +14,8 @@ use crate::ui::i18n::{t, tf};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Activity {
     pub label: String,
+    /// What the call works on, without its verb: `down_proj L11–L14`, `builtin:math`.
+    pub target: String,
     /// `None`: the whole model (a benchmark), no layer stands out.
     pub layers: Option<LayerSelection>,
 }
@@ -53,6 +55,19 @@ pub fn current(conv: &Conversation) -> Option<Activity> {
         })
         .next_back()
         .and_then(|(name, input)| of(name, input))
+}
+
+/// The newest call of `conv` the 3D view can show, running or answered: what Live mode keeps
+/// in focus between two calls.
+pub fn last(conv: &Conversation) -> Option<Activity> {
+    conv.messages
+        .iter()
+        .flat_map(|m| &m.blocks)
+        .rev()
+        .find_map(|b| match b {
+            Block::ToolUse { name, input, .. } => of(name, input),
+            _ => None,
+        })
 }
 
 /// `14`, `"11-14"`, `"3,5"`, `"all"`, `[3, 5]` or `{"start", "end"}`.
@@ -111,11 +126,21 @@ fn patch(v: &Value) -> (Option<LayerSelection>, Vec<String>) {
     // shortcut: a patch given as a file path is not read here (one read per frame), its
     // layers do not pulse; read it once per call if agents start passing paths.
     let ops = v["operations"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let projections: BTreeSet<String> = ops
+        .iter()
+        .flat_map(|op| names(&op["projections"]))
+        .collect();
+    (
+        union(ops.iter().map(|op| layers(&op["layers"]))),
+        projections.into_iter().collect(),
+    )
+}
+
+fn union(selections: impl IntoIterator<Item = Option<LayerSelection>>) -> Option<LayerSelection> {
     let mut all = false;
     let mut list = BTreeSet::new();
-    let mut projections = BTreeSet::new();
-    for op in ops {
-        match layers(&op["layers"]) {
+    for sel in selections {
+        match sel {
             Some(LayerSelection::All) => all = true,
             Some(LayerSelection::List(l)) => list.extend(l),
             Some(LayerSelection::Range {
@@ -124,14 +149,12 @@ fn patch(v: &Value) -> (Option<LayerSelection>, Vec<String>) {
             }) => list.extend(start..=end_inclusive),
             None => {}
         }
-        projections.extend(names(&op["projections"]));
     }
-    let sel = match (all, list.is_empty()) {
+    match (all, list.is_empty()) {
         (true, _) => Some(LayerSelection::All),
         (false, false) => Some(LayerSelection::List(list.into_iter().collect())),
         (false, true) => None,
-    };
-    (sel, projections.into_iter().collect())
+    }
 }
 
 /// The activity of a call to `name` (an engine tool, `mcp__<server>__` prefix or not).
@@ -146,8 +169,13 @@ pub fn of(name: &str, input: &Value) -> Option<Activity> {
         ),
         "surgeon_extract" => (
             |t| tf("activity.extract", &[("target", &t)]),
-            layers(&input["layer"]),
+            layers(&input["layers"]).or_else(|| layers(&input["layer"])),
             Vec::new(),
+        ),
+        "surgeon_causal_trace" => (
+            |t| tf("activity.trace", &[("target", &t)]),
+            layers(&input["layers"]).or(Some(LayerSelection::All)),
+            names(&input["component"]),
         ),
         "surgeon_autotune" => (
             |t| tf("activity.autotune", &[("target", &t)]),
@@ -157,6 +185,14 @@ pub fn of(name: &str, input: &Value) -> Option<Activity> {
         "surgeon_apply" => {
             let (sel, what) = patch(&input["patch"]);
             (|t| tf("activity.apply", &[("target", &t)]), sel, what)
+        }
+        "surgeon_sweep" => {
+            let windows = input["layers"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            (
+                |t| tf("activity.sweep", &[("target", &t)]),
+                union(windows.iter().map(layers)),
+                names(&input["operation"]),
+            )
         }
         "surgeon_bench" => {
             let what = names(&input["dataset"])
@@ -170,8 +206,10 @@ pub fn of(name: &str, input: &Value) -> Option<Activity> {
     };
     let mut target = what;
     target.extend(sel.as_ref().map(layers_text));
+    let target = target.join(" ");
     Some(Activity {
-        label: label(&target.join(" ")).trim().replace(" …", "…"),
+        label: label(&target).trim().replace(" …", "…"),
+        target,
         layers: sel,
     })
 }
@@ -206,6 +244,19 @@ mod tests {
 
         let a = of("surgeon_inspect", &json!({"layers": "all"})).unwrap();
         assert!(a.covers(Some(0)) && a.covers(Some(40)));
+
+        let a = of("surgeon_extract", &json!({"layer": 20, "layers": "4-6"})).unwrap();
+        assert_eq!(a.label, "Extraction L4–L6…");
+        let a = of(
+            "surgeon_sweep",
+            &json!({"layers": ["4-6", "10"], "operation": "project_out"}),
+        )
+        .unwrap();
+        assert_eq!(a.label, "Balayage Pareto project_out L4, L5, L6, L10…");
+        assert!(a.covers(Some(10)) && !a.covers(Some(7)));
+        let a = of("surgeon_causal_trace", &json!({"component": "mlp"})).unwrap();
+        assert_eq!(a.label, "Traçage causal mlp toutes les couches…");
+        assert!(a.covers(Some(0)) && a.covers(Some(27)));
 
         let a = of(
             "surgeon_bench",
@@ -242,10 +293,13 @@ mod tests {
             blocks: vec![result("a")],
         });
         assert!(current(&conv).is_none());
+        // Answered, the call stays the last one Live mode keeps in focus.
+        assert_eq!(last(&conv).unwrap().target, "L3");
         conv.messages.push(Message {
             role: Role::Assistant,
             blocks: vec![call("b", 7)],
         });
         assert_eq!(current(&conv).unwrap().label, "Extraction L7…");
+        assert_eq!(last(&conv).unwrap().target, "L7");
     }
 }

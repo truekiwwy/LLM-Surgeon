@@ -8,6 +8,16 @@ readme = "README.md"
 keywords = ["llm", "safetensors", "steering", "mcp", "tui"]
 categories = ["command-line-utilities", "science"]
 
+# One workspace and one Cargo.lock for the engine, the desktop app and the terminal inspector.
+# `cargo build` / `cargo test` here stay on the engine (the root package); `--workspace` takes
+# all three. tests/deps_purity.rs checks the engine's own tree (`cargo tree -p
+# weight-surgeon`), which the GUI stack (winit, TLS, resource compiler) never enters.
+[workspace]
+members = [".", "crates/surgeon-gui", "crates/surgeon-tui"]
+# Experiment folders with crates of their own (outputs/runs/*/tools/*).
+exclude = ["outputs"]
+resolver = "2"
+
 [[bin]]
 name = "surgeon"
 path = "src/main.rs"
@@ -22,7 +32,6 @@ ctrlc = "3.5.2"
 half = { version = "2.7.1", features = ["std"] }
 memmap2 = "0.9.12"
 miniz_oxide = "0.8"
-nvml-wrapper = "0.13.0"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
 rayon = "1.12.0"
 # Already in the graph through tokenizers (same version, default features): no new crate.
@@ -38,6 +47,10 @@ sysinfo = { version = "0.40.1", default-features = false, features = ["system"] 
 thiserror = "2.0.21"
 tokenizers = { version = "0.23.2", default-features = false, features = ["unstable_wasm"] }
 unicode-width = "0.2.3"
+
+# NVIDIA probing in src/hardware/probe.rs, compiled out on macOS (no discrete GPUs there).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+nvml-wrapper = "0.13.0"
 
 # OS bindings for src/kernel only (declarations, nothing compiled from C). Both versions
 # are already in Cargo.lock through other crates.
@@ -63,6 +76,12 @@ tempfile = "3.27.0"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# The `surgeon-gui` executable of the desktop packages: release with a fat LTO, the profile it
+# had when it was a crate of its own (`cargo build --profile dist -p surgeon-gui`).
+[profile.dist]
+inherits = "release"
+lto = "fat"
 
 # gemm-f16 (through candle-core) keeps its FP16 inline assembly in #[inline] helpers of
 # gemm-common, which only assemble once inlined into functions that enable `fp16`. Without

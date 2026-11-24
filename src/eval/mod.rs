@@ -45,7 +45,7 @@ mod command;
 mod error;
 mod generator;
 mod gguf;
-mod http;
+pub(crate) mod http;
 mod loop_detector;
 mod prompts;
 mod runner;
@@ -54,6 +54,9 @@ pub mod sampling;
 pub mod server;
 
 pub(crate) use command::last_lines;
+/// Tokens generated per prompt by `surgeon eval`, on the CLI and over MCP.
+pub const DEFAULT_MAX_NEW_TOKENS: u32 = 256;
+
 pub use command::{CommandOutput, CommandRunner, StreamControl, SystemCommandRunner};
 pub use error::{EvalError, Result};
 pub(crate) use generator::find_binary;
@@ -68,7 +71,7 @@ pub use gguf::{
 pub use loop_detector::{LoopDetector, LoopDetectorConfig, LoopReason, LoopVerdict};
 pub use prompts::{load_prompts, EvalPrompt};
 pub use runner::{run_eval, EvalConfig, EvalReport, EvalVerdict, PromptResult, PromptStatus};
-pub use safetensors_gguf::{convert_safetensors, WeightType};
+pub use safetensors_gguf::{convert_safetensors, quantize_safetensors, GgufQuant, WeightType};
 
 /// Longest prefix of at most `max_chars` characters; never splits a multi-byte character.
 pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> &str {

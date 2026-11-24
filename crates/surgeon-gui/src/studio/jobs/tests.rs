@@ -134,6 +134,7 @@ fn heavy_jobs_run_one_at_a_time_by_priority_and_light_ones_alongside() {
         let view =
             RunView::replay(&m.project.runs_dir().join(&e.run_id).join(EVENTS_FILE)).unwrap();
         assert_eq!(view.end, Some(SurgeonEvent::Finished { exit_code: 0 }));
+        assert!(e.elapsed_ms.is_some(), "{}: no measured duration", e.run_id);
     }
 }
 
@@ -301,6 +302,30 @@ fn a_crash_leaves_an_interrupted_project_that_resumes() {
 }
 
 #[test]
+fn the_project_lock_is_held_while_a_job_thread_still_runs() {
+    let (_ws, dir) = project();
+    let script = Arc::new(Script::default());
+    let mut m = open(&dir, script.clone());
+    m.submit(spec("surgeon_graph", "long", json!({"behave": "block"})))
+        .unwrap();
+    m.tick(Instant::now());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while script.active.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the job never started");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // The manager goes (the window closes): its detached thread still writes in the project.
+    drop(m);
+    assert!(dir.join(LOCK).exists(), "held by the running job");
+    script.release.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while dir.join(LOCK).exists() {
+        assert!(Instant::now() < deadline, "released once the job ends");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
 fn a_project_open_in_a_live_process_is_refused_and_a_dead_lock_taken_over() {
     let (_ws, dir) = project();
     let mut system = sysinfo::System::new().unwrap();
@@ -350,6 +375,12 @@ fn writes_to_the_source_model_are_refused_before_queuing() {
             "out",
             json!({"model": "copies/c1", "out": source.join("v.safetensors")}),
         ),
+        spec(
+            "surgeon_checkpoint",
+            "restore-src",
+            json!({"action": "restore", "model": source, "id": "0001"}),
+        ),
+        spec("surgeon_sweep", "sweep-src", json!({"model": source})),
         spec("frobnicate", "x", json!({})),
     ];
     for s in refused {
@@ -370,6 +401,12 @@ fn writes_to_the_source_model_are_refused_before_queuing() {
             "surgeon_lora",
             "extract",
             json!({"mode": "extract", "base": source}),
+        ),
+        spec("surgeon_checkpoint", "list", json!({"action": "list"})),
+        spec(
+            "surgeon_checkpoint",
+            "restore",
+            json!({"action": "restore", "model": "copies/c1", "id": "0001"}),
         ),
     ];
     for s in allowed {

@@ -2,9 +2,13 @@
 //! column (the project, its working copy, the tensor tree) and number formats.
 
 pub mod agents;
+pub mod checkpoints;
 pub mod graph;
+pub mod live;
+pub mod radar;
 pub mod results;
 pub mod system;
+pub mod vector;
 
 use std::collections::BTreeMap;
 
@@ -36,6 +40,15 @@ pub fn duration(secs: u64) -> String {
     match secs {
         s if s < 60 => format!("{s} s"),
         s => format!("{} min {:02} s", s / 60, s % 60),
+    }
+}
+
+pub fn elapsed(millis: Option<u64>) -> String {
+    match millis {
+        None => "-".into(),
+        Some(ms) if ms < 1000 => format!("{ms} ms"),
+        Some(ms) if ms < 10_000 => format!("{:.1} s", ms as f64 / 1000.0),
+        Some(ms) => duration(ms / 1000),
     }
 }
 
@@ -192,7 +205,7 @@ pub fn context(ui: &mut Ui, app: &mut SurgeonApp) {
                 _ => (icons::State::Warn, t("copy.modified")),
             };
             c::status(ui, state, word);
-            c::mono_secondary(ui, copy.path.as_str());
+            c::mono_secondary(ui, copy.path.as_str()).on_hover_text(copy.path.as_str());
         }
         None => {
             c::status(ui, icons::State::Idle, t("copy.none"));
@@ -213,12 +226,20 @@ pub fn context(ui: &mut Ui, app: &mut SurgeonApp) {
         None => {}
     }
     ui.add_space(T.space.s);
-    if c::button(ui, t("copy.new"), ButtonKind::Secondary)
-        .on_hover_text(t("copy.new.tip"))
-        .clicked()
-    {
-        app.studio.submit_copy();
-    }
+    ui.horizontal_wrapped(|ui| {
+        if c::button(ui, t("copy.new"), ButtonKind::Secondary)
+            .on_hover_text(t("copy.new.tip"))
+            .clicked()
+        {
+            app.studio.submit_copy();
+        }
+        if c::button(ui, t("vector.open"), ButtonKind::Secondary)
+            .on_hover_text(t("vector.open.tip"))
+            .clicked()
+        {
+            vector::open(app);
+        }
+    });
 }
 
 /// The tensors of the graph on screen, by layer; Up / Down walk it, Escape clears.
@@ -376,6 +397,11 @@ pub(crate) mod tests {
         assert_eq!(num(-2.5e6), "-2.500e6");
         assert_eq!(duration(42), "42 s");
         assert_eq!(duration(65), "1 min 05 s");
+        assert_eq!(elapsed(None), "-");
+        assert_eq!(elapsed(Some(0)), "0 ms");
+        assert_eq!(elapsed(Some(340)), "340 ms");
+        assert_eq!(elapsed(Some(2_450)), "2.5 s");
+        assert_eq!(elapsed(Some(65_400)), "1 min 05 s");
         crate::ui::i18n::set_lang(crate::settings::Lang::En);
         assert_eq!(age(59), "now");
         assert_eq!(age(3599), "59 min");

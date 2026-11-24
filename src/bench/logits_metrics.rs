@@ -79,6 +79,21 @@ fn log_sum_exp(x: &[f64]) -> Option<f64> {
     Some(max + sum.total().ln())
 }
 
+/// The probability the softmax of `logits` gives the next token being one of `tokens`
+/// (each counted once, out-of-range ids ignored), in log space like the rest of this
+/// module. `None` for a row with NaN, +Inf or no finite value.
+pub fn token_mass(logits: &[f64], tokens: &[usize]) -> Option<f64> {
+    let lse = log_sum_exp(logits)?;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut mass = Neumaier::default();
+    for &t in tokens {
+        if let Some(&x) = logits.get(t).filter(|_| seen.insert(t)) {
+            mass.add((x - lse).exp());
+        }
+    }
+    Some(mass.total().clamp(0.0, 1.0))
+}
+
 /// Indices of the `k` largest values, ties to the lowest index, sorted ascending.
 pub fn top_k(x: &[f64], k: usize) -> Vec<usize> {
     let mut best: Vec<(f64, usize)> = Vec::with_capacity(k + 1);
@@ -612,6 +627,28 @@ mod tests {
             position_metrics(&[ninf, ninf], &[0.0, 0.0], 1),
             Err(BadSide::Before)
         );
+    }
+
+    #[test]
+    fn token_mass_is_the_softmax_probability_of_a_token_set() {
+        // Logits ln 1, ln 2, ln 3, ln 4: probabilities 0.1, 0.2, 0.3, 0.4.
+        let logits: Vec<f64> = [1.0f64, 2.0, 3.0, 4.0].iter().map(|v| v.ln()).collect();
+        let mass = |tokens: &[usize]| token_mass(&logits, tokens).unwrap();
+        assert!((mass(&[3]) - 0.4).abs() < 1e-12);
+        assert!((mass(&[0, 2]) - 0.4).abs() < 1e-12);
+        assert!(
+            (mass(&[0, 0, 2]) - 0.4).abs() < 1e-12,
+            "a token counts once"
+        );
+        assert!((mass(&[0, 1, 2, 3]) - 1.0).abs() < 1e-12);
+        assert_eq!(mass(&[]), 0.0);
+        assert_eq!(mass(&[99]), 0.0, "an id out of the vocabulary adds nothing");
+        // Invariant to a shift, stable on huge logits, masked entries weigh nothing.
+        let shifted: Vec<f64> = logits.iter().map(|v| v + 1e4).collect();
+        assert!((token_mass(&shifted, &[3]).unwrap() - 0.4).abs() < 1e-9);
+        let masked = [0.0, f64::NEG_INFINITY];
+        assert_eq!(token_mass(&masked, &[1]), Some(0.0));
+        assert_eq!(token_mass(&[f64::NAN, 0.0], &[1]), None);
     }
 
     #[test]

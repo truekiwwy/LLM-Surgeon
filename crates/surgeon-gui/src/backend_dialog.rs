@@ -7,11 +7,14 @@
 use std::path::PathBuf;
 
 use eframe::egui::{self, Align, Grid, Layout, RichText, TextEdit};
-use weight_surgeon::backend::config::{self, BackendConfig};
+use weight_surgeon::backend::config::{self, BackendConfig, Requantize};
 use weight_surgeon::backend::detect::BackendReport;
 use weight_surgeon::bench::score::Backend;
 
 use crate::theme;
+use crate::ui::components::{self as c, ButtonKind};
+use crate::ui::i18n::{t, tf};
+use crate::ui::icons::Icon;
 
 /// Default of the form when the user file has no value.
 const BATCH_SIZE: usize = 1;
@@ -26,6 +29,8 @@ pub struct BackendDialog {
     mistralrs_bin: String,
     hipfire_url: String,
     batch_size: String,
+    /// `hipfire_requantize = "auto"`: a working copy is requantized before its measure.
+    requantize: bool,
     /// Saved by hand since the app last asked ([`Self::take_saved`]).
     saved_by_hand: bool,
     /// Why the last load or save failed.
@@ -58,6 +63,7 @@ impl BackendDialog {
             mistralrs_bin: String::new(),
             hipfire_url: String::new(),
             batch_size: String::new(),
+            requantize: false,
             saved_by_hand: false,
             saved: BackendConfig::default(),
             error,
@@ -76,6 +82,7 @@ impl BackendDialog {
         self.mistralrs_bin = shown(&saved.mistralrs_bin);
         self.hipfire_url = saved.hipfire_url.clone().unwrap_or_default();
         self.batch_size = saved.batch_size.unwrap_or(BATCH_SIZE).to_string();
+        self.requantize = saved.hipfire_requantize == Some(Requantize::Auto);
         self.saved = saved;
     }
 
@@ -108,10 +115,7 @@ impl BackendDialog {
 
     /// Writes `cfg` (the automatic choice) and shows it.
     pub fn save_config(&mut self, cfg: BackendConfig) -> Result<(), String> {
-        let path = self
-            .path
-            .clone()
-            .ok_or("configuration utilisateur désactivée (WEIGHT_SURGEON_NO_USER_CONFIG)")?;
+        let path = self.path.clone().ok_or(t("backend.disabled"))?;
         config::save_to(&path, &cfg)?;
         self.show_config(cfg);
         Ok(())
@@ -125,13 +129,20 @@ impl BackendDialog {
             .parse::<usize>()
             .ok()
             .filter(|&b| b >= 1)
-            .ok_or_else(|| format!("batch_size « {} » : entier >= 1 attendu", self.batch_size))?;
+            .ok_or_else(|| tf("backend.batch_size.invalid", &[("value", &self.batch_size)]))?;
         let text = |text: &str| Some(text.trim().to_owned()).filter(|t| !t.is_empty());
+        // Unticked: `off` only when the file named a mode; otherwise the key stays absent.
+        let requantize = match (self.requantize, self.saved.hipfire_requantize) {
+            (true, _) => Some(Requantize::Auto),
+            (false, None) => None,
+            (false, Some(_)) => Some(Requantize::Off),
+        };
         Ok(BackendConfig {
             backend: Some(self.backend),
             batch_size: Some(batch_size),
             mistralrs_bin: text(&self.mistralrs_bin).map(PathBuf::from),
             hipfire_url: text(&self.hipfire_url),
+            hipfire_requantize: requantize,
             ..self.saved.clone()
         })
     }
@@ -158,17 +169,16 @@ impl BackendDialog {
         if !self.open {
             return;
         }
+        let mut close = false;
         let modal = egui::Modal::new(egui::Id::new("backend-setup")).show(ctx, |ui| {
             ui.set_width(460.0);
-            ui.label(RichText::new("Backend d'inférence").strong());
-            ui.label(
-                RichText::new(
-                    "Rust seulement : mistral.rs (NVIDIA, Apple Silicon, CPU), hipfire (GPU \
-                     AMD), native (CPU, intégré).",
-                )
-                .small()
-                .color(theme::DIM),
-            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t("backend.title")).strong());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    close = c::icon_button(ui, Icon::Close, t("settings.close")).clicked();
+                });
+            });
+            ui.label(RichText::new(t("backend.lead")).small().color(theme::DIM));
             ui.separator();
             self.choices(ui, report);
             ui.separator();
@@ -176,25 +186,27 @@ impl BackendDialog {
             ui.separator();
             self.buttons(ui);
         });
-        if modal.should_close() {
-            self.open = false;
+        if close || modal.should_close() {
+            self.discard();
         }
+    }
+
+    fn discard(&mut self) {
+        self.show_config(self.saved.clone());
+        self.error = None;
+        self.open = false;
     }
 
     fn choices(&mut self, ui: &mut egui::Ui, report: Option<&BackendReport>) {
         let mistralrs_note = match report.and_then(|r| r.mistralrs.as_ref()) {
-            Some(m) => format!("mistral.rs : {}", m.binary.display()),
-            None => "mistral.rs introuvable : installez-le depuis l'assistant (étape 04)".into(),
+            Some(m) => tf("backend.mistralrs.found", &[("path", &m.binary.display())]),
+            None => t("backend.mistralrs.missing").into(),
         };
-        let hipfire_note = report.map_or("détection en cours".into(), |r| r.hipfire.note.clone());
+        let hipfire_note = report.map_or(t("backend.detecting").into(), |r| r.hipfire.note.clone());
         for (backend, name, note) in [
             (Backend::MistralRs, "mistralrs", mistralrs_note),
             (Backend::Hipfire, "hipfire", hipfire_note),
-            (
-                Backend::Native,
-                "native",
-                "CPU, Rust pur, intégré, dossier SafeTensors".into(),
-            ),
+            (Backend::Native, "native", t("backend.native.note").into()),
         ] {
             ui.radio_value(&mut self.backend, backend, name);
             ui.label(RichText::new(note).small().color(theme::DIM));
@@ -227,30 +239,37 @@ impl BackendDialog {
                         .desired_width(60.0),
                 );
                 ui.end_row();
+                ui.label(theme::mono("hipfire_requantize"));
+                ui.checkbox(&mut self.requantize, "auto")
+                    .on_hover_text(t("backend.requantize.tip"));
+                ui.end_row();
             });
     }
 
     fn buttons(&mut self, ui: &mut egui::Ui) {
         let target = match &self.path {
             Some(path) => theme::mono(path.display().to_string()).color(theme::DIM),
-            None => RichText::new(
-                "configuration utilisateur désactivée (WEIGHT_SURGEON_NO_USER_CONFIG)",
-            )
-            .color(theme::WARN),
+            None => RichText::new(t("backend.disabled")).color(theme::WARN),
         };
         let shown = ui.add(egui::Label::new(target.small()).truncate());
         if let Some(path) = &self.path {
             shown.on_hover_text(path.display().to_string());
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui
-                .add_enabled(self.path.is_some(), egui::Button::new("Enregistrer"))
-                .clicked()
+            let why = t("backend.disabled");
+            if c::button_if(
+                ui,
+                self.path.is_some(),
+                t("backend.save"),
+                ButtonKind::Primary,
+                why,
+            )
+            .clicked()
             {
                 self.save();
             }
-            if ui.button("Annuler").clicked() {
-                self.open = false;
+            if c::button(ui, t("action.cancel"), ButtonKind::Ghost).clicked() {
+                self.discard();
             }
         });
         if let Some(e) = &self.error {
@@ -314,8 +333,43 @@ mod tests {
         assert_eq!(config::parse_toml(&config::to_toml(&cfg)).unwrap(), cfg);
         form.hipfire_url.clear();
         assert_eq!(form.to_config().unwrap().hipfire_url, None);
+        // hipfire_requantize: absent stays absent, ticked is auto, unticked after it is off.
+        assert_eq!(form.to_config().unwrap().hipfire_requantize, None);
+        form.requantize = true;
+        let auto = form.to_config().unwrap();
+        assert_eq!(auto.hipfire_requantize, Some(Requantize::Auto));
+        assert_eq!(config::parse_toml(&config::to_toml(&auto)).unwrap(), auto);
+        let mut form = dialog(auto);
+        assert!(form.requantize, "shown from the file");
+        form.requantize = false;
+        assert_eq!(
+            form.to_config().unwrap().hipfire_requantize,
+            Some(Requantize::Off)
+        );
         form.batch_size = "0".into();
         assert!(form.to_config().unwrap_err().contains("batch_size"));
+    }
+
+    #[test]
+    fn closing_without_saving_drops_the_edits() {
+        let mut form = dialog(BackendConfig {
+            backend: Some(Backend::Hipfire),
+            ..Default::default()
+        });
+        form.open = true;
+        form.backend = Backend::Native;
+        form.batch_size = "0".into();
+        form.error = Some("batch_size".into());
+        form.discard();
+        assert_eq!(
+            (
+                form.backend,
+                form.batch_size.as_str(),
+                form.open,
+                form.error
+            ),
+            (Backend::Hipfire, "1", false, None)
+        );
     }
 
     #[test]

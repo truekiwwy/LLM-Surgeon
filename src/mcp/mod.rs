@@ -38,19 +38,27 @@
 //! its panic catcher, so the panic hook prints on stderr, never on stdout. Remaining
 //! direct writes in the crate are all on stderr (see `ui.rs`).
 
+mod cli_line;
 mod protocol;
 mod sandbox;
 mod server;
 mod tools;
 mod tools_backend;
+mod tools_checkpoint;
+mod tools_compose;
+mod tools_doctor;
+mod tools_files;
 mod tools_graph;
 mod tools_p13;
 mod tools_pipeline;
 mod tools_restore;
 mod tools_session;
+mod tools_trace;
+mod tools_workspace;
 
-use std::io::{BufReader, Write};
+use std::io::Write;
 
+pub use cli_line::{cli_line, CliLine};
 pub use protocol::{
     negotiate, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
     SERVER_NOT_INITIALIZED, SUPPORTED_PROTOCOL_VERSIONS,
@@ -58,11 +66,16 @@ pub use protocol::{
 pub use sandbox::{Sandbox, SandboxError};
 pub use server::{serve, McpConfig, MAX_LINE_BYTES};
 pub use tools::{
-    patch_schema, render_schema, tool_definitions, ApplyToolArgs, AutotuneToolArgs, BenchMode,
-    BenchToolArgs, CheckToolArgs, EvalToolArgs, ExtractToolArgs, InspectToolArgs, MethodId,
-    TOOL_APPLY, TOOL_AUTOTUNE, TOOL_BENCH, TOOL_CHECK, TOOL_EVAL, TOOL_EXTRACT, TOOL_INSPECT,
+    bench_backend, patch_schema, render_schema, tool_definitions, ApplyToolArgs, AutotuneToolArgs,
+    BenchMode, BenchToolArgs, CheckToolArgs, EvalToolArgs, ExtractToolArgs, InspectToolArgs,
+    MethodId, HIPFIRE_SET_ASIDE, TOOL_APPLY, TOOL_AUTOTUNE, TOOL_BENCH, TOOL_CHECK, TOOL_EVAL,
+    TOOL_EXTRACT, TOOL_INSPECT,
 };
+pub use tools_checkpoint::{TOOL_CHECKPOINT, TOOL_SWEEP};
+pub use tools_files::TOOL_FILES;
 pub use tools_pipeline::PipelineJobs;
+pub use tools_trace::TOOL_CAUSAL_TRACE;
+pub use tools_workspace::TOOL_WORKSPACE;
 
 use crate::app::{exit, AppDeps, ProgressSink};
 use crate::cli::{McpArgs, SchemaKind};
@@ -116,5 +129,6 @@ pub fn run_stdio(args: &McpArgs, deps: &AppDeps, out: &mut dyn Write, err: &mut 
         cfg.sandbox.read_roots().len(),
         if cfg.read_only { ", lecture seule" } else { "" }
     );
-    serve(BufReader::new(std::io::stdin()), out, err, deps, &cfg)
+    crate::extract::weight_cache::enable();
+    server::serve_stdio(out, err, deps, &cfg)
 }

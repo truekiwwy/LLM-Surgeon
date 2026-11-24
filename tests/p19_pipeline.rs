@@ -140,6 +140,8 @@ impl Ws {
         // The engine folders come from the test only, never from the machine.
         cmd.current_dir(self.dir.path())
             .env("NO_COLOR", "1")
+            // The reference cache of the workspace, never the user's.
+            .env("WEIGHT_SURGEON_CACHE_DIR", self.path("cache"))
             .env_remove("LLAMA_CPP_DIR")
             .env_remove("MISTRALRS_DIR");
         cmd
@@ -469,13 +471,61 @@ fn a_resumed_job_writes_the_same_results_byte_for_byte() {
     worker.kill().unwrap();
     worker.wait().unwrap();
     assert!(!ws.path("crashed/results.json").exists());
-    for file in tree(&ws.path("crashed/checkpoints")) {
-        serde_json::from_slice::<Value>(&std::fs::read(&file).unwrap())
-            .unwrap_or_else(|e| panic!("{}: partial checkpoint ({e})", file.display()));
-    }
+    let modified = |file: &Path| std::fs::metadata(file).unwrap().modified().unwrap();
+    let finished: Vec<(PathBuf, std::time::SystemTime)> = tree(&ws.path("crashed/checkpoints"))
+        .into_iter()
+        .filter(|f| f.extension().is_some_and(|e| e == "json"))
+        .map(|f| {
+            let checkpoint: Value = serde_json::from_slice(&std::fs::read(&f).unwrap())
+                .unwrap_or_else(|e| panic!("{}: partial checkpoint ({e})", f.display()));
+            // What it measured, so that a resume can tell it is the same measure.
+            assert_eq!(checkpoint["fingerprint"]["split"], "dev", "{}", f.display());
+            let t = modified(&f);
+            (f, t)
+        })
+        .collect();
+    assert!(finished.len() >= 2, "{finished:?}");
+    // What a killed worker leaves: a partial temporary file and a working copy.
+    std::fs::write(
+        ws.path("crashed/checkpoints/cand1_dev_kl.json.tmp"),
+        b"{\"pill",
+    )
+    .unwrap();
+    std::fs::create_dir_all(ws.path("crashed/work/model")).unwrap();
+    std::fs::write(ws.path("crashed/work/model/model.safetensors"), b"half").unwrap();
     // Resumed without --config: the job is bound to its configuration.
     let (code, resumed) = ws.surgeon(&["pipeline", "run", "--job-dir", "crashed"]);
     assert_eq!(code, 0, "{resumed}");
+    assert_eq!(
+        std::fs::read(ws.path("crashed/results.json")).unwrap(),
+        reference
+    );
+    // Nothing finished was measured again; the leftovers are gone.
+    for (file, t) in &finished {
+        assert_eq!(modified(file), *t, "{} measured again", file.display());
+    }
+    assert!(!ws
+        .path("crashed/checkpoints/cand1_dev_kl.json.tmp")
+        .exists());
+    assert!(!ws.path("crashed/work").exists());
+
+    // A checkpoint measured with another token budget (another version, another default)
+    // is measured again, never mixed in; the others stay as they are.
+    for name in ["results.json", "report.json"] {
+        std::fs::remove_file(ws.path("crashed").join(name)).unwrap();
+    }
+    let gsm = ws.path("crashed/checkpoints/cand0_dev_gsm.json");
+    let mut stale: Value = serde_json::from_slice(&std::fs::read(&gsm).unwrap()).unwrap();
+    assert_eq!(stale["fingerprint"]["budget"], 6);
+    stale["fingerprint"]["budget"] = json!(512);
+    std::fs::write(&gsm, stale.to_string()).unwrap();
+    let kl = ws.path("crashed/checkpoints/cand0_dev_kl.json");
+    let kl_time = modified(&kl);
+    let (code, again) = ws.surgeon(&["pipeline", "run", "--job-dir", "crashed"]);
+    assert_eq!(code, 0, "{again}");
+    let remeasured: Value = serde_json::from_slice(&std::fs::read(&gsm).unwrap()).unwrap();
+    assert_eq!(remeasured["fingerprint"]["budget"], 6);
+    assert_eq!(modified(&kl), kl_time);
     assert_eq!(
         std::fs::read(ws.path("crashed/results.json")).unwrap(),
         reference
@@ -486,6 +536,92 @@ fn a_resumed_job_writes_the_same_results_byte_for_byte() {
     ws.write("pipeline.json", &other);
     let (code, refused) = ws.run("crashed", &[]);
     assert_eq!(code, 2, "{refused}");
+}
+
+#[test]
+fn the_dev_baseline_goes_through_the_reference_cache_the_test_one_never() {
+    let ws = Ws::new(12);
+    let (code, run) = ws.run("job", &[]);
+    assert_eq!(code, 0, "{run}");
+    assert_eq!(run["data"]["verdict"], "GO", "{run}");
+    // One entry per binary pillar measured on its Dev set; the Test sets were measured too
+    // (the GO), and stayed in private/.
+    let entries = std::fs::read_dir(ws.path("cache")).unwrap().count();
+    assert_eq!(entries, 3, "gsm, unblock and safety on their Dev sets");
+    assert!(ws.path("job/private/base_test_safety.json").is_file());
+    // The same baseline, read back by bench refusal: one cache for the benches and the jobs.
+    let (code, bench) = ws.surgeon(&[
+        "bench",
+        "refusal",
+        "--model",
+        "qwen2-mini",
+        "--baseline-model",
+        "qwen2-mini",
+        "--prompts",
+        "unblock_dev.json",
+        "--max-new-tokens",
+        "6",
+    ]);
+    assert_eq!(code, 0, "{bench}");
+    assert_eq!(bench["data"]["baseline"]["cache"], "hit");
+}
+
+#[test]
+fn kept_capabilities_turn_the_template_into_an_orthogonal_composition() {
+    let ws = Ws::new(12);
+    let (code, out) = ws.surgeon(&[
+        "extract",
+        "--model",
+        "qwen2-mini",
+        "--pos-prompts",
+        "neg.json",
+        "--neg-prompts",
+        "neutral_dev.json",
+        "--layer",
+        "1",
+        "--out",
+        "keep.safetensors",
+    ]);
+    assert_eq!(code, 0, "{out}");
+    let mut config = Ws::config();
+    config["keep_vectors"] = json!(["keep.safetensors"]);
+    ws.write("pipeline.json", &config);
+    let (code, run) = ws.run("job", &[]);
+    assert_eq!(code, 0, "{run}");
+    let composed = ws.path("job/composed/0-v-orthogonal.safetensors");
+    assert!(composed.is_file());
+    let report = ws.read("job/report.json");
+    let recipe = &report["manifest"]["composition"][0];
+    assert_eq!(recipe["mode"], "orthogonal_preserve");
+    assert!(
+        recipe["result_cos_keep"][0].as_f64().unwrap().abs() < 1e-6,
+        "{recipe}"
+    );
+    let notes = run["data"]["notes"].to_string();
+    assert!(notes.contains("keep_vectors"), "{notes}");
+    // The promoted patch removes the composed direction, through its unit tensors.
+    if run["data"]["verdict"] == "GO" {
+        let (code, promoted) = ws.surgeon(&["pipeline", "promote", "--job-dir", "job"]);
+        assert_eq!(code, 0, "{promoted}");
+        let op = &ws.read("job/promoted/patch.json")["operations"][0];
+        assert!(op["vector_file"]
+            .as_str()
+            .unwrap()
+            .ends_with("0-v-orthogonal.safetensors"));
+        assert_eq!(
+            (&op["vector_tensor"], &op["vector_tensor_b"]),
+            (&json!("a"), &json!("b"))
+        );
+    }
+    // A template that does not read the direction cannot be composed.
+    config["patch"]["operations"][0]["vector_tensor"] = json!("a");
+    ws.write("pipeline.json", &config);
+    let (code, refused) = ws.run("job-2", &[]);
+    assert_eq!(code, 2, "{refused}");
+    assert!(refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("keep_vectors"));
 }
 
 #[test]
@@ -531,6 +667,55 @@ fn cancel_stops_the_worker_without_residue() {
             file.display()
         );
     }
+}
+
+/// hipfire serves its own cache of the model, never the patched candidate: the job stops
+/// before the first candidate and before any Test Set is read or registered.
+#[test]
+fn hipfire_on_the_working_copies_fails_before_the_test_set_is_touched() {
+    let ws = Ws::new(12);
+    let closed = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut config = Ws::config();
+    config["backend"] = json!({"backend": "hipfire",
+        "hipfire_url": format!("http://127.0.0.1:{closed}")});
+    ws.write("pipeline.json", &config);
+    let (code, refused) = ws.run("job", &[]);
+    assert_eq!(code, 2, "{refused}");
+    assert_eq!(refused["error"]["kind"], "invalid_input");
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("copie de travail") && message.contains("--allow-stale-hipfire"),
+        "{message}"
+    );
+    let state = ws.read("job/state.json");
+    assert_eq!(state["status"], "failed", "{state}");
+    assert_eq!(state["stage"], "end");
+    assert!(state["dev_gates"].as_array().unwrap().is_empty());
+    assert!(tree(&ws.path("job/checkpoints")).is_empty(), "no candidate");
+    assert!(
+        tree(&ws.path("job/private")).len() <= 1,
+        "only the private/ marker"
+    );
+    assert!(
+        !ws.path("test_access.json").exists(),
+        "no Test Set consulted"
+    );
+
+    // The CLI override passes the guard: the run goes on until the daemon is asked for the
+    // base model (nothing listens here), still before any Test Set.
+    let (code, run) = ws.run("job-2", &["--allow-stale-hipfire"]);
+    assert_ne!(code, 0, "{run}");
+    let message = run["error"]["message"].as_str().unwrap();
+    assert!(!message.contains("copie de travail"), "{message}");
+    assert_eq!(
+        ws.read("job-2/job.json")["options"]["allow_stale_hipfire"],
+        true
+    );
+    assert!(!ws.path("test_access.json").exists());
 }
 
 #[test]

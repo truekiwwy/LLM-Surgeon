@@ -25,7 +25,7 @@ pub enum ProviderKind {
     OpenAi,
     /// Any OpenAI-compatible endpoint: OpenRouter, Ollama, LM Studio, `llama-server`.
     Compatible,
-    /// The Claude Code CLI, signed in by the user (subscription or key): its own loop.
+    /// The Claude Code CLI, on the claude.ai account it is signed in with: its own loop.
     ClaudeCode,
     /// The Codex CLI, signed in by the user.
     Codex,
@@ -90,6 +90,21 @@ impl ProviderKind {
             Self::Codex => &["gpt-5-codex", "o3", "o4-mini"],
             _ => &[],
         }
+    }
+
+    /// The model of a connection nothing was picked for. Claude Code gets one by name: left
+    /// to itself, the CLI may settle on a model the account's plan does not include.
+    pub fn default_model(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCode => Some("sonnet"),
+            _ => None,
+        }
+    }
+
+    /// A model billed on top of the plan (Fable needs usage credits): it runs when picked for
+    /// the project, and is never carried over to one by itself.
+    pub fn needs_credits(self, model: &str) -> bool {
+        self == Self::ClaudeCode && model.to_ascii_lowercase().contains("fable")
     }
 
     pub fn default_base(self) -> &'static str {
@@ -157,11 +172,13 @@ impl Connection {
         }
     }
 
-    /// The model a project inherits: the chosen default, else the first one listed.
+    /// The model a project inherits: the chosen default, else the first one listed, else the
+    /// default of its kind.
     pub fn inherited_model(&self) -> Option<&str> {
         self.default_model
             .as_deref()
             .or(self.models.first().map(String::as_str))
+            .or(self.kind.default_model())
     }
 
     /// The models the pickers offer: the last list, else the CLI's built-in names.
@@ -177,10 +194,13 @@ impl Connection {
         }
     }
 
-    /// The model a switch to this connection lands on: the last one picked with it, else the
-    /// one it hands down (`None`: a CLI's own default, no `--model`).
+    /// The model a switch to this connection lands on: the last one picked with it unless it
+    /// costs credits, else the one it hands down (`None`: a CLI's own default, no `--model`).
     pub fn preferred_model(&self) -> Option<&str> {
-        self.last_model.as_deref().or(self.inherited_model())
+        self.last_model
+            .as_deref()
+            .filter(|m| !self.kind.needs_credits(m))
+            .or(self.inherited_model())
     }
 
     /// Whether requests stay on this machine (CLI runtimes reach their own servers).

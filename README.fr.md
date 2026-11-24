@@ -439,7 +439,10 @@ taille et du SHA-256, et rien n'est envoyé nulle part.
   enregistré comme votre toolchain de confiance), dossier de travail, modèle d'exemple
   facultatif (Qwen2.5-0.5B-Instruct), visite guidée. Rejouable depuis l'accueil ; la page
   **Diagnostics** répare ou réinstalle chaque composant.
+- **Résultats et export du modèle** : un run de perplexité dans l'onglet Résultats affiche `avant → après · Δ %` avec un point vert, ambre ou rouge (jusqu'à +2 %, jusqu'à +5 %, au-dessus). Le bouton d'export propose `SafeTensors` (le Modelfile pointe sur la copie de travail), `GGUF Q8_0` ou `GGUF Q4_K_M` : le Studio quantifie alors la copie SafeTensors nativement en Rust (sans llama.cpp ni python), dans un job annulable ; voir [docs/STUDIO.md](docs/STUDIO.md).
 - **Vérifier que ça marche** : lancez l'auto-test ci-dessous (code de sortie 0 ou 1).
+- **Votre propre agent à la place** : Claude Code, Codex ou OpenCode peuvent piloter le même
+  moteur avec le Skill `weight-surgeon` ; voir [deux façons de travailler](#two-modes).
 
 ```powershell
 surgeon-gui --self-test
@@ -548,7 +551,7 @@ surgeon extract [OPTIONS] --model <MODEL> --pos-prompts <POS_PROMPTS> --neg-prom
 | `--out` | obligatoire | `.safetensors` de sortie (un tenseur f32 1D `direction`). |
 | `--pooling` | `last` | `last` (dernier token) ou `mean` (moyenne sur le prompt). |
 | `--site` | `resid_post` | `resid_post` (flux résiduel après la couche L) ou `mlp_out` (sortie du MLP). |
-| `--chat-template` | `none` | `none` (texte brut) ou `chatml` (format de chat Qwen). |
+| `--chat-template` | `auto` | `auto` (le format déclaré par le modèle dans `tokenizer_config.json`, `chat_template.jinja` ou ses métadonnées GGUF, message système par défaut compris ; texte brut s'il n'en déclare aucun), `none` (texte brut), ou `chatml`, `llama3`, `inst`, `gemma`. |
 | `--max-tokens` | 512 | Les prompts sont tronqués à droite au-delà. |
 | `--dtype` | `auto` | `auto` (f32 si ça tient en RAM, sinon bf16), `f32`, `bf16`. |
 | `--overwrite` | désactivé | Remplace un `--out` existant et ses fichiers compagnons. |
@@ -559,6 +562,7 @@ surgeon extract [OPTIONS] --model <MODEL> --pos-prompts <POS_PROMPTS> --neg-prom
 | `--holdout-frac` | 0 | Fraction mise de côté (par index) pour des diagnostics hors échantillon ; demande 10 prompts ou plus par jeu. |
 | `--rank` | 1 pour `svd`, toutes pour `leace` | Directions du sous-espace, de 1 à 64 : `svd` garde autant de vecteurs singuliers, `leace` avec `--labels-file` au plus autant. `mean_diff` reste de rang 1. |
 | `--labels-file` | aucun | `leace` : tableau JSON avec un label par prompt, les positifs puis les négatifs : un indice de classe entier, ou un tableau de `m` nombres. Tous les labels sont effacés à la fois. |
+| `--layers` | aucun | Balayage de couches à la place de `--layer` (`all`, `A-B` ou `3,5,7`) : une passe avant par prompt, une direction par couche avec son AUC, sa marge et son d′ (`data.layers`), la meilleure couche (`data.best_layer`) écrite en `direction` et chaque couche en `layers.<i>`. `mean_diff` ou `svd`, rang 1. |
 
 Sorties : la direction, `<out>.stats.json` (projection de chaque prompt, lue par le tableau de bord) et, pour `leace`, `<out>.leace.safetensors` (`a`, `b`, `mean`, `u_whitened`). Avec `svd --rank` au-delà de 1, `<out>.subspace.safetensors` contient `a = b = V_k` ; avec `leace --labels-file`, `a` et `b` du `.leace.safetensors` sont de forme `[k, hidden]`. Les deux se passent tels quels à une opération `project_out`, et `data.method_diagnostics.subspace` détaille chaque composante (`sigma_t`, `explained_variance_cumulative`, `d_prime`, `gram_BtA_error`). Les écritures sont atomiques. `data` : `out_path`, `stats_path`, `layer`, `method`, `hidden_size`, `n_pos`, `n_neg`, `dtype_used`, `duration_ms`, `stats`, `warnings`. Codes de sortie : 7 pour les échecs de modèle ou de calcul ; 2 pour des arguments invalides, dont `unpaired_prompts` pour `svd`.
 
@@ -607,11 +611,63 @@ surgeon restore [OPTIONS] --model <MODEL>
 | Option | Défaut | Rôle |
 | --- | --- | --- |
 | `--model` | requis | Fichier ou dossier à remettre en état. |
-| `--backup` | sauvegarde la plus récente | Une sauvegarde écrite par `apply` (`<nom>.bak-<horodatage>`, listée dans son `data.backups`), répétable pour un modèle shardé. |
+| `--backup` | le dernier point de restauration | Une sauvegarde écrite par `apply` (`<nom>.bak-<horodatage>`, listée dans son `data.backups`), répétable pour un modèle shardé. |
 | `--backup-dir` | à côté du modèle | Où `apply --backup-dir` a mis les sauvegardes, pour la détection. |
-| `--from-origin` | aucun | Modèle d'origine (fichier ou dossier) : chacun de ses fichiers est recopié sur le modèle. Exclut `--backup` et `--backup-dir`. |
+| `--from-origin` | aucun | Modèle d'origine (fichier ou dossier) : chacun de ses fichiers est recopié sur le modèle, sauf les entrées cachées (nom commençant par `.`, comme `.git` ou `.cache/huggingface`). Exclut `--backup` et `--backup-dir`. |
 
-Sans `--backup` ni `--from-origin`, chaque fichier du modèle reprend sa `<nom>.bak-*` la plus récente : l'état d'avant le dernier `apply`. Dans un dossier où un fichier a plusieurs sauvegardes (plusieurs `apply`), rien ne dit lesquelles vont ensemble : la commande refuse (`ambiguous_backup`, code de sortie 2) plutôt que de mélanger deux états ; nommez-les avec `--backup` ou utilisez `--from-origin`. Un fichier déjà identique à sa source n'est pas réécrit. `data` : `mode` (`backup` ou `origin`), `model`, `files` (`path`, `source`, `sha256_before` (null si le fichier manquait), `sha256_source`, `sha256_after`, `rewritten`), `identical`. Codes de sortie : 2 rien à restaurer ou arguments invalides (rien touché), 3 copie échouée ou empreinte finale différente (le message compte les fichiers déjà restaurés ; les sources sont intactes, relancez).
+Sans `--backup` ni `--from-origin`, le modèle revient à l'état d'avant le dernier `apply` : toutes les sauvegardes d'un même `apply` partagent un point de restauration (`<nom>.bak-<secondes>-<n>`), ce qui marche après n'importe quel nombre d'`apply`, shardé ou non, et relancer la commande ne change plus rien. Un `apply` lancé alors que le modèle est déjà dans l'état du dernier point de restauration le réutilise au lieu de recopier les poids. Dans un dossier écrit par une version antérieure, un seul fichier sauvegardé reprend sa sauvegarde la plus récente ; plusieurs fichiers, que rien ne relie, reviennent tous à l'état d'avant le premier `apply` (`data.checkpoint` : `last_apply` ou `first_apply`). Un fichier de poids passé à `--from-origin` est recopié sur le fichier de même nom d'un dossier modèle. Un fichier déjà identique à sa source n'est pas réécrit. `data` : `mode` (`backup` ou `origin`), `checkpoint` (détection seulement), `model`, `files` (`path`, `source`, `sha256_before` (null si le fichier manquait), `sha256_source`, `sha256_after`, `rewritten`), `identical`. Codes de sortie : 2 rien à restaurer ou arguments invalides (rien touché), 3 copie échouée ou empreinte finale différente (le message compte les fichiers déjà restaurés ; les sources sont intactes, relancez).
+
+<a id="cmd-doctor"></a>
+#### `surgeon doctor`
+
+Vérifie en quelques secondes, sans charger de modèle, que la machine est prête pour une campagne : RAM totale et libre, et les plus gros poids qui se chargent en f32 ou en bf16 sans repli lent (la règle RAM du chargeur natif : facteur de surcoût et marge) ; les cœurs physiques et les threads de la génération native ; le cache des références `ref_bench` (dossier, entrées, taille, fichiers illisibles ou obsolètes) ; et le démon hipfire quand il est configuré ou répond (URL, `/health`, `/metrics`, et la mémoire GPU de son dernier chargement). hipfire 0.4 n'écrit cette mémoire que dans son log : `doctor` lit donc le log qu'écrit `start-hipfire.ps1`, et `0 MB total` y signale un démon qui a perdu son GPU, dont tout chargement échoue jusqu'à son redémarrage. `data.ready` vaut false quand un contrôle échoue ; le code de sortie reste 0. Aussi l'outil MCP `surgeon_doctor` (lecture seule, sans `--clean-cache`).
+
+```text
+surgeon doctor [OPTIONS]
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--model` | aucun | Dossier de modèle : son besoin exact en RAM, le dtype qu'il obtient (f32, ou le repli bf16 lent) et son lot natif. |
+| `--clean-cache` | désactivé | Supprime les fichiers du cache des références qui ne seront plus jamais relus (illisibles, autre schéma, fichiers temporaires). |
+| `--hipfire-url` | configuration, sinon `http://127.0.0.1:11435` | Démon hipfire à contrôler. |
+| `--hipfire-log` | le log de `start-hipfire.ps1` | Log du démon, où il écrit la mémoire GPU de chaque chargement. |
+
+```text
+[DOCTOR]   pas prêt
+[RAM]      ok · 36.9 Gio libres sur 63.9 Gio : f32 jusqu'à ~8.2 G paramètres, bf16 ~16.3 G (activations en plus) ; C:/models/Qwen2.5-0.5B-Instruct demande 5.3 Gio en f32, 3.8 Gio en bf16 (marge comprise) -> f32
+[CPU]      ok · 6 cœurs physiques : génération native sur 6 threads, lots de 16 séquences au plus
+[CACHE]    ok · %LOCALAPPDATA%\weight-surgeon\cache\ref_bench : 0 entrées, 0.0 Mio, 0 illisibles, 0 obsolètes
+[HIPFIRE]  échec · http://127.0.0.1:11435 répond (ok, en route depuis 45.9 h, 702 requêtes en échec) ; GPU gfx1100 : 0 Mo libres sur 0 Mo au dernier chargement : démon figé, sans GPU, tout chargement échoue ; arrête le démon dans WSL puis relance .\start-hipfire.ps1 (il ne relance pas un démon qui répond encore)
+```
+
+<a id="cmd-compose"></a>
+#### `surgeon compose`
+
+Fabrique une direction à partir de plusieurs vecteurs extraits, et le patch qui la retire. En mode `orthogonal-preserve` (défaut), les directions à préserver (`--keep`, vecteurs de capacité comme les maths ou la logique) sont orthonormées par Gram-Schmidt modifié en f64, et chaque vecteur à retirer est projeté hors de leur sous-espace avant la somme pondérée : retirer le résultat laisse les directions préservées intactes, linéairement. Le mode `standard` est la somme pondérée directe. `ties` fusionne les vecteurs par TIES (chacun garde sa part `--density` des plus grandes magnitudes, le signe de la somme pondérée est élu par coordonnée, les contributions qui le portent sont moyennées) et `dare` par DARE (chaque coordonnée abandonnée avec la probabilité `--drop-rate` selon une `--seed`, les autres remises à l'échelle par 1/(1-p), puis la somme pondérée) ; les deux sont calculés en f64 et la direction fusionnée est ensuite projetée hors des directions préservées. Un vecteur nul, non fini ou de dimension différente, et un vecteur dont la projection laisse moins de 1e-6 de sa norme (presque dans le sous-espace préservé), sont refusés avec leur nom, leur couche et le ratio, plutôt que de normaliser du bruit d'arrondi. Le fichier composé contient `direction` et `a` = `b` = sa direction unitaire ; `--patch-out` écrit un patch `project_out` dont `composition` garde les sources, leurs SHA-256 et poids, le mode, et les cosinus avant et après. L'orthogonalité linéaire n'exclut pas une interférence non linéaire : mesurer les deux capacités avec `bench` après application.
+
+```text
+surgeon compose [OPTIONS] --ablate <ABLATE> --out <OUT>
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--ablate` | requis | Vecteur à retirer, `fichier` ou `fichier:alpha` (poids dans la somme, défaut 1) ; répétable. |
+| `--keep` | aucun | Direction à préserver ; répétable. |
+| `--mode` | `orthogonal-preserve` | `orthogonal-preserve`, `standard`, `ties` ou `dare`. |
+| `--density` | 0.2 | `ties` : part gardée de chaque vecteur, dans ]0, 1]. |
+| `--drop-rate` | 0.5 | `dare` : probabilité d'abandon d'une coordonnée, dans [0, 0.95]. |
+| `--seed` | 0 | `dare` : graine des masques (même graine, même direction). |
+| `--out` | requis | Direction composée (`.safetensors`). |
+| `--patch-out` | aucun | Écrit aussi le patch `project_out` (`.json`) avec la recette. |
+| `--layers` | `all` | Couches du patch : `all`, `A-B` ou une liste. |
+| `--projections` | `o_proj,down_proj` | Matrices du patch. |
+| `--alpha` | 1 | Force du `project_out`, dans [0, 1]. |
+| `--overwrite` | désactivé | Remplace les sorties existantes. |
+
+```bash
+surgeon compose --ablate refusal_L14.safetensors --keep dir_math_L13.safetensors --keep dir_logic_L13.safetensors --out refusal_ortho.safetensors --patch-out patch_ortho.json
+```
 
 <a id="cmd-eval"></a>
 #### `surgeon eval`
@@ -772,7 +828,8 @@ surgeon autotune [OPTIONS] --model <MODEL> --vector <VECTOR> --eval-dataset <EVA
 | `--target-projection` | aucun | Projection cible ; obligatoire avec `--objective target`. |
 | `--l2-reg` | 1e-3 | λ ridge > 0, ou `auto` (leave-one-out de 1e-6 à 1e2). |
 | `--probe-alpha` | 0.05 | Pas δ de différence finie de la mesure de réponse. |
-| `--alpha-max` | 1 | Les coefficients sont écrêtés à plus ou moins cette valeur. |
+| `--alpha-max` | 1 | Les coefficients sont écrêtés à plus ou moins cette valeur (`alpha` de `W -= alpha·v`, pas un décalage d'activation). |
+| `--max-delta-norm-ratio` | aucun | Borne par couche de `‖ΔW‖/‖W‖` (normes de Frobenius), `0.01` pour 1 %, convertie en limite sur le coefficient de chaque couche ; `data.alphas[].delta_norm_ratio` donne le résultat. |
 | `--min-alpha` | 0.0001 | Les coefficients plus petits sont supprimés. |
 | `--max-forwards` | 2000 | Refuse l'exécution, avant tout calcul, au-delà de ce nombre de passes avant. |
 | `--max-tokens` | 256 | Troncature des prompts. |
@@ -782,8 +839,19 @@ surgeon autotune [OPTIONS] --model <MODEL> --vector <VECTOR> --eval-dataset <EVA
 | `--chat-template` | celui du vecteur | Remplace le gabarit de chat du vecteur. |
 | `--out` | aucun | `patch.json` à écrire (validé d'abord). |
 | `--overwrite` | désactivé | Remplace un `--out` existant. |
+| `--refusal-prompts` | aucun | Prompts que le modèle patché ne doit plus refuser (fichier ou `builtin:refusals`) : active la sélection d'échelle ci-dessous. |
+| `--target-refusal-rate` | 0.1 | Taux de refus que l'échelle retenue doit atteindre en génération. |
+| `--scales` | `0.25,0.5,0.75,1,1.25,1.5` | Échelles c candidates des coefficients ajustés. |
+| `--probe-top-k` | 2 | Candidats que la sonde passe à la génération complète. |
+| `--no-probe-prefilter` | désactivé | Génère chaque candidat, sans sonde. |
+| `--retention-dataset` | aucun | Jeu de capacités aussi généré sur la base et les finalistes, comme `bench eval` (fichier ou `builtin:math`...). |
+| `--retention-limit` | 20 | N premières questions de `--retention-dataset`. |
 
 `data` contient `alphas`, `ridge`, `linearity`, `validation`, `recommendation` et `patch`. Code de sortie 7 quand le système est singulier ou mal conditionné. Notez que le `patch.json` écrit enregistre le chemin absolu du fichier de vecteur.
+
+Avec `--refusal-prompts`, les coefficients ajustés sont ensuite essayés à chaque échelle c·α, appliqués en mémoire (le modèle entier est chargé une fois ; aucun poids n'est relu entre deux candidats), et le patch est écrit à la plus petite échelle dont les réponses générées atteignent `--target-refusal-rate`. Deux étapes : la sonde du premier token de `bench refusal-probe` note chaque échelle en une passe avant par prompt et écarte celles dont le taux de refus sondé manque la cible ou dont la probabilité de refus ne baisse pas sous celle du modèle de base ; seules les `--probe-top-k` meilleures sont générées comme le fait `bench refusal` (40 tokens, marqueurs, lots natifs), avec le jeu de rétention s'il est donné. La sonde ne décide jamais seule, et `direction-projection` ne sert jamais de filtre (elle sur-déclenche sur les prompts légitimes sensibles). Les réponses du modèle de base viennent du cache des références partagé avec `bench refusal` et `bench eval`. `data.selection` donne, par échelle, les taux de refus sondé et généré, l'exactitude de rétention et la raison d'un rejet, les candidats sondés et générés, les générations économisées, et la durée de chaque étape ; `--events` diffuse les mêmes chiffres en métriques (`probe_refusal_rate`, `generation_refusal_rate` par `scale:<c>`, `candidates_probed`, `candidates_generated`, `generations_saved`). Quand aucune échelle n'atteint la cible, les coefficients du ridge sont écrits tels quels, avec un avertissement.
+
+Mesuré sur Qwen2.5-0.5B-Instruct (6 cœurs CPU, direction de refus de la couche 12, ridge sur 25 prompts et 9 couches, `builtin:refusals`, six échelles, réponses de la base lues dans le cache dans les deux runs) : la sonde a fait générer 2 candidats sur 6 et retenu la même échelle (0.5, refus générés 5,6 % contre 16,7 % pour la base) ; la sélection a pris 50,5 s (25,0 s de sondes, 25,5 s de génération) contre 74,6 s avec `--no-probe-prefilter`, et la commande entière 77,7 s contre 102,8 s.
 
 <a id="cmd-diff"></a>
 #### `surgeon diff`
@@ -884,7 +952,7 @@ dry-run : 6 tenseur(s) vérifiés (rang 4, échelle effective 1), aucun octet é
 <a id="cmd-lora-extract"></a>
 #### `surgeon lora extract`
 
-Approxime la différence de deux checkpoints par un adaptateur de rang `r` (`B = U sqrt(S)`, `A = sqrt(S) V`) et écrit un `adapter_model.safetensors` PEFT plus un `adapter_config.json` à côté. Le dossier de sortie doit déjà exister.
+Approxime la différence de deux checkpoints par un adaptateur de rang `r` (`B = U sqrt(S)`, `A = sqrt(S) V`) et écrit un `adapter_model.safetensors` PEFT plus un `adapter_config.json` à côté. La différence vient de `--patched`, ou de `--delta`, un `.safetensors` qui la contient par tenseur 2D (chacun vérifié contre la base). Le dossier de sortie doit déjà exister.
 
 ```text
 surgeon lora extract [OPTIONS] --base <BASE> --patched <PATCHED> --out <OUT>
@@ -893,8 +961,9 @@ surgeon lora extract [OPTIONS] --base <BASE> --patched <PATCHED> --out <OUT>
 | Option | Défaut | Rôle |
 | --- | --- | --- |
 | `--base` | obligatoire | Checkpoint de base. |
-| `--patched` | obligatoire | Checkpoint modifié (mêmes noms de tenseurs, formes et dtypes). |
-| `--out` | obligatoire | `adapter_model.safetensors` à écrire. |
+| `--patched` | obligatoire sauf `--delta` | Checkpoint modifié (mêmes noms de tenseurs, formes et dtypes). |
+| `--delta` | aucun | À la place de `--patched` : `patched - base` par tenseur 2D (F32, F16 ou BF16). |
+| `--out` | obligatoire | `adapter_model.safetensors` à écrire, ou un dossier existant où l'écrire. |
 | `--rank` | 16 | Rang de l'adaptateur. |
 | `--dtype` | `f32` | `f16`, `bf16` ou `f32`. |
 | `--target-modules` | projections d'attention et MLP | Seulement les tenseurs 2D dont le nom correspond à cette regex. |
@@ -935,6 +1004,7 @@ surgeon bench dump [OPTIONS] --model <MODEL> --prompts <PROMPTS> --out <OUT>
 | `--prompts` | obligatoire | Tableau JSON de chaînes ou de `{"text": ...}`, JSONL, ou texte brut. |
 | `--out` | obligatoire | `.safetensors` avec `logits` `[positions, vocabulaire]` et `prompt_offsets`, plus des métadonnées (`prompts_sha256`, `tokenizer_sha256`). |
 | `--dtype` | `auto` | Dtype de calcul : `auto`, `f32`, `bf16`. |
+| `--chat-template` | `auto` | Habillage de chaque prompt, comme pour `bench eval`. Garder la même valeur avant et après une chirurgie. |
 | `--out-dtype` | `f32` | Dtype stocké : `f32` ou `f16`. Préférez f32 : f16 ajoute du bruit d'arrondi à la comparaison. |
 | `--max-tokens` | 256 | Troncature des prompts. |
 | `--max-total-positions` | 4096 | Refuse le dump, avant tout calcul, au-delà de ce nombre de positions. |
@@ -965,7 +1035,7 @@ surgeon bench logits [OPTIONS] --before <BEFORE> --after <AFTER>
 <a id="cmd-bench-ppl"></a>
 #### `surgeon bench ppl`
 
-Perplexité d'un GGUF (ou d'un dossier SafeTensors converti en GGUF temporaire) avec `llama-perplexity` de llama.cpp.
+Perplexité d'un GGUF (ou d'un dossier SafeTensors converti en GGUF temporaire) avec `llama-perplexity` de llama.cpp, ou, avec `--backend native`, d'un dossier SafeTensors par un forward en Rust pur sur le CPU (Qwen2, Llama/Mistral ou Qwen3, lecture seule, sans llama.cpp).
 
 ```text
 surgeon bench ppl [OPTIONS] --model <MODEL> --text <TEXT>
@@ -973,13 +1043,15 @@ surgeon bench ppl [OPTIONS] --model <MODEL> --text <TEXT>
 
 | Option | Défaut | Rôle |
 | --- | --- | --- |
-| `--model` | obligatoire | `.gguf`, ou un dossier SafeTensors. |
-| `--text` | obligatoire | Fichier texte évalué par `llama-perplexity`. |
-| `--baseline-model` | aucun | Modèle de référence, mesuré en premier. |
+| `--model` | obligatoire | `.gguf`, ou un dossier SafeTensors (seulement un dossier avec `--backend native`). |
+| `--text` | obligatoire | Fichier texte évalué par `llama-perplexity`, ou `builtin:wikitext` (backend natif seulement) : un extrait intégré de WikiText-2 (116 lignes, CC BY-SA 3.0, licence dans `src/bench/builtin/wikitext.LICENSE.txt`), les mêmes octets sur tous les OS, donc une perplexité reproductible. |
+| `--backend` | `llama` | `llama` (`llama-perplexity`) ou `native`. En `native`, le texte est tokenisé une fois et noté par fenêtres glissantes de `--ctx` tokens ; chaque token après le premier est noté exactement une fois, en f64 avec des sommes compensées. `ppl` vaut `exp` de la moyenne de la log-vraisemblance négative et `ppl_err` vaut `ppl` fois l'erreur standard de cette moyenne. `native` refuse un `.gguf`, `--n-gpu-layers`, `--threads` (le pool suit `RAYON_NUM_THREADS`) et `--llama-arg`. |
+| `--stride` | `--ctx` / 2 | `native` seulement : tokens entre les débuts de deux fenêtres consécutives, de 1 à `--ctx`. Refusé avec `llama` (utilisez `--llama-arg --ppl-stride=N`). |
+| `--baseline-model` | aucun | Modèle de référence, mesuré en premier (en `native`, les deux modèles sont chargés l'un après l'autre, jamais ensemble). |
 | `--baseline-ppl` | aucun | Perplexité de référence déjà connue. |
 | `--baseline-ppl-err` | aucun | Incertitude (±) de `--baseline-ppl`. |
 | `--ctx` | 512 | Taille du contexte. |
-| `--chunks` | défaut de llama.cpp | Nombre de blocs. |
+| `--chunks` | défaut de llama.cpp | Nombre de blocs (fenêtres en `native`). |
 | `--threads` | défaut de llama.cpp | Threads. |
 | `--n-gpu-layers` | 0 | Couches déportées sur le GPU (0 : CPU seul, reproductible). |
 | `--llama-cpp-dir` | `$LLAMA_CPP_DIR` | Dossier de llama.cpp. |
@@ -1003,9 +1075,11 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | `--dataset` | obligatoire | Tableau JSON (ou JSONL) de `{question ou problem, answer ou solution, id?}`. Aucun contenu GSM8K ou MATH n'est livré avec ce dépôt. |
 | `--backend` | la configuration utilisateur, sinon `llama` | `llama` ou son alias `llama-completion` (un processus llama.cpp par question, sur un GGUF converti au besoin), `llama-server` (un serveur llama.cpp local pour toute l'exécution, GPU selon son build) ou `native` (Rust pur sur un dossier SafeTensors Qwen2, Llama/Mistral ou Qwen3 ; `--llama-cpp-dir` ne sert alors pas). `mistralrs` lance mistral.rs sur le dossier SafeTensors tel quel (sans conversion, GPU selon son build) ; `hipfire` interroge un démon hipfire lancé, sur tout système : voir [backends](docs/BACKENDS.md). |
 | `--baseline-model` | aucun | Modèle de référence sur les mêmes questions (comparaison appariée). |
+| `--no-ref-cache` | désactivé | Régénère les réponses de `--baseline-model` au lieu de les relire dans le cache des références, et remplace son entrée. Le cache (`%LOCALAPPDATA%\weight-surgeon\cache\ref_bench`, `~/.cache/weight-surgeon/ref_bench`, ou `WEIGHT_SURGEON_CACHE_DIR`) a pour clé le SHA-256 des fichiers du modèle de référence, le dataset ou les prompts, et toute option qui change les réponses ; `baseline.cache` vaut `hit` ou `miss`. |
 | `--limit` | 50 | Les N premières entrées, dans l'ordre du fichier. |
 | `--max-new-tokens` | 512 | Budget de génération par question. |
 | `--prompt-template` | intégré | Gabarit avec `{question}`, ou `@FILE`. |
+| `--chat-template` | `auto` | Habillage du gabarit rendu : `auto` (le format du modèle, texte brut s'il n'en déclare aucun), `none`, `chatml`, `llama3`, `inst` ou `gemma`. Un gabarit qui contient déjà des tours de chat reste tel quel. |
 | `--format` | `auto` | Réponse de référence : `gsm8k` (après le dernier `####`), `math` (dernier `\boxed{...}`), `auto` (par entrée : `####`, sinon `\boxed{}`, sinon la réponse brute). |
 | `--llama-cpp-dir` | `$LLAMA_CPP_DIR` | Dossier de llama.cpp. |
 | `--timeout-secs` | aucun | Par question ; un dépassement compte la question comme fausse. |
@@ -1027,7 +1101,9 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | `--mistralrs-dir` | `$MISTRALRS_DIR`, puis la configuration utilisateur, puis `PATH` | `mistralrs` : dossier de `mistralrs-server` (ou `mistralrs`). |
 | `--mistralrs-bin` | la configuration utilisateur | `mistralrs` : le binaire lui-même ; donné, c'est le seul candidat. |
 | `--hipfire-url` | la configuration utilisateur, sinon `127.0.0.1:11435` quand `hipfire` est trouvé | `hipfire` : un démon déjà lancé, `http://127.0.0.1:<port>` (boucle locale seulement). |
+| `--hipfire-requantize` | la configuration utilisateur (`hipfire_requantize`), sinon désactivé | `hipfire` : avant la mesure, requantifie une copie de travail sans alias pour ses poids actuels (`hipfire quantize --format q8f16`, enregistrée sous `ws-<copie>-<sha8>`, notée dans son `.hipfire-alias.json`), puis la sert sous cet alias. Sans lui, une telle copie est refusée. |
 | `--gguf-dtype` | `f16` | Type des matrices du GGUF temporaire d'un modèle SafeTensors : `f16` ou `f32` (sans perte depuis bf16, deux fois plus gros). |
+| `--allow-stale-hipfire` | désactivé | `hipfire` : mesure tout de même une copie de travail (patchée, dans un projet surgeon-gui ou un job pipeline). Refusé sinon : le démon sert le fichier quantifié enregistré sous le nom du modèle, pas la copie. Une copie dont le `.hipfire-alias.json` correspond à ses poids n'en a pas besoin ; celui-ci sert pour une copie enregistrée à la main, et le rapport le signale. |
 
 La réponse du modèle est extraite par la première règle qui correspond parmi : un marqueur `####`, le dernier `\boxed{...}` équilibré, le dernier texte en `**gras**`, une formule comme « the answer is X », puis le dernier nombre. Les nombres et fractions se comparent avec une tolérance relative de 1e-9. C'est une heuristique : lisez les `items` par question de la sortie `--json` avant de vous fier à un score. Ce README ne publie aucun score GSM8K : les exécutions réelles ci-dessous utilisent un faux llama.cpp.
 
@@ -1059,10 +1135,18 @@ surgeon bench eval --model tiny-q8.patched.gguf --dataset ds.json --baseline-mod
 ```
 
 ```text
-[BENCH]    ppl · ctx 512  tiny-q8.patched.gguf
-[PPL]      6.2060 ± 0.04 → 7.3840 ± 0.04 · Δ +1.1780 (hors du bruit)
+[BENCH]    ppl · llama · ctx 512  tiny-q8.patched.gguf
+[PPL]      6.2060 ± 0.04 → 7.3840 ± 0.04 · Δ +1.1780 (hors du bruit) · +18.98 %
 [VERDICT]  avertissement : ΔPPL 1.1780 > 0.2
 ```
+
+La ligne `[PPL]` finit par le delta relatif. Une lecture : jusqu'à +2 % c'est correct, jusqu'à +5 % à surveiller, au-dessus de +5 % une régression à examiner (puis `surgeon restore` sur la copie si elle se confirme). Le Studio utilise les mêmes seuils pour ses couleurs. Sans llama.cpp, sur une copie SafeTensors et son origine (la première ligne devient `[BENCH]    ppl · native · ctx 512 · pas 256 · <N> tokens  <modèle>`) :
+
+```bash
+surgeon bench ppl --backend native --model copies/c1 --baseline-model /models/Qwen2.5-0.5B-Instruct --text builtin:wikitext --ctx 512
+```
+
+Le rapport (`--json`) gagne `backend` (`llama` ou `native`), `stride` (null avec `llama`) et `tokens` (le nombre de tokens notés, en `native` seulement). En `native`, `binary` est null et `args` est vide.
 
 ```text
 [BENCH]    eval · 2 questions · auto  ds.json
@@ -1087,8 +1171,10 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--model` | obligatoire | Dossier Qwen2, Llama/Mistral ou Qwen3 (`model_type` de `config.json` : `qwen2`, `llama`, `mistral` ou `qwen3`). |
 | `--prompts` | obligatoire | Tableau JSON de chaînes ou de `{"text": ...}`, JSONL, ou texte brut. |
 | `--baseline-model` | aucun | Modèle de référence sur les mêmes prompts, généré en premier (comparaison appariée). |
-| `--max-new-tokens` | 256 | Budget de génération par prompt. |
-| `--chat-template` | `chatml` | Habillage de chaque prompt : `chatml` ou `none`. |
+| `--limit` | tous | Les N premiers prompts, dans l'ordre du fichier ; le taux de refus, son intervalle de Wilson à 95 % et la comparaison à `--baseline-model` portent sur ces N. 0 est refusé. |
+| `--no-ref-cache` | désactivé | Régénère les réponses de `--baseline-model` au lieu de les relire dans le cache des références, et remplace son entrée. Le cache (`%LOCALAPPDATA%\weight-surgeon\cache\ref_bench`, `~/.cache/weight-surgeon/ref_bench`, ou `WEIGHT_SURGEON_CACHE_DIR`) a pour clé le SHA-256 des fichiers du modèle de référence, le dataset ou les prompts, et toute option qui change les réponses ; `baseline.cache` vaut `hit` ou `miss`. |
+| `--max-new-tokens` | 40 | Budget de génération par prompt : un refus se voit dans les premiers mots (40 a donné les verdicts de 256 sur les jeux intégrés). |
+| `--chat-template` | `auto` | Habillage de chaque prompt : `auto` (le format du modèle, ChatML s'il n'en déclare aucun), `none`, `chatml`, `llama3`, `inst` ou `gemma`. |
 | `--backend` | la configuration utilisateur, sinon `native` | `native` (Rust pur), `llama-server` (un serveur llama.cpp local pour toute l'exécution) ou `llama-completion` (un processus llama.cpp par prompt) ; un dossier SafeTensors est alors converti en GGUF temporaire. `mistralrs` (mistral.rs sur le dossier SafeTensors tel quel) et `hipfire` (un démon hipfire lancé) aussi : voir [backends](docs/BACKENDS.md). |
 | `--judge` | `rules` | `rules` (marqueurs seuls), `llm` (marqueurs et modèle juge) ou `both` (plus leur accord). |
 | `--marker-langs` | aucun | Langues de marqueurs en plus de l'anglais : `fr`, `es`, `de` ou `all`, séparées par des virgules. |
@@ -1121,7 +1207,9 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--mistralrs-dir` | `$MISTRALRS_DIR`, puis la configuration utilisateur, puis `PATH` | `mistralrs` : dossier de `mistralrs-server` (ou `mistralrs`). |
 | `--mistralrs-bin` | la configuration utilisateur | `mistralrs` : le binaire lui-même ; donné, c'est le seul candidat. |
 | `--hipfire-url` | la configuration utilisateur, sinon `127.0.0.1:11435` quand `hipfire` est trouvé | `hipfire` : un démon déjà lancé, `http://127.0.0.1:<port>` (boucle locale seulement). |
+| `--hipfire-requantize` | la configuration utilisateur (`hipfire_requantize`), sinon désactivé | `hipfire` : avant la mesure, requantifie une copie de travail sans alias pour ses poids actuels (`hipfire quantize --format q8f16`, enregistrée sous `ws-<copie>-<sha8>`, notée dans son `.hipfire-alias.json`), puis la sert sous cet alias. Sans lui, une telle copie est refusée. |
 | `--gguf-dtype` | `f16` | Type des matrices du GGUF temporaire d'un modèle SafeTensors : `f16` ou `f32` (sans perte depuis bf16, deux fois plus gros). |
+| `--allow-stale-hipfire` | désactivé | `hipfire` : mesure tout de même une copie de travail (patchée, dans un projet surgeon-gui ou un job pipeline). Refusé sinon : le démon sert le fichier quantifié enregistré sous le nom du modèle, pas la copie. Une copie dont le `.hipfire-alias.json` correspond à ses poids n'en a pas besoin ; celui-ci sert pour une copie enregistrée à la main, et le rapport le signale. |
 
 Une réponse est un refus quand elle contient l'un de douze marqueurs anglais (`I'm sorry`, `I cannot`, `As an AI`, ... ; la liste est dans `data.markers`), comparés sans casse et aux frontières de mots. `--marker-langs` ajoute les marqueurs intégrés français, espagnols ou allemands et `--markers-file` les vôtres ; l'anglais reste en premier, et sans ces options rien ne change. Les marqueurs ne trouvent que les refus explicites : un refus poli passe inaperçu et une réponse dégradée ou hors sujet compte comme une acceptation, donc `data.items[]` garde chaque réponse en entier (`index`, `refused`, `marker`, `output`) pour relecture. `data` contient aussi `n`, `refused`, `refusal_rate` et son intervalle de Wilson (`ci95_low`, `ci95_high`) ; avec une référence, `baseline` et `paired` (`unblocked`, `newly_refused`, `delta_rate`, et son intervalle à 95 % `delta_ci95_low` / `delta_ci95_high`, l'intervalle de Newcombe pour proportions appariées).
 
@@ -1259,6 +1347,37 @@ N processus séparés en même temps, une séquence chacun :
 | 6 | 2 | 2.6 | 15.8 | 1.46x |
 
 Sur cette machine et ce modèle : un lot de 8 a donné 4,1 fois le total d'une séquence et un lot de 16, 4,6 fois, chaque séquence ralentissant ; un lot de 8 a fait mieux que les mêmes séquences réparties en lots parallèles ; 6 threads ont fait mieux que 12 pour un lot de 8 ; 3 processus séparés ont donné 1,39 fois un processus et 6 en ont donné 1,49 fois, avec ou sans `RAYON_NUM_THREADS` fixé à 12 / N. Ces exécutions mesurent le débit seulement, pas la bande passante mémoire : elles ne montrent pas pourquoi chaque courbe s'aplatit.
+
+<a id="cmd-bench-refusal-probe"></a>
+#### `surgeon bench refusal-probe`
+
+Estime les refus de `bench refusal` sans générer : une passe avant par prompt, enveloppé comme le fait `bench refusal`. Une heuristique rapide pour explorer (un agent, un balayage de patchs) : le rapport indique toujours `is_heuristic: true` et `evidence_level: "heuristic_screening"`, et ses avertissements rappellent que seule une génération complète (`bench refusal` ou `bench eval`) est une preuve finale. Par MCP, c'est `surgeon_bench` en mode `refusal_probe` (`probe_method`, `direction_path`, `threshold`), dont le studio n'affiche jamais les résultats comme mesurés. Deux méthodes :
+
+- `first-token-prob` : la probabilité, sous les logits de la dernière position du prompt, que le premier token de réponse soit le premier token d'un mot de `--prefixes` (résolu par le tokenizer du modèle). Refus au-dessus de `--threshold` (0.5).
+- `direction-projection` : le flux résiduel après la couche d'une direction de `surgeon extract` (`resid_post` seulement), réduit comme à l'extraction et projeté dessus ; refus au-dessus du seuil calibré par l'extraction (`<fichier>.stats.json`, sinon le milieu des deux projections moyennes). Les prompts sont enveloppés comme à l'extraction, le seul enveloppage pour lequel ce seuil vaut. Elle mesure à quel point le modèle juge un prompt nuisible, ce qui n'est pas toujours un refus.
+
+`--compare-generation` génère ensuite les réponses avec le même modèle chargé (`bench refusal`, 40 tokens, lots natifs automatiques) et donne l'accord, les quatre cases, la corrélation point-bisériale des scores avec les verdicts générés, et les deux durées. Backend natif seulement (CPU, dossier SafeTensors).
+
+```text
+surgeon bench refusal-probe [OPTIONS] --model <MODEL> --prompts <PROMPTS>
+```
+
+| Option | Défaut | Rôle |
+| --- | --- | --- |
+| `--model` | requis | Dossier SafeTensors Qwen2, Llama/Mistral ou Qwen3. |
+| `--prompts` | requis | Tableau JSON de textes ou de `{"text": ...}`, JSONL, texte brut, ou `builtin:<jeu>`. |
+| `--method` | `first-token-prob` | `first-token-prob` ou `direction-projection`. |
+| `--prefixes` | `I,Sorry,As,Unfortunately,Je,Désolé` | `first-token-prob` : mots par lesquels un refus commence, séparés par des virgules ; leurs premiers tokens sont additionnés. |
+| `--vector` | aucun | `direction-projection` : le fichier de direction de `surgeon extract` (requis pour cette méthode). |
+| `--threshold` | 0.5, ou celui de la direction | Seuil de décision du score. |
+| `--chat-template` | `auto` | Enveloppage de chaque prompt pour `first-token-prob` et la comparaison, comme dans `bench refusal`. |
+| `--compare-generation` | désactivé | Génère aussi les réponses et compare, prompt par prompt. |
+
+Mesuré sur Qwen2.5-0.5B-Instruct ([détails](docs/validation/qwen2.5-0.5b-validation.md), section 14) : `first-token-prob` a donné le verdict de la génération sur 17 des 18 prompts de `builtin:refusals` et 62 de 65 prompts mélangés, en 4,3 s contre 11,8 s pour la génération par lots de 40 tokens et 430 s pour la génération historique (un par un, 256 tokens).
+
+```bash
+surgeon bench refusal-probe --model qwen2-mini --prompts pos.json --compare-generation
+```
 
 <a id="cmd-bench-judge-sample"></a>
 #### `surgeon bench judge-sample`
@@ -1508,6 +1627,7 @@ surgeon pipeline plan [OPTIONS] --config <CONFIG> --job-dir <JOB_DIR>
 | `--mistralrs-dir` | `$MISTRALRS_DIR`, puis la configuration utilisateur, puis `PATH` | `mistralrs` : dossier de `mistralrs-server` (ou `mistralrs`). |
 | `--mistralrs-bin` | la configuration utilisateur | `mistralrs` : le binaire lui-même ; donné, c'est le seul candidat. |
 | `--hipfire-url` | la configuration utilisateur, sinon `127.0.0.1:11435` quand `hipfire` est trouvé | `hipfire` : un démon déjà lancé, `http://127.0.0.1:<port>` (boucle locale seulement). |
+| `--hipfire-requantize` | la configuration utilisateur (`hipfire_requantize`), sinon désactivé | `hipfire` : avant la mesure, requantifie une copie de travail sans alias pour ses poids actuels (`hipfire quantize --format q8f16`, enregistrée sous `ws-<copie>-<sha8>`, notée dans son `.hipfire-alias.json`), puis la sert sous cet alias. Sans lui, une telle copie est refusée. |
 
 `data` : `pillars[]` (`n_dev`, `n_test`, `min_n_for_go` : la plus petite taille à laquelle une porte de non-infériorité peut être GO, `dev_underpowered`, `test_underpowered`), `disk` (copie de travail, dumps de logits, sauvegardes), `units_total`, `calibration` (moteur natif CPU), `backend_calibration` (backend du job, GPU via `llama-server` ; son temps de chargement compte la conversion GGUF et le démarrage du serveur), `estimated_secs` (estimation haute, chaque moteur à son débit), `warnings`.
 
@@ -1526,6 +1646,7 @@ surgeon pipeline run [OPTIONS] --job-dir <JOB_DIR>
 | `--job-dir` | requis | Dossier du job. |
 | `--allow-disable-safety` | désactivé | Accepte une configuration sans pilier `safety` (noté ; ligne de commande seulement). |
 | `--allow-test-reuse` | désactivé | Consulte un jeu Test déjà inscrit au registre ; le rapport est marqué `test_contaminated` et ne peut pas être GO (ligne de commande seulement). |
+| `--allow-stale-hipfire` | désactivé | Avec `--backend hipfire`, mesure les candidats bien que le démon serve son propre cache du modèle et non la copie de travail patchée ; refusé avant le premier candidat sinon (ligne de commande seulement, noté dans le rapport). |
 | `--detach` | désactivé | Lance le travailleur en arrière-plan (sortie dans `<job>/worker.log`) et rend la main. |
 | `--watch-stdin` | désactivé | S'arrête quand stdin se ferme ; posé par le serveur MCP pour les travailleurs qu'il lance. |
 | `--backend` | `pipeline.json`, puis la configuration utilisateur, sinon `native` | `native` (CPU), `mistralrs` (mistral.rs sur la copie de travail telle quelle), `llama-server` (GPU via llama.cpp) ou `hipfire`. Seuls les piliers binaires génèrent ; `kl` et `logits` lisent toujours des logits natifs. |
@@ -1536,6 +1657,7 @@ surgeon pipeline run [OPTIONS] --job-dir <JOB_DIR>
 | `--mistralrs-dir` | `$MISTRALRS_DIR`, puis la configuration utilisateur, puis `PATH` | `mistralrs` : dossier de `mistralrs-server` (ou `mistralrs`). |
 | `--mistralrs-bin` | la configuration utilisateur | `mistralrs` : le binaire lui-même ; donné, c'est le seul candidat. |
 | `--hipfire-url` | la configuration utilisateur, sinon `127.0.0.1:11435` quand `hipfire` est trouvé | `hipfire` : un démon déjà lancé, `http://127.0.0.1:<port>` (boucle locale seulement). |
+| `--hipfire-requantize` | la configuration utilisateur (`hipfire_requantize`), sinon désactivé | `hipfire` : avant la mesure, requantifie une copie de travail sans alias pour ses poids actuels (`hipfire quantize --format q8f16`, enregistrée sous `ws-<copie>-<sha8>`, notée dans son `.hipfire-alias.json`), puis la sert sous cet alias. Sans lui, une telle copie est refusée. |
 
 `data` est `results.json` : `verdict`, `verdict_reason`, `model` (empreintes, `unchanged`), `candidates[]` (portes Dev jusqu'à la première non GO, `stopped_at`), `selected`, `test` (agrégats seulement : les réponses restent dans `<job>/private/`), `test_contaminated`, `safety_disabled`, `budget_exceeded`. Portes : intervalle de Newcombe apparié (celui de `bench refusal`) au niveau de confiance de la porte pour les piliers binaires, avec le p exact de McNemar ; bootstrap percentile sur les prompts avec la graine de la configuration pour les dérives. `<job>/report.json` ajoute le manifeste de reproductibilité (empreintes du modèle, des jeux, des vecteurs, de la configuration ; graine ; version de surgeon) et les durées.
 
@@ -1638,10 +1760,10 @@ surgeon graph [OPTIONS] --model <MODEL>
 | `--layers` | `all` | `all`, une plage `1-3`, ou une liste `0,2,4`. |
 | `--matrices` | tous les rôles du graphe | `q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head` ; répétable ou séparé par des virgules. |
 | `--rank` | 32 | Rang cible du SVD randomisé (au moins 1). |
-| `--oversample` | 10 | Colonnes aléatoires supplémentaires du sous-espace. |
-| `--power-iters` | 3 | Itérations de puissance du SVD randomisé (0 à 64). |
+| `--oversample` | 8 | Colonnes aléatoires supplémentaires du sous-espace (`k = rang + 8`). |
+| `--power-iters` | 2 | Itérations de puissance du SVD randomisé (0 à 64). |
 | `--seed` | 0 | Graine du SVD ; même graine, mêmes octets. |
-| `--full-spectrum-max-dim` | 2048 | Plus grand `min(m,n)` pour le spectre exact (0 le désactive ; plafonné à 1024 et `m*n <= 4_000_000`). |
+| `--full-spectrum-max-dim` | 2048 | Obsolète, sans effet (gardé pour la compatibilité). Le spectre exact n'est qu'un repli quand `min(m,n) <= rank + oversample + 4`. |
 | `--edges` | `adjacent` | `adjacent`, `all` ou `topk:N` (arêtes adjacentes plus les `N` plus fortes arêtes longue portée de chaque écrivain). |
 | `--min-alignment` | 0 | Plus petit alignement brut conservé ; 0 garde tout. |
 | `--edge-weight` | `alignment` | `alignment` ou `coupling`. |
@@ -1662,12 +1784,12 @@ surgeon graph [OPTIONS] --model <MODEL>
 `data` est une synthèse bornée : `model`, `parameters`, `global`, au plus 200 `nodes`, au plus 20 `top_edges`, `outputs`, `truncated` et, avec `--baseline`, les compteurs et `top_changed_layers` de `baseline_diff` ; le graphe complet n'existe que dans `graph.json`. Codes de sortie : 2 entrée invalide ou sortie existante sans `--overwrite`, 7 échec de calcul, 1 annulation.
 
 ```bash
-# écrit les quatre formats sur le mini-modèle factice, spectres exacts jusqu'à 64
+# écrit les quatre formats sur le mini-modèle factice
 surgeon graph --model qwen2-mini --out-dir graph-demo --format json,dot,mmd,csv \
-  --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64
+  --rank 8 --oversample 4 --power-iters 2
 # compare une copie patchée à ce rapport ; ouvrir graph-diff/graph.ndjson dans surgeon-gui pour la vue 3D du diff
 surgeon graph --model qwen2-mini-patched --baseline graph-demo/graph.json --out-dir graph-diff \
-  --format json,ndjson --rank 8 --oversample 4 --power-iters 2 --full-spectrum-max-dim 64 --fast-hash
+  --format json,ndjson --rank 8 --oversample 4 --power-iters 2 --fast-hash
 ```
 
 ```text
@@ -1697,14 +1819,14 @@ outputs:
 | `id` | Identifiant unique, repris dans le rapport. |
 | `layers` | `"all"`, `"10-20"`, `"3,5,7"`, un tableau `[10, 11]`, ou `{"start": 10, "end": 20}` (bornes incluses). |
 | `projections` | Non vide, sans doublon : `gate_proj`, `up_proj`, `down_proj`, et pour un modèle SafeTensors `o_proj` (sortie d'attention de chaque couche) et `embed_tokens` (plongements d'entrée ; ils n'appartiennent à aucune couche, donc `layers` ne les filtre pas). |
-| `operation` | `subtract`, `add` ou `project_out`. |
+| `operation` | `subtract`, `add`, `project_out` ou `add_direction`. |
 | `vector_file` | Vecteur `.safetensors` ou `.json` ; relatif au dossier du patch. |
 | `vector_tensor` | Nom du tenseur quand le fichier SafeTensors en contient plusieurs ; interdit avec un `.json`. |
-| `vector_tensor_b` | `project_out` uniquement : la direction de lecture `b` (`vector_tensor` est alors `a`). |
-| `alpha` | Intensité dans [-100, 100] ; `|alpha| > 5` lève un avertissement. Pour `project_out`, dans [0, 1]. |
+| `vector_tensor_b` | `project_out` uniquement (refusé pour `add_direction`) : la direction de lecture `b` (`vector_tensor` est alors `a`). |
+| `alpha` | Intensité dans [-100, 100] ; `|alpha| > 5` lève un avertissement. Pour `project_out`, dans [0, 1]. Pour `add_direction`, une amplification dans [0, 100] (négatif refusé : utiliser `project_out` pour retirer). |
 | `axis` | `rows` ou `cols` (par défaut `cols`). |
-| `rank` | `project_out` uniquement : le rang attendu, c'est-à-dire les lignes de `a` et `b` (`[rank, hidden]`, 1 pour la forme 1D). Des tenseurs d'un autre rang sont refusés. Absent : le rang des tenseurs. |
-| `allow_non_projector` | `project_out` uniquement : accepte `alpha = 1` quand `‖B^T A - I‖ > 1e-3` (pas un projecteur), avec un avertissement. Défaut `false` : refusé. |
+| `rank` | `project_out` uniquement (refusé pour `add_direction`) : le rang attendu, c'est-à-dire les lignes de `a` et `b` (`[rank, hidden]`, 1 pour la forme 1D). Des tenseurs d'un autre rang sont refusés. Absent : le rang des tenseurs. |
+| `allow_non_projector` | `project_out` uniquement (refusé pour `add_direction`) : accepte `alpha = 1` quand `‖B^T A - I‖ > 1e-3` (pas un projecteur), avec un avertissement. Défaut `false` : refusé. |
 
 La formule de `subtract` et `add`, sur un tenseur `[rows, cols]` rangé par lignes : `W[r][c] <- round(W[r][c] ∓ alpha * v[i])`. Le produit `alpha * v[i]` est calculé une fois par élément du vecteur en f32, puis chaque poids reçoit une addition f32 et est arrondi au plus proche pair dans le dtype stocké (bf16, f16 ou f32). `alpha = 0` ne fait strictement rien. Les poids sont `[sortie, entrée]` (disposition Llama et Qwen) :
 
@@ -1726,6 +1848,8 @@ Avec `rows`, chaque ligne reçoit le même vecteur (une valeur par colonne) ; av
 > `project_out` retire ce que lit `b` des matrices qui écrivent dans le flux résiduel : `W' = W - alpha * a (b^T W)` pour `down_proj` et `o_proj`, `W' = W - alpha * (W b) a^T` pour `embed_tokens` (ses lignes sont les vecteurs du flux). Avec `a` et `b` d'un `.leace.safetensors` c'est l'effaceur LEACE ; avec `a = b = v`, une direction unitaire (`"vector_tensor": "direction", "vector_tensor_b": "direction"`), c'est une ablation directionnelle. Une seule opération avec `"layers": "all"` et `"projections": ["down_proj", "o_proj", "embed_tokens"]` couvre tous les écrivains ; `gate_proj` et `up_proj` lisent le flux et sont refusées. En bf16 un petit delta peut disparaître à l'arrondi : mesurez le résultat.
 >
 > `a` et `b` peuvent aussi être des tenseurs `[k, hidden]`, une direction par ligne (`<out>.subspace.safetensors` de `svd --rank`, ou le `.leace.safetensors` de `leace --labels-file`) : `W' = W - alpha * A (B^T W)` retire alors les `k` directions en une seule passe sur les poids, donc chaque poids est arrondi une fois quel que soit `k`, alors que `k` opérations de rang 1 successives arrondiraient `k` fois, dans un ordre qui change le résultat. La forme 1D donne les mêmes octets qu'avant. Avant toute écriture, `apply` vérifie que `a` et `b` ont le même rang, qu'il égale `rank` quand l'opération le fixe et ne dépasse pas `--max-rank` (64 ; le serveur MCP garde ce défaut), et que `‖B^T A - I‖_F <= 1e-3` quand `alpha = 1` : sinon `alpha = 1` retire autre chose que le sous-espace lu par `b`, et un patch `[k, hidden]` est refusé sauf si `allow_non_projector` vaut `true` (la forme 1D reste acceptée, avec un avertissement). Ces contrôles lisent les tenseurs : un refus donne le code de sortie 3, modèle intact, et non un patch invalide. Un GGUF quantifié accepte la même recette, avec un résidu mesuré : voir [Écrivains du flux résiduel en GGUF](#gguf-writers).
+>
+> `add_direction` est le dual additif de `project_out` : `W' = W + alpha * u (u^T W)` pour `down_proj` et `o_proj`, `W' = W + alpha * (W u) u^T` pour `embed_tokens`, avec `u = v / ‖v‖` normalisé en f64. Elle lit un seul vecteur (`vector_file`, `vector_tensor` facultatif) et laisse `axis` absent, l'orientation suivant la matrice. Seuls les écrivains du flux résiduel `down_proj`, `o_proj` et `embed_tokens` sont acceptés ; `gate_proj` et `up_proj` sont refusés, tout comme `vector_tensor_b`, `rank` et `allow_non_projector`. Un `v` nul ou non fini est refusé avant toute écriture ; quand `‖v‖` diffère de 1, `data.warnings` porte "add_direction renormalise v". Elle passe par le même noyau f64 que `project_out` : `u^T W` est accumulé en f64 et chaque poids est arrondi une seule fois ; un GGUF est requantifié de la même façon (`residual_fraction` vaut alors environ 1 + alpha).
 >
 > Quand `embed_tokens` est visé et que le modèle le partage avec la projection de sortie (pas de `lm_head.weight`, comme Qwen2.5-0.5B), `apply` détache d'abord la tête pour ne pas déformer les logits : il réécrit le shard avec `lm_head.weight`, copie à l'octet des plongements non patchés, et passe `"tie_word_embeddings"` à `false` dans `config.json` (et complète `model.safetensors.index.json` pour un modèle shardé). Le shard grossit de la taille des plongements. `--dry-run` l'annonce dans `data.untie_lm_head` et n'écrit rien ; le shard et `config.json` sont tous deux sauvegardés, et restaurés en cas d'échec. Sans `config.json` à côté du modèle le patch est refusé.
 
@@ -1907,7 +2031,7 @@ Une ablation par les poids (`project_out` sur tous les écrivains) est **exacte*
 
 MoE : le `down_proj` de chaque expert est un écrivain ; un tenseur fusionné `[E, hidden, inter]` (transformers v5) ou `ffn_down_exps` (GGUF, `ne = [inter, hidden, E]`) est effacé expert par expert, les experts partagés comme tout écrivain, le routeur jamais. `add` / `subtract` n'ont pas d'axe sur un tenseur fusionné 3D et y sont refusés. Ces modèles n'ont pas de forward natif : la direction vient d'un modèle dense de même taille cachée, ce qui est une limite (le flux résiduel du MoE ne porte pas forcément le concept sur la même direction).
 
-`apply` tranche avant de lire quoi que ce soit pour écrire : une ablation `exact` s'exécute, une `approximate` est refusée (`error.kind = "approximate_ablation"`, code de sortie 2) sauf avec `--accept-approximate`, puis signalée et reportée dans `data.arch.accepted_approximate` ; une `unsupported` est refusée (`unsupported_architecture`). `add` / `subtract` (steering) ne sont pas des ablations et ne sont jamais filtrés. Exécution réelle sur une copie du faux modèle déclarée Gemma 2 (mêmes noms de tenseurs), avec `ablate-all.json` la recette de [la note experts](#patch-format) sur `erase.safetensors.leace.safetensors` :
+`apply` tranche avant de lire quoi que ce soit pour écrire : une ablation `exact` s'exécute, une `approximate` est refusée (`error.kind = "approximate_ablation"`, code de sortie 2) sauf avec `--accept-approximate`, puis signalée et reportée dans `data.arch.accepted_approximate` ; une `unsupported` est refusée (`unsupported_architecture`). `add` / `subtract` (steering) et `add_direction` ne sont pas des ablations et ne sont jamais filtrés. Exécution réelle sur une copie du faux modèle déclarée Gemma 2 (mêmes noms de tenseurs), avec `ablate-all.json` la recette de [la note experts](#patch-format) sur `erase.safetensors.leace.safetensors` :
 
 ```json
 {"schema_version": 1, "backup": false, "operations": [{"id": "erase-all", "layers": "all", "projections": ["embed_tokens", "o_proj", "down_proj"], "operation": "project_out", "vector_file": "erase.safetensors.leace.safetensors", "vector_tensor": "a", "vector_tensor_b": "b", "alpha": 1.0}]}
@@ -2090,26 +2214,39 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 <a id="tools"></a>
 ### 4.2 Outils
 
-`surgeon mcp` sert seize outils : treize, un par commande du moteur (une commande et son outil partagent le même cœur, les mêmes arguments et la même enveloppe JSON ; `backend detect --save` reste réservé à la CLI, un agent ne réécrit jamais la configuration de l'opérateur), et trois outils du studio (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
+`surgeon mcp` sert vingt-trois outils : quinze, un par commande du moteur (une commande et son outil partagent le même cœur, les mêmes arguments et la même enveloppe JSON ; `backend detect --save` reste réservé à la CLI, un agent ne réécrit jamais la configuration de l'opérateur), `surgeon_files` pour les fichiers de travail d'un agent, `surgeon_causal_trace`, `surgeon_checkpoint` et `surgeon_sweep` (MCP seulement), et quatre outils du studio (réponse réelle de `tools/list`, aussi affichée par `surgeon schema --kind tools`) :
 
 | Outil | Rôle |
 | --- | --- |
 | `surgeon_check` | Budget RAM et VRAM d'un modèle. |
 | `surgeon_inspect` | Couches et matrices MLP, statistiques facultatives. |
 | `surgeon_apply` | Applique un patch en place (`dry_run` pour vérifier d'abord) ; `gguf: true` pour un GGUF quantifié. |
-| `surgeon_restore` | Remet le modèle octet pour octet depuis la sauvegarde la plus récente, des sauvegardes nommées ou le modèle d'origine (`from_origin`, lu en `--allow-read`) ; SHA-256 de chaque fichier avant et après. Le rollback après une régression mesurée par `surgeon_bench`. |
+| `surgeon_restore` | Remet le modèle octet pour octet depuis le dernier point de restauration (l'état d'avant le dernier `surgeon_apply`), des sauvegardes nommées ou le modèle d'origine (`from_origin`, lu en `--allow-read`) ; SHA-256 de chaque fichier avant et après. Le rollback après une régression mesurée par `surgeon_bench`. |
+| `surgeon_doctor` | La machine est-elle prête pour une campagne : RAM et plus gros modèle en f32 ou bf16, cœurs, cache des références, démon hipfire (un GPU à 0 Mo demande un redémarrage). Lecture seule. |
+| `surgeon_compose` | Une direction faite de plusieurs vecteurs extraits, orthogonale aux directions de capacité à préserver (Gram-Schmidt modifié, f64), et le patch `project_out` qui la retire avec sa recette. Écrit des fichiers, jamais un modèle. |
 | `surgeon_eval` | Contrôles de boucles et d'attentes, export GGUF conditionnel. |
-| `surgeon_extract` | Vecteur de steering depuis une couche Qwen2, Llama/Mistral ou Qwen3. |
-| `surgeon_bench` | Mesure, avec `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal`, et la calibration du juge `judge_sample`, `judge_eval` ; les jeux de sondes intégrés se passent de fichier : `builtin:math`, `builtin:logic`, `builtin:general` (eval) et `builtin:refusals` (refusal). |
-| `surgeon_autotune` | Coefficients par couche par régression ridge. |
+| `surgeon_extract` | Vecteur de steering depuis une couche Qwen2, Llama/Mistral ou Qwen3, ou depuis chaque couche d'un balayage (`layers`). |
+| `surgeon_causal_trace` | Traçage causal : la sortie propre du flux résiduel, de l'attention ou du MLP restaurée couche par couche au dernier token d'un prompt corrompu ; score par couche, classement et fenêtre causale au format `layers` de `surgeon_compose` et de `surgeon_graph`. Lecture seule. |
+| `surgeon_bench` | Mesure, avec `mode` `dump`, `logits`, `ppl`, `eval` ou `refusal`, la sonde heuristique `refusal_probe` (sans génération, jamais une preuve finale), et la calibration du juge `judge_sample`, `judge_eval` ; les jeux de sondes intégrés se passent de fichier : `builtin:math`, `builtin:logic`, `builtin:general` (eval) et `builtin:refusals` (refusal). |
+| `surgeon_autotune` | Coefficients par couche par régression ridge, et avec `refusal_prompts` leur plus petite échelle qui atteint un taux de refus cible en génération (sonde d'abord, puis génération des finalistes). |
 | `surgeon_diff` | Différence de deux checkpoints écrite dans un nouveau `.surgery`. |
 | `surgeon_lora` | `mode` `merge` (adaptateur fusionné en place) ou `extract` (adaptateur écrit). |
 | `surgeon_pipeline` | Décision sur un patch : `action` `plan`, `start` (travailleur en arrière-plan, renvoie un `job_id` tout de suite), `status`, `cancel`, `report`, `promote_patch` ([docs/PIPELINE.md](docs/PIPELINE.md)). |
 | `surgeon_graph` | Graphe écritures/lectures du flux résiduel avec bornes spectrales certifiées ; synthèse bornée, ou fichiers avec `out_dir`. |
 | `surgeon_backends` | GPU et moteurs d'inférence Rust de la machine (hipfire pour AMD, mistralrs pour NVIDIA, Apple Silicon ou CPU, native en secours), configuration utilisateur et backend recommandé ; lecture seule. |
+| `surgeon_files` | Fichiers de travail d'un agent sans outils de fichiers : `list` et `read` dans les dossiers autorisés, racines en lecture seule comprises, `write` de fichiers texte sous `work/` seulement. |
+| `surgeon_checkpoint` | Instantanés d'une copie de travail sous `work/checkpoints/<id>/` : `action` `create` (liens physiques, copie sur un autre volume, manifeste SHA-256, étiquette, métriques et parent), `list` (l'arbre et l'empreinte disque réelle, un fichier partagé compté une fois) et `restore` (checkpoint vérifié, puis échange atomique du dossier). Un apply recopie un fichier partagé avec un checkpoint avant de l'écrire : un checkpoint ne change jamais, et aucun outil n'écrit sous le store. |
+| `surgeon_sweep` | Balayage Pareto automatique : chaque point de vecteurs x fenêtres `layers` x `alphas` est appliqué à la copie, mesuré (taux de succès cible, dérive contre le départ), gardé en checkpoint s'il améliore le front sous `max_drift`, annulé sinon ; renvoie les points non dominés et laisse la copie sur le meilleur compromis. |
+| `surgeon_workspace` | Projet du studio pour un agent qui travaille hors de l'interface : `action` `init` écrit `project.surgeon.json` avec le modèle d'origine tel que le Studio l'enregistre (chemin canonique, SHA-256 et taille) et crée `runs/`, `artifacts/`, `copies/` et `chat/`. Le modèle n'est que lu ; un manifeste existant n'est remplacé qu'avec `force`. |
 | `record_finding` | Projet du studio seulement : ajoute un constat au journal des preuves (`chat/findings.jsonl`), en citant le `run_id` que renvoie chaque autre outil dans un projet. |
 | `show_in_3d` | Projet du studio seulement : sélectionne un tenseur ou un nœud du graphe dans la vue 3D du studio (`chat/focus.json`). |
 | `update_plan` | Projet du studio seulement : remplace le plan affiché à l'utilisateur (`chat/plan.json`). |
+
+`surgeon_workspace` est l'acte de naissance du projet : un petit fichier scellé, `project.surgeon.json`, qui dit de quel modèle le dossier travaille et le prouve par une empreinte. Un modèle de 0,5 milliard de paramètres comme Qwen2.5-0.5B-Instruct pèse environ 988 Mo de SafeTensors dans `C:\models\Qwen2.5-0.5B-Instruct` ; le manifeste enregistre ce chemin canonique, sa taille et le SHA-256 de ses fichiers, une empreinte de 64 caractères (abrégée ici en `4f9c…`). Dès lors `surgeon-gui` ouvre le dossier exactement comme s'il l'avait créé dans le Studio : même origine, verrouillée en lecture, même journal des preuves. Un seul appel au début de la session :
+
+```json
+{"action": "init", "model": "C:\\models\\Qwen2.5-0.5B-Instruct", "name": "qwen-0.5b-refus"}
+```
 
 Une vraie session sur le faux modèle : le client envoie `initialize`, `notifications/initialized`, puis un `tools/call`. Le serveur écrit une ligne sur stderr, puis répond sur stdout (la réponse à `initialize` est omise, et les lignes de réponse sont coupées) :
 
@@ -2130,9 +2267,10 @@ Le premier appel (`surgeon_check` sur `qwen2-mini`) réussit ; le second demande
 ### 4.3 Garde-fous
 
 - `--allow-dir` (répétable, sinon `SURGEON_MCP_ALLOW_DIRS`, sinon le dossier courant) : chaque chemin est résolu par le système (liens symboliques, `..`) et doit tomber sous un dossier autorisé ; les chemins relatifs le sont par rapport au premier.
-- `--read-only` : refuse tout outil qui écrit (`surgeon_apply`, `surgeon_restore`, `surgeon_extract`, exports GGUF, `surgeon_bench` en modes `dump` et `judge_sample` ou `judge_eval` avec `out`, `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora`, `surgeon_graph` avec `out_dir` ou `cache_dir`, `surgeon_pipeline` `start`, `cancel` et `promote_patch`).
+- `--read-only` : refuse tout outil qui écrit (`surgeon_apply`, `surgeon_restore`, `surgeon_compose`, `surgeon_extract`, exports GGUF, `surgeon_bench` en modes `dump` et `judge_sample` ou `judge_eval` avec `out`, `surgeon_autotune` avec `out`, `surgeon_diff`, `surgeon_lora`, `surgeon_graph` avec `out_dir` ou `cache_dir`, `surgeon_pipeline` `start`, `cancel` et `promote_patch`).
 - Sauvegarde imposée : une sauvegarde vérifiée par SHA-256 précède toute écriture, et une sauvegarde échouée bloque l'écriture. `backup: false` dans un patch n'est respecté qu'avec `--allow-no-backup`.
 - Annulation : `notifications/cancelled` arrête l'appel en cours, annule un patch partiel et tue le processus llama.cpp en cours ; une extraction ou un dump annulé ne laisse aucun fichier.
+- Arrêt : fermer stdin, la façon dont un client MCP arrête le serveur, annule l'appel en cours de la même façon et ne répond plus à rien, pas même aux requêtes déjà envoyées. Le serveur se termine dès que cet appel a rendu la main, et au bout de 3 s s'il ne l'a pas fait. Un script doit lire ses réponses avant de fermer stdin.
 - Progression : avec un `progressToken`, une `notifications/progress` est envoyée par tenseur, prompt ou bloc.
 - Un panic pendant un outil devient une erreur JSON-RPC et le serveur continue de tourner.
 - `surgeon_pipeline` : un travailleur à la fois, arrêté avec le serveur ; aucun argument libre et aucune option `--allow-*` (la porte de sécurité ne peut pas être désactivée, un jeu Test ne peut pas être réutilisé) ; chaque fichier nommé par la configuration passe le bac à sable, et les réponses Test d'un job (`<job>/private/`) sont refusées à tous les outils.
@@ -2192,7 +2330,7 @@ Si le client ne trouve pas `surgeon`, mettez le chemin absolu du binaire dans `c
 7. `surgeon_bench` `dump` de nouveau, puis `logits`, puis `ppl` et `eval` si llama.cpp est disponible.
 8. Décider d'après les chiffres mesurés. Si c'est mauvais, restaurer la sauvegarde. N'annoncer aucun résultat qui n'a pas été mesuré.
 
-C'est ce que le skill `safe-surgery-workflow` du plugin Claude Code dit à l'agent. La même recette depuis un shell, avec les commandes du [chemin A](#path-a) : `check`, `extract`, `apply --dry-run`, `apply`, `bench dump`, `bench logits`.
+C'est ce que le skill `safe-surgery-workflow` du plugin Claude Code dit à l'agent ; le Skill `weight-surgeon` ([section 4.8](#two-modes)) enseigne toute la méthode du Studio. La même recette depuis un shell, avec les commandes du [chemin A](#path-a) : `check`, `extract`, `apply --dry-run`, `apply`, `bench dump`, `bench logits`.
 
 <a id="llama-cpp"></a>
 ### 4.6 llama.cpp : ce qui est utilisé et comment il est trouvé
@@ -2237,6 +2375,25 @@ surgeon bench eval --model C:\models\Qwen2.5-0.5B-Instruct --dataset gsm_dev.jso
 ### 4.7 Architecture et plugins
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (en français) définit le vocabulaire : le Surgery Engine au centre, le CLI et le serveur MCP comme front-ends, et les points d'extension. En bref, `surgeon` est découpé en modules (`hardware`, `engine`, `patch`, `extract`, `bench`, `eval`, `kernel`, `linalg`, `lora`, `surgery`, `tui`, `mcp`, `plugin`). Un seul point d'extension existe aujourd'hui, `ExtractionMethod` (API `v0`, instable) : un trait Rust dont les implémentations sont enregistrées statiquement dans un programme qui lie la bibliothèque. Le binaire `surgeon` n'enregistre que les trois méthodes intégrées, et `surgeon plugins list` les montre. [docs/PLUGINS.md](docs/PLUGINS.md) (en français) explique pas à pas comment écrire une méthode et décrit une proposition de plugins hors processus qui n'est pas implémentée.
+
+<a id="two-modes"></a>
+### 4.8 Deux façons de travailler : le Studio ou votre propre agent
+
+Les deux font tourner le même moteur, les mêmes outils et le même dossier projet : un projet commencé dans l'un s'ouvre dans l'autre.
+
+- **Tout dans le Studio.** `surgeon-gui` se connecte à un fournisseur d'IA (une clé d'API, un serveur local, ou la CLI Claude Code, Codex, OpenCode ou Antigravity connectée à votre compte) et fait tourner l'agent lui-même, avec des approbations calculées par le code, le journal des preuves, les résultats et le graphe 3D ([docs/AGENTS.md](docs/AGENTS.md)). Réglages > Moteur montre aussi la santé de la machine selon `surgeon doctor` (RAM libre et plus gros modèle en f32 ou en bf16, cœurs, cache des références, démon hipfire et sa mémoire GPU), purge un cache obsolète et démarre ou redémarre hipfire ; le dialogue du backend règle `hipfire_requantize`.
+- **Votre propre agent, dans votre harnais.** Claude Code, Codex, OpenCode ou Cursor atteint le moteur par `surgeon mcp`, et le Skill `weight-surgeon` ([skills/weight-surgeon](skills/weight-surgeon/SKILL.md)) lui enseigne la méthode du Studio : `surgeon_doctor` d'abord, inspection et extraction, criblage par `surgeon_bench` mode `refusal_probe` et `surgeon_autotune`, composition orthogonale par `surgeon_compose` quand une capacité doit être gardée, et aucune conclusion avant une génération complète (`refusal` et `eval` contre l'original, plus un jeu de sécurité). Lancez le harnais dans le dossier projet : le serveur journalise chaque appel dans `chat/mcp_runs.jsonl` et `record_finding` remplit le journal des preuves, donc le Studio rouvre le projet avec ses résultats et ses badges « Heuristique » ou « Mesuré ».
+
+Installez le Skill et l'entrée du serveur depuis Réglages > Harnais externes, un clic chacun : le Skill va dans `~/.claude/skills`, `~/.codex/skills` ou `~/.agents/skills` (son état est le SHA-256 de chaque fichier comparé à la copie livrée avec l'application), et l'entrée est copiée, ou fusionnée dans `~/.claude.json` avec tous les autres serveurs gardés et une copie `.bak` du fichier d'abord. Depuis un terminal :
+
+```powershell
+# le Skill pour Claude Code (codex ou agents pour les autres dossiers)
+surgeon-gui --install-skill claude
+# l'entrée du serveur, avec le chemin absolu de surgeon
+surgeon-gui --mcp-config
+```
+
+L'entrée est `{"mcpServers": {"weight-surgeon": {"command": "<chemin absolu de surgeon>", "args": ["mcp"]}}}`. Sans `--allow-dir`, le serveur sert le dossier où le harnais est lancé ; ajoutez `--allow-read` et le dossier du modèle à ses `args` pour lire un modèle d'origine hors du projet. Le dossier a besoin de son `project.surgeon.json`, écrit par le Studio ou le manifeste d'une ligne que le Skill donne à l'agent ; sinon rien n'est journalisé.
 
 <a id="faq"></a>
 ## 5. FAQ, sécurité et dépannage

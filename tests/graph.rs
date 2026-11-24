@@ -782,7 +782,7 @@ fn schema_kind_graph_is_the_report_schema() {
     assert_eq!(code, 0);
     let tools: Value = serde_json::from_str(&out).unwrap();
     let list = tools.as_array().unwrap();
-    assert_eq!(list.len(), 16);
+    assert_eq!(list.len(), 23);
     let graph = list.iter().find(|t| t["name"] == "surgeon_graph").unwrap();
     assert_eq!(graph["inputSchema"]["required"], json!(["model"]));
     assert!(graph["inputSchema"]["properties"]["out_dir"].is_object());
@@ -1090,9 +1090,11 @@ fn baseline_diff_is_zero_on_twins_and_finds_the_scaled_matrix() {
         .unwrap();
     assert_eq!(node["norm_delta"].as_f64().unwrap(), after / 2.0);
     assert!(node["effective_rank_delta"].as_f64().unwrap().abs() < 1e-9);
+    assert!((node["weight_diff"].as_f64().unwrap() - after / 2.0).abs() < 1e-9);
     for other in diff["nodes"].as_array().unwrap() {
         if other["id"] != "L2.mlp_out" {
             assert_eq!(other["relative_change"], 0.0, "{other}");
+            assert_eq!(other["weight_diff"], 0.0, "{other}");
         }
     }
     let top = &diff["top_changed_layers"][0];
@@ -1124,7 +1126,27 @@ fn baseline_diff_is_zero_on_twins_and_finds_the_scaled_matrix() {
     assert_eq!(code, 0, "{env}");
     let again = read_json(&from_json.join("graph.json"))["baseline_diff"].clone();
     assert_eq!(again["source"], "graph_json");
-    assert_eq!(again["nodes"], diff["nodes"]);
+    let without_weights = |nodes: &Value| -> Vec<Value> {
+        nodes
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| {
+                let mut node = node.clone();
+                node["weight_diff"] = Value::Null;
+                node
+            })
+            .collect()
+    };
+    assert!(again["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|node| node["weight_diff"].is_null()));
+    assert_eq!(
+        without_weights(&again["nodes"]),
+        without_weights(&diff["nodes"])
+    );
     assert_eq!(again["edges"], diff["edges"]);
     assert_eq!(again["top_changed_layers"], diff["top_changed_layers"]);
 

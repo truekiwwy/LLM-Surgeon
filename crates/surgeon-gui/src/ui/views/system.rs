@@ -1,6 +1,7 @@
 //! The settings dialog, the one place where the environment is configured, sections on the
 //! left: general (language, local only, projects folder, the wizard to replay), the AI
-//! providers (keys in the vault, models, prices, CLI runtimes), the engine (machine,
+//! providers (keys in the vault, models, prices, CLI runtimes), the external harnesses (the
+//! `weight-surgeon` skill and the MCP configuration of `surgeon mcp`), the engine (machine,
 //! dependencies with their repair, inference backend), the updates, and the technical log
 //! with the diagnostics report (no personal path, no secret).
 
@@ -16,7 +17,9 @@ use crate::agent::detect::{Preset, Reason};
 use crate::app::{Section, SurgeonApp};
 use crate::desktop::UpdateState;
 use crate::diag::{actions_needed, Fix, Group, Row, Severity, Status, Uses};
+use crate::integration::{self, Harness, SkillState};
 use crate::settings::Lang;
+use weight_surgeon::doctor::Level;
 
 /// The column of the sections.
 const NAV: f32 = 232.0;
@@ -27,6 +30,7 @@ fn section_label(section: Section) -> &'static str {
     match section {
         Section::General => t("settings.section.general"),
         Section::Providers => t("settings.section.providers"),
+        Section::Harnesses => t("settings.section.harnesses"),
         Section::Engine => t("settings.section.engine"),
         Section::Updates => t("settings.section.updates"),
         Section::Journal => t("settings.section.journal"),
@@ -37,6 +41,7 @@ fn section_icon(section: Section) -> Icon {
     match section {
         Section::General => Icon::Sliders,
         Section::Providers => Icon::Sparkle,
+        Section::Harnesses => Icon::Cube,
         Section::Engine => Icon::Chip,
         Section::Updates => Icon::Download,
         Section::Journal => Icon::List,
@@ -83,6 +88,7 @@ pub fn dialog(ctx: &egui::Context, app: &mut SurgeonApp) {
                         icons::paint(ui.painter(), glyph, section_icon(s), ink);
                         c::line(ui, label);
                     });
+                    c::record(ui.ctx(), label, row.rect);
                     if row.clicked() {
                         app.settings = Some(s);
                     }
@@ -91,17 +97,15 @@ pub fn dialog(ctx: &egui::Context, app: &mut SurgeonApp) {
             let shut = Rect::from_min_size(
                 Pos2::new(
                     body.right() - T.space.s - T.size.control,
-                    body.top() + T.space.s,
+                    body.top() + (T.size.header - T.size.control) / 2.0,
                 ),
                 Vec2::splat(T.size.control),
             );
             close = c::region(ui, shut, "settings-close", |ui| {
                 c::icon_button(ui, Icon::Close, t("settings.close")).clicked()
             });
-            let right = Rect::from_min_max(
-                Pos2::new(body.right() - T.size.right, body.top() + T.size.header),
-                body.max,
-            );
+            let right =
+                Rect::from_min_max(Pos2::new(body.right() - T.size.right, body.top()), body.max);
             let center = Rect::from_min_max(body.min, Pos2::new(right.left(), body.bottom()));
             let regions = Regions {
                 titlebar: Rect::NOTHING,
@@ -112,7 +116,7 @@ pub fn dialog(ctx: &egui::Context, app: &mut SurgeonApp) {
             };
             if matches!(
                 section,
-                Section::Providers | Section::Engine | Section::Journal
+                Section::Providers | Section::Harnesses | Section::Engine | Section::Journal
             ) {
                 c::vline(
                     ui.painter(),
@@ -127,6 +131,7 @@ pub fn dialog(ctx: &egui::Context, app: &mut SurgeonApp) {
                     .title(t("settings.section.general"))
                     .show(ui, body, |ui| general(ui, app)),
                 Section::Providers => providers(ui, app, &regions),
+                Section::Harnesses => harnesses(ui, app, &regions),
                 Section::Engine => machine(ui, app, &regions),
                 Section::Updates => c::Panel::new("updates")
                     .bare()
@@ -198,17 +203,11 @@ fn general(ui: &mut Ui, app: &mut SurgeonApp) {
             let folder = app.studio.workspace.display().to_string();
             let ctx = ui.ctx().clone();
             setting(ui, t("settings.workspace"), &folder, |ui| {
-                let free = !app.workspace_picker.busy();
-                let why = t("project.source.picking");
-                if cfg!(windows)
-                    && c::button_if(
-                        ui,
-                        free,
-                        t("settings.workspace.change"),
-                        ButtonKind::Secondary,
-                        why,
-                    )
-                    .clicked()
+                if app.workspace_picker.busy() {
+                    c::busy(ui, t("project.source.picking"));
+                } else if cfg!(windows)
+                    && c::button(ui, t("settings.workspace.change"), ButtonKind::Secondary)
+                        .clicked()
                 {
                     app.pick_workspace(&ctx, t("wiz.workspace.hint"));
                 }
@@ -235,7 +234,11 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
             regions.right,
             app,
             |ui, app| {
+                ui.add_space(T.size.control + T.space.s);
                 let probing = app.desktop.probing();
+                if probing {
+                    c::spinner(ui);
+                }
                 let label = if probing {
                     t("diag.probing")
                 } else {
@@ -244,6 +247,7 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 if c::button_if(ui, !probing, label, ButtonKind::Ghost, t("diag.probing")).clicked()
                 {
                     app.desktop.refresh_system(&ctx);
+                    app.refresh_doctor(&ctx, false);
                 }
             },
             |ui, app| {
@@ -269,6 +273,7 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 .id_salt("deps")
                 .auto_shrink(false)
                 .show(ui, |ui| {
+                    health(ui, app);
                     for group in [Group::Essential, Group::Acceleration, Group::Samples] {
                         c::section(ui, group_label(group));
                         for row in rows.iter().filter(|r| r.group == group) {
@@ -282,6 +287,94 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     if let Some((what, force)) = fix {
         app.desktop.open_fix(what, force);
     }
+}
+
+/// The engine's machine check (`surgeon doctor`, run the first time the section shows): one
+/// line per check with the engine's own words, then what can be done from here: purge the
+/// stale reference cache, start or restart a hipfire daemon that is down or lost its GPU.
+fn health(ui: &mut Ui, app: &mut SurgeonApp) {
+    let ctx = ui.ctx().clone();
+    c::section(ui, t("doctor.title"));
+    let checking = app.desktop.doctoring();
+    if app.desktop.doctor.is_none() && !checking {
+        app.refresh_doctor(&ctx, false);
+    }
+    let Some(report) = app.desktop.doctor.clone() else {
+        c::status(ui, State::Active, t("doctor.running"));
+        ui.add_space(T.space.m);
+        return;
+    };
+    match report.ready {
+        true => c::status(ui, State::Ok, t("doctor.ready")),
+        false => c::status(ui, State::Error, t("doctor.not_ready")),
+    };
+    ui.add_space(T.space.xs);
+    for check in &report.checks {
+        let state = match check.level {
+            Level::Ok => State::Ok,
+            Level::Warn => State::Warn,
+            Level::Fail => State::Error,
+        };
+        let name = match check.name {
+            "memory" => t("doctor.memory"),
+            "cpu" => t("doctor.cpu"),
+            "cache" => t("doctor.cache"),
+            _ => t("doctor.hipfire"),
+        };
+        c::status(ui, state, name);
+        c::secondary(ui, check.message.as_str());
+        ui.add_space(T.space.xs);
+    }
+    let stale = report.cache.corrupt + report.cache.obsolete;
+    let hipfire = report.hipfire.as_ref();
+    let down = hipfire.is_some_and(|h| !h.up);
+    let frozen = hipfire
+        .and_then(|h| h.gpu_memory.as_ref())
+        .is_some_and(|g| g.total_mb == 0);
+    let busy = app.desktop.setup.hipfire_busy();
+    ui.add_space(T.space.s);
+    ui.horizontal_wrapped(|ui| {
+        let why = t("doctor.running");
+        if stale > 0
+            && c::button_if(
+                ui,
+                !checking,
+                &tf("doctor.purge", &[("n", &stale)]),
+                ButtonKind::Secondary,
+                why,
+            )
+            .clicked()
+        {
+            app.refresh_doctor(&ctx, true);
+        }
+        if down || frozen {
+            let label = match down {
+                true => t("doctor.hipfire.start"),
+                false => t("doctor.hipfire.restart"),
+            };
+            if c::button_if(
+                ui,
+                !busy,
+                label,
+                ButtonKind::Secondary,
+                t("doctor.hipfire.busy"),
+            )
+            .clicked()
+            {
+                app.restart_hipfire(&ctx);
+            }
+        }
+    });
+    if busy {
+        c::status(ui, State::Active, t("doctor.hipfire.busy"));
+    }
+    if let Some(Err(e)) = &app.desktop.setup.hipfire {
+        c::message(ui, e, true);
+    }
+    if report.cache.removed > 0 {
+        c::meta(ui, tf("doctor.purged", &[("n", &report.cache.removed)]));
+    }
+    c::separator(ui);
 }
 
 /// The machine in key / value rows: OS, GPUs, Vulkan, memory, disk, notes.
@@ -484,6 +577,7 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 .auto_shrink(false)
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
+                    ui.style_mut().interaction.selectable_labels = true;
                     for line in lines.iter().map(|l| clock(l)) {
                         let state = match () {
                             _ if line.contains("WARN") => Some(State::Warn),
@@ -512,6 +606,105 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 c::meta(ui, tf("report.copied", &[("n", &text.lines().count())]));
             }
         });
+}
+
+// ------------------------------------------------------------------ external harnesses
+
+/// The program the MCP configuration starts, looked for once per session.
+fn surgeon_command() -> &'static std::path::Path {
+    static COMMAND: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    COMMAND.get_or_init(integration::surgeon_command)
+}
+
+/// The skill of each harness in the center, the MCP configuration on the right. A click
+/// writes; the states are read from disk on every frame.
+fn harnesses(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
+    let ctx = ui.ctx().clone();
+    let home = crate::paths::home_dir();
+    let mut note = None;
+    c::Panel::new("skill")
+        .bare()
+        .title(t("panel.skill"))
+        .show(ui, regions.center, |ui| {
+            c::secondary(ui, t("skill.explain"));
+            ui.add_space(T.space.m);
+            let Some(home) = &home else {
+                c::message(ui, t("skill.no_home"), true);
+                return;
+            };
+            for harness in Harness::ALL {
+                let dir = harness.skill_dir(home);
+                let (state, word, action) = match integration::skill_state(&dir) {
+                    SkillState::UpToDate => (State::Ok, t("skill.installed"), None),
+                    SkillState::Outdated => {
+                        (State::Warn, t("skill.outdated"), Some(t("skill.update")))
+                    }
+                    SkillState::Missing => {
+                        (State::Idle, t("skill.missing"), Some(t("skill.install")))
+                    }
+                };
+                ui.horizontal(|ui| {
+                    c::status(ui, state, harness.name());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let clicked = action.is_some_and(|text| {
+                            c::button(ui, text, ButtonKind::Secondary).clicked()
+                        });
+                        if clicked {
+                            note = Some(match integration::install_skill(&dir) {
+                                Ok(()) => (tf("skill.done", &[("path", &dir.display())]), false),
+                                Err(e) => (e, true),
+                            });
+                        }
+                        c::meta(ui, word);
+                    });
+                });
+                c::mono_wrapped(ui, dir.display().to_string(), T.color.text_secondary);
+                ui.add_space(T.space.s);
+            }
+        });
+    c::Panel::new("mcp")
+        .bare()
+        .title(t("panel.mcp"))
+        .show(ui, regions.right, |ui| {
+            c::secondary(ui, t("mcp.explain"));
+            ui.add_space(T.space.s);
+            c::meta(ui, t("mcp.command"));
+            c::mono_wrapped(ui, surgeon_command().display().to_string(), T.color.text);
+            ui.add_space(T.space.s);
+            let snippet = integration::mcp_snippet(surgeon_command());
+            let text = serde_json::to_string_pretty(&snippet).unwrap_or_default();
+            c::mono_wrapped(ui, text.as_str(), T.color.text_secondary);
+            ui.add_space(T.space.m);
+            if c::button_wide(ui, t("mcp.copy"), ButtonKind::Primary).clicked() {
+                ctx.copy_text(text.clone());
+                note = Some((t("mcp.copied").into(), false));
+            }
+            if let Some(home) = &home {
+                let file = integration::claude_config(home);
+                if c::button_wide(ui, t("mcp.add_claude"), ButtonKind::Secondary).clicked() {
+                    note = Some(
+                        match integration::merge_mcp_config(&file, surgeon_command()) {
+                            Ok(Some(bak)) => (
+                                tf(
+                                    "mcp.added",
+                                    &[("path", &file.display()), ("backup", &bak.display())],
+                                ),
+                                false,
+                            ),
+                            Ok(None) => (tf("mcp.created", &[("path", &file.display())]), false),
+                            Err(e) => (e, true),
+                        },
+                    );
+                }
+            }
+            if let Some((text, error)) = &app.harness_note {
+                ui.add_space(T.space.s);
+                c::message(ui, text, *error);
+            }
+        });
+    if note.is_some() {
+        app.harness_note = note;
+    }
 }
 
 // ------------------------------------------------------------------ AI providers
@@ -553,15 +746,9 @@ fn providers(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
             regions.center,
             app,
             |ui, app| {
-                let scanning = app.agents.scanning();
-                let label = if scanning {
-                    t("scan.running")
-                } else {
-                    t("scan.again")
-                };
-                if c::button_if(ui, !scanning, label, ButtonKind::Ghost, t("scan.running"))
-                    .clicked()
-                {
+                if app.agents.scanning() {
+                    c::busy(ui, t("scan.running"));
+                } else if c::button(ui, t("scan.again"), ButtonKind::Ghost).clicked() {
                     app.agents.rescan();
                 }
             },
@@ -899,15 +1086,12 @@ pub(crate) fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
             false => (State::Idle, t("prov.to_test")),
         };
         c::status(ui, state, word);
-        let checking = hub.checking_cli(&id);
-        if c::button_if(
+        if hub.checking_cli(&id) {
+            c::busy(ui, t("conn.testing"));
+        } else if c::button_if(
             ui,
-            !checking && !local_only,
-            if checking {
-                t("conn.testing")
-            } else {
-                t("prov.test")
-            },
+            !local_only,
+            t("prov.test"),
             ButtonKind::Secondary,
             t("prov.test.why"),
         )
@@ -919,12 +1103,10 @@ pub(crate) fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
         if let Some((_, command)) = hub.login.clone().filter(|(k, _)| *k == id) {
             ui.add_space(T.space.s);
             c::secondary(ui, t("prov.login"));
-            ui.horizontal(|ui| {
-                c::mono(ui, command);
-                if c::button(ui, t("prov.copy"), ButtonKind::Ghost).clicked() {
-                    ctx.copy_text(command.to_owned());
-                }
-            });
+            c::mono_wrapped(ui, command, T.color.text);
+            if c::button(ui, t("prov.copy"), ButtonKind::Ghost).clicked() {
+                ctx.copy_text(command.to_owned());
+            }
         }
     } else {
         if !conn.is_local() {
@@ -942,15 +1124,12 @@ pub(crate) fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
             }
             c::field_secret(ui, &mut hub.key_input, t("conn.key.hint"), width);
             ui.add_space(T.space.xs);
-            let trying = hub.trying_key(&id);
-            if c::button_if(
+            if hub.trying_key(&id) {
+                c::busy(ui, t("conn.testing"));
+            } else if c::button_if(
                 ui,
-                !trying && !hub.key_input.trim().is_empty(),
-                if trying {
-                    t("conn.testing")
-                } else {
-                    t("prov.key.try")
-                },
+                !hub.key_input.trim().is_empty(),
+                t("prov.key.try"),
                 ButtonKind::Secondary,
                 t("prov.key.try.why"),
             )
@@ -960,20 +1139,9 @@ pub(crate) fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
             }
         }
         c::section(ui, t("prov.models.title"));
-        let testing = hub.testing(&id);
-        if c::button_if(
-            ui,
-            !testing,
-            if testing {
-                t("conn.testing")
-            } else {
-                t("prov.test")
-            },
-            ButtonKind::Secondary,
-            t("conn.testing"),
-        )
-        .clicked()
-        {
+        if hub.testing(&id) {
+            c::busy(ui, t("conn.testing"));
+        } else if c::button(ui, t("prov.test"), ButtonKind::Secondary).clicked() {
             hub.test_models(&conn);
         }
         if !conn.models.is_empty() {
@@ -1028,6 +1196,60 @@ mod tests {
         assert_eq!(super::short_version("codex-cli 0.166.0"), "0.166.0");
         assert_eq!(super::short_version("opencode v2.2.7"), "v2.2.7");
         assert_eq!(super::short_version("weird"), "weird");
+    }
+
+    #[test]
+    fn a_click_on_a_section_name_opens_it_without_selecting_text() {
+        use super::*;
+        use eframe::egui::{text_selection::LabelSelectionState, Event, PointerButton, RawInput};
+
+        crate::ui::i18n::set_lang(Lang::Fr);
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = crate::ui::wizard::tests::app(dir.path());
+        crate::ui::theme::apply(&ctx);
+        crate::ui::fonts::install(&ctx);
+        app.settings = Some(Section::General);
+        let frame = |events: Vec<Event>, app: &mut SurgeonApp| {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                c::begin_dump(ui.ctx(), true);
+                super::dialog(ui.ctx(), app);
+            });
+            output.textures_delta.clear();
+            c::take_dump(&ctx)
+        };
+        frame(vec![], &mut app);
+        let dump = frame(vec![], &mut app);
+        let row = dump
+            .iter()
+            .find(|(name, _)| name == "Moteur et machine")
+            .map(|(_, rect)| *rect)
+            .expect("the engine section is listed");
+        // On the word itself, past the icon column.
+        let at = Pos2::new(
+            row.left() + T.space.s + T.size.icon + 2.0 * T.space.s,
+            row.center().y,
+        );
+        let press = |pressed| Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![Event::PointerMoved(at)], &mut app);
+        frame(vec![press(true)], &mut app);
+        frame(vec![press(false)], &mut app);
+        frame(vec![], &mut app);
+        assert_eq!(app.settings, Some(Section::Engine));
+        let selected = ctx
+            .with_plugin::<LabelSelectionState, _>(|s| s.has_selection())
+            .unwrap_or(false);
+        assert!(!selected, "the label text was selected instead");
     }
 
     #[test]

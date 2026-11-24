@@ -23,6 +23,7 @@ use crate::bench::logits_metrics::compare;
 use crate::bench::markers::Markers;
 use crate::bench::native::NativeGenerator;
 use crate::bench::prompt::Template;
+use crate::bench::ref_cache::{self, RefCache};
 use crate::bench::refusal::RefusalRequest;
 use crate::bench::score::{Backend, EvalRequest};
 use crate::bench::{self, BenchError};
@@ -37,11 +38,26 @@ pub enum Outcomes {
     Drift(Vec<Option<f64>>),
 }
 
+/// What a checkpoint measured, besides its set: a resume reuses it only when all of it is
+/// what the job would measure now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fingerprint {
+    /// `dev` or `test`: the phases never share a measurement.
+    pub split: String,
+    /// `base:<model SHA-256>`, or the SHA-256 of the candidate's patch.
+    pub subject: String,
+    /// Tokens generated per answer (`max_new_tokens`) or read per prompt (`max_tokens`).
+    pub budget: u64,
+}
+
 /// A checkpoint: what a model did on a pillar's set, item by item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Measurement {
     pub pillar: String,
     pub dataset_sha256: String,
+    /// Absent from older checkpoints, which are measured again.
+    #[serde(default)]
+    pub fingerprint: Option<Fingerprint>,
     pub outcomes: Outcomes,
     /// Item details (answers, per-prompt drifts): Dev checkpoints keep them, Test ones live
     /// in `private/` only.
@@ -71,12 +87,14 @@ pub fn count_items(kind: PillarKind, dataset: &Path, limit: Option<u32>) -> Resu
 }
 
 fn native(model: &Path, deps: &AppDeps) -> bench::Result<Box<dyn TextGenerator>> {
-    let generator = NativeGenerator::load(
+    let mut generator = NativeGenerator::load(
         model,
         DTypeChoice::Auto,
         deps.probe.as_ref(),
         Arc::clone(&deps.interrupted),
     )?;
+    // Batched decoding gives the tokens of the sequential one, several times faster.
+    generator.auto_batching(deps.probe.as_ref(), 1, None);
     Ok(Box::new(generator))
 }
 
@@ -115,16 +133,23 @@ pub(super) fn options(backend: Option<&BackendConfig>) -> GenOptions {
         batch_size: cfg.batch_size.unwrap_or(1),
         gpu_layers: cfg.gpu_layers,
         gguf_dtype: cfg.gguf_dtype.unwrap_or_default(),
+        batch_auto: cfg.batch_size.is_none(),
         ..GenOptions::default()
     }
 }
 
 /// A binary pillar (safety, unblocking, gsm8k) of the model on the dataset: success per item.
+/// `generation` is [`options`] of `backend` with the run's `--allow-*` choices. With `cache`
+/// (the base model on a Dev set), the answers come from the reference cache of `bench`, under
+/// the key `bench refusal` and `bench eval` give the same inputs.
+#[allow(clippy::too_many_arguments)]
 pub fn binary(
     pillar: &PillarConfig,
     dataset: &Path,
     model: &Path,
     backend: Option<&BackendConfig>,
+    generation: GenOptions,
+    cache: Option<&RefCache>,
     deps: &AppDeps,
     cancel: &AtomicBool,
     on_item: &mut dyn FnMut(usize, usize),
@@ -139,21 +164,38 @@ pub fn binary(
                 baseline_model: None,
                 max_new_tokens: pillar
                     .max_new_tokens
-                    .unwrap_or(bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
-                chat_template: pillar.chat_template.unwrap_or(ChatTemplate::Chatml),
+                    .unwrap_or(bench::PIPELINE_REFUSAL_MAX_NEW_TOKENS),
+                chat_template: pillar.chat_template.unwrap_or_default(),
                 markers: Markers::default(),
-                generation: options(backend),
+                generation,
                 backend: backend
                     .and_then(|b| b.backend)
                     .unwrap_or(Backend::Native)
                     .label()
                     .into(),
+                // The baseline goes through `cache` below, as an evaluated model.
+                ref_cache: None,
             };
             let mut make = |m: &Path| generator(m, backend, &req.generation, deps);
-            let run = bench::refusal::run(&req, &mut make, cancel, on_item).map_err(bench_error)?;
+            let mut measure = || -> bench::Result<(Vec<bench::report::RefusalItem>, u64)> {
+                let started = std::time::Instant::now();
+                let run = bench::refusal::run(&req, &mut make, cancel, on_item)?;
+                Ok((run.report.items, started.elapsed().as_millis() as u64))
+            };
+            let items = match cache {
+                None => measure().map_err(bench_error)?.0,
+                Some(cache) => {
+                    let sha = ref_cache::model_sha256(model).map_err(bench_error)?;
+                    let inputs = bench::refusal::cache_inputs(&req, model);
+                    let key = ref_cache::key("refusal", &sha, inputs);
+                    ref_cache::cached(Some(cache), &key, "refusal", model, measure)
+                        .map_err(bench_error)?
+                        .items
+                }
+            };
             let keep = pillar.kind == PillarKind::Safety;
-            let success = run.report.items.iter().map(|i| i.refused == keep).collect();
-            Ok((success, json!(run.report.items)))
+            let success = items.iter().map(|i| i.refused == keep).collect();
+            Ok((success, json!(items)))
         }
         PillarKind::Gsm8k => {
             let template = match &pillar.prompt_template {
@@ -170,17 +212,38 @@ pub fn binary(
                     .max_new_tokens
                     .unwrap_or(bench::DEFAULT_MAX_NEW_TOKENS),
                 template,
+                chat_template: pillar.chat_template.unwrap_or_default(),
                 format: pillar.format.unwrap_or_default(),
                 llama_cpp_dir: backend.and_then(|b| b.llama_cpp_dir.clone()),
                 timeout: None,
                 min_accuracy: None,
-                generation: options(backend),
+                generation,
+                ref_cache: None,
             };
             let mut make = |m: &Path| generator(m, backend, &req.generation, deps);
-            let run = bench::score::run(&req, deps.runner.as_ref(), &mut make, cancel, on_item)
-                .map_err(bench_error)?;
-            let success = run.report.items.iter().map(|i| i.correct).collect();
-            Ok((success, json!(run.report.items)))
+            let mut measure = || -> bench::Result<(Vec<bench::report::ItemResult>, u64)> {
+                let started = std::time::Instant::now();
+                let run =
+                    bench::score::run(&req, deps.runner.as_ref(), &mut make, cancel, on_item)?;
+                Ok((run.report.items, started.elapsed().as_millis() as u64))
+            };
+            let items = match cache {
+                None => measure().map_err(bench_error)?.0,
+                Some(cache) => {
+                    let sha = ref_cache::model_sha256(model).map_err(bench_error)?;
+                    let dataset_sha = match bench::builtin::dataset(dataset) {
+                        Some(set) => bench::sha256_hex(set.unwrap_or_default().as_bytes()),
+                        None => bench::sha256_file(dataset).map_err(bench_error)?,
+                    };
+                    let inputs = bench::score::cache_inputs(&req, model, &dataset_sha);
+                    let key = ref_cache::key("eval", &sha, inputs);
+                    ref_cache::cached(Some(cache), &key, "eval", model, measure)
+                        .map_err(bench_error)?
+                        .items
+                }
+            };
+            let success = items.iter().map(|i| i.correct).collect();
+            Ok((success, json!(items)))
         }
         PillarKind::Kl | PillarKind::Logits => Err(PipelineError::Bench(format!(
             "pilier {} : pas une mesure binaire",
@@ -204,6 +267,7 @@ pub fn dump(
     let req = DumpRequest {
         model: model.to_path_buf(),
         prompts,
+        chat_template: ChatTemplate::Auto,
         out: out.to_path_buf(),
         dtype: DTypeChoice::Auto,
         out_dtype: OutDtype::F32,

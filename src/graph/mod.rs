@@ -13,7 +13,8 @@
 //! All spectral quantities come from the shared randomized SVD (see
 //! [`crate::surgery::rsvd`]); the range certificate gives certified intervals for `sigma1`,
 //! the stable rank `D_spec` and the energy-entropy effective rank even when the tail is not
-//! captured. `--full-spectrum-max-dim` enables the exact L1 effective rank on small matrices.
+//! captured. The exact spectrum (and the L1 effective rank) is only computed when the smaller
+//! dimension is within [`metrics::EXACT_MARGIN`] of `rank + oversample`.
 
 pub mod cache;
 pub mod diff;
@@ -32,6 +33,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Args, ValueEnum};
+use rayon::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -51,6 +53,10 @@ use self::output::{
 };
 
 // ------------------------------------------------------------------ CLI
+
+pub const DEFAULT_RANK: usize = 32;
+pub const DEFAULT_OVERSAMPLE: usize = 8;
+pub const DEFAULT_POWER_ITERS: usize = 2;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
@@ -268,18 +274,18 @@ pub struct GraphArgs {
     #[arg(long, value_enum, value_delimiter = ',')]
     pub matrices: Vec<MatrixArg>,
     /// Rang cible du SVD randomisé.
-    #[arg(long, default_value_t = 32)]
+    #[arg(long, default_value_t = DEFAULT_RANK)]
     pub rank: usize,
     /// Colonnes supplémentaires du sous-espace aléatoire.
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = DEFAULT_OVERSAMPLE)]
     pub oversample: usize,
     /// Itérations de puissance (stabilisent le sous-espace).
-    #[arg(long = "power-iters", default_value_t = 3)]
+    #[arg(long = "power-iters", default_value_t = DEFAULT_POWER_ITERS)]
     pub power_iters: usize,
     /// Graine du générateur du SVD ; même graine, mêmes nombres.
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
-    /// Dimension maximale pour le spectre complet exact (0 : désactivé).
+    /// Obsolète, sans effet : le spectre exact n'est calculé que si min(m, n) <= rang + oversample + 4.
     #[arg(long = "full-spectrum-max-dim", default_value_t = 2048)]
     pub full_spectrum_max_dim: usize,
     /// Arêtes : adjacent, all, ou topk:N.
@@ -516,7 +522,18 @@ pub fn skeleton(model: &Path) -> Result<GraphReport> {
     args.rank = 0;
     let idle = AtomicBool::new(false);
     let mut sink = crate::app::NullSink;
-    build_report(model, &args, &settings, &idle, &mut sink, &idle, true)
+    let data = open_model(model, &args, &idle, &mut sink, &idle)?;
+    let built = build_report(
+        &data,
+        &args,
+        &settings,
+        &idle,
+        &mut sink,
+        &idle,
+        true,
+        Peer::None,
+    )?;
+    Ok(built.report)
 }
 
 /// Core with an optional wall-clock cap (the MCP `max_seconds` argument).
@@ -533,34 +550,51 @@ pub fn core_graph_with(
     let cancel = Arc::new(AtomicBool::new(false));
     let watchdog = Watchdog::start(max_seconds, Arc::clone(&cancel));
     let settings = args.check()?;
+    let model = open_model(&args.model, args, &deps.interrupted, sink, &cancel)?;
     if args.estimate {
-        let model = open_model(&args.model, args, &deps.interrupted, sink, &cancel)?;
         return estimate(args, &settings, &model);
     }
-    let mut report = build_report(
-        &args.model,
+    let baseline_model = match &args.baseline {
+        Some(path) if !diff::is_report_file(path) => {
+            Some(open_model(path, args, &deps.interrupted, sink, &cancel)?)
+        }
+        _ => None,
+    };
+    let peer = match &baseline_model {
+        Some(baseline) => Peer::Compare(baseline),
+        None => Peer::None,
+    };
+    let built = build_report(
+        &model,
         args,
         &settings,
         &deps.interrupted,
         sink,
         &cancel,
         false,
+        peer,
     )?;
+    let mut report = built.report;
     let baseline = match &args.baseline {
         Some(path) => {
-            let baseline = match diff::is_report_file(path) {
-                true => diff::read_report(path)?,
-                false => build_report(
-                    path,
-                    args,
-                    &settings,
-                    &deps.interrupted,
-                    sink,
-                    &cancel,
-                    false,
-                )?,
+            let baseline = match &baseline_model {
+                Some(baseline) => {
+                    build_report(
+                        baseline,
+                        args,
+                        &settings,
+                        &deps.interrupted,
+                        sink,
+                        &cancel,
+                        false,
+                        Peer::Reuse(&built.identical),
+                    )?
+                    .report
+                }
+                None => diff::read_report(path)?,
             };
-            report.baseline_diff = Some(diff::compare(&baseline, &report, path));
+            report.baseline_diff =
+                Some(diff::compare(&baseline, &report, path, &built.weight_diffs));
             Some(baseline)
         }
         None => None,
@@ -601,19 +635,36 @@ fn open_model(
     Ok(model)
 }
 
+/// What the nodes of a report are paired with.
+#[derive(Clone, Copy)]
+enum Peer<'a> {
+    None,
+    /// The `--baseline` model: weight differences, and analyses the baseline run can reuse.
+    Compare(&'a ModelData),
+    /// Analyses of the nodes whose weights are byte-identical in the model, by node id.
+    Reuse(&'a BTreeMap<String, metrics::NodeAnalysis>),
+}
+
+struct Built {
+    report: GraphReport,
+    /// `||W - W_baseline||_F` by node id.
+    weight_diffs: BTreeMap<String, f64>,
+    identical: BTreeMap<String, metrics::NodeAnalysis>,
+}
+
 /// The complete report of one model with the command's parameters: the target, or the
 /// `--baseline` model. `structure_only`: no SVD (see [`skeleton`]).
 #[allow(clippy::too_many_arguments)]
 fn build_report(
-    model_path: &Path,
+    model: &ModelData,
     args: &GraphArgs,
     settings: &Settings,
     interrupted: &AtomicBool,
     sink: &mut dyn ProgressSink,
     cancel: &AtomicBool,
     structure_only: bool,
-) -> Result<GraphReport> {
-    let model = open_model(model_path, args, interrupted, sink, cancel)?;
+    peer: Peer<'_>,
+) -> Result<Built> {
     if model.tensors.is_empty() {
         return Err(GraphError::Model("aucune matrice du flux résiduel".into()));
     }
@@ -665,7 +716,7 @@ fn build_report(
     };
 
     sink.event(ProgressEvent::GraphStart {
-        model: model_path.to_path_buf(),
+        model: model.path.clone(),
         matrices: nodes.len(),
         rank: args.rank,
     });
@@ -677,7 +728,6 @@ fn build_report(
             power_iters: args.power_iters,
             seed: args.seed,
         },
-        full_spectrum_max_dim: args.full_spectrum_max_dim,
         kurtosis_threshold: args.kurtosis_threshold,
         vector: vector.as_deref(),
         cancel,
@@ -692,32 +742,114 @@ fn build_report(
                 .map_err(|e| GraphError::Compute(format!("--jobs {threads} : {e}")))?,
         ),
     };
-    let mut computed: Vec<(NodeReport, Basis, Vec<f32>)> = Vec::with_capacity(nodes.len());
-    let mut skipped_full_spectrum = 0usize;
-    for (index, tensor) in nodes.iter().enumerate() {
-        check_cancel(interrupted, cancel)?;
-        sink.event(ProgressEvent::GraphNode {
-            id: node_id(tensor.role, tensor.layer, tensor.expert),
-            done: index,
-            total: nodes.len(),
-        });
-        let key = cache::key_for(&model.sha256, tensor, &options, vector_sha.clone())?;
-        let analysis = match cache.get(&key) {
-            _ if structure_only => metrics::NodeAnalysis::unmeasured(tensor.m(), tensor.n()),
-            Some(cached) => cached.clone(),
-            None => {
-                let analysis = match &pool {
-                    Some(pool) => {
-                        pool.install(|| metrics::analyze(&model, tensor, model.hidden, &options))?
-                    }
-                    None => metrics::analyze(&model, tensor, model.hidden, &options)?,
-                };
-                cache.put(&key, &analysis)?;
-                analysis
-            }
+    let ids: Vec<String> = nodes
+        .iter()
+        .map(|tensor| node_id(tensor.role, tensor.layer, tensor.expert))
+        .collect();
+    let mut pairs = Vec::with_capacity(nodes.len());
+    let mut same = Vec::with_capacity(nodes.len());
+    for tensor in &nodes {
+        let pair = match peer {
+            Peer::Compare(baseline) => baseline
+                .tensors
+                .iter()
+                .find(|t| t.name == tensor.name && t.expert == tensor.expert)
+                .map(|t| (baseline, t)),
+            _ => None,
         };
-        if args.full_spectrum_max_dim > 0 && !analysis.metrics.full_spectrum {
-            skipped_full_spectrum += 1;
+        same.push(match (pair, structure_only) {
+            (Some((baseline, other)), false) => {
+                metrics::same_weights(model, tensor, baseline, other)?
+            }
+            _ => None,
+        });
+        pairs.push(pair);
+    }
+
+    let mut analyses: Vec<Option<metrics::NodeAnalysis>> = vec![None; nodes.len()];
+    let mut keys: Vec<Option<String>> = vec![None; nodes.len()];
+    let mut todo = Vec::new();
+    for (index, tensor) in nodes.iter().enumerate() {
+        if structure_only {
+            analyses[index] = Some(metrics::NodeAnalysis::unmeasured(tensor.m(), tensor.n()));
+            continue;
+        }
+        if let Some(reused) = match peer {
+            Peer::Reuse(identical) => identical.get(&ids[index]),
+            _ => None,
+        } {
+            analyses[index] = Some(reused.clone());
+            continue;
+        }
+        let key = cache::key_for(&model.sha256, tensor, &options, vector_sha.clone())?;
+        match cache.get(&key) {
+            Some(cached) if same[index] != Some(false) => analyses[index] = Some(cached.clone()),
+            _ => todo.push(index),
+        }
+        keys[index] = Some(key);
+    }
+    check_cancel(interrupted, cancel)?;
+
+    let mut weight_diffs = BTreeMap::new();
+    for (index, same) in same.iter().enumerate() {
+        if *same == Some(true) {
+            weight_diffs.insert(ids[index].clone(), 0.0);
+        }
+    }
+    let (nodes_ref, pairs_ref, same_ref, options_ref) = (&nodes, &pairs, &same, &options);
+    let pending = todo.len();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let work = move || {
+        todo.par_iter().try_for_each_with(sender, |sender, &index| {
+            let compare = match same_ref[index] {
+                Some(false) => pairs_ref[index],
+                _ => None,
+            };
+            let (analysis, diff) = metrics::analyze(model, nodes_ref[index], options_ref, compare)?;
+            let _ = sender.send((index, analysis, diff));
+            Result::Ok(())
+        })
+    };
+    let total = nodes.len();
+    let mut done = total - pending;
+    let mut cache_failure = None;
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| match &pool {
+            Some(pool) => pool.install(work),
+            None => work(),
+        });
+        for (index, analysis, diff) in receiver.iter() {
+            done += 1;
+            sink.event(ProgressEvent::GraphNode {
+                id: ids[index].clone(),
+                done,
+                total,
+            });
+            if let (Some(key), None) = (&keys[index], &cache_failure) {
+                cache_failure = cache.put(key, &analysis).err();
+            }
+            if let Some(diff) = diff {
+                weight_diffs.insert(ids[index].clone(), diff);
+            }
+            analyses[index] = Some(analysis);
+        }
+        worker
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })?;
+    if let Some(failure) = cache_failure {
+        return Err(failure);
+    }
+    check_cancel(interrupted, cancel)?;
+
+    let mut identical = BTreeMap::new();
+    let mut computed: Vec<(NodeReport, Basis, Vec<f32>)> = Vec::with_capacity(nodes.len());
+    for (index, tensor) in nodes.iter().enumerate() {
+        let analysis = analyses[index]
+            .take()
+            .ok_or_else(|| GraphError::Compute(format!("{} : nœud non analysé", ids[index])))?;
+        if same[index] == Some(true) {
+            identical.insert(ids[index].clone(), analysis.clone());
         }
         let seq = causal_seq(
             tensor.role,
@@ -806,15 +938,7 @@ fn build_report(
         .count();
     let structural_edges = edges.iter().filter(|e| e.structural).count();
     let total_weight_bytes = unique_weight_bytes(computed.iter().map(|(n, _, _)| n));
-    let mut warnings = model.warnings.clone();
-    if skipped_full_spectrum > 0 {
-        warnings.push(format!(
-            "{skipped_full_spectrum} matrice(s) sans spectre complet : min(m,n) > {} ou min(m,n) > {} ou m·n > {}",
-            args.full_spectrum_max_dim,
-            MAX_N,
-            metrics::FULL_SPECTRUM_PRODUCT_CAP
-        ));
-    }
+    let warnings = model.warnings.clone();
     let mut nodes: Vec<NodeReport> = computed.into_iter().map(|(node, _, _)| node).collect();
     layout::apply(&mut nodes, &edges);
     let report = GraphReport {
@@ -881,7 +1005,11 @@ fn build_report(
         edges,
         baseline_diff: None,
     };
-    Ok(report)
+    Ok(Built {
+        report,
+        weight_diffs,
+        identical,
+    })
 }
 
 fn check_cancel(interrupted: &AtomicBool, cancel: &AtomicBool) -> Result<()> {
@@ -1136,25 +1264,24 @@ fn estimate(args: &GraphArgs, settings: &Settings, model: &ModelData) -> CoreRes
             GraphError::Usage("aucune matrice ne survit à --layers/--matrices".into()).into(),
         );
     }
-    let passes = 4 + 2 * args.power_iters;
+    let svd_passes = 3 + 2 * args.power_iters;
+    let passes = 1 + svd_passes;
+    let svd_flops = |m: usize, n: usize, k: usize| {
+        (m as f64) * (n as f64) * (2.0 * k as f64 * (2.0 + 2.0 * args.power_iters as f64) + 4.0)
+    };
     let mut bytes = 0u64;
     let mut flops = 0.0f64;
     let mut full_spectrum_nodes = 0usize;
     for tensor in &nodes {
         let (m, n) = (tensor.m(), tensor.n());
         let k = (args.rank + args.oversample).min(m).min(n);
-        let full = args.full_spectrum_max_dim > 0
-            && m.min(n) <= args.full_spectrum_max_dim
-            && m.min(n) <= MAX_N
-            && m.saturating_mul(n) <= metrics::FULL_SPECTRUM_PRODUCT_CAP;
-        let node_passes = passes + usize::from(full);
+        let full = m.min(n) <= (args.rank + args.oversample + metrics::EXACT_MARGIN).min(MAX_N);
+        let node_passes = passes + usize::from(full) * svd_passes;
         bytes = bytes.saturating_add(tensor.weight_bytes.saturating_mul(node_passes as u64));
-        flops += (m as f64)
-            * (n as f64)
-            * (2.0 * k as f64 * (2.0 + 2.0 * args.power_iters as f64) + 4.0);
+        flops += svd_flops(m, n, k);
         if full {
             full_spectrum_nodes += 1;
-            flops += (m as f64) * (n as f64) * 2.0;
+            flops += svd_flops(m, n, m.min(n));
         }
     }
     let bench = model::micro_bench_seconds();

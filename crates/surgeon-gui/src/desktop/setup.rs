@@ -79,9 +79,15 @@ impl Setup {
         }
     }
 
-    /// Installs and starts hipfire in WSL2 (`hipfire_setup`), with the user's consent and
-    /// outside local-only mode, one install at a time.
-    pub fn install_hipfire(&mut self, ctx: &egui::Context, consent: bool, local_only: bool) {
+    /// Installs and starts hipfire in WSL2 (`hipfire_setup`) for `gpu` (its name decides the
+    /// workarounds), with the user's consent and outside local-only mode, one install at a time.
+    pub fn install_hipfire(
+        &mut self,
+        ctx: &egui::Context,
+        consent: bool,
+        local_only: bool,
+        gpu: String,
+    ) {
         if !consent || local_only || self.installing() {
             return;
         }
@@ -91,9 +97,31 @@ impl Setup {
             move || wake.request_repaint(),
             move |handle| {
                 i18n::set_lang(lang);
-                crate::hipfire_setup::run(handle)
+                crate::hipfire_setup::run(handle, &gpu)
             },
         ));
+    }
+
+    /// Stops the WSL daemon and starts it again (`hipfire_setup::restart`): nothing is
+    /// downloaded, so no consent; one task at a time, like an install.
+    pub fn restart_hipfire(&mut self, ctx: &egui::Context, gpu: String) {
+        if self.installing() {
+            return;
+        }
+        let (lang, wake) = (i18n::lang(), ctx.clone());
+        self.hipfire = None;
+        self.hipfire_task = Some(Task::spawn(
+            move || wake.request_repaint(),
+            move |handle| {
+                i18n::set_lang(lang);
+                crate::hipfire_setup::restart(handle, &gpu)
+            },
+        ));
+    }
+
+    /// Whether hipfire is being installed or restarted.
+    pub fn hipfire_busy(&self) -> bool {
+        self.hipfire_task.is_some()
     }
 
     /// A download may start only with the consent box ticked, outside local-only mode, with

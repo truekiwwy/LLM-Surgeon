@@ -158,6 +158,9 @@ pub fn validate_patch(
                     );
                 }
             }
+            if op.operation == OperationKind::AddDirection {
+                check_add_direction(op, &mut |field, message| issue(at(field), message));
+            }
         }
         if !(op.alpha.is_finite() && op.alpha.abs() <= MAX_ABS_ALPHA) {
             issue(
@@ -315,6 +318,36 @@ fn check_project_out(op: &Operation, issue: &mut dyn FnMut(&str, String)) {
     }
 }
 
+/// add_direction: the additive dual of project_out with `a = b = v / ‖v‖`, so the same
+/// writers and orientation; a negative alpha would be a partial project_out.
+fn check_add_direction(op: &Operation, issue: &mut dyn FnMut(&str, String)) {
+    if op.alpha < 0.0 {
+        issue(
+            "alpha",
+            format!(
+                "add_direction : alpha est une amplification ≥ 0 (project_out pour retirer), reçu {}",
+                op.alpha
+            ),
+        );
+    }
+    if op
+        .projections
+        .iter()
+        .any(|p| matches!(p, Projection::Gate | Projection::Up))
+    {
+        issue(
+            "projections",
+            "add_direction ne s'applique qu'aux matrices qui écrivent dans le flux résiduel où vit v : down_proj, o_proj et embed_tokens (gate_proj et up_proj le lisent)".into(),
+        );
+    }
+    if op.axis != Axis::Cols {
+        issue(
+            "axis",
+            "axis n'a pas de sens pour add_direction (l'orientation suit la matrice) : retirer le champ".into(),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +476,36 @@ mod tests {
             ));
             assert_eq!(got.len(), 1, "{got:?}");
             assert_eq!(got[0].0, "operations[0].projections");
+        }
+    }
+
+    #[test]
+    fn add_direction_takes_one_vector_on_the_writers_and_a_non_negative_alpha() {
+        let add = |projections: &str, alpha: &str, extra: &str| {
+            patch(&[op("d", extra)
+                .replace(r#"["gate_proj"]"#, projections)
+                .replace("subtract", "add_direction")
+                .replace(r#""alpha":0.5"#, &format!(r#""alpha":{alpha}"#))])
+        };
+        let writers = r#"["down_proj","o_proj","embed_tokens"]"#;
+        let v = validate_patch(&add(writers, "7", ""), Path::new("."), &no_files()).unwrap();
+        let op = &v.operations[0];
+        assert_eq!(op.kind, OperationKind::AddDirection);
+        assert!(op.kind.is_projection());
+        assert_eq!(op.vector_tensor, None);
+        assert_eq!(v.warnings.len(), 1, "|alpha| > 5 warns");
+
+        for (projections, alpha, extra, path) in [
+            (writers, "-0.5", "", "alpha"),
+            (writers, "1", r#","axis":"rows""#, "axis"),
+            (writers, "1", r#","vector_tensor_b":"b""#, "vector_tensor_b"),
+            (writers, "1", r#","rank":1"#, "rank"),
+            (r#"["down_proj","up_proj"]"#, "1", "", "projections"),
+        ] {
+            let p = add(projections, alpha, extra);
+            let got = issues(validate_patch(&p, Path::new("."), &no_files()));
+            assert_eq!(got.len(), 1, "{extra}: {got:?}");
+            assert_eq!(got[0].0, format!("operations[0].{path}"));
         }
     }
 

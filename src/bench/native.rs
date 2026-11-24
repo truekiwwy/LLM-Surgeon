@@ -28,7 +28,17 @@ use crate::hardware::HardwareProbe;
 /// A longer prompt is refused, never silently truncated.
 pub const MAX_PROMPT_TOKENS: usize = 2048;
 /// Context assumed by the RAM check at load time.
-const PLANNED_CONTEXT: usize = MAX_PROMPT_TOKENS + 1024;
+pub const PLANNED_CONTEXT: usize = MAX_PROMPT_TOKENS + 1024;
+
+/// The KV cache of one sequence, K and V of every layer in f32 over the context the load
+/// plans for: what one more sequence of a native batch costs.
+pub fn kv_bytes_per_sequence(cfg: &crate::extract::Qwen2Config) -> u64 {
+    let head_dim = cfg
+        .head_dim
+        .unwrap_or(cfg.hidden_size / cfg.num_attention_heads.max(1));
+    (2 * cfg.num_hidden_layers * cfg.num_key_value_heads * head_dim * 4) as u64
+        * PLANNED_CONTEXT as u64
+}
 
 pub struct NativeGenerator {
     state: Qwen2State,
@@ -89,6 +99,7 @@ impl NativeGenerator {
         probe: &dyn HardwareProbe,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self> {
+        let model_dir = crate::extract::model_folder(model_dir);
         if !model_dir.is_dir() {
             return Err(BenchError::input(
                 model_dir,
@@ -97,6 +108,16 @@ impl NativeGenerator {
             ));
         }
         let state = Qwen2State::load(model_dir, dtype, probe, PLANNED_CONTEXT)?;
+        Self::from_state(model_dir, state, cancel)
+    }
+
+    /// A generator over weights already in memory (autotune's patched candidates); the
+    /// tokenizer and the end-of-sequence ids come from `model_dir`.
+    pub fn from_state(
+        model_dir: &Path,
+        state: Qwen2State,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self> {
         let tokenizer = load_tokenizer(model_dir)?;
         let eos_ids = eos_ids_from_dir(model_dir, &tokenizer)?;
         Ok(Self {
@@ -123,6 +144,79 @@ impl NativeGenerator {
         self.batch_size = batch_size.max(1);
         self.jobs = jobs.max(1);
         self.pool = pool;
+    }
+
+    /// [`set_batching`](Self::set_batching) with [`auto_batching`](super::generation::auto_batching):
+    /// the RAM still free now that the weights are loaded, against the KV cache of one
+    /// sequence (K and V of every layer in f32 over the context the load planned for), and
+    /// the physical cores, unless `pool` (`--threads`) is given. What was chosen, for the log.
+    pub fn auto_batching(
+        &mut self,
+        probe: &dyn HardwareProbe,
+        jobs: usize,
+        pool: Option<Arc<rayon::ThreadPool>>,
+    ) -> String {
+        let per_sequence = kv_bytes_per_sequence(self.state.config());
+        let free = probe.system_ram().map_or(0, |m| m.available_bytes);
+        let cores = sysinfo::System::physical_core_count().ok();
+        let (batch, threads) = super::generation::auto_batching(free, per_sequence, cores);
+        let pool = pool.or_else(|| {
+            let built = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads?)
+                .build();
+            built.ok().map(Arc::new)
+        });
+        let used = pool
+            .as_ref()
+            .map_or_else(rayon::current_num_threads, |p| p.current_num_threads());
+        self.set_batching(batch, jobs, pool);
+        let mib = |b: u64| b as f64 / (1u64 << 20) as f64;
+        format!(
+            "génération native : lots de {batch} séquences au plus, {used} threads (RAM libre \
+             {:.0} Mio, cache KV {:.0} Mio par séquence ; --batch-size et --threads les fixent)",
+            mib(free),
+            mib(per_sequence)
+        )
+    }
+
+    /// The logits of the first answer token after `prompt`: one forward pass over the prompt,
+    /// nothing generated past it.
+    pub fn first_token_logits(&mut self, prompt: &str) -> Result<Vec<f32>> {
+        let request = self
+            .request(prompt, 1)
+            .map_err(|e| BenchError::Generation(e.to_string()))?;
+        let mut logits = Vec::new();
+        self.state.generate_with_logits(
+            &request,
+            &self.cancel,
+            &mut |_| ControlFlow::Break(()),
+            &mut |row| logits = row.to_vec(),
+        )?;
+        Ok(logits)
+    }
+
+    /// The residual stream after `layer` for `prompt`, one row per position; no layer past
+    /// it is computed.
+    pub fn residual(&mut self, prompt: &str, layer: usize) -> Result<Vec<Vec<f32>>> {
+        let request = self
+            .request(prompt, 1)
+            .map_err(|e| BenchError::Generation(e.to_string()))?;
+        Ok(self
+            .state
+            .capture_residual(&request.prompt_ids, layer, None)?)
+    }
+
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
+
+    pub fn teacher_logits(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        Ok(self.state.teacher_logits(ids)?)
+    }
+
+    /// Swaps the weights; the tokenizer, the sampling and the batching stay.
+    pub fn set_state(&mut self, state: Qwen2State) {
+        self.state = state;
     }
 
     fn request(&self, prompt: &str, max_new_tokens: u32) -> eval::Result<GenRequest> {
@@ -152,6 +246,11 @@ impl NativeGenerator {
     /// Notes raised while loading (f32 did not fit, bf16 used).
     pub fn warnings(&self) -> &[String] {
         self.state.warnings()
+    }
+
+    /// The load's decisions for the log (dtype, free RAM).
+    pub fn notes(&self) -> &[String] {
+        self.state.notes()
     }
 }
 

@@ -308,7 +308,10 @@ fn targets_resolve_their_display_form() {
         if cfg!(windows) {
             r"\\.\pipe\surgeon-tui".to_owned()
         } else {
-            format!("{}/surgeon-tui.sock", std::env::temp_dir().display())
+            std::env::temp_dir()
+                .join("surgeon-tui.sock")
+                .display()
+                .to_string()
         }
     );
 }

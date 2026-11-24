@@ -51,6 +51,18 @@ pub struct Cli {
     /// démarrage. Les composants installés et le config.toml du moteur sont conservés.
     #[arg(long)]
     pub reset_settings: bool,
+    /// Retire de la distribution WSL ce que l'installation de hipfire a écrit pour une carte
+    /// hors de la matrice ROCm (la ligne gfx1102 de dids.conf), puis quitte.
+    #[arg(long)]
+    pub hipfire_cleanup: bool,
+    /// Installe ou met à jour le Skill weight-surgeon dans le dossier de skills de ce harnais
+    /// (claude : ~/.claude/skills, codex : ~/.codex/skills, agents : ~/.agents/skills), puis
+    /// quitte.
+    #[arg(long, value_name = "HARNAIS", value_enum)]
+    pub install_skill: Option<crate::integration::Harness>,
+    /// Affiche la configuration MCP qui lance `surgeon mcp` (chemin absolu), puis quitte.
+    #[arg(long)]
+    pub mcp_config: bool,
 }
 
 /// `1440x900` as `[1440, 900]`.
@@ -134,6 +146,14 @@ mod tests {
         .unwrap();
         assert!(cli.demo_data && cli.no_motion);
         assert_eq!((cli.size, cli.scale), ([1920, 1080], 1.5));
+        let cli = Cli::try_parse_from(["surgeon-gui", "--install-skill", "codex"]).unwrap();
+        assert_eq!(cli.install_skill, Some(crate::integration::Harness::Codex));
+        assert!(Cli::try_parse_from(["surgeon-gui", "--install-skill", "vim"]).is_err());
+        assert!(
+            Cli::try_parse_from(["surgeon-gui", "--mcp-config"])
+                .unwrap()
+                .mcp_config
+        );
         assert!(Cli::try_parse_from(["surgeon-gui", "--size", "big"]).is_err());
         assert!(Cli::try_parse_from(["surgeon-gui", "--size", "10x10"]).is_err());
     }

@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use candle_core::{DType, Device, Tensor};
 
@@ -24,11 +24,16 @@ pub struct RawTensor<'a> {
 pub trait TensorSource {
     fn meta(&self, name: &str) -> Option<(engine::DType, Vec<usize>)>;
     fn read(&self, name: &str) -> Result<RawTensor<'_>>;
+    /// The files the tensors are read from, when they can be fingerprinted (the cache key).
+    fn shard_files(&self) -> Option<&[PathBuf]> {
+        None
+    }
 }
 
 /// Every `.safetensors` shard of a model directory (index or listing, as `hardware` sees
 /// it), memory-mapped read-only by the engine: opening reads the headers only.
 pub struct SafetensorsDir {
+    files: Vec<PathBuf>,
     shards: Vec<ReadOnlyModel>,
     owner: HashMap<String, usize>,
 }
@@ -48,7 +53,11 @@ impl SafetensorsDir {
             }
             shards.push(shard);
         }
-        Ok(Self { shards, owner })
+        Ok(Self {
+            files,
+            shards,
+            owner,
+        })
     }
 }
 
@@ -75,6 +84,10 @@ impl TensorSource for SafetensorsDir {
             shape: view.info.shape.clone(),
             bytes: Cow::Borrowed(view.bytes),
         })
+    }
+
+    fn shard_files(&self) -> Option<&[PathBuf]> {
+        Some(&self.files)
     }
 }
 
@@ -184,8 +197,25 @@ pub struct TensorTotals {
 }
 
 /// Reads and converts every required tensor to `dtype`. `on_tensor(done, total)` returning
-/// `Break` cancels the load.
+/// `Break` cancels the load. In the MCP server, CPU tensors of a fingerprinted source come
+/// from the [`weight_cache`](super::weight_cache) while its files are unchanged.
 pub fn load_tensors(
+    src: &dyn TensorSource,
+    required: &[(String, Vec<usize>)],
+    dtype: DType,
+    device: &Device,
+    on_tensor: &mut dyn FnMut(usize, usize) -> ControlFlow<()>,
+) -> Result<HashMap<String, Tensor>> {
+    match (super::weight_cache::global(), src.shard_files()) {
+        (Some(cache), Some(files)) if device.is_cpu() => {
+            cache.load(files, src, required, dtype, on_tensor)
+        }
+        _ => read_tensors(src, required, dtype, device, on_tensor),
+    }
+}
+
+/// [`load_tensors`] straight from the source, without the cache.
+pub(super) fn read_tensors(
     src: &dyn TensorSource,
     required: &[(String, Vec<usize>)],
     dtype: DType,

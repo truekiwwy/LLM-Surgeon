@@ -47,14 +47,22 @@ Diagnostics > Repair).
    built-in native engine (CPU, Rust) runs, and an AMD machine runs mistral.rs while its
    hipfire daemon is not up. The choice follows the machine at every start until a backend
    is saved by hand in *Configurer…*; a file that still names `llama-server` is taken over.
-   - **hipfire** runs outside the app (Linux with ROCm; on Windows in WSL2) as a daemon on
-     `127.0.0.1:11435`. On Windows, *Install and start hipfire* (consent required) installs
+   - **hipfire** runs as a daemon on `127.0.0.1:11435` (Linux with ROCm; on Windows natively or
+     in WSL2). When a `hipfire` binary is found (`hipfire_bin`, the app's folder, the `PATH`) and
+     nothing answers, the app starts the daemon at launch and stops it, GPU process included, when
+     it closes; a daemon it did not start is left alone (docs/BACKENDS.md, section 7). On Windows,
+     *Install and start hipfire* (consent required) installs
      Ubuntu 24.04 in WSL2 when missing, then as root in it ROCm 7.2.1, librocdxg 1.2.2 (SHA-256
      checked), Rust and hipfire v0.4.6 (its official `install.sh --yes`), starts `hipfire serve`
      and waits for it; the backend switches as soon as it answers (`hipfire_setup.rs`). The
-     GPU is first checked against the ROCm-under-WSL list (RX 9070/9060/7900/7800 XT, Ryzen AI):
-     an unlisted card (an RX 7600 XT, gfx1102) needs *Run it anyway*. The AMD Adrenalin 26.2.2
-     driver for WSL2 is the user's to install on Windows.
+     GPU is first checked against the ROCm-under-WSL list (RX 9070/9060/7900/7800 XT, Ryzen AI,
+     and the RX 7600 XT through its workarounds): another card needs *Run it anyway*. The RX 7600
+     XT (gfx1102, outside librocdxg's matrix) gets three workarounds: the line `0x7480,11,0,2` in
+     `/opt/rocm/share/rocdxg/dids.conf` (between `# >>> weight-surgeon` markers, `dids.conf.bak`
+     taken first, skipped when already there, removed by `surgeon-gui --hipfire-cleanup`),
+     `LD_PRELOAD=/opt/rocm-7.2.1/lib/libamdhip64.so` for hipfire's installer and daemon, and
+     `hipfire serve --spec ngram`; the last two live in the commands only. The AMD Adrenalin
+     26.2.2 driver for WSL2 is the user's to install on Windows.
    - **mistral.rs**: the official CPU build (`mistralrs-cpu-x86_64-pc-windows-msvc.zip`) is
      downloaded; with an NVIDIA GPU, *Build with CUDA* runs `cargo install --git
      …/mistral.rs --tag <release> mistralrs-cli --features cuda` when `cargo` and `nvcc`
@@ -97,6 +105,8 @@ surgeon-gui --screenshot d.png --screen settings:engine   # agent, agent:advance
 surgeon-gui --demo-data --no-motion --size 1920x1080 --scale 1.0 --screenshot g.png --screen graph
 surgeon-gui --demo-data                      # a throwaway workspace filled by the real engine, offline
 surgeon-gui --reset-settings                 # the wizard runs again at the next start
+surgeon-gui --install-skill claude           # the weight-surgeon skill for Claude Code (codex, agents)
+surgeon-gui --mcp-config                     # the MCP entry that starts surgeon mcp, absolute path
 surgeon-gui graph.json                       # still accepted: graph.json, graph.ndjson, - (stdin)
 surgeon-gui "C:\Modèles\mon espace"          # a folder becomes the workspace; so does a drop on the window
 ```
@@ -151,8 +161,9 @@ Your models and workspaces are never touched.
 ./packaging/build-windows.ps1 -DryRun         # placeholder binaries: only checks the installer script (needs NSIS)
 ```
 
-Release binaries use fat LTO, `strip` and the static CRT (`crates/surgeon-gui/.cargo/config.toml`,
-which applies when cargo runs from that folder). `.github/workflows/release.yml` does this on a
+Release binaries use `strip` and the static CRT (`crates/surgeon-gui/.cargo/config.toml`,
+which applies when cargo runs from that folder); `surgeon-gui` is built with the workspace's
+`dist` profile (fat LTO, `target/dist/`), `surgeon` with `release` (thin LTO). `.github/workflows/release.yml` does this on a
 `v*` tag and attaches everything to a **draft** release.
 
 ## Manual test checklist (before announcing a release)

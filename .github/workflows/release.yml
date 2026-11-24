@@ -31,10 +31,6 @@ jobs:
           toolchain: "1.97"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            .
-            crates/surgeon-gui
 
       - name: Tag matches the crate version
         shell: pwsh
@@ -47,17 +43,24 @@ jobs:
         run: cargo test --locked --test deps_purity
 
       - name: GUI format, lint and tests
-        working-directory: crates/surgeon-gui
         run: |
-          cargo fmt --check
-          cargo clippy --all-targets --locked -- -D warnings
-          cargo test --locked
+          cargo fmt -p surgeon-gui --check
+          cargo clippy -p surgeon-gui --all-targets --locked -- -D warnings
+          cargo test -p surgeon-gui --locked
 
       - name: NSIS
         shell: pwsh
         run: |
-          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
-          "C:\Program Files (x86)\NSIS" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+          # choco exits 0 even when its feed is down (503), so check for the file and retry.
+          $nsis = "C:\Program Files (x86)\NSIS"
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            for ($i = 1; -not (Test-Path "$nsis\makensis.exe"); $i++) {
+              if ($i -gt 3) { throw "NSIS not installed after 3 attempts (Chocolatey feed unavailable?)" }
+              if ($i -gt 1) { Start-Sleep -Seconds 30 }
+              choco install nsis -y --no-progress
+            }
+          }
+          $nsis | Out-File -Append -Encoding ascii $env:GITHUB_PATH
 
       - name: Build ZIP, installer and checksums
         shell: pwsh
@@ -72,7 +75,7 @@ jobs:
         shell: pwsh
         continue-on-error: true
         run: |
-          $out = & ./crates/surgeon-gui/target/release/surgeon-gui.exe --self-test | Out-String
+          $out = & ./target/dist/surgeon-gui.exe --self-test | Out-String
           Write-Host $out
           if ($LASTEXITCODE -ne 0) { throw "self-test failed" }
 

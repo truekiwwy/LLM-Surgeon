@@ -199,10 +199,16 @@ fn nothing_is_configured_by_default() {
         !ws.config().exists(),
         "detect without --save writes nothing"
     );
-    let backend = &v["data"]["report"]["recommended"]["backend"];
-    // mistral.rs only when this machine has it on its PATH.
+    let report = &v["data"]["report"];
+    let backend = &report["recommended"]["backend"];
+    // mistral.rs only when this machine has it on its PATH, hipfire only on an AMD machine
+    // whose daemon answers at its default address (what `detect` probes there).
+    let amd_daemon = report["vendor"] == "amd" && report["hipfire"]["up"] == true;
     assert!(
-        backend == "native" || backend == "llama-server" || backend == "mistralrs",
+        backend == "native"
+            || backend == "llama-server"
+            || backend == "mistralrs"
+            || (amd_daemon && backend == "hipfire"),
         "{v}"
     );
 }
@@ -462,23 +468,295 @@ impl Drop for Daemon {
     }
 }
 
+/// `copy/`: the mini model patched in place, the backup `surgeon apply` left beside it.
+fn working_copy(ws: &Ws) {
+    let copy = ws.path("copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    for entry in std::fs::read_dir(ws.path("qwen2-mini")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), copy.join(entry.file_name())).unwrap();
+    }
+    let weights = copy.join("model.safetensors");
+    std::fs::copy(&weights, copy.join("model.safetensors.bak-1700000000-1")).unwrap();
+}
+
+/// The questions a fake daemon was asked (the probe's empty request is not one).
+fn asked(ws: &Ws, log: &str) -> usize {
+    match ws.path(log).exists() {
+        true => ws
+            .requests(log)
+            .iter()
+            .filter(|r| r["prompt"].as_str().is_some_and(|p| !p.is_empty()))
+            .count(),
+        false => 0,
+    }
+}
+
+#[test]
+fn the_cli_never_measures_a_working_copy_on_hipfire_unless_told_to() {
+    let ws = Ws::new();
+    let daemon = Daemon::start(
+        &ws,
+        json!({"completions": true, "log": ws.path("hip.jsonl")}),
+    );
+    working_copy(&ws);
+    let hip = ["--backend", "hipfire", "--hipfire-url", daemon.url.as_str()];
+    let (code, v) = ws.eval(&[&["--model", "copy"][..], &hip].concat());
+    assert_eq!(code, 2, "{v}");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(message.contains("copie de travail"), "{message}");
+    assert_eq!(asked(&ws, "hip.jsonl"), 0, "refused before any question");
+    // A working copy as the baseline is refused the same way, before the original runs.
+    let baseline = ["--model", "qwen2-mini", "--baseline-model", "copy"];
+    let (code, v) = ws.eval(&[&baseline[..], &hip].concat());
+    assert_eq!(code, 2, "{v}");
+    assert_eq!(asked(&ws, "hip.jsonl"), 0);
+
+    // Told to (requantized and registered): measured, and the report says so.
+    let allow = ["--model", "copy", "--allow-stale-hipfire"];
+    let (code, v) = ws.eval(&[&allow[..], &hip].concat());
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["data"]["generation"]["backend"], "hipfire");
+    assert!(
+        v["warnings"].to_string().contains("--allow-stale-hipfire"),
+        "{v}"
+    );
+    assert_eq!(asked(&ws, "hip.jsonl"), 2);
+}
+
+/// The models a fake daemon was asked about, question by question.
+fn served_models(ws: &Ws, log: &str) -> Vec<String> {
+    ws.requests(log)
+        .iter()
+        .filter(|r| r["prompt"].as_str().is_some_and(|p| !p.is_empty()))
+        .map(|r| r["model"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// One byte of `copy/model.safetensors` changed, its size kept.
+fn touch_weights(ws: &Ws) {
+    let weights = ws.path("copy").join("model.safetensors");
+    let mut bytes = std::fs::read(&weights).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&weights, bytes).unwrap();
+}
+
+#[test]
+fn a_requantized_copy_is_measured_by_alias_next_to_its_original() {
+    use weight_surgeon::backend::hipfire;
+    let ws = Ws::new();
+    let daemon = Daemon::start(
+        &ws,
+        json!({"completions": true, "log": ws.path("hip.jsonl")}),
+    );
+    working_copy(&ws);
+    // What `--hipfire-requantize` leaves once hipfire registered the copy.
+    let copy = ws.path("copy");
+    let sha = hipfire::weights_sha256(&copy).unwrap();
+    let alias = hipfire::alias_for("copy", &sha);
+    let record =
+        json!({"alias": alias, "weights_sha256": sha, "created_at": "2026-11-20T00:00:00Z"});
+    std::fs::write(copy.join(hipfire::ALIAS_FILE), record.to_string()).unwrap();
+
+    let hip = ["--backend", "hipfire", "--hipfire-url", daemon.url.as_str()];
+    let pair = ["--model", "copy", "--baseline-model", "qwen2-mini"];
+    let (code, v) = ws.eval(&[&pair[..], &hip].concat());
+    assert_eq!(code, 0, "{v}");
+    assert!(!v["warnings"].to_string().contains("hipfire"), "{v}");
+    // The original first, then the copy under its alias: both on the same daemon.
+    let original = "qwen2-mini".to_owned();
+    assert_eq!(
+        served_models(&ws, "hip.jsonl"),
+        [original.clone(), original, alias.clone(), alias.clone()]
+    );
+
+    // A shard rewritten after the quantization: refused before any question.
+    touch_weights(&ws);
+    let (code, v) = ws.eval(&[&pair[..], &hip].concat());
+    assert_eq!(code, 2, "{v}");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(&format!("poids modifiés depuis l'alias {alias}")),
+        "{message}"
+    );
+    assert_eq!(served_models(&ws, "hip.jsonl").len(), 4);
+}
+
+/// `--hipfire-requantize` with a fake hipfire CLI that registers aliases as hipfire 0.4.6
+/// writes them. Unix only: on Windows the requantization runs hipfire in WSL.
+#[cfg(unix)]
+#[test]
+fn hipfire_requantize_registers_a_copy_once_and_again_when_its_weights_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = Ws::new();
+    let daemon = Daemon::start(
+        &ws,
+        json!({"completions": true, "log": ws.path("hip.jsonl")}),
+    );
+    working_copy(&ws);
+    let home = ws.path("hipfire-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let cli = ws.path("hipfire-cli");
+    std::fs::write(
+        &cli,
+        "#!/bin/sh\necho \"$@\" >> \"$HIPFIRE_HOME/calls\"\n\
+         while [ \"$1\" != --register ]; do shift; done\n\
+         printf '%s = \"%s.q8f16\"\\n' \"$2\" \"$2\" >> \"$HIPFIRE_HOME/models.toml\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (url, cli) = (daemon.url.as_str(), cli.to_str().unwrap());
+    let run = |extra: &[&str]| {
+        let mut args = vec!["bench", "eval", "--dataset", "gsm.json", "--limit", "2"];
+        args.extend([
+            "--model",
+            "copy",
+            "--backend",
+            "hipfire",
+            "--hipfire-url",
+            url,
+        ]);
+        args.extend(["--hipfire-bin", cli]);
+        args.extend(extra);
+        ws.run_env(&args, &[("HIPFIRE_HOME", home.as_os_str())])
+    };
+    let calls = || {
+        std::fs::read_to_string(home.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let recorded = || -> Value {
+        let text = std::fs::read_to_string(ws.path("copy").join(".hipfire-alias.json"));
+        serde_json::from_str(&text.unwrap()).unwrap()
+    };
+
+    let (code, v) = run(&["--hipfire-requantize"]);
+    assert_eq!(code, 0, "{v}");
+    let first = recorded();
+    let alias = first["alias"].as_str().unwrap().to_owned();
+    assert!(
+        alias.starts_with("ws-copy-") && alias.len() == 16,
+        "{alias}"
+    );
+    assert_eq!(first["weights_sha256"].as_str().unwrap()[..8], alias[8..]);
+    assert_eq!(calls().len(), 1);
+    let call = &calls()[0];
+    assert!(call.starts_with("quantize "), "{call}");
+    assert!(
+        call.contains(&format!("--format q8f16 --stem {alias}")),
+        "{call}"
+    );
+    assert!(
+        call.contains(&format!("--install --register {alias}")),
+        "{call}"
+    );
+    assert!(call.contains(ws.path("copy").to_str().unwrap()), "{call}");
+    assert_eq!(
+        served_models(&ws, "hip.jsonl"),
+        [alias.clone(), alias.clone()]
+    );
+
+    // Same weights: served at once, hipfire not called again.
+    let (code, v) = run(&["--hipfire-requantize"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(calls().len(), 1);
+
+    // Weights changed: refused without the flag, requantized under a new alias with it.
+    touch_weights(&ws);
+    let (code, v) = run(&[]);
+    assert_eq!(code, 2, "{v}");
+    let (code, v) = run(&["--hipfire-requantize"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(calls().len(), 2);
+    let second = recorded()["alias"].as_str().unwrap().to_owned();
+    assert_ne!(second, alias);
+    assert_eq!(served_models(&ws, "hip.jsonl").last(), Some(&second));
+}
+
+#[test]
+fn mcp_moves_a_working_copy_off_hipfire_and_says_why() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let ws = Ws::new();
+    let daemon = Daemon::start(
+        &ws,
+        json!({"completions": true, "log": ws.path("hip.jsonl")}),
+    );
+    daemon.configure(&ws);
+    working_copy(&ws);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_surgeon"))
+        .args(["mcp", "--allow-dir", ws.dir.path().to_str().unwrap()])
+        .current_dir(ws.dir.path())
+        .env("WEIGHT_SURGEON_CONFIG", ws.config())
+        .env_remove("LLAMA_CPP_DIR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for line in [
+        json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "p20", "version": "0"}}}),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "name": "surgeon_bench", "arguments": {"mode": "refusal", "model": "copy",
+            "prompts": "builtin:refusals", "max_new_tokens": 2}}}),
+    ] {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    stdin.flush().unwrap();
+    let mut reply = Value::Null;
+    for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+        let value: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        if value["id"] == 1 {
+            reply = value;
+            break;
+        }
+    }
+    drop(stdin);
+    child.wait().unwrap();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    let result = &reply["result"]["structuredContent"];
+    assert_eq!(result["ok"], true, "{reply}");
+    let first = result["warnings"][0].as_str().unwrap();
+    assert!(first.starts_with("backend hipfire écarté"), "{first}");
+    assert!(first.contains("copy"), "the reason names the copy: {first}");
+    assert!(
+        stderr.contains("backend hipfire écarté"),
+        "logged: {stderr}"
+    );
+    assert_eq!(asked(&ws, "hip.jsonl"), 0, "measured on native");
+}
+
 #[test]
 fn hipfire_runs_on_every_os_and_warns_on_a_chat_only_daemon() {
     let ws = Ws::new();
     let daemon = Daemon::start(&ws, json!({"log": ws.path("hip.jsonl")}));
     let url = daemon.url.as_str();
-    let (code, v) = ws.eval(&[
+    let hip = [
         "--model",
         "qwen2-mini",
         "--backend",
         "hipfire",
         "--hipfire-url",
         url,
-    ]);
+    ];
+    let (code, v) = ws.eval(&[&hip[..], &["--chat-template", "chatml"]].concat());
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["data"]["correct"], 2, "{v}");
     assert_eq!(v["data"]["generation"]["backend"], "hipfire");
-    // The probe's empty request, then the two questions as chat messages.
+    // The probe's empty request, then the two questions as chat messages: the bench's
+    // ChatML turns unwrapped, so hipfire's template is the only one, greedy.
     let requests = ws.requests("hip.jsonl");
     let asked: Vec<&Value> = requests
         .iter()
@@ -487,6 +765,21 @@ fn hipfire_runs_on_every_os_and_warns_on_a_chat_only_daemon() {
     assert_eq!(asked.len(), 2, "{requests:?}");
     assert_eq!(asked[0]["model"], "qwen2-mini");
     assert_eq!(asked[0]["seed"], 42);
+    assert_eq!(asked[0]["temperature"], 0.0);
+    let messages = asked[0]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0]["role"], "user");
+    let content = messages[0]["content"].as_str().unwrap();
+    assert!(
+        content.contains("1 and 2") && !content.contains("<|im_"),
+        "{content}"
+    );
+
+    // Sampling cannot be replayed without a seed: refused before any question.
+    let sampled = ws.eval(&[&hip[..], &["--temperature", "0.7"]].concat());
+    assert_eq!(sampled.0, 2, "{}", sampled.1);
+    assert!(sampled.1.to_string().contains("glouton"), "{}", sampled.1);
+    assert_eq!(ws.requests("hip.jsonl").len(), requests.len());
 
     // `backend show` says it, without failing.
     daemon.configure(&ws);

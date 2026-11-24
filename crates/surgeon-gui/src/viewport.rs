@@ -174,6 +174,10 @@ pub struct View<'a> {
     pub activity: Option<&'a Activity>,
     /// Pulses and flows move (off: `--no-motion`, captures, tests).
     pub animate: bool,
+    /// Live mode: the nodes kept lit; the others step back. `None`: every node is lit.
+    pub focus: Option<&'a [bool]>,
+    /// The origin, drawn as a translucent wireframe over this state.
+    pub ghost: Option<&'a Step>,
 }
 
 /// What a frame allocates, kept between frames.
@@ -400,6 +404,10 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
                 true => color,
                 false => theme::shade(color, -0.88),
             };
+            let color = match view.focus.is_some_and(|f| !f[i]) {
+                true => theme::shade(color, -0.8),
+                false => color,
+            };
             theme::mix(color, theme::BG, fades[i])
         }));
     let colors = &buf.colors;
@@ -471,6 +479,9 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
         }
         if !(view.visible[a] || view.visible[b]) {
             alpha *= 0.2;
+        }
+        if view.focus.is_some_and(|f| !(f[a] || f[b])) {
+            alpha *= 0.25;
         }
         let ends = match edge_diffs.get(&(edge.source.as_str(), edge.target.as_str())) {
             Some(diff) => [theme::diverge(diff.alignment_delta); 2],
@@ -552,6 +563,9 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
         }
     }
     painter.extend(shapes.drain(..));
+    if let Some(ghost) = view.ghost {
+        origin_overlay(&painter, view, ghost, camera, rect);
+    }
 
     // The layer marks at the left of each row, without overlapping one another. In the
     // helix, left of the ring as the camera sees it (its right is (cos yaw, 0, -sin yaw)).
@@ -634,7 +648,12 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
             }
         }
         let run = view.layer.map(|l| run_line(l, i));
-        hover_card(&painter, rect, pointer, &report.nodes[i], run);
+        let above = egui::LayerId::new(
+            egui::Order::Middle,
+            painter.layer_id().id.with("node-hover"),
+        );
+        let top = painter.ctx().layer_painter(above).with_clip_rect(rect);
+        hover_card(&top, rect, pointer, &report.nodes[i], run);
     }
     if let Some(activity) = view.activity {
         let beat = match view.animate {
@@ -688,6 +707,57 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
         true => Some(hovered),
         false => None,
     }
+}
+
+/// `ghost`, the origin, as a translucent wireframe over the state on screen: its structural
+/// edges, and a ring per node sized by its `‖W‖F` against the current one (the baseline when
+/// the report compared to it, else the ghost's own metrics). Nothing changed: rings at rest.
+fn origin_overlay(painter: &egui::Painter, view: &View, ghost: &Step, camera: &Orbit, rect: Rect) {
+    let ink = Stroke::new(1.0, theme::TEXT.gamma_multiply(0.35));
+    let projected: Vec<Option<Projected>> = (0..ghost.report.nodes.len())
+        .map(|j| {
+            let at = lerp(ghost.scene.column[j], ghost.scene.helix[j], view.blend);
+            camera.project(at, rect)
+        })
+        .collect();
+    let baseline: HashMap<&str, &NodeDiff> = view
+        .step
+        .report
+        .baseline_diff
+        .iter()
+        .flat_map(|d| &d.nodes)
+        .map(|d| (d.id.as_str(), d))
+        .collect();
+    let mut shapes = Vec::new();
+    for &(k, a, b) in &ghost.edges {
+        if let (true, Some(pa), Some(pb)) =
+            (ghost.report.edges[k].structural, projected[a], projected[b])
+        {
+            shapes.push(Shape::line(vec![pa.pos, pb.pos], ink));
+        }
+    }
+    for (node, p) in ghost.report.nodes.iter().zip(&projected) {
+        let Some(p) = p else { continue };
+        let now = view
+            .step
+            .index
+            .get(&node.id)
+            .map(|&i| view.step.report.nodes[i].metrics.frobenius_norm);
+        let origin = match baseline.get(node.id.as_str()) {
+            Some(diff) => now.map(|n| n - diff.norm_delta),
+            None => Some(node.metrics.frobenius_norm),
+        };
+        let ratio = match (origin, now) {
+            (Some(o), Some(n)) if o > 0.0 && n > 0.0 => (o / n).clamp(0.5, 2.0) as f32,
+            _ => 1.0,
+        };
+        shapes.push(Shape::circle_stroke(
+            p.pos,
+            node_radius(p) * ratio + 1.5,
+            ink,
+        ));
+    }
+    painter.extend(shapes);
 }
 
 /// The drafting-table mark of the view: three orthogonal axes in the top right corner, in
@@ -806,11 +876,15 @@ fn hover_card(
     min.x = min.x.min(rect.right() - size.x - 4.0);
     min.y = min.y.min(rect.bottom() - size.y - 4.0);
     let card = Rect::from_min_size(min, size);
-    painter.rect_filled(card, CornerRadius::same(2), theme::PANEL);
+    painter.rect_filled(
+        card,
+        CornerRadius::same(2),
+        theme::TOKENS.color.surface_hover,
+    );
     painter.rect_stroke(
         card,
         CornerRadius::same(2),
-        Stroke::new(1.0, theme::BORDER),
+        Stroke::new(1.0, theme::TOKENS.color.text_disabled),
         StrokeKind::Inside,
     );
     let mut y = card.top() + 4.0;
@@ -839,6 +913,7 @@ mod tests {
             norm_delta: relative,
             relative_change: relative,
             sigma1_delta: None,
+            weight_diff: None,
             changed,
         }
     }
@@ -947,15 +1022,76 @@ mod tests {
             layer,
             activity,
             animate: false,
+            focus: None,
+            ghost: None,
         };
+        render(&view)
+    }
+
+    /// One still frame of `view` at 960×640 and the number of edges it drew.
+    fn render(view: &View) -> (raster::Frame, usize) {
         let ctx = egui::Context::default();
         let (mut camera, mut buf) = (Orbit::default(), Buffers::default());
         let frame = raster::render(&ctx, [960, 640], 1.0, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                show(ui, &view, &mut camera, &mut buf);
+                show(ui, view, &mut camera, &mut buf);
             });
         });
         (frame, buf.edges_drawn)
+    }
+
+    #[test]
+    fn live_focus_steps_back_the_untouched_layers_and_the_ghost_adds_its_wireframe() {
+        let timeline = Timeline::from_report(testkit::graph(28));
+        let step = timeline.current().unwrap();
+        let n = step.report.nodes.len();
+        let (visible, targets) = (vec![true; n], vec![false; n]);
+        let lit: Vec<bool> = step
+            .report
+            .nodes
+            .iter()
+            .map(|x| x.layer == Some(2))
+            .collect();
+        let view = |focus, ghost| View {
+            step,
+            blend: 0.0,
+            diff: false,
+            visible: &visible,
+            selected: None,
+            targets: &targets,
+            layer: None,
+            activity: None,
+            animate: false,
+            focus,
+            ghost,
+        };
+        // The role hues (indigo, amber) are counted, as the depth of field shifts the shades.
+        let saturated = |frame: &raster::Frame| {
+            frame
+                .image
+                .rgba
+                .chunks_exact(4)
+                .filter(|p| {
+                    let (r, g, b) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+                    (b > 140 && b > r + 50) || (r > 150 && r > g + 40 && g > b + 60)
+                })
+                .count()
+        };
+        let (all, _) = render(&view(None, None));
+        let (focused, _) = render(&view(Some(&lit), None));
+        assert!(
+            saturated(&focused) * 3 < saturated(&all),
+            "{} vs {}",
+            saturated(&focused),
+            saturated(&all)
+        );
+        assert!(saturated(&focused) > 0, "layer 2 stays lit");
+        // The wireframe lands on the nodes' halos: count the pixels it changed, not the ink.
+        let (ghosted, _) = render(&view(Some(&lit), Some(step)));
+        let (before, after) = (&focused.image.rgba, &ghosted.image.rgba);
+        let pairs = before.chunks_exact(4).zip(after.chunks_exact(4));
+        let changed = pairs.filter(|(a, b)| a != b).count();
+        assert!(changed > 500, "{changed}");
     }
 
     /// Pixels within 24 (Chebyshev, RGB) of `color`.
@@ -1110,6 +1246,8 @@ mod tests {
             layer: Some(&layer),
             activity: None,
             animate: true,
+            focus: None,
+            ghost: None,
         };
         let ctx = egui::Context::default();
         let (mut camera, mut buf) = (Orbit::default(), Buffers::default());

@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use candle_core::{DType, Device, Tensor};
 
 use super::config::{DecoderConfig, SUPPORTED_MODEL_TYPES};
-use super::decoder::{HookedDecoder, KvCache, Site};
+use super::decoder::{HookedDecoder, KvCache, LayerHook, Site};
 use super::error::{ExtractError, Result};
 
 /// A forward pass that exposes the residual stream.
@@ -28,6 +28,7 @@ pub trait ResidualForward: Send + Sync {
     /// `[1, seq, hidden]` at the last loaded layer: the residual stream after it, or its
     /// MLP output. Nothing after it is computed.
     fn forward_capture(&self, input_ids: &Tensor, site: Site) -> Result<Tensor>;
+    fn forward_hooked(&self, input_ids: &Tensor, hook: &mut LayerHook) -> Result<Tensor>;
     /// `[seq, vocab]` f32 logits (teacher forcing). Needs [`Depth::Full`].
     fn forward_logits(&self, input_ids: &Tensor) -> Result<Tensor>;
     /// Layers `0..n_layers` on new tokens, continuing `cache`; `after_layer(i, resid)` may
@@ -59,6 +60,10 @@ impl ResidualForward for HookedDecoder {
 
     fn forward_capture(&self, input_ids: &Tensor, site: Site) -> Result<Tensor> {
         HookedDecoder::forward_capture(self, input_ids, site)
+    }
+
+    fn forward_hooked(&self, input_ids: &Tensor, hook: &mut LayerHook) -> Result<Tensor> {
+        HookedDecoder::forward_hooked(self, input_ids, hook)
     }
 
     fn forward_logits(&self, input_ids: &Tensor) -> Result<Tensor> {

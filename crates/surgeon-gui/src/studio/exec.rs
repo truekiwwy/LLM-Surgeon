@@ -3,15 +3,18 @@
 //! with the project folder as allowed directory and the source model's folder as read-only
 //! root. The working copy is the only job the studio runs itself.
 
+use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
+use weight_surgeon::eval::{quantize_safetensors, GgufQuant};
 use weight_surgeon::events::SurgeonEvent;
 use weight_surgeon::mcp::{call_tool, McpConfig, PipelineJobs};
 
 use super::bus::Recorder;
 use super::copy;
-use super::jobs::{Executor, JobSpec, Outcome, RunContext, COPY_TOOL};
+use super::jobs::{Executor, JobSpec, Outcome, RunContext, COPY_TOOL, EXPORT_TOOL};
 
 #[derive(Default)]
 pub struct EngineExecutor {
@@ -24,12 +27,16 @@ impl Executor for EngineExecutor {
         if spec.tool == COPY_TOOL {
             return working_copy(args, ctx, rec);
         }
-        // The source model is read only, as for the CLI runtimes (`--allow-read`): the
-        // engine itself refuses a write there, not only the policy.
+        if spec.tool == EXPORT_TOOL {
+            return gguf_export(args, ctx, rec);
+        }
+        // The source model and the models folder are read only, as for the CLI runtimes
+        // (`--allow-read`): the engine itself refuses a write there, not only the policy.
         let read: Vec<_> = ctx
             .source
             .iter()
             .map(|s| super::copy::model_root(&s.path).to_path_buf())
+            .chain(weight_surgeon::backend::models_dir())
             .collect();
         // allow_no_backup false: the apply backups are imposed, as over MCP.
         let cfg = McpConfig::new(
@@ -54,6 +61,48 @@ impl Executor for EngineExecutor {
             }
             Err(e) => Outcome::failed(e),
         }
+    }
+}
+
+fn gguf_export(args: &Value, ctx: &RunContext, rec: &mut Recorder) -> Outcome {
+    let quant = match serde_json::from_value::<GgufQuant>(args["format"].clone()) {
+        Ok(quant) => quant,
+        Err(e) => return Outcome::failed(format!("format : {e}")),
+    };
+    let (Some(model), Some(out)) = (args["model"].as_str(), args["out"].as_str()) else {
+        return Outcome::failed(format!("{EXPORT_TOOL} : model et out requis"));
+    };
+    let made = quantize_safetensors(
+        Path::new(model),
+        Path::new(out),
+        quant,
+        &ctx.cancel,
+        &mut |done, total| {
+            rec.emit(SurgeonEvent::Progress {
+                done: done as u64,
+                total: Some(total as u64),
+                unit: "tensor".into(),
+            })
+        },
+    );
+    match made {
+        Ok(()) => {
+            rec.emit(SurgeonEvent::Artifact {
+                kind: "gguf".into(),
+                path: out.into(),
+                sha256: None,
+            });
+            Outcome {
+                exit_code: 0,
+                envelope: json!({ "ok": true, "command": EXPORT_TOOL, "exit_code": 0,
+                    "data": { "gguf": out, "format": quant } }),
+                cancelled: false,
+            }
+        }
+        Err(e) => Outcome {
+            cancelled: ctx.cancel.load(Ordering::SeqCst),
+            ..Outcome::failed(e.to_string())
+        },
     }
 }
 

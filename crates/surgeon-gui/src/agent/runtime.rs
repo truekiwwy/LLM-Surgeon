@@ -3,7 +3,8 @@
 //! (`opencode run`) and Antigravity (`agy -p`), started non-interactively with `surgeon mcp`
 //! as their engine server. Their own loop and approvals are theirs, not the studio's.
 //!
-//! - Claude Code and Codex get `surgeon` as their only tool server and an explicit allow-list.
+//! - Claude Code and Codex get `surgeon` as their only tool server and an explicit allow-list;
+//!   their working files go through its `surgeon_files` tool, confined to `work/`.
 //! - OpenCode and Antigravity keep their own tools (terminal, files) so as not to limit the
 //!   model: OpenCode inside the project folder (`external_directory` denied), Antigravity in an
 //!   isolated profile that only knows `surgeon` (the user's global configuration is never read
@@ -12,7 +13,8 @@
 //!
 //! The studio reads no credential, except for Antigravity: its sign-in files
 //! (`~/.gemini/oauth_creds.json`, `google_accounts.json`) are copied into the isolated
-//! profile for the run and removed with it, on the user's explicit request.
+//! profile for the run and removed with it, on the user's explicit request. Claude Code never
+//! inherits `ANTHROPIC_API_KEY`, so that it stays on the signed-in claude.ai account.
 //!
 //! Options checked against `claude --help` (2.1.x), `codex exec --help` (0.166),
 //! `opencode run --help` (2.2.7) and `agy --help` (1.4.4): a binary whose help lacks one is
@@ -54,12 +56,16 @@ const AGY_OPTIONS: [&str; 4] = ["--print", "--output-format", "--input-format", 
 /// The sign-in files of Antigravity, in `~/.gemini`, copied into its isolated profile.
 const AGY_SIGN_IN: [&str; 2] = ["oauth_creds.json", "google_accounts.json"];
 /// The engine tools an "Ask" runtime may call (its server also runs `--read-only`).
-const READ_TOOLS: [&str; 5] = [
+const READ_TOOLS: [&str; 9] = [
     "surgeon_check",
     "surgeon_inspect",
+    "surgeon_causal_trace",
     "surgeon_graph",
     "surgeon_bench",
     "surgeon_backends",
+    "surgeon_autotune",
+    "surgeon_files",
+    "surgeon_checkpoint",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,12 +145,15 @@ pub fn detect(kind: ProviderKind, path: Option<&OsStr>) -> Option<Detected> {
 }
 
 fn command(program: &Path) -> Command {
-    let mut c = Command::new(program);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        c.creation_flags(CREATE_NO_WINDOW);
+    crate::platform::command(program)
+}
+
+/// The process of a CLI runtime, without what would take over from its signed-in account:
+/// `claude -p` prefers `ANTHROPIC_API_KEY` to the claude.ai session whenever it is set.
+pub fn cli_command(kind: ProviderKind, program: &Path) -> Command {
+    let mut c = command(program);
+    if kind == ProviderKind::ClaudeCode {
+        c.env_remove("ANTHROPIC_API_KEY");
     }
     c
 }
@@ -186,7 +195,12 @@ pub fn signed_in(kind: ProviderKind, path: Option<&OsStr>) -> Result<Vec<String>
         Some(home) => home.prepare(None, None)?,
         None => Vec::new(),
     };
-    let checked = run_short(&bin, status_args(kind), &env, Duration::from_secs(60));
+    let checked = run_short(
+        cli_command(kind, &bin),
+        status_args(kind),
+        &env,
+        Duration::from_secs(60),
+    );
     if let Some(home) = &agy {
         home.clear();
     }
@@ -227,17 +241,17 @@ fn capture(
     env: &[(OsString, OsString)],
     timeout: Duration,
 ) -> Option<String> {
-    run_short(program, args, env, timeout).map(|(_, text)| text)
+    run_short(command(program), args, env, timeout).map(|(_, text)| text)
 }
 
 /// Whether a short command succeeded, with its stdout then stderr; None past `timeout`.
 fn run_short(
-    program: &Path,
+    mut cmd: Command,
     args: &[&str],
     env: &[(OsString, OsString)],
     timeout: Duration,
 ) -> Option<(bool, String)> {
-    let mut child = command(program)
+    let mut child = cmd
         .args(args)
         .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
@@ -373,16 +387,16 @@ impl AgyHome {
     }
 }
 
-/// The `surgeon mcp` arguments for a mode: the project is read and written; the source
-/// model is read only (`--allow-read`), for paired before / after measures, in every mode.
-/// The server refuses any write there whatever the mode.
-pub fn mcp_args(mode: AgentMode, project: &Path, source_dir: Option<&Path>) -> Vec<String> {
+/// The `surgeon mcp` arguments for a mode: the project is read and written; `read_roots` (the
+/// source model, the configured models folder) are read only, in every mode. The server
+/// refuses any write there whatever the mode.
+pub fn mcp_args(mode: AgentMode, project: &Path, read_roots: &[PathBuf]) -> Vec<String> {
     let mut args = vec![
         "mcp".to_owned(),
         "--allow-dir".into(),
         project.display().to_string(),
     ];
-    if let Some(dir) = source_dir {
+    for dir in read_roots {
         args.extend(["--allow-read".into(), dir.display().to_string()]);
     }
     if mode == AgentMode::Ask {
@@ -399,6 +413,7 @@ pub fn allowed_tools(mode: AgentMode) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(|t| t["name"].as_str().map(str::to_owned))
+        .filter(|n| !super::tools::EXTERNAL_ONLY.contains(&n.as_str()))
         .filter(|n| match mode {
             AgentMode::Ask => {
                 READ_TOOLS.contains(&n.as_str()) || super::tools::UI_TOOLS.contains(&n.as_str())
@@ -414,7 +429,8 @@ pub struct LaunchInput<'a> {
     pub surgeon: &'a Path,
     pub mode: AgentMode,
     pub project: &'a Path,
-    pub source_dir: Option<&'a Path>,
+    /// Folders the engine may read but never write.
+    pub read_roots: &'a [PathBuf],
     pub model: Option<&'a str>,
     pub prompt: &'a str,
     /// Where the MCP configuration file of a Claude Code run is written.
@@ -426,7 +442,7 @@ pub struct LaunchInput<'a> {
 pub fn launch(input: &LaunchInput) -> Result<Launch, String> {
     let server = json!({
         "command": input.surgeon,
-        "args": mcp_args(input.mode, input.project, input.source_dir),
+        "args": mcp_args(input.mode, input.project, input.read_roots),
     });
     let tools = allowed_tools(input.mode);
     let mut args: Vec<OsString> = Vec::new();
@@ -435,7 +451,7 @@ pub fn launch(input: &LaunchInput) -> Result<Launch, String> {
     match input.detected.kind {
         ProviderKind::OpenCode => {
             let mut command = vec![input.surgeon.display().to_string()];
-            command.extend(mcp_args(input.mode, input.project, input.source_dir));
+            command.extend(mcp_args(input.mode, input.project, input.read_roots));
             let config = json!({
                 "mcp": { "surgeon": { "type": "local", "command": command, "enabled": true } },
                 // Its own tools stay, inside the project folder only.
@@ -512,7 +528,7 @@ pub fn launch(input: &LaunchInput) -> Result<Launch, String> {
         }
         _ => {
             let toml_list = |v: &[String]| serde_json::to_string(v).unwrap_or_default();
-            let mcp = mcp_args(input.mode, input.project, input.source_dir);
+            let mcp = mcp_args(input.mode, input.project, input.read_roots);
             for a in [
                 "exec",
                 "--json",
@@ -559,7 +575,10 @@ pub enum Event {
         name: String,
         input: Value,
     },
-    ToolResult(String),
+    ToolResult {
+        content: String,
+        is_error: bool,
+    },
     Done {
         cost_usd: Option<f64>,
         summary: String,
@@ -594,7 +613,10 @@ pub fn parse_claude(line: &str) -> Vec<Event> {
         Some("user") => content()
             .iter()
             .filter(|b| b["type"] == "tool_result")
-            .map(|b| Event::ToolResult(short(&b["content"])))
+            .map(|b| Event::ToolResult {
+                content: short(&b["content"]),
+                is_error: b["is_error"].as_bool().unwrap_or(false),
+            })
             .collect(),
         Some("result") => vec![Event::Done {
             cost_usd: v["total_cost_usd"].as_f64(),
@@ -621,7 +643,10 @@ pub fn parse_codex(line: &str) -> Vec<Event> {
             input: item["arguments"].clone(),
         }],
         (Some("item.completed"), Some("mcp_tool_call")) => {
-            vec![Event::ToolResult(short(&item["result"]))]
+            vec![Event::ToolResult {
+                content: short(&item["result"]),
+                is_error: item["status"] == "failed",
+            }]
         }
         (Some("turn.completed"), _) => vec![Event::Done {
             cost_usd: None,
@@ -659,8 +684,14 @@ pub fn parse_opencode(line: &str) -> Vec<Event> {
                 input: state["input"].clone(),
             }];
             match state["status"].as_str() {
-                Some("completed") => events.push(Event::ToolResult(short(&state["output"]))),
-                Some("error") => events.push(Event::Error(short(&state["error"]))),
+                Some("completed") => events.push(Event::ToolResult {
+                    content: short(&state["output"]),
+                    is_error: false,
+                }),
+                Some("error") => events.push(Event::ToolResult {
+                    content: short(&state["error"]),
+                    is_error: true,
+                }),
                 _ => {}
             }
             events
@@ -724,7 +755,17 @@ fn short(v: &Value) -> String {
     text.chars().take(2000).collect()
 }
 
-/// A running CLI: events as they come, `stop` kills it.
+/// The process of a run, its pipes still to set.
+pub fn run_command(l: &Launch, kind: ProviderKind) -> Command {
+    let mut c = cli_command(kind, &l.program);
+    c.args(&l.args)
+        .envs(l.env.iter().map(|(k, v)| (k, v)))
+        .current_dir(&l.cwd);
+    c
+}
+
+/// A running CLI: events as they come, `stop` (or the drop) kills it with what it started,
+/// the `surgeon-gui mcp` servers first.
 pub struct Run {
     pub rx: Receiver<Event>,
     child: Arc<Mutex<Child>>,
@@ -736,10 +777,14 @@ impl Run {
         kind: ProviderKind,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, String> {
-        let mut child = command(&l.program)
-            .args(&l.args)
-            .envs(l.env.iter().map(|(k, v)| (k, v)))
-            .current_dir(&l.cwd)
+        let mut cmd = run_command(l, kind);
+        // A group of its own: `stop` takes the MCP servers it starts with it (kill_tree).
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -797,9 +842,24 @@ impl Run {
         Ok(Self { rx, child })
     }
 
+    #[cfg(test)]
+    pub fn pid(&self) -> u32 {
+        self.child.lock().unwrap_or_else(|e| e.into_inner()).id()
+    }
+
+    /// Kills the CLI and its process tree. Killing the CLI alone left its `surgeon-gui mcp`
+    /// servers running on Windows, a long benchmark with them.
     pub fn stop(&self) {
-        if let Ok(mut c) = self.child.lock() {
-            let _ = c.kill();
+        let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = weight_surgeon::process::kill_tree(&mut child) {
+            crate::logging::warn(&format!("arrêt du runtime : {e}"));
         }
+    }
+}
+
+impl Drop for Run {
+    /// A run dropped while its CLI still works (project closed, window closed) stops it.
+    fn drop(&mut self) {
+        self.stop();
     }
 }

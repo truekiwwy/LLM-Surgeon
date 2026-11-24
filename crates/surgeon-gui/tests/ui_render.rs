@@ -6,7 +6,7 @@
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, RawInput, Rect, Vec2};
 use surgeon_gui::actions::Env;
 use surgeon_gui::agent::policy::AgentMode;
-use surgeon_gui::app::{Mode, Section, SurgeonApp, Tab};
+use surgeon_gui::app::{Mode, RightPane, Section, SurgeonApp, Tab};
 use surgeon_gui::desktop::Desktop;
 use surgeon_gui::settings::{Lang, Settings};
 use surgeon_gui::ui::{components, fonts, theme};
@@ -118,6 +118,257 @@ fn every_view_and_section_renders_in_both_languages_without_a_raw_key() {
             let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
             assert!(raw.is_empty(), "{lang:?} {name}: {raw:?}");
         }
+    }
+}
+
+#[test]
+fn the_radar_compares_two_direction_files_of_work() {
+    for (lang, title, strong) in [
+        (Lang::Fr, "Radar d'interférence", "Forte collision"),
+        (Lang::En, "Interference radar", "Strong collision"),
+    ] {
+        let mut b = bench(lang);
+        let project = b.app.studio.manager.as_ref().unwrap().project.dir.clone();
+        let work = project.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let meta = [("layer".to_owned(), "14".to_owned())].into();
+        for (name, v) in [("a.safetensors", [1.0, 0.0]), ("b.safetensors", [0.8, 0.6])] {
+            let bytes = weight_surgeon::extract::encode_tensors(&[("direction", &v)], &meta);
+            std::fs::write(work.join(name), bytes.unwrap()).unwrap();
+        }
+        b.app.radar.open_on(&work);
+        let texts = b.texts(Tab::Agent);
+        // The layer comes from the metadata, the row reads in full inside the panel.
+        for text in [title, "L14 · direction", "+0.8000", strong] {
+            assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
+        }
+        let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+    }
+}
+
+#[test]
+fn the_vector_dialog_and_the_causal_scores_of_a_layer_render_in_both_languages() {
+    use surgeon_gui::agent::session::Dirs;
+    use surgeon_gui::studio::vectors::VectorMode;
+
+    for (lang, title, run, causal, inside) in [
+        (
+            Lang::Fr,
+            "Extraire un vecteur",
+            "Lancer",
+            "Score causal",
+            "dedans",
+        ),
+        (
+            Lang::En,
+            "Extract a vector",
+            "Run",
+            "Causal score",
+            "inside",
+        ),
+    ] {
+        let mut b = bench(lang);
+        b.app.vector.open = true;
+        let sweep = b.texts(Tab::Agent);
+        for text in [title, run, "pca (svd)", "work/direction.safetensors"] {
+            assert!(sweep.iter().any(|t| t == text), "{text}: {sweep:?}");
+        }
+        b.app.vector.mode = VectorMode::Trace;
+        let trace = b.texts(Tab::Agent);
+        assert!(trace.iter().any(|t| t == "mlp"), "{trace:?}");
+        let raw: Vec<_> = sweep.iter().chain(&trace).filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+        b.app.vector.open = false;
+
+        let project = b.app.agents.project.clone().unwrap();
+        let data = serde_json::json!({"component": "mlp",
+            "window": {"start": 1, "end": 2, "layers": "1-2"},
+            "layers": [{"layer": 0, "score": 0.1}, {"layer": 1, "score": 0.75},
+                       {"layer": 2, "score": 0.5}]});
+        let line = serde_json::json!({"run_id": "mcp-1", "tool": "surgeon_causal_trace",
+            "ok": true, "exit_code": 0, "data": data, "started_unix": 1, "finished_unix": 2});
+        std::fs::write(Dirs::of(&project).mcp_runs(), format!("{line}\n")).unwrap();
+        let step = b.app.timeline.current().unwrap();
+        let node = step
+            .report
+            .nodes
+            .iter()
+            .find(|n| n.layer == Some(1))
+            .unwrap();
+        b.app.selected = Some(node.id.clone());
+        assert_eq!(b.app.layer_scores().window, Some((1, 2)));
+        let inspector = b.texts(Tab::Graph);
+        for text in [causal, "+0.750 · mlp", inside] {
+            assert!(inspector.iter().any(|t| t == text), "{text}: {inspector:?}");
+        }
+    }
+}
+
+#[test]
+fn the_results_panel_shows_the_ollama_command_of_the_working_copy() {
+    use surgeon_gui::agent::{paths::ProjectPaths, session::Dirs};
+    use surgeon_gui::studio::ollama;
+
+    for (lang, button) in [
+        (Lang::Fr, "Exporter vers Ollama"),
+        (Lang::En, "Export to Ollama"),
+    ] {
+        let mut b = bench(lang);
+        let project = b.app.agents.project.clone().unwrap();
+        // A measuring run, so that the panel lists something and offers its exports.
+        let line = serde_json::json!({"run_id": "mcp-1", "tool": "surgeon_extract", "ok": true,
+            "exit_code": 0, "data": null, "started_unix": 1, "finished_unix": 2});
+        std::fs::write(Dirs::of(&project).mcp_runs(), format!("{line}\n")).unwrap();
+        let paths = ProjectPaths::of(&project);
+        let (copy, origin) = (paths.copy.as_deref(), paths.origin.as_deref());
+        // The demo's copy holds the weights only; a Hugging Face folder has its config.
+        let config = copy.unwrap().join("config.json");
+        std::fs::write(config, r#"{"max_position_embeddings": 4096}"#).unwrap();
+        let export = ollama::export(&project, "demo-qwen2", None, copy, origin).unwrap();
+        let export = export.expect("the working copy is a SafeTensors folder");
+        let command = export.command.clone();
+        b.app.ollama = Some(Ok(export));
+        b.app.right = RightPane::Results;
+        let texts = b.texts(Tab::Agent);
+        for text in [button, "SafeTensors · c1", command.as_str()] {
+            assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
+        }
+        let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+    }
+}
+
+#[test]
+fn the_checkpoints_panel_shows_the_tree_the_front_and_the_restore_button() {
+    use std::collections::BTreeMap;
+    use surgeon_gui::agent::paths::ProjectPaths;
+
+    for (lang, title, restore) in [
+        (Lang::Fr, "Checkpoints & Pareto", "Restaurer ce checkpoint"),
+        (Lang::En, "Checkpoints & Pareto", "Restore this checkpoint"),
+    ] {
+        let mut b = bench(lang);
+        let project = b.app.agents.project.clone().unwrap();
+        let copy = ProjectPaths::of(&project).copy.unwrap();
+        let store = weight_surgeon::checkpoint::Store::in_work(&project.join("work"));
+        let metrics = |target: f64, gain: f64, drift: f64| {
+            BTreeMap::from([
+                ("target".into(), target),
+                ("gain".into(), gain),
+                ("drift".into(), drift),
+            ])
+        };
+        let base = store.create(&copy, "base", metrics(0.5, 0.0, 0.0)).unwrap();
+        store
+            .create(&copy, "v L4 a1", metrics(0.8, 0.3, 0.2))
+            .unwrap();
+        store.restore(&base.id, &copy).unwrap();
+        b.app.right = RightPane::Checkpoints;
+        b.app.checkpoint_selected = Some("0002".into());
+        let texts = b.texts(Tab::Agent);
+        for text in [
+            title,
+            restore,
+            "0001",
+            "0002",
+            "v L4 a1 · +0.300 / 0.200",
+            "80.0 %",
+            "50.0 %",
+        ] {
+            assert!(
+                texts.iter().any(|t| t == text),
+                "{lang:?} {text}: {texts:?}"
+            );
+        }
+        let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+    }
+}
+
+#[test]
+fn live_mode_puts_the_session_beside_the_graph_under_its_telemetry() {
+    for (lang, expected) in [
+        (
+            Lang::Fr,
+            [
+                "Télémétrie Live",
+                "Où",
+                "Quand",
+                "Comment",
+                "Vers où",
+                "3. Compose",
+            ],
+        ),
+        (
+            Lang::En,
+            [
+                "Live telemetry",
+                "Where",
+                "When",
+                "How",
+                "Toward",
+                "3. Compose",
+            ],
+        ),
+    ] {
+        let mut b = bench(lang);
+        b.app.live = true;
+        b.app.ghost = true;
+        let texts = b.texts(Tab::Agent);
+        // The demo agent waits on surgeon_apply of patch.json: the compose stage, its method
+        // and the approval card the user must still reach.
+        for text in expected.iter().chain(&["patch.json", "surgeon_apply"]) {
+            assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
+        }
+        let approve = match lang {
+            Lang::Fr => "Autoriser une fois",
+            Lang::En => "Allow once",
+        };
+        assert!(texts.iter().any(|t| t == approve), "{texts:?}");
+        let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+        // A tab of the activity bar leaves Live mode for that tab.
+        b.press(key(Key::Num2, Modifiers::COMMAND));
+        assert!(!b.app.live);
+        assert_eq!(b.app.tab, Tab::Graph);
+    }
+}
+
+#[test]
+fn the_advanced_panel_forces_a_merge_method_with_its_own_settings() {
+    use surgeon_gui::agent::mission::Merge;
+
+    for (lang, merge) in [(Lang::Fr, "Fusion"), (Lang::En, "Merge")] {
+        let mut b = bench(lang);
+        empty_session(&mut b);
+        b.app.agents.forced_on = true;
+        b.app.agents.forced.merge = Merge::Dare;
+        // The panel sits below the fold of the form: a taller window shows all of it.
+        let tall = |b: &mut Bench| {
+            let app = &mut b.app;
+            raster::render(&b.ctx, [1440, 1800], 1.0, |ui| app.draw(ui)).texts
+        };
+        let texts = tall(&mut b);
+        assert!(!texts.iter().any(|t| t.contains("widget ID")), "{texts:?}");
+        let all = [
+            merge,
+            "auto",
+            "Orthogonal f64",
+            "TIES-Merge",
+            "DARE",
+            "drop_rate",
+            "seed",
+        ];
+        for text in all {
+            assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
+        }
+        assert!(!texts.iter().any(|t| t == "density"), "TIES only");
+        b.app.agents.forced.merge = Merge::Ties;
+        let texts = tall(&mut b);
+        assert!(texts.iter().any(|t| t == "density"), "{texts:?}");
+        let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
     }
 }
 
@@ -381,4 +632,30 @@ fn no_screen_spends_more_than_three_percent_of_its_pixels_on_the_accent() {
         assert!(share < 0.03, "{tab:?}: {:.2} %", share * 100.0);
     }
     println!("{}", lines.join("\n"));
+}
+
+#[test]
+fn the_results_panel_offers_the_lora_export_and_shows_its_fidelity() {
+    use surgeon_gui::agent::session::Dirs;
+
+    for (lang, button) in [
+        (Lang::Fr, "Extraire en LoRA (.safetensors)"),
+        (Lang::En, "Extract as LoRA (.safetensors)"),
+    ] {
+        let mut b = bench(lang);
+        let project = b.app.agents.project.clone().unwrap();
+        let lora = serde_json::json!({"rank": 16, "tensors": 196, "mean_rel_error": 0.013,
+            "out": "out/lora-r16/adapter_model.safetensors",
+            "per_tensor": [{"name": "model.layers.3.mlp.down_proj.weight", "rel_error": 0.041}]});
+        let line = serde_json::json!({"run_id": "mcp-3", "tool": "surgeon_lora", "ok": true,
+            "exit_code": 0, "data": {"lora": lora}, "started_unix": 1, "finished_unix": 2});
+        std::fs::write(Dirs::of(&project).mcp_runs(), format!("{line}\n")).unwrap();
+        b.app.right = RightPane::Results;
+        let texts = b.texts(Tab::Agent);
+        for text in [button, "r = 16", "lora · r16 · 98.7 %"] {
+            assert!(texts.iter().any(|t| t == text), "{text}: {texts:?}");
+        }
+        let raw: Vec<_> = texts.iter().filter(|t| raw_key(t)).collect();
+        assert!(raw.is_empty(), "{lang:?}: {raw:?}");
+    }
 }

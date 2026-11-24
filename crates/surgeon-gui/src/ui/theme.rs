@@ -385,6 +385,8 @@ pub fn style() -> egui::Style {
         ..Default::default()
     };
     style.animation_time = t.motion;
+    // Labels are interface by default; reading zones opt in with `components::selectable`.
+    style.interaction.selectable_labels = false;
 
     let s = &mut style.spacing;
     s.item_spacing = egui::vec2(t.space.s, t.space.xs);

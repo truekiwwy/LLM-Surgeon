@@ -65,7 +65,7 @@ Une propriété inconnue du schéma est aussi une `invalid_arguments`.
 | `mode` | Requis | Optionnels |
 | --- | --- | --- |
 | `merge` | `model`, `lora` | `alpha`, `adapter_config`, `scale` (1), `dry_run`, `backup_dir` |
-| `extract` | `base`, `patched`, `out` | `rank` (16), `dtype` (`f32`, `f16`, `bf16`), `target_modules` (regex), `seed` (0), `overwrite` |
+| `extract` | `base`, `patched` ou `delta` (un seul des deux), `out` | `rank` (16), `dtype` (`f32`, `f16`, `bf16`), `target_modules` (regex), `seed` (0), `overwrite` |
 
 `merge` calcule `W <- W + scale * (lora_alpha / r) * B A` en place. `lora_alpha` vient du
 `adapter_config.json` voisin de `lora` (ou de `adapter_config`) ; `alpha` le remplace ; sans
@@ -75,7 +75,9 @@ paramètre pour la sauter, et `--allow-no-backup` ne concerne que `backup: false
 (`error.kind = "cancelled"` dans le second cas). Faire d'abord `dry_run: true`.
 
 `extract` écrit un adaptateur de rang `rank` au format PEFT (`out`, plus `adapter_config.json`
-à côté) sans toucher aux modèles. Limites : le format PEFT n'est pas testé contre HuggingFace en
+à côté ; un `out` qui est un dossier existant reçoit `adapter_model.safetensors`) sans toucher
+aux modèles. La différence vient de `patched`, ou de `delta`, un `.safetensors` qui la contient
+par tenseur 2D, chacun vérifié contre la forme du même tenseur dans `base`. Limites : le format PEFT n'est pas testé contre HuggingFace en
 CI ; la fusion dans un GGUF n'est pas supportée.
 
 ```json
@@ -107,8 +109,10 @@ Succès de `extract` (le dossier de `out` doit déjà exister ; un `out` existan
 
 ## Garde-fous communs aux deux outils
 
-- Tous les chemins (`base`, `tuned`, `out`, `model`, `lora`, `adapter_config`, `backup_dir`,
-  `patched`) sont confinés aux dossiers `--allow-dir`, relatifs au premier dossier autorisé.
+- Tous les chemins sont relatifs au premier dossier autorisé. Ceux qui sont écrits (`out`,
+  `model`, `backup_dir`) sont confinés aux dossiers `--allow-dir` ; ceux qui sont seulement lus
+  (`base`, `tuned`, `patched`, `delta`, `lora`, `adapter_config`) peuvent aussi être dans une
+  racine `--allow-read`, celle du modèle d'origine.
 - Avec un `progressToken` dans `_meta`, un `notifications/progress` est envoyé par tenseur traité.
 - Les erreurs sont des résultats `isError: true` avec l'enveloppe habituelle ; `command` vaut
   `diff`, `lora merge` ou `lora extract`.

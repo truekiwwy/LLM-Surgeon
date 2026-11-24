@@ -1,0 +1,11 @@
+wikitext.txt is an unmodified excerpt (lines 1 to 116: the articles "Robert Boulter" and
+"Du Fu") of wiki.test.raw from the WikiText-2 raw dataset (wikitext-2-raw-v1).
+
+WikiText: Stephen Merity, Caiming Xiong, James Bradbury and Richard Socher, "Pointer
+Sentinel Mixture Models", 2016. https://arxiv.org/abs/1609.07843
+
+The text comes from Wikipedia articles and is licensed under the Creative Commons
+Attribution-ShareAlike 3.0 Unported License (CC BY-SA 3.0):
+https://creativecommons.org/licenses/by-sa/3.0/
+
+This license applies to wikitext.txt only, not to the rest of the repository.

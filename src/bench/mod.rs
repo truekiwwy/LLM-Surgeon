@@ -3,7 +3,8 @@
 //!
 //! - `dump`: full Qwen2 forward (candle, CPU) on prompts, logits written to a SafeTensors.
 //! - `logits`: KL(before‖after), cosine, top-1 / top-k shifts between two dumps.
-//! - `ppl`: perplexity of a GGUF through `llama-perplexity`, delta against a baseline.
+//! - `ppl`: perplexity through `llama-perplexity` on a GGUF, or the native forward on a
+//!   SafeTensors folder (`--backend native`), delta against a baseline.
 //! - `eval`: exact-match Pass@1 on GSM8K / MATH style datasets through `llama-cli`, or
 //!   through the native generator (`--backend native`, Qwen2 SafeTensors, CPU).
 //! - `refusal`: refusal rate on prompts (native generator, canonical refusal markers),
@@ -76,9 +77,11 @@ pub mod logits_io;
 pub mod logits_metrics;
 pub mod markers;
 pub mod native;
+pub mod ppl_native;
 pub mod ppl_parse;
 pub mod ppl_runner;
 pub mod prompt;
+pub mod ref_cache;
 pub mod refusal;
 pub mod report;
 pub mod score;
@@ -99,7 +102,12 @@ pub const DEFAULT_LIMIT: usize = 50;
 pub const DEFAULT_MAX_NEW_TOKENS: u32 = 512;
 pub const DEFAULT_DUMP_MAX_TOKENS: usize = 256;
 pub const DEFAULT_MAX_TOTAL_POSITIONS: usize = 4096;
-pub const DEFAULT_REFUSAL_MAX_NEW_TOKENS: u32 = 256;
+/// `bench refusal`: a refusal marker comes in the first words of the answer. 40 tokens gave
+/// the verdicts of 256 on the built-in sets with Qwen2.5-0.5B (docs/validation, 2026-11-20).
+pub const DEFAULT_REFUSAL_MAX_NEW_TOKENS: u32 = 40;
+/// The safety and unblocking pillars of a pipeline keep their historical budget: a job
+/// resumed across versions must measure its Dev and Test sets alike.
+pub const PIPELINE_REFUSAL_MAX_NEW_TOKENS: u32 = 256;
 /// Human labels a calibration file must hold before a judge is called calibrated.
 pub const DEFAULT_MIN_CALIBRATION_N: usize = 100;
 /// Lower end of the "substantial agreement" band of Landis and Koch (1977): a convention,

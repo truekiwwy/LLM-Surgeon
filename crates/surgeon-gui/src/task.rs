@@ -84,11 +84,8 @@ impl<T: Send + 'static> Task<T> {
     }
 }
 
-/// One line of a program's output, readable whatever it wrote: UTF-16 output (`wsl.exe`'s own
-/// messages) loses its NUL bytes, invalid UTF-8 is replaced.
 pub fn output_line(bytes: &[u8]) -> String {
-    let kept: Vec<u8> = bytes.iter().copied().filter(|b| *b != 0).collect();
-    String::from_utf8_lossy(&kept).trim().to_owned()
+    weight_surgeon::process::decode_windows_output(bytes.strip_prefix(&[0]).unwrap_or(bytes))
 }
 
 /// Runs `cmd` to its end, each line it writes (stdout and stderr) shown as the progress;
@@ -154,11 +151,12 @@ mod tests {
 
     #[test]
     fn output_lines_read_utf16_and_utf8_alike() {
-        let utf16: Vec<u8> = "Ubuntu-24.04\r"
+        let utf16: Vec<u8> = "Ubuntu-24.04\r\nL'opération\r\n"
             .encode_utf16()
             .flat_map(|u| u.to_le_bytes())
             .collect();
-        assert_eq!(output_line(&utf16), "Ubuntu-24.04");
+        let lines: Vec<String> = utf16.split(|b| *b == b'\n').map(output_line).collect();
+        assert_eq!(lines, ["Ubuntu-24.04", "L'opération", ""]);
         assert_eq!(
             output_line("[2/6] ROCm 7.2.1 ".as_bytes()),
             "[2/6] ROCm 7.2.1"

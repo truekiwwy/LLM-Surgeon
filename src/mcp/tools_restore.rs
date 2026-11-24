@@ -19,7 +19,7 @@ pub(super) const NAMES: [&str; 1] = [TOOL_RESTORE];
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Arguments de surgeon_restore : model, puis au plus un de backup, backup_dir ou from_origin (aucun : la sauvegarde la plus récente à côté du modèle)."
+    description = "Arguments de surgeon_restore : model, puis au plus un de backup, backup_dir ou from_origin (aucun : l'état d'avant le dernier surgeon_apply, depuis les sauvegardes à côté du modèle)."
 )]
 pub struct RestoreToolArgs {
     #[schemars(
@@ -38,7 +38,7 @@ pub struct RestoreToolArgs {
     pub backup_dir: Option<PathBuf>,
     #[serde(default)]
     #[schemars(
-        description = "Modèle d'origine (fichier ou dossier, lisible en --allow-read) : chacun de ses fichiers est recopié sur model."
+        description = "Modèle d'origine (dossier, ou fichier de poids recopié sous son nom dans model, lisible en --allow-read) : chacun de ses fichiers est recopié sur model."
     )]
     pub from_origin: Option<PathBuf>,
 }
@@ -51,7 +51,7 @@ pub(super) fn definitions() -> Vec<Value> {
         .into_root_schema_for::<RestoreToolArgs>();
     vec![json!({
         "name": TOOL_RESTORE,
-        "description": "Remet un modèle octet pour octet dans un état connu : depuis les sauvegardes de surgeon_apply (backup, ou détection de la plus récente <nom>.bak-* ; un dossier où un fichier a plusieurs sauvegardes est refusé, error.kind = \"ambiguous_backup\") ou depuis le modèle d'origine (from_origin). SHA-256 de chaque fichier avant et après dans data.files ; échec si l'empreinte finale diffère de la source. À appeler quand surgeon_bench mesure une régression après un surgeon_apply. Les sauvegardes et l'origine ne sont jamais modifiées.",
+        "description": "Remet un modèle octet pour octet dans un état connu : depuis les sauvegardes de surgeon_apply (backup, ou sans argument l'état d'avant le dernier surgeon_apply, data.checkpoint = \"last_apply\" ; répéter l'appel ne remonte pas plus loin) ou depuis le modèle d'origine (from_origin). SHA-256 de chaque fichier avant et après dans data.files ; échec si l'empreinte finale diffère de la source. À appeler quand surgeon_bench mesure une régression après un surgeon_apply. Les sauvegardes et l'origine ne sont jamais modifiées.",
         "inputSchema": serde_json::to_value(schema).unwrap_or(Value::Null),
         "annotations": {
             "title": "Restauration d'un modèle",

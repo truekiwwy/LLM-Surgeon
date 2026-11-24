@@ -475,7 +475,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fake = FakeReleases::serve(
             NAME,
-            archive(&[("mistralrs.exe", b"MZ"), ("ggml.dll", b"d")]),
+            archive(&[(server_name(), b"MZ"), ("ggml.dll", b"d")]),
             true,
         );
         let mut pins = BTreeMap::new();
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn a_wrong_digest_is_refused_and_leaves_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let fake = FakeReleases::serve(NAME, archive(&[("mistralrs.exe", b"MZ")]), true);
+        let fake = FakeReleases::serve(NAME, archive(&[(server_name(), b"MZ")]), true);
         fake.corrupt_digest();
         let err = run(
             &fake,
@@ -520,7 +520,7 @@ mod tests {
     fn a_dropped_connection_resumes_instead_of_restarting() {
         let dir = tempfile::tempdir().unwrap();
         let payload = vec![7u8; 200_000];
-        let fake = FakeReleases::serve(NAME, archive(&[("mistralrs.exe", &payload)]), true);
+        let fake = FakeReleases::serve(NAME, archive(&[(server_name(), &payload)]), true);
         fake.cut_first_transfer_after(50_000);
         let mut pins = BTreeMap::new();
         let cancel = AtomicBool::new(false);
@@ -545,7 +545,7 @@ mod tests {
     fn cancelling_keeps_the_part_for_a_later_resume() {
         let dir = tempfile::tempdir().unwrap();
         let payload = vec![1u8; 400_000];
-        let fake = FakeReleases::serve(NAME, archive(&[("mistralrs.exe", &payload)]), true);
+        let fake = FakeReleases::serve(NAME, archive(&[(server_name(), &payload)]), true);
         let fetcher = Fetcher::new(Policy::loopback());
         let plan = fetch_plan(&fetcher, &fake.api_url(), WIN).unwrap();
         let cancel = AtomicBool::new(false);
@@ -587,13 +587,13 @@ mod tests {
     #[test]
     fn without_a_digest_the_hash_is_pinned_then_enforced() {
         let dir = tempfile::tempdir().unwrap();
-        let fake = FakeReleases::serve(NAME, archive(&[("mistralrs.exe", b"A")]), false);
+        let fake = FakeReleases::serve(NAME, archive(&[(server_name(), b"A")]), false);
         let mut pins = BTreeMap::new();
         let first = run(&fake, dir.path(), &mut pins, &AtomicBool::new(false)).unwrap();
         assert_eq!(first.manifest.hash_source, HashSource::Pinned);
         assert_eq!(pins.get(NAME), Some(&first.manifest.sha256));
         // Same name, other bytes, on a clean machine that kept the pin.
-        let other = FakeReleases::serve(NAME, archive(&[("mistralrs.exe", b"B")]), false);
+        let other = FakeReleases::serve(NAME, archive(&[(server_name(), b"B")]), false);
         let clean = tempfile::tempdir().unwrap();
         let err = run(&other, clean.path(), &mut pins, &AtomicBool::new(false)).unwrap_err();
         assert!(matches!(err, InstallError::PinMismatch { .. }), "{err}");
@@ -604,7 +604,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fake = FakeReleases::serve(
             NAME,
-            archive(&[("mistralrs.exe", b"MZ"), ("../../pwn.txt", b"x")]),
+            archive(&[(server_name(), b"MZ"), ("../../pwn.txt", b"x")]),
             true,
         );
         let err = run(
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn a_build_that_does_not_start_is_not_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let fake = FakeReleases::serve(NAME, archive(&[("mistralrs.exe", b"MZ")]), true);
+        let fake = FakeReleases::serve(NAME, archive(&[(server_name(), b"MZ")]), true);
         let fetcher = Fetcher::new(Policy::loopback());
         let plan = fetch_plan(&fetcher, &fake.api_url(), WIN).unwrap();
         let bad = |_: &Path| -> Result<String, String> { Err("DLL manquante".into()) };

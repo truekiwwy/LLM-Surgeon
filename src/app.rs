@@ -103,6 +103,7 @@ use crate::kernel::{self, IoConfig, IoMeter, KernelChoice, Level};
 use crate::patch::autotune::{
     self, AutotuneError, AutotuneEvent, AutotuneRequest, AutotuneRun, EvalSource,
 };
+use crate::patch::autotune_select::SelectionRequest;
 use crate::patch::gguf::{self, GgufApplyArgs, GgufApplyError, Requant};
 use crate::patch::{
     self, apply_patch, apply_patch_with, load_patch, untie, validate_patch, ApplyOptions,
@@ -171,7 +172,7 @@ pub fn real_deps() -> AppDeps {
 
 /// Prefers `llama-completion` (raw completion in recent llama.cpp), else `llama-cli`.
 /// `-no-cnv` disables chat mode on both; very old builds without it will reject it.
-fn real_generator(
+pub fn real_generator(
     gguf: &Path,
     args: &EvalArgs,
 ) -> std::result::Result<Box<dyn TextGenerator>, EvalError> {
@@ -369,6 +370,8 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Inspect(_) => "inspect",
         Commands::Apply(_) => "apply",
         Commands::Restore(_) => "restore",
+        Commands::Compose(_) => "compose",
+        Commands::Doctor(_) => "doctor",
         Commands::Eval(_) => "eval",
         Commands::Extract(_) => "extract",
         Commands::Schema(_) => "schema",
@@ -404,6 +407,7 @@ fn command_name(command: &Commands) -> &'static str {
             BenchCommand::Eval(_) => "bench eval",
             BenchCommand::Dump(_) => "bench dump",
             BenchCommand::Refusal(_) => "bench refusal",
+            BenchCommand::RefusalProbe(_) => "bench refusal-probe",
             BenchCommand::JudgeSample(_) => "bench judge-sample",
             BenchCommand::JudgeEval(_) => "bench judge-eval",
         },
@@ -422,14 +426,16 @@ fn extract_cli(cmd: &ExtractCommand, deps: &AppDeps, io: &mut Io) -> CoreResult 
     };
     let rank = cmd.method.rank.map(|r| r as usize);
     let ui = io.ui;
-    core_extract_with(
-        &cmd.args,
-        &cmd.method.method,
-        &extract::params_with_subspace(&cmd.method.options(), rank, labels),
-        deps,
-        &ui,
-        &mut CliSink::new(io),
-    )
+    let params = extract::params_with_subspace(&cmd.method.options(), rank, labels);
+    let method = &cmd.method.method;
+    let Some(layers) = &cmd.method.layers else {
+        return core_extract_with(&cmd.args, method, &params, deps, &ui, &mut CliSink::new(io));
+    };
+    let request = extract::SweepRequest {
+        extract: extract_request(&cmd.args)?,
+        layers: layers.clone(),
+    };
+    core_extract_sweep(&request, method, &params, deps, &ui, &mut CliSink::new(io))
 }
 
 fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
@@ -438,6 +444,17 @@ fn dispatch(command: &Commands, deps: &AppDeps, io: &mut Io) -> Outcome {
         Commands::Inspect(args) => core_inspect(args, deps, &io.ui),
         Commands::Apply(args) => apply(args, deps, io),
         Commands::Restore(args) => crate::patch::core_restore(args, deps),
+        Commands::Compose(args) => crate::patch::compose::core_compose(args),
+        Commands::Doctor(args) => {
+            let req = crate::doctor::DoctorRequest {
+                model: args.model.clone(),
+                clean_cache: args.clean_cache,
+                hipfire_url: args.hipfire_url.clone(),
+                hipfire_log: args.hipfire_log.clone(),
+                cache_dir: None,
+            };
+            crate::doctor::core_doctor(&req, deps.probe.as_ref(), &io.ui)
+        }
         Commands::Eval(args) => eval(args, deps, &io.ui),
         Commands::Extract(cmd) => extract_cli(cmd, deps, io),
         Commands::Plugins(_) => plugins_list(&io.ui),
@@ -474,7 +491,7 @@ fn pipeline_cli(command: &crate::cli::PipelineCommand, deps: &AppDeps) -> CoreRe
         C::Plan(a) => {
             let options = RunOptions {
                 allow_disable_safety: a.allow_disable_safety,
-                allow_test_reuse: false,
+                ..RunOptions::default()
             };
             front::core_plan(
                 &a.config,
@@ -490,6 +507,7 @@ fn pipeline_cli(command: &crate::cli::PipelineCommand, deps: &AppDeps) -> CoreRe
             let options = RunOptions {
                 allow_disable_safety: a.allow_disable_safety,
                 allow_test_reuse: a.allow_test_reuse,
+                allow_stale_hipfire: a.allow_stale_hipfire,
             };
             match a.detach {
                 true => front::core_detach(
@@ -982,12 +1000,13 @@ fn find_targets<'a>(
         .collect()
 }
 
-/// `project_out` is not a shift: it goes through `PatchBackend::project_out_tensor`.
+/// `project_out` and `add_direction` are not shifts: they go through
+/// `PatchBackend::project_out_subspace`.
 fn shift_op(op: OperationKind) -> Option<ShiftOp> {
     match op {
         OperationKind::Subtract => Some(ShiftOp::Subtract),
         OperationKind::Add => Some(ShiftOp::Add),
-        OperationKind::ProjectOut => None,
+        OperationKind::ProjectOut | OperationKind::AddDirection => None,
     }
 }
 
@@ -1226,6 +1245,8 @@ pub enum ProgressEvent {
         operations: usize,
     },
     Warn(String),
+    /// What the engine decided on its own (dtype, batching): a log line, not a warning.
+    Info(String),
     DryRun {
         op_id: String,
         tensors: Vec<String>,
@@ -1325,6 +1346,22 @@ pub enum ProgressEvent {
     },
     /// `autotune`: responses measured, ridge being solved.
     AutotuneSolve,
+    TraceForward {
+        done: usize,
+        total: usize,
+    },
+    /// `autotune --refusal-prompts`: one candidate scale measured (`probe` or `generation`).
+    AutotuneScale {
+        scale: f64,
+        stage: &'static str,
+        refusal_rate: f64,
+    },
+    /// `autotune --refusal-prompts`: candidates probed and generated, generations saved.
+    AutotuneSelection {
+        probed: usize,
+        generated: usize,
+        saved: usize,
+    },
     /// `graph`: the model is open, the SVD loop is about to start.
     GraphStart {
         model: PathBuf,
@@ -1682,6 +1719,7 @@ impl ProgressSink for CliSink<'_, '_> {
             ProgressEvent::AutotuneForward { done, total } => {
                 Some(("autotune", *done, Some(*total)))
             }
+            ProgressEvent::TraceForward { done, total } => Some(("trace", *done, Some(*total))),
             _ => None,
         };
         if let Some((label, done, total)) = bench {
@@ -1711,6 +1749,30 @@ impl ProgressSink for CliSink<'_, '_> {
                 ui::metric(&ui, operations)
             )),
             ProgressEvent::Warn(warning) => self.io.line(&warning_line(&ui, &warning)),
+            // A log line, not part of the report: stderr, like the progress.
+            ProgressEvent::Info(note) => {
+                let err_ui = self.io.err_ui;
+                let line = format!("{} {}", ui::badge(&err_ui, "INFO"), ui::dim(&err_ui, &note));
+                err_ui.line(self.io.err, &line);
+            }
+            ProgressEvent::AutotuneScale {
+                scale,
+                stage,
+                refusal_rate,
+            } => {
+                let err_ui = self.io.err_ui;
+                let stage = match stage {
+                    "probe" => "sonde",
+                    _ => "génération",
+                };
+                let line = format!(
+                    "{} échelle {} · {stage} · refus {}",
+                    ui::badge(&err_ui, "SCALE"),
+                    ui::metric(&err_ui, scale),
+                    ui::metric(&err_ui, format!("{:.1} %", refusal_rate * 100.0))
+                );
+                err_ui.line(self.io.err, &line);
+            }
             ProgressEvent::DryRun {
                 op_id,
                 tensors,
@@ -1855,6 +1917,8 @@ impl ProgressSink for CliSink<'_, '_> {
             | ProgressEvent::BenchJudgeVerdict { .. }
             | ProgressEvent::AutotuneForward { .. }
             | ProgressEvent::AutotuneSolve
+            | ProgressEvent::TraceForward { .. }
+            | ProgressEvent::AutotuneSelection { .. }
             | ProgressEvent::Surgery(_) => {}
         }
     }
@@ -2114,6 +2178,9 @@ fn core_apply_io(
             touched.push(file);
         }
     }
+    for file in &touched {
+        crate::checkpoint::unshare(file).map_err(|e| PatchError::io(file, &e))?;
+    }
     let mut backup = match patch.backup {
         true => Some(BackupSet::create_many_in(
             &touched,
@@ -2363,6 +2430,9 @@ fn core_apply_gguf(
         options.arch_spec = Some(arch::load_spec(path).map_err(arch_failure)?);
     }
     let dry_run = request.dry_run;
+    if !dry_run {
+        crate::checkpoint::unshare(&model).map_err(|e| PatchError::io(&model, &e))?;
+    }
     let started = Instant::now();
     let meter = IoMeter::start();
     let result = gguf::apply_gguf(
@@ -2721,6 +2791,10 @@ pub fn core_extract_with(
     ui: &Ui,
     sink: &mut dyn ProgressSink,
 ) -> CoreResult {
+    core_extract_method(&extract_request(args)?, method, params, deps, ui, sink)
+}
+
+fn extract_request(args: &ExtractArgs) -> Result<ExtractRequest, Outcome> {
     let load = |set: &str, path: &Path| {
         extract::load_prompt_texts(path).map_err(|message| {
             extract_failure(&ExtractError::Prompts {
@@ -2729,7 +2803,7 @@ pub fn core_extract_with(
             })
         })
     };
-    let request = ExtractRequest {
+    Ok(ExtractRequest {
         model_dir: args.model.clone(),
         pos_prompts: load("pos", &args.pos_prompts)?,
         neg_prompts: load("neg", &args.neg_prompts)?,
@@ -2741,8 +2815,7 @@ pub fn core_extract_with(
         max_tokens: args.max_tokens,
         dtype: args.dtype,
         overwrite: args.overwrite,
-    };
-    core_extract_method(&request, method, params, deps, ui, sink)
+    })
 }
 
 /// Shared by the CLI and the MCP tool. Cancellation (`deps.interrupted`) is honored
@@ -2790,6 +2863,150 @@ pub fn core_extract_method(
     Ok(outcome)
 }
 
+pub fn core_extract_sweep(
+    request: &extract::SweepRequest,
+    method: &str,
+    params: &Value,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let registry = Registry::with_builtin();
+    let Some(method) = registry.get(method) else {
+        let message = unknown_method_message(method, &registry.ids());
+        return Err(extract_failure(&ExtractError::InvalidArgument(message)));
+    };
+    let mut observer = SinkObserver {
+        sink,
+        interrupted: &deps.interrupted,
+        request: &request.extract,
+    };
+    let report = extract::run_sweep(
+        request,
+        method,
+        params,
+        deps.probe.as_ref(),
+        &mut observer,
+        &deps.interrupted,
+    )
+    .map_err(|e| extract_failure(&e))?;
+    let mut outcome = Outcome::ok(to_value(&report), sweep_text(ui, &report));
+    outcome.warnings = report.warnings.clone();
+    Ok(outcome)
+}
+
+fn sweep_text(ui: &Ui, report: &extract::SweepReport) -> String {
+    let rows: Vec<Vec<String>> = report
+        .layers
+        .iter()
+        .map(|s| {
+            let d_prime = s.d_prime.map_or("∞".to_owned(), |d| format!("{d:.2}"));
+            vec![
+                ui::metric(ui, format!("L{}", s.layer)),
+                ui::metric(ui, format!("{:.3}", s.auc)),
+                ui::metric(ui, format!("{:.3}", s.margin)),
+                ui::metric(ui, d_prime),
+                ui::metric(ui, format!("{:.3}", s.raw_diff_norm)),
+            ]
+        })
+        .collect();
+    let mut text = format!(
+        "{}\n{} meilleure couche L{}\n{} {}\n",
+        ui::table(ui, &["COUCHE", "AUC", "MARGE", "D′", "‖Δ‖"], &rows),
+        ui::badge(ui, "VERDICT"),
+        report.best_layer,
+        ui::badge(ui, "WRITE"),
+        ui::path(ui, &report.out_path),
+    );
+    for w in &report.warnings {
+        text.push_str(&warning_line(ui, w));
+        text.push('\n');
+    }
+    text
+}
+
+pub fn core_causal_trace(
+    request: &extract::TraceRequest,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let mut observer = TraceObserver {
+        sink,
+        interrupted: &deps.interrupted,
+    };
+    let report = extract::run_trace(
+        request,
+        deps.probe.as_ref(),
+        &mut observer,
+        &deps.interrupted,
+    )
+    .map_err(|e| extract_failure(&e))?;
+    let mut outcome = Outcome::ok(to_value(&report), trace_text(ui, &report));
+    outcome.warnings = report.warnings.clone();
+    Ok(outcome)
+}
+
+fn trace_text(ui: &Ui, report: &extract::TraceReport) -> String {
+    let rows: Vec<Vec<String>> = report
+        .layers
+        .iter()
+        .map(|e| {
+            vec![
+                ui::metric(ui, format!("L{}", e.layer)),
+                ui::metric(ui, format!("{:+.3}", e.score)),
+                ui::dim(ui, &format!("[{:+.3}, {:+.3}]", e.min, e.max)),
+            ]
+        })
+        .collect();
+    let mut text = format!(
+        "{}\n{} {} · pic L{} · fenêtre {} ({} paire(s) sur {})\n",
+        ui::table(ui, &["COUCHE", "SCORE", "ÉTENDUE"], &rows),
+        ui::badge(ui, "CAUSAL"),
+        report.component.as_str(),
+        report.peak_layer,
+        ui::metric(ui, &report.window.layers),
+        report.pairs_used,
+        report.n_pairs,
+    );
+    for w in &report.warnings {
+        text.push_str(&warning_line(ui, w));
+        text.push('\n');
+    }
+    text
+}
+
+struct TraceObserver<'a> {
+    sink: &'a mut dyn ProgressSink,
+    interrupted: &'a AtomicBool,
+}
+
+impl ExtractObserver for TraceObserver<'_> {
+    fn on_event(&mut self, event: ExtractEvent) -> ControlFlow<()> {
+        let progress = match event {
+            ExtractEvent::LoadingWeights {
+                done_tensors,
+                total_tensors,
+            } => Some(ProgressEvent::ExtractLoading {
+                done: done_tensors,
+                total: total_tensors,
+            }),
+            ExtractEvent::Forward { done, total } => {
+                Some(ProgressEvent::TraceForward { done, total })
+            }
+            ExtractEvent::Note(note) => Some(ProgressEvent::Info(note)),
+            _ => None,
+        };
+        if let Some(progress) = progress {
+            self.sink.event(progress);
+        }
+        match self.interrupted.load(Ordering::SeqCst) {
+            true => ControlFlow::Break(()),
+            false => ControlFlow::Continue(()),
+        }
+    }
+}
+
 fn extract_failure(e: &ExtractError) -> Outcome {
     let code = match e {
         ExtractError::InvalidArgument(_)
@@ -2816,10 +3033,11 @@ impl ExtractObserver for SinkObserver<'_> {
             ExtractEvent::Planned {
                 dtype_used,
                 weight_bytes,
+                layer,
                 ..
             } => ProgressEvent::ExtractStart {
                 model: self.request.model_dir.clone(),
-                layer: self.request.layer,
+                layer,
                 site: self.request.site.as_str().into(),
                 pooling: self.request.pooling.as_str().into(),
                 dtype: dtype_used,
@@ -2838,6 +3056,8 @@ impl ExtractObserver for SinkObserver<'_> {
                 ProgressEvent::ExtractPrompt { set, done, total }
             }
             ExtractEvent::Writing => ProgressEvent::ExtractWriting,
+            ExtractEvent::Note(note) => ProgressEvent::Info(note),
+            ExtractEvent::Forward { done, total } => ProgressEvent::TraceForward { done, total },
         };
         self.sink.event(progress);
         match self.interrupted.load(Ordering::SeqCst) {
@@ -3044,6 +3264,12 @@ fn bench_outcome<R: Serialize>(run: &BenchRun<R>, fail_on_warn: bool, human: Str
     Ok(outcome)
 }
 
+/// The reference cache of a CLI bench. With `--no-ref-cache` its entry is not read: the
+/// baseline is generated again and overwrites it.
+fn ref_cache(regenerate: bool) -> Option<bench::ref_cache::RefCache> {
+    bench::ref_cache::RefCache::from_env().map(|c| c.regenerating(regenerate))
+}
+
 /// The options with the GPU API of the llama-server, for the report label only.
 fn labelled(
     mut generation: bench::generation::GenOptions,
@@ -3193,6 +3419,8 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 timeout: timeout(a.timeout_secs)?,
                 llama_args: bench::ppl_runner::validate_llama_args(&a.llama_args)
                     .map_err(invalid)?,
+                backend: a.backend.unwrap_or_default(),
+                stride: a.stride,
             };
             core_bench_ppl(&req, a.fail_on_warn, deps, &ui, &mut sink)
         }
@@ -3206,6 +3434,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 limit: a.limit,
                 max_new_tokens: a.max_new_tokens,
                 template: Template::from_cli(a.prompt_template.as_deref()).map_err(invalid)?,
+                chat_template: a.chat_template,
                 format: a.format,
                 llama_cpp_dir: a.llama_cpp_dir.clone(),
                 timeout: timeout(a.timeout_secs)?,
@@ -3215,6 +3444,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                     eval_backend,
                     a.llama_cpp_dir.as_deref(),
                 ),
+                ref_cache: ref_cache(a.no_ref_cache),
             };
             let engines = a.generation.engines.config(a.llama_cpp_dir.as_deref());
             core_bench_eval(&req, &engines, a.fail_on_warn, deps, &ui, &mut sink)
@@ -3225,6 +3455,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
             let req = DumpRequest {
                 model: a.model.clone(),
                 prompts,
+                chat_template: a.chat_template,
                 out: a.out.clone(),
                 dtype: a.dtype,
                 out_dtype: a.out_dtype,
@@ -3236,8 +3467,9 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
         }
         BenchCommand::Refusal(a) => {
             let refusal_backend = a.backend.unwrap_or(Backend::Native);
-            let prompts = extract::load_prompt_texts(&a.prompts)
+            let mut prompts = extract::load_prompt_texts(&a.prompts)
                 .map_err(|m| invalid(BenchError::input(&a.prompts, m)))?;
+            prompts.truncate(a.limit.unwrap_or(usize::MAX));
             let req = RefusalRequest {
                 model: a.model.clone(),
                 prompts,
@@ -3251,6 +3483,7 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                     a.judge_args.llama_cpp_dir.as_deref(),
                 ),
                 backend: refusal_backend.label().into(),
+                ref_cache: ref_cache(a.no_ref_cache),
             };
             let judging = match a.judge {
                 JudgeMode::Rules if a.judge_args.judge_model.is_some() => {
@@ -3283,6 +3516,21 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
                 &ui,
                 &mut sink,
             )
+        }
+        BenchCommand::RefusalProbe(a) => {
+            let prompts = extract::load_prompt_texts(&a.prompts)
+                .map_err(|m| invalid(BenchError::input(&a.prompts, m)))?;
+            let req = bench::refusal::ProbeRequest {
+                model: a.model.clone(),
+                prompts,
+                mode: a.method,
+                chat_template: a.chat_template,
+                prefixes: a.prefixes.clone(),
+                vector: a.vector.clone(),
+                threshold: a.threshold,
+                compare_generation: a.compare_generation,
+            };
+            core_bench_refusal_probe(&req, deps, &ui, &mut sink)
         }
         BenchCommand::JudgeSample(a) => {
             let prompts = extract::load_prompt_texts(&a.prompts)
@@ -3377,6 +3625,7 @@ pub fn core_bench_ppl(
     let run = bench::ppl_runner::run(
         req,
         deps.runner.as_ref(),
+        deps.probe.as_ref(),
         &deps.interrupted,
         &mut |done, total| sink.event(ProgressEvent::BenchPplChunk { done, total }),
     )
@@ -3397,11 +3646,37 @@ fn native_generator(
         deps.probe.as_ref(),
         Arc::clone(&deps.interrupted),
     )?;
+    for note in generator.notes() {
+        sink.borrow_mut().event(ProgressEvent::Info(note.clone()));
+    }
     for warning in generator.warnings() {
         sink.borrow_mut()
             .event(ProgressEvent::Warn(warning.clone()));
     }
     Ok(generator)
+}
+
+/// `bench refusal-probe`: the native model loaded once (its dtype logged), probed prompt by
+/// prompt, then, with `--compare-generation`, the same instance generates the answers with
+/// the automatic native batches.
+pub fn core_bench_refusal_probe(
+    req: &bench::refusal::ProbeRequest,
+    deps: &AppDeps,
+    ui: &Ui,
+    sink: &mut dyn ProgressSink,
+) -> CoreResult {
+    let sink = RefCell::new(sink);
+    let mut generator = native_generator(&req.model, deps, &sink).map_err(|e| bench_failure(&e))?;
+    if req.compare_generation {
+        let note = generator.auto_batching(deps.probe.as_ref(), 1, None);
+        sink.borrow_mut().event(ProgressEvent::Info(note));
+    }
+    let run = bench::refusal::run_probe(req, generator, &deps.interrupted, &mut |done, total| {
+        sink.borrow_mut()
+            .event(ProgressEvent::BenchRefusalPrompt { done, total })
+    })
+    .map_err(|e| bench_failure(&e))?;
+    bench_outcome(&run, false, bench_report::probe_text(ui, &run))
 }
 
 /// Shared by the CLI and the MCP tool. Generators come from `deps.generator_factory` (or
@@ -3417,6 +3692,8 @@ pub fn core_bench_eval(
 ) -> CoreResult {
     let sink = RefCell::new(sink);
     req.generation.validate().map_err(|e| bench_failure(&e))?;
+    let models = [Some(req.model.as_path()), req.baseline_model.as_deref()];
+    let stale = hipfire_targets(req.backend, &models, &req.generation, engines)?;
     let pool = generation_pool(&req.generation, req.backend, &sink)?;
     let mut make = |gguf: &Path| {
         let tag = "bench-eval";
@@ -3431,7 +3708,7 @@ pub fn core_bench_eval(
             &sink,
         )
     };
-    let run = bench::score::run(
+    let mut run = bench::score::run(
         req,
         deps.runner.as_ref(),
         &mut make,
@@ -3442,7 +3719,32 @@ pub fn core_bench_eval(
         },
     )
     .map_err(|e| bench_failure(&e))?;
+    run.warnings.extend(stale);
     bench_outcome(&run, fail_on_warn, bench_report::eval_text(ui, &run))
+}
+
+/// [`hipfire::prepare_target`](crate::backend::hipfire::prepare_target) on every model of a
+/// bench before its first generation: a refused working copy must not cost the baseline's
+/// run first, and one to requantize (`hipfire_requantize = "auto"`) is requantized here. The
+/// warnings of `--allow-stale-hipfire` go in the report. [`bench_generator`] applies the rule
+/// again to each model it serves.
+fn hipfire_targets(
+    backend: Backend,
+    models: &[Option<&Path>],
+    generation: &bench::generation::GenOptions,
+    engines: &crate::backend::BackendConfig,
+) -> std::result::Result<Vec<String>, Outcome> {
+    use crate::backend::hipfire;
+    if backend != Backend::Hipfire {
+        return Ok(Vec::new());
+    }
+    let mut warnings = Vec::new();
+    for model in models.iter().flatten() {
+        let decision = hipfire::prepare_target(model, engines, generation.allow_stale_hipfire)
+            .map_err(|e| bench_failure(&BenchError::InvalidArgument(e)))?;
+        warnings.extend(decision.warning);
+    }
+    Ok(warnings)
 }
 
 /// A bench generator for `backend`: the native one on a SafeTensors folder (batches,
@@ -3465,7 +3767,14 @@ pub(crate) fn bench_generator(
     match backend {
         Backend::Native => {
             let mut native = native_generator(model, deps, sink)?;
-            native.set_batching(generation.batch_size, generation.jobs, pool.clone());
+            match generation.batch_auto {
+                true => {
+                    let probe = deps.probe.as_ref();
+                    let note = native.auto_batching(probe, generation.jobs, pool.clone());
+                    sink.borrow_mut().event(ProgressEvent::Info(note));
+                }
+                false => native.set_batching(generation.batch_size, generation.jobs, pool.clone()),
+            }
             return Ok(Box::new(native));
         }
         Backend::MistralRs => {
@@ -3481,6 +3790,10 @@ pub(crate) fn bench_generator(
             return Ok(Box::new(server));
         }
         Backend::Hipfire => {
+            hipfire::check_sampling(&generation.sampling).map_err(BenchError::InvalidArgument)?;
+            // Its warning, when let through, is the caller's to report (bench, pipeline).
+            let target = hipfire::prepare_target(model, engines, generation.allow_stale_hipfire)
+                .map_err(BenchError::InvalidArgument)?;
             let endpoint = hipfire::probe(engines).map_err(BenchError::InvalidArgument)?;
             if let Some(warning) = endpoint.warning() {
                 sink.borrow_mut().event(ProgressEvent::Warn(warning.into()));
@@ -3489,7 +3802,7 @@ pub(crate) fn bench_generator(
                 "hipfire",
                 endpoint.port,
                 endpoint.dialect,
-                hipfire::model_name(model),
+                target.model,
                 generation.batch_size,
             )));
         }
@@ -3637,6 +3950,8 @@ pub fn core_bench_refusal(
         .transpose()
         .map_err(|e| bench_failure(&e))?;
     req.generation.validate().map_err(|e| bench_failure(&e))?;
+    let models = [Some(req.model.as_path()), req.baseline_model.as_deref()];
+    let stale = hipfire_targets(backend, &models, &req.generation, engines)?;
     let pool = generation_pool(&req.generation, backend, &sink)?;
     let llama_cpp_dir = engines.llama_cpp_dir.as_deref();
     let mut make = |model: &Path| {
@@ -3648,6 +3963,7 @@ pub fn core_bench_refusal(
             .event(ProgressEvent::BenchRefusalPrompt { done, total })
     })
     .map_err(|e| bench_failure(&e))?;
+    run.warnings.extend(stale);
     if let Some(judging) = judging {
         bench::judge::annotate(
             &mut run,
@@ -3778,6 +4094,7 @@ fn autotune_cli(
         l2_reg: args.l2_reg,
         probe_alpha: args.probe_alpha,
         alpha_max: args.alpha_max,
+        max_delta_norm_ratio: args.max_delta_norm_ratio,
         min_alpha: args.min_alpha,
         max_forwards: args.max_forwards,
         max_tokens: args.max_tokens,
@@ -3787,6 +4104,21 @@ fn autotune_cli(
         chat_template: args.chat_template,
         out: args.out.clone(),
         overwrite: args.overwrite,
+        selection: args
+            .refusal_prompts
+            .clone()
+            .map(|prompts| SelectionRequest {
+                prompts,
+                target_refusal_rate: args.target_refusal_rate,
+                scales: args.scales.clone(),
+                top_k: args.probe_top_k,
+                prefilter: !args.no_probe_prefilter,
+                retention: args
+                    .retention_dataset
+                    .clone()
+                    .map(|d| (d, args.retention_limit)),
+                ref_cache: bench::ref_cache::RefCache::from_env(),
+            }),
     };
     core_autotune(&request, deps, ui, sink)
 }
@@ -3809,6 +4141,25 @@ pub fn core_autotune(
                 sink.event(ProgressEvent::AutotuneForward { done, total })
             }
             AutotuneEvent::Solve => sink.event(ProgressEvent::AutotuneSolve),
+            AutotuneEvent::Scale {
+                scale,
+                stage,
+                refusal_rate,
+            } => sink.event(ProgressEvent::AutotuneScale {
+                scale,
+                stage: stage.as_str(),
+                refusal_rate,
+            }),
+            AutotuneEvent::Selected {
+                probed,
+                generated,
+                saved,
+            } => sink.event(ProgressEvent::AutotuneSelection {
+                probed,
+                generated,
+                saved,
+            }),
+            AutotuneEvent::Note(note) => sink.event(ProgressEvent::Info(note)),
         },
     )
     .map_err(|e| autotune_failure(&e))?;
@@ -3872,6 +4223,41 @@ fn autotune_text(ui: &Ui, run: &AutotuneRun) -> String {
             ui::metric(ui, format!("{:.4}", r.validation.target_rmse_after))
         ),
     ];
+    if let Some(s) = &r.selection {
+        let pct = |v: Option<f64>| v.map_or("—".to_owned(), |x| format!("{:.1} %", x * 100.0));
+        lines.push(format!(
+            "{} {} échelles · {} sondées · {} générées · {} générations économisées · cible {} → {}",
+            ui::badge(ui, "SELECT"),
+            ui::metric(ui, s.candidates.len()),
+            ui::metric(ui, s.candidates_probed),
+            ui::metric(ui, s.candidates_generated),
+            ui::metric(ui, s.generations_saved),
+            ui::metric(ui, pct(Some(s.target_refusal_rate))),
+            ui::metric(
+                ui,
+                s.selected_scale
+                    .map_or("aucune échelle".to_owned(), |c| format!("échelle {c}"))
+            )
+        ));
+        for c in std::iter::once(&s.baseline).chain(&s.candidates) {
+            let label = match c.scale {
+                0.0 => "base".to_owned(),
+                x => format!("c = {x}"),
+            };
+            let mut detail = format!(
+                "{label} : sonde {} · génération {}",
+                pct(c.probe_refusal_rate),
+                pct(c.generated_refusal_rate)
+            );
+            if let Some(acc) = c.retention_accuracy {
+                detail.push_str(&format!(" · rétention {}", pct(Some(acc))));
+            }
+            if let Some(reason) = &c.rejected {
+                detail.push_str(&format!(" · écartée : {reason}"));
+            }
+            lines.push(format!("  {}", ui::dim(ui, &detail)));
+        }
+    }
     lines.push(match (&r.out, &r.patch) {
         (Some(out), _) => format!("{} {}", ui::badge(ui, "WRITE"), ui::path(ui, out)),
         (None, Some(_)) => format!(

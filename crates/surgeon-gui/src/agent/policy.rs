@@ -2,13 +2,15 @@
 //! arguments only: the agent's prose, the tool results and the model outputs have no say.
 //! `Safe` runs, `Approval` waits for a human, `Forbidden` is answered with an error.
 //!
-//! - Forbidden: an unknown tool, a path outside the sandbox (project folder and source
+//! - Forbidden: an unknown tool, a tool for agents outside the studio (`surgeon_workspace`:
+//!   the project already has its manifest), a path outside the sandbox (project folder and source
 //!   model folder), anything the job manager refuses (the source model written, an in-place
 //!   tool on anything but a working copy), a pipeline without its Safety pillar, a promotion
 //!   (human only), and in "Ask" mode every tool that is not a read.
 //! - Approval: in "Modify" mode, every write, external program (llama.cpp) or job not
 //!   proven read-only. Destructive ones (in-place apply, LoRA merge, restore, pipeline
-//!   cancel) can never be allowed "always".
+//!   cancel) can never be allowed "always". A working file (`surgeon_files`, confined to
+//!   `work/` by the engine) touches no model and needs none.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -16,7 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::tools::UI_TOOLS;
+use super::tools::{EXTERNAL_ONLY, UI_TOOLS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,6 +47,8 @@ pub struct Scope<'a> {
     pub copies_dir: PathBuf,
     /// The source model (file or folder).
     pub source: Option<PathBuf>,
+    /// The configured models folder, read only.
+    pub models_dir: Option<PathBuf>,
     /// The job manager's own guard (`Manager::check`): origin never written, in-place tools
     /// on copies only, pipeline budgets.
     pub guard: &'a dyn Fn(&str, &Value) -> Result<(), String>,
@@ -59,6 +63,7 @@ impl Scope<'_> {
                 false => s.parent().unwrap_or(s),
             }));
         }
+        roots.extend(self.models_dir.iter().map(|d| canonical(d)));
         roots
     }
 
@@ -83,11 +88,16 @@ pub fn classify(tool: &str, args: &Value, mode: AgentMode, scope: &Scope) -> Dec
     if !known {
         return Decision::Forbidden(format!("outil inconnu : {tool}"));
     }
+    if EXTERNAL_ONLY.contains(&tool) {
+        return Decision::Forbidden(format!(
+            "{tool} sert aux agents hors du studio : ce projet a déjà son manifeste"
+        ));
+    }
     if !args.is_object() {
         return Decision::Forbidden("arguments illisibles (objet JSON attendu)".into());
     }
     let roots = scope.roots();
-    for s in strings(args) {
+    for s in path_candidates(args) {
         if looks_like_path(s) {
             let p = scope.resolve(s);
             if !roots.iter().any(|r| p.starts_with(r)) {
@@ -122,7 +132,7 @@ pub fn classify(tool: &str, args: &Value, mode: AgentMode, scope: &Scope) -> Dec
     }
     let effect = effect(tool, args);
     match (mode, &effect) {
-        (AgentMode::Modify, Effect::Read) => Decision::Safe,
+        (AgentMode::Modify, Effect::Read | Effect::WorkFile) => Decision::Safe,
         (AgentMode::Ask, Effect::Read) => {
             let on_copy = |key: &str| {
                 args[key]
@@ -150,6 +160,8 @@ pub fn classify(tool: &str, args: &Value, mode: AgentMode, scope: &Scope) -> Dec
 
 enum Effect {
     Read,
+    /// A text file under `work/`.
+    WorkFile,
     Write(Vec<String>),
     Destructive(Vec<String>),
 }
@@ -158,6 +170,7 @@ impl Effect {
     fn reasons(&self) -> Vec<String> {
         match self {
             Self::Read => Vec::new(),
+            Self::WorkFile => vec!["écrit un fichier de travail".into()],
             Self::Write(r) | Self::Destructive(r) => r.clone(),
         }
     }
@@ -170,7 +183,13 @@ fn effect(tool: &str, args: &Value) -> Effect {
     let external = "exécute un programme externe de la chaîne d'outils (llama.cpp)".to_owned();
     let writes = "écrit dans le projet".to_owned();
     match tool {
-        "surgeon_check" | "surgeon_inspect" | "surgeon_backends" => Effect::Read,
+        "surgeon_check"
+        | "surgeon_inspect"
+        | "surgeon_backends"
+        | "surgeon_doctor"
+        | "surgeon_causal_trace" => Effect::Read,
+        "surgeon_files" if args["action"] == "write" => Effect::WorkFile,
+        "surgeon_files" => Effect::Read,
         "surgeon_graph" if !has("out_dir") && !has("cache_dir") => Effect::Read,
         "surgeon_bench"
             if args
@@ -180,7 +199,8 @@ fn effect(tool: &str, args: &Value) -> Effect {
             Effect::Write(vec![external])
         }
         "surgeon_bench" => match mode {
-            "logits" | "refusal" => Effect::Read,
+            // refusal_probe: one native forward pass per prompt, nothing written.
+            "logits" | "refusal" | "refusal_probe" => Effect::Read,
             "eval" if args["backend"] == "native" => Effect::Read,
             "dump" | "judge_sample" => Effect::Write(vec![writes]),
             _ => Effect::Write(vec![external]),
@@ -191,6 +211,19 @@ fn effect(tool: &str, args: &Value) -> Effect {
         ]),
         "surgeon_restore" => Effect::Destructive(vec![
             "réécrit la copie de travail depuis une sauvegarde ou l'origine (SHA-256 vérifié)"
+                .into(),
+        ]),
+        "surgeon_checkpoint" => match args["action"].as_str().unwrap_or("") {
+            "list" => Effect::Read,
+            "create" => Effect::Write(vec![
+                "fige la copie de travail sous work/checkpoints (liens physiques, SHA-256)".into(),
+            ]),
+            _ => Effect::Destructive(vec![
+                "remet la copie de travail dans l'état d'un checkpoint (SHA-256 vérifié)".into(),
+            ]),
+        },
+        "surgeon_sweep" => Effect::Destructive(vec![
+            "réécrit la copie de travail à chaque point de la grille, la laisse sur le meilleur              compromis"
                 .into(),
         ]),
         "surgeon_lora" if mode == "merge" => {
@@ -211,6 +244,28 @@ fn effect(tool: &str, args: &Value) -> Effect {
         },
         _ => Effect::Write(vec![writes]),
     }
+}
+
+/// Arguments that hold text rather than paths: a prompt may well contain `1/2` or `a: b`.
+const FREE_TEXT: [&str; 5] = [
+    "content",
+    "prompt_template",
+    "pos_prompts",
+    "neg_prompts",
+    "eval_prompts",
+];
+
+/// The strings of the arguments that may name a file (`prompts` is one for `surgeon_bench`,
+/// and a list of texts for `surgeon_eval`).
+fn path_candidates(args: &Value) -> Vec<&str> {
+    args.as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, value)| {
+            !FREE_TEXT.contains(&key.as_str()) && !(*key == "prompts" && value.is_array())
+        })
+        .flat_map(|(_, value)| strings(value))
+        .collect()
 }
 
 /// Every string in a JSON value.

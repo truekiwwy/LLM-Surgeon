@@ -16,6 +16,31 @@ use super::score::SEED;
 use crate::eval::sampling::{SamplingParams, Xoshiro256pp};
 use crate::eval::{Decoding, GenJob, WeightType};
 
+/// Most sequences the native backend decodes together when `--batch-size` is not given. On
+/// an i5-12400F (6 cores, 12 threads), Qwen2.5-0.5B in f32, 18 prompts of 40 tokens took
+/// 57.8 s one by one, 14.5 s by 8 and 11.9 s by 16 (6 threads), with the same tokens; the
+/// gain flattens past 16 while each sequence still holds its KV cache.
+pub const MAX_AUTO_BATCH: usize = 16;
+
+/// The native backend's batch and threads when the command line leaves them out: as many
+/// sequences as half the RAM still free once the model is loaded holds in KV caches
+/// (`per_sequence_bytes` each), within 1..=[`MAX_AUTO_BATCH`]; one thread per physical core
+/// (6 beat 12 hyper-threads, measured), `None` when unknown (the global pool).
+pub fn auto_batching(
+    free_ram: u64,
+    per_sequence_bytes: u64,
+    physical_cores: Option<usize>,
+) -> (usize, Option<usize>) {
+    let budget = free_ram
+        .saturating_sub(crate::hardware::BudgetPolicy::default().ram_safety_margin_bytes)
+        / 2;
+    let by_ram = budget / per_sequence_bytes.max(1);
+    let batch = usize::try_from(by_ram)
+        .unwrap_or(usize::MAX)
+        .clamp(1, MAX_AUTO_BATCH);
+    (batch, physical_cores.filter(|&c| c > 0))
+}
+
 pub const BOOTSTRAP_RESAMPLES: usize = 2000;
 /// Seed of the bootstrap (not the sampling seed).
 pub const BOOTSTRAP_SEED: u64 = 20_241_111;
@@ -43,6 +68,11 @@ pub struct GenOptions {
     pub gguf_dtype: WeightType,
     /// The GPU API of the llama-server (`Vulkan`...), only to label the report.
     pub gpu_api: Option<&'static str>,
+    /// hipfire: measure a working copy all the same (`--allow-stale-hipfire`, CLI only).
+    pub allow_stale_hipfire: bool,
+    /// No `--batch-size` given: the native backend picks its batch and threads
+    /// ([`auto_batching`]); other backends use `batch_size` as is.
+    pub batch_auto: bool,
 }
 
 impl Default for GenOptions {
@@ -57,6 +87,8 @@ impl Default for GenOptions {
             ctx_size: None,
             gguf_dtype: WeightType::default(),
             gpu_api: None,
+            allow_stale_hipfire: false,
+            batch_auto: true,
         }
     }
 }
@@ -127,6 +159,21 @@ impl GenOptions {
             ));
         }
         (threads, warnings)
+    }
+
+    /// The options that change the answers, for the key of a cached baseline. Left out:
+    /// `jobs`, `threads` and the labels, and the batch of the native backend, whose batched
+    /// decoding gives the tokens of the sequential one; a server's batch can change its
+    /// reductions, so it stays in.
+    pub fn answer_inputs(&self, native: bool) -> serde_json::Value {
+        serde_json::json!({
+            "sampling": self.sampling,
+            "samples": self.samples,
+            "batch_size": (!native).then_some(self.batch_size),
+            "gpu_layers": self.gpu_layers,
+            "ctx_size": self.ctx_size,
+            "gguf_dtype": format!("{:?}", self.gguf_dtype),
+        })
     }
 
     pub fn decoding(&self, timeout: Option<std::time::Duration>) -> Decoding {
@@ -257,7 +304,12 @@ pub struct GenerationReport {
 impl GenOptions {
     /// Whether the run differs from the historical one with this backend label.
     pub fn is_historical(&self, backend_is_default: bool) -> bool {
-        backend_is_default && *self == GenOptions::default()
+        // An explicit --batch-size 1 is the historical run too.
+        let normalized = GenOptions {
+            batch_auto: true,
+            ..*self
+        };
+        backend_is_default && normalized == GenOptions::default()
     }
 
     /// The report block, with the per-prompt statistics of `samples > 1`.
@@ -426,6 +478,33 @@ mod tests {
             warnings.iter().any(|w| w.contains("sur-souscription")),
             "{warnings:?}"
         );
+    }
+
+    #[test]
+    fn the_native_batch_follows_the_free_ram_and_the_threads_the_physical_cores() {
+        const GIB: u64 = 1 << 30;
+        let margin = crate::hardware::BudgetPolicy::default().ram_safety_margin_bytes;
+        // Plenty of RAM: the measured ceiling.
+        assert_eq!(
+            auto_batching(64 * GIB, 75 << 20, Some(6)),
+            (MAX_AUTO_BATCH, Some(6))
+        );
+        // Half of what is free past the margin, in KV caches of 1 GiB: 3 sequences.
+        assert_eq!(auto_batching(margin + 6 * GIB + 1, GIB, Some(6)).0, 3);
+        // Nothing left, or an unknown machine: one sequence, the global pool.
+        assert_eq!(auto_batching(0, GIB, None), (1, None));
+        assert_eq!(auto_batching(margin, 1, Some(0)), (1, None));
+        assert_eq!(
+            auto_batching(64 * GIB, 0, None).0,
+            MAX_AUTO_BATCH,
+            "never divides by 0"
+        );
+        // --batch-size 1 is the historical run as much as no --batch-size.
+        let explicit = GenOptions {
+            batch_auto: false,
+            ..GenOptions::default()
+        };
+        assert!(explicit.is_historical(true) && GenOptions::default().is_historical(true));
     }
 
     #[test]

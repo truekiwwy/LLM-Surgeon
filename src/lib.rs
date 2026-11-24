@@ -5,7 +5,9 @@ pub mod app;
 pub mod arch;
 pub mod backend;
 pub mod bench;
+pub mod checkpoint;
 pub mod cli;
+pub mod doctor;
 pub mod engine;
 pub mod eval;
 pub mod events;
@@ -17,6 +19,7 @@ pub mod mcp;
 pub mod patch;
 pub mod pipeline;
 pub mod plugin;
+pub mod process;
 pub mod tui;
 pub mod ui;
 

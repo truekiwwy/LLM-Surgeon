@@ -9,8 +9,10 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime};
 
 use eframe::egui::{self, Key};
-use weight_surgeon::backend::{self, config::BackendConfig, detect::BackendReport};
+use weight_surgeon::backend::{self, config::BackendConfig, detect::BackendReport, hipfire};
 use weight_surgeon::bench::score::Backend;
+use weight_surgeon::checkpoint::{Listing, Manifest};
+use weight_surgeon::eval::GgufQuant;
 use weight_surgeon::graph::output::GraphReport;
 use weight_surgeon::graph::stream::GraphPatch;
 use weight_surgeon::graph::GraphRole;
@@ -25,16 +27,23 @@ use crate::backend_dialog::BackendDialog;
 use crate::camera::Orbit;
 use crate::cli::Item;
 use crate::desktop::{Desktop, Event};
+use crate::hipfire_daemon::HipfireDaemon;
+use crate::logging;
 use crate::platform::Picker;
 use crate::source::{self, Input, Timeline};
 use crate::studio::bus::RunView;
+use crate::studio::checkpoints;
+use crate::studio::jobs::EXPORT_TOOL;
 use crate::studio::ledger;
 use crate::studio::live::{Layer, Replay};
+use crate::studio::ollama::{self, Artifact};
 use crate::studio::results::{self, Run};
+use crate::studio::vectors::{LayerScores, VectorForm};
 use crate::studio::view::{Studio, Target};
 use crate::task::Task;
 use crate::ui::layout::Columns;
 use crate::ui::palette::Palette;
+use crate::ui::views::radar::Radar;
 use crate::ui::{fonts, i18n, shell, theme};
 use crate::viewport;
 
@@ -72,15 +81,18 @@ pub use crate::settings::Mode;
 pub enum Section {
     General,
     Providers,
+    /// External harnesses: the skill and the MCP configuration.
+    Harnesses,
     Engine,
     Updates,
     Journal,
 }
 
 impl Section {
-    pub const ALL: [Section; 5] = [
+    pub const ALL: [Section; 6] = [
         Section::General,
         Section::Providers,
+        Section::Harnesses,
         Section::Engine,
         Section::Updates,
         Section::Journal,
@@ -88,7 +100,14 @@ impl Section {
 
     /// The `--screen settings:<name>` part; `machine` (before G7) is the engine.
     pub fn from_name(name: &str) -> Option<Self> {
-        let names = ["general", "providers", "engine", "updates", "journal"];
+        let names = [
+            "general",
+            "providers",
+            "harnesses",
+            "engine",
+            "updates",
+            "journal",
+        ];
         match name {
             "machine" => Some(Section::Engine),
             _ => names.iter().position(|n| *n == name).map(|k| Self::ALL[k]),
@@ -101,6 +120,7 @@ impl Section {
 pub enum RightPane {
     Evidence,
     Results,
+    Checkpoints,
 }
 
 /// A file read again only when its modification time changed: path, time, entries.
@@ -159,7 +179,13 @@ pub struct SurgeonApp {
     pub hardware: Option<BackendReport>,
     /// The hipfire daemon answered at the last probe.
     pub hipfire_up: bool,
+    /// The hipfire daemon this window started, if any.
+    pub hipfire: HipfireDaemon,
     pub tab: Tab,
+    /// Live mode: the agent and the 3D graph side by side, over whichever tab is selected.
+    pub live: bool,
+    /// Live mode overlays the origin on the 3D graph.
+    pub ghost: bool,
     /// The kind of session the new-session form offers first, kept between launches.
     pub mode: Mode,
     pub studio: Studio,
@@ -174,10 +200,17 @@ pub struct SurgeonApp {
     pub buffers: viewport::Buffers,
     pub columns: Columns,
     pub palette: Palette,
+    /// The vector interference radar over `work/` of the open project.
+    pub radar: Radar,
+    pub vector: VectorForm,
+    /// The last Ollama export of the Results panel: its command, or why it failed.
+    pub ollama: Option<Result<crate::studio::ollama::Export, String>>,
     /// `false` (`--no-motion`): no transition at all.
     pub motion: bool,
     /// The settings dialog, open on this section.
     pub settings: Option<Section>,
+    /// What the last skill install or MCP configuration did (`true`: an error).
+    pub harness_note: Option<(String, bool)>,
     /// The system picker of the workspace folder (wizard, settings).
     pub workspace_picker: Picker,
     pub right: RightPane,
@@ -195,6 +228,10 @@ pub struct SurgeonApp {
     ledger_cache: RunCache,
     mcp_cache: RunCache,
     results_cache: Option<(RunStamp, Vec<Run>)>,
+    scores_cache: Option<(RunStamp, LayerScores)>,
+    pub checkpoint_selected: Option<String>,
+    checkpoints_cache: Option<(PathBuf, Option<SystemTime>, Result<Listing, String>)>,
+    restore_pending: Option<String>,
 }
 
 impl SurgeonApp {
@@ -230,7 +267,10 @@ impl SurgeonApp {
             probe: None,
             hardware: None,
             hipfire_up: false,
+            hipfire: HipfireDaemon::default(),
             tab,
+            live: false,
+            ghost: false,
             mode,
             studio: Studio::new(workspace),
             agents: Hub::system(ctx),
@@ -241,8 +281,12 @@ impl SurgeonApp {
             buffers: viewport::Buffers::default(),
             columns,
             palette: Palette::default(),
+            radar: Radar::default(),
+            vector: VectorForm::default(),
+            ollama: None,
             motion: true,
             settings: None,
+            harness_note: None,
             workspace_picker: Picker::default(),
             right: RightPane::Evidence,
             focus: None,
@@ -254,6 +298,10 @@ impl SurgeonApp {
             ledger_cache: None,
             mcp_cache: None,
             results_cache: None,
+            scores_cache: None,
+            checkpoint_selected: None,
+            checkpoints_cache: None,
+            restore_pending: None,
         };
         if app
             .agents
@@ -291,8 +339,10 @@ impl SurgeonApp {
         self.desktop.save_settings();
     }
 
-    /// Makes `dir` the projects folder (created, checked writable) and opens it.
+    /// Makes `dir` the projects folder (created, checked writable) and opens it, unless the
+    /// open project cannot be left ([`Studio::can_switch`]): nothing changes then.
     pub fn use_workspace(&mut self, dir: PathBuf) -> Result<(), String> {
+        self.studio.can_switch()?;
         self.desktop.use_workspace(&dir)?;
         self.studio = Studio::new(dir);
         Ok(())
@@ -519,6 +569,41 @@ impl SurgeonApp {
         self.probe = Some(probe);
     }
 
+    /// Brings the daemon of this window in line with the last probe: started when the machine
+    /// or the saved backend calls for hipfire and nothing answers, stopped once native is
+    /// pinned. Without a binary nothing happens and the fallback engine keeps running.
+    fn sync_hipfire(&mut self, ctx: &egui::Context) {
+        let Some(report) = &self.hardware else {
+            return;
+        };
+        let saved = self.dialog.saved();
+        let auto = self.desktop.settings.backend_auto;
+        if !backend_choice::wants_hipfire(report.target, saved.backend, auto) {
+            self.hipfire.stop();
+            return;
+        }
+        let Some(bin) = report
+            .hipfire
+            .binary
+            .as_ref()
+            .filter(|_| !report.hipfire.up)
+        else {
+            return;
+        };
+        let url = saved
+            .hipfire_url
+            .clone()
+            .unwrap_or_else(backend_choice::hipfire_url);
+        match hipfire::loopback_port(&url) {
+            Ok(port) => {
+                let wake = ctx.clone();
+                self.hipfire
+                    .start(bin, port, move || wake.request_repaint());
+            }
+            Err(e) => logging::warn(&e),
+        }
+    }
+
     /// Starts the agent on `mission`. A project with a source model and no working copy gets
     /// one first, and the session starts when it is made: the agent never has to ask for it.
     pub fn start_session(&mut self, mission: Mission) {
@@ -553,9 +638,107 @@ impl SurgeonApp {
         }
     }
 
+    pub fn export_ollama(&mut self, quant: Option<GgufQuant>) {
+        let copy = self
+            .agents
+            .project
+            .as_deref()
+            .and_then(|p| ProjectPaths::of(p).copy)
+            .filter(|c| c.join("config.json").is_file());
+        self.ollama = match (quant, copy) {
+            (None, copy) => Some(self.modelfile(copy.map(Artifact::SafeTensors))),
+            (Some(_), None) => Some(Err(i18n::t("ollama.quant.none").into())),
+            (Some(quant), Some(copy)) => {
+                let job = ollama::export_job(&copy, quant);
+                match self.studio.manager.as_mut().map(|m| m.submit(job)) {
+                    Some(Ok(_)) => {
+                        let format = quant.label();
+                        self.studio.message = Some((
+                            i18n::tf("ollama.quant.running", &[("format", &format)]),
+                            false,
+                        ));
+                        None
+                    }
+                    Some(Err(e)) => Some(Err(e)),
+                    None => Some(Err(i18n::t("ollama.none").into())),
+                }
+            }
+        };
+    }
+
+    fn modelfile(&self, artifact: Option<Artifact>) -> Result<ollama::Export, String> {
+        let project = self
+            .agents
+            .project
+            .as_deref()
+            .ok_or_else(|| i18n::t("ollama.none").to_owned())?;
+        let paths = ProjectPaths::of(project);
+        let title = self
+            .studio
+            .manager
+            .as_ref()
+            .map(|m| m.project.manifest.name.clone())
+            .unwrap_or_default();
+        ollama::export(
+            project,
+            &title,
+            artifact,
+            paths.copy.as_deref(),
+            paths.origin.as_deref(),
+        )?
+        .ok_or_else(|| i18n::t("ollama.none").into())
+    }
+
+    fn follow_export(&mut self, ended: &[crate::studio::jobs::Ended]) {
+        for e in ended.iter().filter(|e| e.spec.tool == EXPORT_TOOL) {
+            let gguf = e.envelope["data"]["gguf"]
+                .as_str()
+                .filter(|_| e.verdict == ledger::Verdict::Ok);
+            self.ollama = Some(match gguf {
+                Some(gguf) => self.modelfile(Some(Artifact::Gguf(gguf.into()))),
+                None => Err(e.envelope["error"]["message"]
+                    .as_str()
+                    .map_or_else(|| format!("{:?}", e.verdict), str::to_owned)),
+            });
+        }
+    }
+
     /// Looks at the backends again (the hipfire daemon started, mistral.rs installed).
     pub fn reprobe(&mut self, ctx: &egui::Context) {
         if self.probe.is_none() {
+            self.spawn_probe(ctx);
+        }
+    }
+
+    /// The engine's machine check, with the open project's model (its working copy, else its
+    /// origin) when it is a SafeTensors folder: the dtype that model gets and its batch.
+    /// `clean` purges the stale reference cache entries first.
+    pub fn refresh_doctor(&mut self, ctx: &egui::Context, clean: bool) {
+        let model = self
+            .agents
+            .project
+            .as_deref()
+            .map(ProjectPaths::of)
+            .and_then(|p| p.copy.or(p.origin))
+            .filter(|m| m.join("config.json").is_file());
+        self.desktop.refresh_doctor(ctx, model, clean);
+    }
+
+    /// Starts hipfire again, stopped or frozen without its GPU. On Windows the daemon of WSL
+    /// (`hipfire_setup::restart`); elsewhere the one this window runs, started again by the
+    /// next probe. A daemon started outside the app there is left to its owner.
+    pub fn restart_hipfire(&mut self, ctx: &egui::Context) {
+        if cfg!(windows) {
+            // The GPU whose name decides the workarounds, picked as the wizard does.
+            let gpus = self.desktop.system.iter().flat_map(|s| s.gpus.iter());
+            let gpu = gpus
+                .map(|g| g.name.clone())
+                .find(|n| backend_choice::vendor(n) == backend_choice::Vendor::Amd)
+                .unwrap_or_default();
+            self.desktop.setup.restart_hipfire(ctx, gpu);
+        } else {
+            self.hipfire.stop();
+            self.hardware = None;
             self.spawn_probe(ctx);
         }
     }
@@ -605,6 +788,10 @@ impl SurgeonApp {
                 self.dialog = BackendDialog::load();
                 self.hardware = None;
                 self.spawn_probe(ctx);
+                // A daemon just installed or restarted: the check on screen is out of date.
+                if self.desktop.doctor.is_some() {
+                    self.refresh_doctor(ctx, false);
+                }
             }
             Event::Open(items) => {
                 for item in items {
@@ -623,10 +810,7 @@ impl SurgeonApp {
                 self.set_input(ctx, input);
                 self.tab = Tab::Graph;
             }
-            Item::Folder(dir) => {
-                self.desktop.use_workspace(&dir)?;
-                self.studio = Studio::new(dir);
-            }
+            Item::Folder(dir) => self.use_workspace(dir)?,
             Item::Unknown(path) => {
                 return Err(i18n::tf("open.unknown", &[("path", &path.display())]))
             }
@@ -666,12 +850,28 @@ impl SurgeonApp {
         ledger.iter().chain(mcp).cloned().collect()
     }
 
+    fn run_stamp(&mut self) -> RunStamp {
+        self.run_lists();
+        let stamp = |c: &RunCache| c.as_ref().map(|(p, m, _)| (p.clone(), *m));
+        [stamp(&self.ledger_cache), stamp(&self.mcp_cache)]
+    }
+
+    pub fn layer_scores(&mut self) -> &LayerScores {
+        let stamp = self.run_stamp();
+        if self.scores_cache.as_ref().is_none_or(|(s, _)| *s != stamp) {
+            let entries = [&self.ledger_cache, &self.mcp_cache]
+                .into_iter()
+                .flatten()
+                .flat_map(|(_, _, e)| e);
+            self.scores_cache = Some((stamp, LayerScores::of(entries)));
+        }
+        &self.scores_cache.get_or_insert_default().1
+    }
+
     /// The measuring runs of the project for the Results panel, parsed again only when one
     /// of the files changed.
     pub fn results(&mut self) -> &[Run] {
-        self.run_lists();
-        let stamp = |c: &RunCache| c.as_ref().map(|(p, m, _)| (p.clone(), *m));
-        let stamp = [stamp(&self.ledger_cache), stamp(&self.mcp_cache)];
+        let stamp = self.run_stamp();
         if self.results_cache.as_ref().is_none_or(|(s, _)| *s != stamp) {
             let entries = [&self.ledger_cache, &self.mcp_cache]
                 .into_iter()
@@ -680,6 +880,63 @@ impl SurgeonApp {
             self.results_cache = Some((stamp, results::runs(entries)));
         }
         self.results_cache.as_ref().map_or(&[], |(_, r)| r)
+    }
+
+    pub fn checkpoints(&mut self) -> Option<&Result<Listing, String>> {
+        let project = self.agents.project.clone()?;
+        let stamp = checkpoints::stamp(&project);
+        let stale = self
+            .checkpoints_cache
+            .as_ref()
+            .is_none_or(|(p, s, _)| *p != project || *s != stamp);
+        if stale {
+            let listing = checkpoints::load(&project);
+            self.checkpoints_cache = Some((project, stamp, listing));
+        }
+        self.checkpoints_cache.as_ref().map(|(_, _, l)| l)
+    }
+
+    pub fn restore_checkpoint(&mut self, m: &Manifest) {
+        let Some(manager) = self.studio.manager.as_mut() else {
+            return;
+        };
+        match manager.submit(checkpoints::restore_job(m, i18n::t("checkpoints.restore"))) {
+            Ok(run) => {
+                self.restore_pending = Some(run);
+                self.studio.message =
+                    Some((i18n::tf("checkpoints.submitted", &[("id", &m.id)]), false));
+            }
+            Err(e) => self.studio.message = Some((e, true)),
+        }
+    }
+
+    fn follow_restore(&mut self) {
+        let Some(run) = self.restore_pending.clone() else {
+            return;
+        };
+        let entries = self.runs();
+        let Some(done) = entries.iter().find(|e| e.run_id == run) else {
+            return;
+        };
+        self.restore_pending = None;
+        let Some(manager) = self.studio.manager.as_mut() else {
+            return;
+        };
+        if done.verdict != ledger::Verdict::Ok {
+            let error = done.error.clone().unwrap_or_default();
+            self.studio.message =
+                Some((i18n::tf("checkpoints.failed", &[("error", &error)]), true));
+            return;
+        }
+        let jobs = checkpoints::followups(&manager.project.dir, &entries, done);
+        let n = jobs.len();
+        for job in jobs {
+            if let Err(e) = manager.submit(job) {
+                self.studio.message = Some((e, true));
+                return;
+            }
+        }
+        self.studio.message = Some((i18n::tf("checkpoints.synced", &[("n", &n)]), false));
     }
 
     /// Drains the background channels and runs the debounced validation.
@@ -696,18 +953,26 @@ impl SurgeonApp {
             self.hardware = Some(report);
             self.hipfire_up = up;
             self.probe = None;
+            self.sync_hipfire(ctx);
+        }
+        // Kept for later while a probe runs: it may have looked before the port opened.
+        if self.probe.is_none() && self.hipfire.poll() {
+            self.spawn_probe(ctx);
         }
         self.auto_backend();
         if self.dialog.take_saved() {
             // Saved by hand: the user's choice from now on.
             self.desktop.settings.backend_auto = false;
             self.desktop.save_settings();
+            self.sync_hipfire(ctx);
         }
         self.picked_workspace();
         let ended = self.studio.tick(ctx);
         self.agents.tick(&mut self.studio, &ended);
         self.start_after_copy(&ended);
+        self.follow_export(&ended);
         self.follow_project_graph(ctx);
+        self.follow_restore();
         if let Some(target) = self.agents.take_focus() {
             self.show_focus(target);
         }
@@ -830,6 +1095,10 @@ impl SurgeonApp {
 impl eframe::App for SurgeonApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.hipfire.stop();
     }
 }
 
@@ -1078,6 +1347,7 @@ mod tests {
             exit_code: 0,
             result: report,
             error: None,
+            elapsed_ms: None,
         };
         ledger::append(&ledger_path, &studio_run).unwrap();
         let line = serde_json::json!({"run_id": "mcp-7", "tool": "surgeon_extract", "ok": false,
@@ -1089,13 +1359,142 @@ mod tests {
         assert_eq!(ids, ["mcp-7", "r1"], "newest first, both sources");
         assert_eq!(runs[0].verdict, ledger::Verdict::Failed);
         let bench = runs[1].bench.as_ref().unwrap();
-        assert_eq!(runs[1].seconds, 60);
+        assert_eq!(runs[1].millis, Some(60_000));
         assert_eq!(bench.dataset.as_deref(), Some("builtin:math"));
         assert_eq!((bench.after.rate, bench.before.unwrap().rate), (1.0, 0.0));
         assert_eq!((bench.gained, bench.lost), (1, 0));
         let first = &bench.items[0];
         assert!(first.question.as_deref().unwrap().starts_with("A baker"));
         assert_eq!(first.before.as_ref().unwrap().text, "5");
+    }
+
+    /// The Results panel's LoRA export end to end: the studio job reads the origin (a
+    /// read-only root of its sandbox), writes the PEFT pair under `out/`, and the run reads
+    /// back with the fidelity of its SVD. The origin is never written.
+    #[test]
+    fn the_lora_export_extracts_the_copy_against_the_origin_with_its_fidelity() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("model");
+        write_model(&source);
+        let origin_bytes = std::fs::read(source.join("model.safetensors")).unwrap();
+        let (ctx, mut app, project) = app_on(dir.path(), &source);
+        app.studio.submit_copy().unwrap();
+        poll_until(&mut app, &ctx, |a| {
+            ProjectPaths::of(a.agents.project.as_deref().unwrap())
+                .copy
+                .is_some_and(|c| c.join("model.safetensors").is_file())
+                && a.studio.manager.as_ref().unwrap().running.is_empty()
+        });
+        // A rank-1 change of the first matrix (layer 0 q_proj, [4, 4] f32 at offset 0).
+        let paths = ProjectPaths::of(&project);
+        let file = paths.copy.as_ref().unwrap().join("model.safetensors");
+        let mut bytes = std::fs::read(&file).unwrap();
+        let start = 8 + u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+        let (u, v) = ([1.0f32, 2.0, 3.0, 4.0], [0.5f32, -1.0, 0.25, 2.0]);
+        for (k, value) in (0..16).map(|k| (k, u[k / 4] * v[k % 4])) {
+            bytes[start + 4 * k..start + 4 * k + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(&file, bytes).unwrap();
+
+        let (origin, copy) = (paths.origin.unwrap(), paths.copy.unwrap());
+        let job = results::lora_job(&project, &origin, &copy, 8).unwrap();
+        let id = app.studio.manager.as_mut().unwrap().submit(job).unwrap();
+        poll_until(&mut app, &ctx, |a| {
+            let m = a.studio.manager.as_ref().unwrap();
+            m.running.is_empty() && m.queue.is_empty()
+        });
+        let run = app.results().iter().find(|r| r.id == id).cloned().unwrap();
+        assert_eq!(run.verdict, ledger::Verdict::Ok, "{:?}", run.error);
+        let lora = run.lora.expect("an extraction reports its fidelity");
+        // Every matrix is 4 × 4: the rank is lowered to 4, which rebuilds rank 1 exactly.
+        assert_eq!((lora.rank, lora.tensors), (4, 14));
+        assert!(lora.fidelity > 1.0 - 1e-6, "{}", lora.fidelity);
+        assert!(lora.out.ends_with("out/lora-r8/adapter_model.safetensors"));
+        assert!(project.join("out/lora-r8/adapter_config.json").is_file());
+        assert_eq!(
+            std::fs::read(source.join("model.safetensors")).unwrap(),
+            origin_bytes,
+            "the origin is only read"
+        );
+    }
+
+    fn write_qwen2(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let config = serde_json::json!({
+            "model_type": "qwen2", "num_hidden_layers": 1, "max_position_embeddings": 64,
+            "hidden_size": 32, "intermediate_size": 32, "num_attention_heads": 2,
+            "num_key_value_heads": 1, "rope_theta": 1e6, "rms_norm_eps": 1e-6,
+            "tie_word_embeddings": true, "bos_token_id": 4, "eos_token_id": 4,
+        });
+        let tokenizer = serde_json::json!({
+            "added_tokens": [{"id": 4, "content": "<|endoftext|>", "special": true}],
+            "model": {"type": "BPE", "vocab": {"a": 0, "b": 1, "ab": 2, "Ġ": 3},
+                      "merges": ["a b"]},
+        });
+        std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+        std::fs::write(dir.join("tokenizer.json"), tokenizer.to_string()).unwrap();
+        let tensors = [
+            ("model.embed_tokens.weight", [5, 32]),
+            ("model.layers.0.self_attn.q_proj.weight", [32, 32]),
+        ];
+        let (mut header, mut data) = (serde_json::Map::new(), Vec::new());
+        for (name, shape) in tensors {
+            let start = data.len();
+            let n = shape[0] * shape[1];
+            data.extend((0..n).flat_map(|i| (i as f32 / 64.0).to_le_bytes()));
+            let info = serde_json::json!({"dtype": "F32", "shape": shape,
+                                          "data_offsets": [start, data.len()]});
+            header.insert(name.into(), info);
+        }
+        let header = serde_json::Value::Object(header).to_string();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&data);
+        std::fs::write(dir.join("model.safetensors"), bytes).unwrap();
+    }
+
+    #[test]
+    fn the_gguf_export_quantizes_the_copy_and_the_modelfile_points_at_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("model");
+        write_qwen2(&source);
+        let origin_bytes = std::fs::read(source.join("model.safetensors")).unwrap();
+        let (ctx, mut app, project) = app_on(dir.path(), &source);
+        app.studio.submit_copy().unwrap();
+        poll_until(&mut app, &ctx, |a| {
+            ProjectPaths::of(a.agents.project.as_deref().unwrap())
+                .copy
+                .is_some_and(|c| c.join("model.safetensors").is_file())
+                && a.studio.manager.as_ref().unwrap().running.is_empty()
+        });
+
+        app.export_ollama(Some(GgufQuant::Q8_0));
+        assert!(app.ollama.is_none(), "the job runs first");
+        poll_until(&mut app, &ctx, |a| a.ollama.is_some());
+        let export = app.ollama.clone().unwrap().unwrap();
+        let Artifact::Gguf(gguf) = &export.artifact else {
+            panic!("{:?}", export.artifact);
+        };
+        let name = gguf.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.ends_with("-Q8_0.gguf"), "{name}");
+        assert!(gguf.starts_with(project.join("runs")), "{}", gguf.display());
+        assert!(!gguf.to_string_lossy().contains("out.partial"));
+        assert_eq!(&std::fs::read(gguf).unwrap()[..4], b"GGUF");
+        let modelfile = std::fs::read_to_string(project.join("Modelfile")).unwrap();
+        let from = modelfile.lines().next().unwrap().trim_end_matches('"');
+        assert!(from.starts_with("FROM ") && from.ends_with(&name), "{from}");
+
+        app.export_ollama(None);
+        let export = app.ollama.clone().unwrap().unwrap();
+        assert!(
+            matches!(export.artifact, Artifact::SafeTensors(_)),
+            "{export:?}"
+        );
+        assert_eq!(
+            std::fs::read(source.join("model.safetensors")).unwrap(),
+            origin_bytes,
+            "the origin is only read"
+        );
     }
 
     #[test]
@@ -1128,5 +1527,58 @@ mod tests {
         // A copy exists now: the next start does not make another.
         app.start_session(Mission::Advance);
         assert!(app.pending_start.is_none());
+    }
+
+    /// A job of the open project still writes there: neither another project nor another
+    /// workspace replaces the studio until it ends; then every switch goes through.
+    #[test]
+    fn no_project_or_workspace_switch_while_a_job_runs() {
+        use crate::studio::jobs::{Budgets, JobSpec};
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("model");
+        write_model(&source);
+        let (ctx, mut app, project) = app_on(dir.path(), &source);
+        let workspace = app.studio.workspace.clone();
+        let second = crate::studio::project::Project::create(&workspace, "q", None)
+            .unwrap()
+            .dir;
+        // Outside the app's data folder (`dir`), which a workspace may not be in.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let other = elsewhere.path().join("other");
+        let job = JobSpec {
+            tool: "surgeon_check".into(),
+            label: "check".into(),
+            args: serde_json::json!({}),
+            priority: 0,
+            budgets: Budgets::default(),
+            resumed_from: None,
+            read_only: false,
+        };
+        // Queued and not started (no frame ran): the manager is busy all the same.
+        let id = app.studio.manager.as_mut().unwrap().submit(job).unwrap();
+        let open = |app: &SurgeonApp| app.studio.manager.as_ref().map(|m| m.project.dir.clone());
+
+        let refused = app.use_workspace(other.clone()).unwrap_err();
+        assert!(refused.contains("job"), "{refused}");
+        let refused = app
+            .open_item(&ctx, Item::Folder(other.clone()))
+            .unwrap_err();
+        assert!(refused.contains("job"), "{refused}");
+        app.studio.open_project(&ctx, &second);
+        let (message, error) = app.studio.message.clone().unwrap();
+        assert!(error && message.contains("job"), "{message}");
+        assert_eq!(open(&app), Some(project.clone()), "the same project");
+        assert_eq!(app.studio.workspace, workspace, "the same workspace");
+        assert_ne!(app.desktop.settings.workspace.as_ref(), Some(&other));
+
+        app.studio.manager.as_mut().unwrap().cancel(&id).unwrap();
+        app.studio.open_project(&ctx, &second);
+        assert_eq!(open(&app), Some(second));
+        app.open_item(&ctx, Item::Folder(other.clone())).unwrap();
+        assert_eq!(app.studio.workspace, other);
+        let third = elsewhere.path().join("third");
+        app.use_workspace(third.clone()).unwrap();
+        assert_eq!(app.studio.workspace, third);
     }
 }

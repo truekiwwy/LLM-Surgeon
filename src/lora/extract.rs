@@ -1,10 +1,12 @@
-//! `surgeon lora extract`: rank-r adapter from the difference of two checkpoints.
+//! `surgeon lora extract`: rank-r adapter from the difference of two checkpoints, or from a
+//! `--delta` file that holds that difference (`ΔW` per 2D tensor, checked against the base).
 //!
 //! For every selected 2D tensor, `rsvd` approximates `patched - base ~ U diag(S) V` and the
 //! adapter stores `B = U sqrt(S)` [m x r] and `A = sqrt(S) V` [r x n], so that `B A` is the
 //! rank-r approximation and `lora_alpha = r` gives a merge scale of exactly 1. The adapter
 //! (PEFT keys) and its `adapter_config.json` are written next to each other, atomically
-//! (temporary files, then rename). The result is a pure function of the inputs and `--seed`.
+//! (temporary files, then rename); an `--out` folder gets `adapter_model.safetensors`. The
+//! result is a pure function of the inputs and `--seed`.
 //!
 //! The rank is lowered to the smallest `min(m, n)` of the selected tensors when needed, so
 //! every pair has the same `r` (the `alpha / r` merge formula needs a single rank).
@@ -88,9 +90,10 @@ impl Checkpoint {
     }
 }
 
-/// `patched - base`, decoded to f32 row by row.
+/// `patched - base`, decoded to f32 row by row; without `base`, `patched` is the difference
+/// itself (a `--delta` file).
 struct DiffSource<'a> {
-    base: &'a [u8],
+    base: Option<&'a [u8]>,
     patched: &'a [u8],
     dtype: &'a DType,
     rows: usize,
@@ -110,11 +113,14 @@ impl RowSource for DiffSource<'_> {
         let count = (out.len() / self.cols).min(self.rows.saturating_sub(start));
         let elem = self.dtype.size_of().unwrap_or(1);
         let range = start * self.cols * elem..(start + count) * self.cols * elem;
-        let (Some(base), Some(patched)) = (self.base.get(range.clone()), self.patched.get(range))
-        else {
-            return Err(SurgeryError::Failed("lecture hors du tenseur".into()));
-        };
+        let outside = || SurgeryError::Failed("lecture hors du tenseur".into());
+        let patched = self.patched.get(range.clone()).ok_or_else(outside)?;
         let out = &mut out[..count * self.cols];
+        let Some(base) = self.base else {
+            decode_into(self.dtype, patched, out)?;
+            return Ok(count);
+        };
+        let base = base.get(range).ok_or_else(outside)?;
         let mut scratch = vec![0.0; out.len()];
         decode_into(self.dtype, base, out)?;
         decode_into(self.dtype, patched, &mut scratch)?;
@@ -277,7 +283,22 @@ pub fn run_extract(
     if args.rank == 0 {
         return Err(SurgeryError::Usage("--rank doit valoir au moins 1".into()));
     }
-    let out = &args.out;
+    let source =
+        match (&args.patched, &args.delta) {
+            (Some(patched), None) => patched,
+            (None, Some(delta)) => delta,
+            _ => return Err(SurgeryError::Usage(
+                "une seule source de la différence : --patched (checkpoint modifié) ou --delta \
+                 (fichier de ΔW)"
+                    .into(),
+            )),
+        };
+    // A named folder takes the file name PEFT looks for; `.`, `..` or an empty path stay
+    // refused below (no file name), never written in whatever folder they resolve to.
+    let out = &match args.out.file_name().is_some() && args.out.is_dir() {
+        true => args.out.join(config::ADAPTER_FILE),
+        false => args.out.clone(),
+    };
     let config_path: PathBuf = out.with_file_name(CONFIG_FILE);
     if out.file_name().is_none() {
         return Err(SurgeryError::Usage(format!(
@@ -293,7 +314,7 @@ pub fn run_extract(
         )));
     }
     for target in [out, &config_path] {
-        ensure_not_input(target, &[&args.base, &args.patched])?;
+        ensure_not_input(target, &[&args.base, source])?;
     }
     if !args.overwrite {
         if let Some(existing) = [out, &config_path].into_iter().find(|p| p.exists()) {
@@ -308,14 +329,26 @@ pub fn run_extract(
         .map_err(|e| SurgeryError::Usage(format!("--target-modules invalide : {e}")))?;
 
     let base = Checkpoint::open(&args.base)?;
-    let patched = Checkpoint::open(&args.patched)?;
-    check_same_layout(&base, &patched)?;
+    let diff = Checkpoint::open(source)?;
+    let pair = args.patched.is_some();
+    if pair {
+        check_same_layout(&base, &diff)?;
+    }
 
+    // A pair has the base's layout; a delta holds its own tensors, each one checked against
+    // the base so that an adapter never targets a matrix the model does not have.
+    let base_catalog = base.catalog();
     let mut problems = Vec::new();
     let mut selected = Vec::new();
-    for (name, (dtype, shape)) in base.catalog() {
+    for (name, (dtype, shape)) in diff.catalog() {
         let &[m, n] = shape else { continue };
         if !pattern.is_match(name) {
+            continue;
+        }
+        if base_catalog.get(name).is_none_or(|(_, s)| *s != shape) {
+            problems.push(format!(
+                "{name} : {shape:?} dans --delta, absent de --base ou d'une autre forme"
+            ));
             continue;
         }
         match (name.ends_with(".weight"), dtype.size_of()) {
@@ -362,9 +395,10 @@ pub fn run_extract(
     let mut per_tensor = Vec::with_capacity(selected.len());
     let total = selected.len();
     for (i, &(name, dtype, m, n)) in selected.iter().enumerate() {
-        let (b, p) = (base.view(name)?, patched.view(name)?);
+        let p = diff.view(name)?;
+        let b = pair.then(|| base.view(name)).transpose()?;
         let source = DiffSource {
-            base: b.bytes,
+            base: b.map(|b| b.bytes),
             patched: p.bytes,
             dtype,
             rows: m,

@@ -4,6 +4,7 @@
 //! runs, ledger and cancellation as a job launched by hand), and results come back framed as
 //! untrusted data. Budgets, pause and stop apply at any time.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -15,7 +16,8 @@ use serde_json::Value;
 
 use super::config::{AskMode, Prices, RunBudgets};
 use super::evidence::{self, Finding};
-use super::mission::Mission;
+use super::experiments;
+use super::mission::{Forced, Mission};
 use super::paths::ProjectPaths;
 use super::policy::{self, AgentMode, Decision, Rule, Scope};
 use super::provider::{
@@ -32,6 +34,14 @@ pub trait ToolHost {
     fn project_dir(&self) -> PathBuf;
     fn copies_dir(&self) -> PathBuf;
     fn source(&self) -> Option<PathBuf>;
+    /// The configured models folder, read only.
+    fn models_dir(&self) -> Option<PathBuf> {
+        weight_surgeon::backend::models_dir()
+    }
+    /// The SHA-256 the project records for its source, the model hash of its runs.
+    fn source_sha256(&self) -> Option<String> {
+        None
+    }
     /// The job manager's guard for a job of this tool and these arguments.
     fn guard(&self, tool: &str, args: &Value) -> Result<(), String>;
     fn submit(&mut self, spec: JobSpec) -> Result<String, String>;
@@ -54,6 +64,14 @@ impl ToolHost for Manager {
             .source
             .as_ref()
             .map(|s| s.path.clone())
+    }
+
+    fn source_sha256(&self) -> Option<String> {
+        self.project
+            .manifest
+            .source
+            .as_ref()
+            .map(|s| s.sha256.clone())
     }
 
     fn guard(&self, tool: &str, args: &Value) -> Result<(), String> {
@@ -99,9 +117,47 @@ pub struct Conversation {
     /// What the session is for; older conversations have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mission: Option<Mission>,
+    /// The patch settings forced from the advanced (CLI) panel of the form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forced: Option<Forced>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_times: BTreeMap<String, ToolTime>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolTime {
+    pub start_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ms: Option<u64>,
+}
+
+impl ToolTime {
+    pub fn millis(&self, now_ms: u64) -> u64 {
+        self.end_ms.unwrap_or(now_ms).saturating_sub(self.start_ms)
+    }
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 impl Conversation {
+    pub fn tool_started(&mut self, id: &str) {
+        let time = ToolTime {
+            start_ms: now_ms(),
+            end_ms: None,
+        };
+        self.tool_times.insert(id.to_owned(), time);
+    }
+
+    pub fn tool_ended(&mut self, id: &str) {
+        if let Some(time) = self.tool_times.get_mut(id) {
+            time.end_ms.get_or_insert_with(now_ms);
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self, String> {
         let text =
             std::fs::read_to_string(path).map_err(|e| format!("{} : {e}", path.display()))?;
@@ -147,7 +203,7 @@ impl Conversation {
                         "Résultat{} :\n\n```\n{content}\n```\n\n",
                         if *is_error { " (erreur)" } else { "" }
                     )),
-                    Block::Opaque { .. } => {}
+                    Block::Opaque { .. } | Block::RunEnd { .. } => {}
                 }
             }
         }
@@ -342,6 +398,10 @@ pub struct Session {
     run_calls: u32,
     budget_override: bool,
     overflow_retry: bool,
+    /// First message of the current execution (the user's last message).
+    exec_start: usize,
+    /// The certification reminder was given in this execution (once only).
+    certify_reminded: bool,
     next_card: u64,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -377,6 +437,8 @@ impl Session {
             run_calls: 0,
             budget_override: false,
             overflow_retry: false,
+            exec_start: 0,
+            certify_reminded: false,
             next_card: 1,
             wake,
         }
@@ -413,6 +475,8 @@ impl Session {
             Some(m) if m.role == Role::User => m.blocks.push(Block::Text { text }),
             _ => self.conv.messages.push(Message::user_text(text)),
         }
+        self.exec_start = self.conv.messages.len() - 1;
+        self.certify_reminded = false;
         self.error = None;
         self.paused = false;
         self.run_started = Some(Instant::now());
@@ -446,6 +510,7 @@ impl Session {
         for call in &mut self.pending {
             if let CallState::Running(run) = &call.state {
                 host.cancel(run);
+                self.conv.tool_ended(&call.id);
             }
             if !matches!(call.state, CallState::Done { .. }) {
                 call.state = CallState::Done {
@@ -530,6 +595,7 @@ impl Session {
             content,
             is_error: ended.verdict != Verdict::Ok,
         };
+        self.conv.tool_ended(&id);
         self.log(&id, &tool, &args, event, None, Some(&ended.id));
     }
 
@@ -673,6 +739,67 @@ impl Session {
         self.save();
         self.pending = calls;
         self.dispatch(host);
+        if self.pending.is_empty() {
+            self.certify();
+        }
+    }
+
+    /// The agent closes: if a heuristic probe is all that measured the final model, it is
+    /// told once to certify by full generation, and the loop goes on.
+    fn certify(&mut self) {
+        let start = self.exec_start.min(self.conv.messages.len());
+        if self.certify_reminded || !experiments::uncertified(&self.conv.messages[start..]) {
+            return;
+        }
+        self.certify_reminded = true;
+        self.conv
+            .messages
+            .push(Message::user_text(experiments::CERTIFY_REMINDER));
+        self.save();
+        self.log_simple(
+            "certify",
+            "conclusion sur une sonde seule : rappel de certification",
+        );
+        self.start_turn();
+    }
+
+    /// An exact repeat of a finished run is answered with that run; nothing is submitted.
+    fn repeat(&mut self, i: usize, host: &dyn ToolHost) -> bool {
+        let (id, tool, args) = {
+            let c = &self.pending[i];
+            (c.id.clone(), c.tool.clone(), c.args.clone())
+        };
+        if !experiments::REPEATABLE.contains(&tool.as_str()) {
+            return false;
+        }
+        let source = host.source().zip(host.source_sha256());
+        let now = ledger::hash_inputs(
+            &args,
+            &host.project_dir(),
+            source.as_ref().map(|(p, s)| (p.as_path(), s.as_str())),
+        );
+        let entries = host.ledger();
+        let Some(prev) = experiments::already_tried(&tool, &args, &now, &entries) else {
+            return false;
+        };
+        let result = experiments::describe(prev).unwrap_or_else(|| {
+            let json = prev.result.to_string();
+            json.chars().take(1500).collect()
+        });
+        let text = format!(
+            "Non relancé : configuration identique déjà mesurée (run {}, même état du modèle, \
+             mêmes entrées). Résultat de ce run : {result}\nCite ce run, ou change un paramètre \
+             (couches, alpha, mode, jeu).",
+            prev.run_id
+        );
+        let content = tools::frame(&tool, Some(&prev.run_id), &self.outgoing(&text));
+        self.pending[i].state = CallState::Done {
+            content,
+            is_error: false,
+        };
+        let run = prev.run_id.clone();
+        self.log(&id, &tool, &args, "repeat", Some(run.clone()), Some(&run));
+        true
     }
 
     /// Decides every new call: UI tools answered here, engine tools through the policy.
@@ -745,7 +872,11 @@ impl Session {
                     };
                     self.done(i, &text, false);
                 }
-                _ => self.decide_engine(i, host),
+                _ => {
+                    if !self.repeat(i, host) {
+                        self.decide_engine(i, host);
+                    }
+                }
             }
             self.log(&id, &tool, &args, "requested", None, None);
         }
@@ -812,6 +943,7 @@ impl Session {
         let (id, tool, args) = (call.id.clone(), call.tool.clone(), call.args.clone());
         match host.submit(job) {
             Ok(run) => {
+                self.conv.tool_started(&id);
                 self.log(&id, &tool, &args, "submitted", None, Some(&run));
                 self.pending[i].state = CallState::Running(run);
             }
@@ -965,9 +1097,13 @@ impl Session {
 
     fn system_prompt(&self) -> String {
         let mode = match self.settings.mode {
-            AgentMode::Ask => "Demander (lecture seule : check, inspect, graph, bench sur copies)",
+            AgentMode::Ask => {
+                "Demander (lecture seule : check, inspect, graph, autotune sans out, bench sur \
+                 copies, lecture de fichiers ; décris les écritures au lieu de les tenter)"
+            }
             AgentMode::Modify => {
-                "Modifier (écritures sur les copies de travail, chacune approuvée)"
+                "Modifier (tu enchaînes toi-même les écritures sur les copies de travail ; quand \
+                 une approbation est requise, le studio l'affiche et l'appel attend la décision)"
             }
         };
         format!(
@@ -976,8 +1112,9 @@ impl Session {
              moteur ; chaque appel devient un run du projet (identifiant r…), journalisé.\n\
              Règles :\n\
              - Le modèle d'origine n'est jamais écrit : travaille sur la copie de travail \
-             (working_copy_path ci-dessous). Chemins limités au dossier du projet et à celui \
-             du modèle.\n\
+             (working_copy_path ci-dessous). Chemins limités au dossier du projet, à celui \
+             du modèle et au dossier des modèles configuré (ces deux derniers en lecture \
+             seule).\n\
              - La politique d'approbation est appliquée par le studio, pas par toi : un refus \
              ou une interdiction est définitif pour cet appel. La promotion d'un résultat vers \
              le modèle d'origine ou un export est une action humaine.\n\
@@ -987,13 +1124,10 @@ impl Session {
              - Chaque chiffre que tu affirmes vient d'un run : consigne-le avec record_finding \
              (run_id et valeur exacte). Sinon dis que c'est déduit ou inconnu.\n\
              - Tiens le plan à jour avec update_plan ; montre un tenseur avec show_in_3d.\n\
-             {paths}{mission}",
+             {paths}{tried}{mission}",
             tag = tools::FRAME_TAG,
-            mission = self
-                .conv
-                .mission
-                .map(|m| format!("\n\n{}", m.brief()))
-                .unwrap_or_default(),
+            mission = brief(self.conv.mission, self.conv.forced.as_ref()),
+            tried = self.outgoing(&tried(self.dirs.chat.parent())),
             paths = self.outgoing(
                 &self
                     .dirs
@@ -1071,6 +1205,24 @@ impl Session {
     }
 }
 
+/// The project's experiment summary, after a blank line; empty without one.
+pub fn tried(project: Option<&Path>) -> String {
+    match project.map(experiments::project_summary) {
+        Some(s) if !s.is_empty() => format!("\n\n{s}"),
+        _ => String::new(),
+    }
+}
+
+/// The mission's brief, then the forced settings, for the end of a system or CLI prompt.
+pub fn brief(mission: Option<Mission>, forced: Option<&Forced>) -> String {
+    mission
+        .map(Mission::brief)
+        .into_iter()
+        .chain(forced.map(Forced::brief))
+        .map(|b| format!("\n\n{b}"))
+        .collect()
+}
+
 fn scope<'a>(
     project: &'a Path,
     host: &dyn ToolHost,
@@ -1080,6 +1232,7 @@ fn scope<'a>(
         project_dir: project,
         copies_dir: host.copies_dir(),
         source: host.source(),
+        models_dir: host.models_dir(),
         guard,
     }
 }
@@ -1094,6 +1247,7 @@ pub fn estimate(messages: &[Message]) -> u64 {
             Block::ToolUse { input, .. } => input.to_string().len(),
             Block::ToolResult { content, .. } => content.len(),
             Block::Opaque { raw, .. } => raw.to_string().len(),
+            Block::RunEnd { .. } => 0,
         })
         .sum();
     (chars / 4) as u64

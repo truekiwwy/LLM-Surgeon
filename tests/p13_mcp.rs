@@ -144,10 +144,10 @@ fn tools_list(dir: &Path) -> Vec<Value> {
 // ------------------------------------------------------------------ tools/list and schemas
 
 #[test]
-fn tools_list_has_sixteen_tools_and_the_new_schemas_are_valid() {
+fn tools_list_has_twenty_three_tools_and_the_new_schemas_are_valid() {
     let dir = tempfile::tempdir().unwrap();
     let tools = tools_list(dir.path());
-    assert_eq!(tools.len(), 16);
+    assert_eq!(tools.len(), 23);
     let by_name = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap();
     for name in ["surgeon_diff", "surgeon_lora"] {
         let tool = by_name(name);
@@ -215,6 +215,7 @@ fn tools_list_has_sixteen_tools_and_the_new_schemas_are_valid() {
             "alpha",
             "backup_dir",
             "base",
+            "delta",
             "dry_run",
             "dtype",
             "lora",
@@ -265,9 +266,16 @@ fn schema_kind_tools_equals_tools_list_for_the_new_tools() {
             "surgeon_graph",
             "surgeon_backends",
             "surgeon_restore",
+            "surgeon_compose",
+            "surgeon_doctor",
+            "surgeon_files",
+            "surgeon_workspace",
             "record_finding",
             "show_in_3d",
-            "update_plan"
+            "update_plan",
+            "surgeon_causal_trace",
+            "surgeon_checkpoint",
+            "surgeon_sweep"
         ]
     );
 }
@@ -864,6 +872,48 @@ fn lora_extract_writes_a_peft_adapter_that_rebuilds_the_delta() {
     }
 }
 
+/// The studio serves the source model as an `--allow-read` root: lora extract and diff read
+/// their checkpoints there, and still never write in it.
+#[test]
+fn lora_extract_and_diff_read_checkpoints_from_a_read_only_root() {
+    let (origin, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    checkpoints(origin.path());
+    let before = std::fs::read(origin.path().join("base.safetensors")).unwrap();
+    let config = cfg(project.path())
+        .with_read_roots(&[origin.path().to_path_buf()])
+        .unwrap();
+    let source = |name: &str| origin.path().join(name).display().to_string();
+    let (is_error, env) = one_call(
+        &config,
+        "surgeon_lora",
+        json!({"mode": "extract", "base": source("base.safetensors"),
+               "patched": source("tuned.safetensors"), "out": "adapter_model.safetensors",
+               "rank": 2}),
+    );
+    assert!(!is_error, "{env}");
+    assert!(project.path().join("adapter_config.json").is_file());
+    let (is_error, env) = one_call(
+        &config,
+        "surgeon_diff",
+        json!({"base": source("base.safetensors"), "tuned": source("tuned.safetensors"),
+               "out": "delta.surgery", "rank": 2}),
+    );
+    assert!(!is_error, "{env}");
+    let (is_error, env) = one_call(
+        &config,
+        "surgeon_lora",
+        json!({"mode": "extract", "base": source("base.safetensors"),
+               "patched": source("tuned.safetensors"), "out": source("adapter.safetensors")}),
+    );
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "path_not_allowed", "{env}");
+    assert_eq!(
+        std::fs::read(origin.path().join("base.safetensors")).unwrap(),
+        before
+    );
+    assert!(!origin.path().join("adapter.safetensors").exists());
+}
+
 #[test]
 fn progress_notifications_follow_the_token_for_diff_and_merge() {
     let dir = tempfile::tempdir().unwrap();
@@ -1033,6 +1083,11 @@ fn studio_tools_write_under_chat_and_runs_are_journaled_with_their_id() {
     let run: Value = serde_json::from_str(runs.lines().next().unwrap()).unwrap();
     assert_eq!(run["run_id"], run_id.as_str());
     assert_eq!(run["tool"], "surgeon_backends");
+    assert_eq!(
+        run["arguments"],
+        json!({}),
+        "what the studio's summary reads"
+    );
     assert_eq!(
         runs.lines().count(),
         1,

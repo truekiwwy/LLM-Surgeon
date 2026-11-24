@@ -9,7 +9,9 @@ mod fake_qwen2;
 #[path = "support/fake_server.rs"]
 mod support;
 
-use std::io::{BufRead, BufReader, Write};
+#[path = "support/mcp_client.rs"]
+mod mcp_client;
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -141,6 +143,233 @@ fn sampled_refusal_is_reproducible_whatever_the_batches() {
 }
 
 #[test]
+fn the_baseline_is_read_back_from_the_cache_until_an_input_changes() {
+    let dir = workspace();
+    let cache = dir.path().join("cache");
+    let run = |args: &[&str]| -> Value {
+        let output = command(dir.path())
+            .env("WEIGHT_SURGEON_CACHE_DIR", &cache)
+            .arg("--json")
+            .args(args)
+            .output()
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {envelope}");
+        envelope["data"].clone()
+    };
+    let entries = || std::fs::read_dir(&cache).map_or(0, |d| d.count());
+    let lookup = |data: &Value| data["baseline"]["cache"].as_str().unwrap().to_owned();
+
+    let first = run(&NATIVE_REFUSAL);
+    assert_eq!(lookup(&first), "miss");
+    assert_eq!(entries(), 1);
+    let second = run(&NATIVE_REFUSAL);
+    assert_eq!(lookup(&second), "hit");
+    assert_eq!(second["baseline"]["items"], first["baseline"]["items"]);
+    assert_eq!(second["paired"], first["paired"]);
+
+    // Another token budget: another entry; --no-ref-cache regenerates in place.
+    let shorter = [&NATIVE_REFUSAL[..8], &["--max-new-tokens", "5"]].concat();
+    assert_eq!(lookup(&run(&shorter)), "miss");
+    assert_eq!(lookup(&run(&shorter)), "hit");
+    assert_eq!(entries(), 2);
+    let fresh = [&NATIVE_REFUSAL[..], &["--no-ref-cache"]].concat();
+    assert_eq!(lookup(&run(&fresh)), "miss");
+    assert_eq!(entries(), 2);
+
+    // A damaged entry is replaced, never fatal.
+    for entry in std::fs::read_dir(&cache).unwrap() {
+        std::fs::write(entry.unwrap().path(), b"{\"schema\": 1, \"items\": [").unwrap();
+    }
+    assert_eq!(lookup(&run(&NATIVE_REFUSAL)), "miss");
+    assert_eq!(lookup(&run(&NATIVE_REFUSAL)), "hit");
+
+    // bench eval: the dataset is part of the key.
+    let eval = |dataset: &str| {
+        run(&[
+            "bench",
+            "eval",
+            "--backend",
+            "native",
+            "--model",
+            "qwen2-mini",
+            "--baseline-model",
+            "qwen2-mini",
+            "--dataset",
+            dataset,
+            "--max-new-tokens",
+            "8",
+        ])
+    };
+    assert_eq!(lookup(&eval("gsm.json")), "miss");
+    assert_eq!(lookup(&eval("gsm.json")), "hit");
+    let other = dir.path().join("gsm2.json");
+    std::fs::write(
+        &other,
+        r#####"[{"id":"q1","question":"1 and 3","answer":"#### 4"}]"#####,
+    )
+    .unwrap();
+    assert_eq!(lookup(&eval("gsm2.json")), "miss");
+
+    // No cache directory (the harness ignores the machine's): no `cache` key at all.
+    assert!(refusal(dir.path(), &[])["baseline"].get("cache").is_none());
+}
+
+#[test]
+fn the_native_load_logs_its_dtype_and_batching() {
+    let dir = workspace();
+    let output = command(dir.path())
+        .args([
+            "bench",
+            "refusal",
+            "--model",
+            "qwen2-mini",
+            "--prompts",
+            "pos.json",
+        ])
+        .args(["--max-new-tokens", "4"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    // Logs on stderr, the report alone on stdout.
+    let log = String::from_utf8_lossy(&output.stderr);
+    assert!(log.contains("dtype f32 (auto) : RAM libre"), "{log}");
+    assert!(log.contains("génération native : lots de"), "{log}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("[INFO]"));
+    // With --batch-size, what was asked: no automatic batching to report.
+    let fixed = command(dir.path())
+        .args([
+            "bench",
+            "refusal",
+            "--model",
+            "qwen2-mini",
+            "--prompts",
+            "pos.json",
+        ])
+        .args(["--max-new-tokens", "4", "--batch-size", "2"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&fixed.stderr).contains("lots de"));
+}
+
+#[test]
+fn the_refusal_probe_scores_without_generating_and_compares_on_demand() {
+    let dir = workspace();
+    let probe = |extra: &[&str]| {
+        let base = [
+            "bench",
+            "refusal-probe",
+            "--model",
+            "qwen2-mini",
+            "--prompts",
+            "pos.json",
+        ];
+        let (code, envelope) = surgeon(dir.path(), &[&base[..], extra].concat());
+        assert_eq!(code, 0, "{extra:?}: {envelope}");
+        envelope["data"].clone()
+    };
+    let first = probe(&[]);
+    assert_eq!(first["mode"], "first-token-prob");
+    assert!(first["caveat"]
+        .as_str()
+        .unwrap()
+        .contains("génération complète"));
+    assert_eq!(first["is_heuristic"], true);
+    assert_eq!(first["evidence_level"], "heuristic_screening");
+    assert_eq!(first["prompt_count"], 6);
+    assert!(first["mean_refusal_prob"].as_f64().is_some());
+    assert!(first["duration_ms"].as_u64().is_some());
+    assert_eq!(first["threshold"], 0.5);
+    assert!(first["prefix_tokens"]
+        .as_array()
+        .is_some_and(|t| !t.is_empty()));
+    for item in first["items"].as_array().unwrap() {
+        let score = item["score"].as_f64().unwrap();
+        assert!((0.0..=1.0).contains(&score), "{item}");
+    }
+    assert!(
+        first.get("comparison").is_none(),
+        "nothing generated unless asked"
+    );
+
+    // Against the full generation of the same prompts.
+    let compared = probe(&["--compare-generation"]);
+    let c = &compared["comparison"];
+    assert_eq!(c["max_new_tokens"], 40);
+    let cells = ["both_refused", "probe_only", "generation_only", "neither"];
+    let total: u64 = cells.iter().map(|k| c[k].as_u64().unwrap()).sum();
+    assert_eq!(total, 6);
+    assert!(c["speedup"].as_f64().unwrap() > 0.0);
+    assert!(compared["timing_ms"]["generation"].as_u64().is_some());
+
+    // Along a direction extracted from the same model: its layer, threshold and wrapping.
+    let (code, extracted) = surgeon(
+        dir.path(),
+        &[
+            "extract",
+            "--model",
+            "qwen2-mini",
+            "--pos-prompts",
+            "pos.json",
+            "--neg-prompts",
+            "neg.json",
+            "--layer",
+            "1",
+            "--out",
+            "dir.safetensors",
+        ],
+    );
+    assert_eq!(code, 0, "{extracted}");
+    let along = probe(&[
+        "--method",
+        "direction-projection",
+        "--vector",
+        "dir.safetensors",
+    ]);
+    assert_eq!(along["mode"], "direction-projection");
+    assert!(
+        along.get("mean_refusal_prob").is_none(),
+        "a projection is not a probability"
+    );
+    assert_eq!(along["direction"]["layer"], 1);
+    let calibrated = along["direction"]["calibrated_threshold"].as_f64().unwrap();
+    assert_eq!(along["threshold"].as_f64().unwrap(), calibrated);
+    assert_eq!(
+        calibrated,
+        extracted["data"]["stats"]["threshold"].as_f64().unwrap()
+    );
+    // The extraction's own prompts project above its threshold, as it measured them.
+    let refused = along["refused"].as_u64().unwrap();
+    let measured = extracted["data"]["pos_projections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p.as_f64().unwrap() > calibrated)
+        .count() as u64;
+    assert_eq!(refused, measured);
+
+    // Without --vector, a clear refusal.
+    let (code, envelope) = surgeon(
+        dir.path(),
+        &[
+            "bench",
+            "refusal-probe",
+            "--model",
+            "qwen2-mini",
+            "--prompts",
+            "pos.json",
+            "--method",
+            "direction-projection",
+        ],
+    );
+    assert_eq!(code, 2, "{envelope}");
+    assert!(envelope["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--vector"));
+}
+
+#[test]
 fn greedy_batches_change_nothing_but_the_generation_block() {
     let dir = workspace();
     let historical = refusal(dir.path(), &[]);
@@ -263,6 +492,10 @@ fn benches_run_through_llama_server() {
 
 /// Raw JSON-RPC replies of `surgeon_bench` calls to `surgeon mcp --allow-dir <dir>`.
 fn mcp(dir: &Path, calls: &[Value]) -> Vec<Value> {
+    mcp_tool(dir, "surgeon_bench", calls)
+}
+
+fn mcp_tool(dir: &Path, tool: &str, calls: &[Value]) -> Vec<Value> {
     let mut child = command(dir)
         .args(["mcp", "--allow-dir", dir.to_str().unwrap()])
         .stdin(Stdio::piped())
@@ -279,22 +512,265 @@ fn mcp(dir: &Path, calls: &[Value]) -> Vec<Value> {
     for (i, arguments) in calls.iter().enumerate() {
         lines.push(
             json!({"jsonrpc": "2.0", "id": i + 1, "method": "tools/call",
-            "params": {"name": "surgeon_bench", "arguments": arguments}}),
+            "params": {"name": tool, "arguments": arguments}}),
         );
     }
-    let mut stdin = child.stdin.take().unwrap();
-    for line in &lines {
-        writeln!(stdin, "{line}").unwrap();
-    }
-    drop(stdin);
-    let replies: Vec<Value> = BufReader::new(child.stdout.take().unwrap())
-        .lines()
-        .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
-        .collect();
-    child.wait().unwrap();
+    let (replies, _) = mcp_client::exchange(&mut child, &lines);
     (1..=calls.len())
         .map(|id| replies.iter().find(|r| r["id"] == id).unwrap().clone())
         .collect()
+}
+
+#[test]
+fn autotune_picks_its_scale_by_probe_then_generation() {
+    let dir = workspace();
+    let cache = dir.path().join("cache");
+    let (code, extracted) = surgeon(
+        dir.path(),
+        &[
+            "extract",
+            "--model",
+            "qwen2-mini",
+            "--pos-prompts",
+            "pos.json",
+            "--neg-prompts",
+            "neg.json",
+            "--layer",
+            "1",
+            "--out",
+            "dir.safetensors",
+        ],
+    );
+    assert_eq!(code, 0, "{extracted}");
+    let tune = |extra: &[&str]| -> (i32, Value) {
+        let output = command(dir.path())
+            .env("WEIGHT_SURGEON_CACHE_DIR", &cache)
+            .arg("--json")
+            .args([
+                "autotune",
+                "--model",
+                "qwen2-mini",
+                "--vector",
+                "dir.safetensors",
+                "--eval-dataset",
+                "pos.json",
+            ])
+            .args(extra)
+            .output()
+            .unwrap();
+        let envelope = serde_json::from_slice(&output.stdout).unwrap();
+        (output.status.code().unwrap(), envelope)
+    };
+    let select = [
+        "--refusal-prompts",
+        "pos.json",
+        "--scales",
+        "0.5,1,1.5",
+        "--probe-top-k",
+        "1",
+        "--events",
+        "events.ndjson",
+    ];
+    let (code, screened) = tune(&select);
+    assert_eq!(code, 0, "{screened}");
+    let s = &screened["data"]["selection"];
+    assert_eq!(s["prefilter"], true);
+    assert_eq!(s["n_prompts"], 6);
+    assert_eq!(
+        (
+            &s["candidates_probed"],
+            &s["candidates_generated"],
+            &s["generations_saved"]
+        ),
+        (&json!(3), &json!(1), &json!(2))
+    );
+    assert_eq!(s["baseline_cache"], "miss");
+    let candidates = s["candidates"].as_array().unwrap();
+    assert!(candidates
+        .iter()
+        .all(|c| c["probe_refusal_rate"].is_number()));
+    let generated: Vec<&Value> = candidates
+        .iter()
+        .filter(|c| c["generated_refusal_rate"].is_number())
+        .collect();
+    assert_eq!(generated.len(), 1, "{s}");
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|c| c["rejected"].is_string())
+            .count(),
+        2
+    );
+    // The mini model never refuses: its only finalist reaches the target and is written.
+    let scale = s["selected_scale"].as_f64().unwrap();
+    assert_eq!(generated[0]["scale"], scale);
+    let patch = &screened["data"]["patch"];
+    assert!(patch["description"].as_str().unwrap().contains("échelle"));
+    for (op, a) in patch["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(screened["data"]["alphas"].as_array().unwrap())
+    {
+        assert_eq!(
+            op["alpha"].as_f64().unwrap() as f32,
+            a["alpha"].as_f64().unwrap() as f32
+        );
+    }
+    let events = std::fs::read_to_string(dir.path().join("events.ndjson")).unwrap();
+    for name in [
+        "probe_refusal_rate",
+        "generation_refusal_rate",
+        "generations_saved",
+    ] {
+        assert!(
+            events.contains(&format!("\"name\":\"{name}\"")),
+            "{name}: {events}"
+        );
+    }
+
+    // Every candidate generated, the base read back from the cache: the same choice or a
+    // smaller scale, never a larger one.
+    let (code, full) = tune(&[&select[..6], &["--no-probe-prefilter"]].concat());
+    assert_eq!(code, 0, "{full}");
+    let f = &full["data"]["selection"];
+    assert_eq!(
+        (
+            &f["candidates_probed"],
+            &f["candidates_generated"],
+            &f["generations_saved"]
+        ),
+        (&json!(0), &json!(3), &json!(0))
+    );
+    assert_eq!(f["baseline_cache"], "hit");
+    assert!(f["selected_scale"].as_f64().unwrap() <= scale);
+
+    // Selection options need --refusal-prompts; scales stay in ]0, 4].
+    assert_eq!(tune(&["--no-probe-prefilter"]).0, 2);
+    let (code, bad) = tune(&["--refusal-prompts", "pos.json", "--scales", "0"]);
+    assert_eq!(code, 2, "{bad}");
+
+    // The MCP tool takes the same selection.
+    let replies = mcp_tool(
+        dir.path(),
+        "surgeon_autotune",
+        &[
+            json!({"model": "qwen2-mini", "vector": "dir.safetensors", "eval_dataset": "pos.json",
+                   "refusal_prompts": "pos.json", "scales": [1.0], "no_probe_prefilter": true}),
+            json!({"model": "qwen2-mini", "vector": "dir.safetensors", "eval_dataset": "pos.json",
+                   "probe_top_k": 1}),
+        ],
+    );
+    let ok = &replies[0]["result"]["structuredContent"];
+    assert_eq!(ok["ok"], true, "{ok}");
+    assert_eq!(ok["data"]["selection"]["candidates_generated"], 1);
+    let orphan = &replies[1]["result"]["structuredContent"];
+    assert_eq!(orphan["error"]["kind"], "invalid_arguments", "{orphan}");
+}
+
+#[test]
+fn refusal_limit_scores_the_first_prompts_only() {
+    let dir = workspace();
+    let all: Vec<String> =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("pos.json")).unwrap())
+            .unwrap();
+    assert_eq!(all.len(), 6);
+    std::fs::write(
+        dir.path().join("first2.json"),
+        serde_json::to_string(&all[..2]).unwrap(),
+    )
+    .unwrap();
+    let call = |prompts: &str, limit: Option<u64>| {
+        let mut args = json!({"mode": "refusal", "model": "qwen2-mini", "prompts": prompts,
+                              "baseline_model": "qwen2-mini", "max_new_tokens": 6,
+                              "backend": "native"});
+        if let Some(limit) = limit {
+            args["limit"] = json!(limit);
+        }
+        args
+    };
+    let replies = mcp(
+        dir.path(),
+        &[
+            call("pos.json", Some(2)),
+            call("first2.json", None),
+            call("pos.json", Some(0)),
+            call("pos.json", Some(100)),
+        ],
+    );
+    let content = |i: usize| replies[i]["result"]["structuredContent"].clone();
+    let limited = content(0);
+    assert_eq!(limited["ok"], true, "{limited}");
+    let limited = &limited["data"];
+    assert_eq!(limited["n"], 2);
+    assert_eq!(limited["items"].as_array().unwrap().len(), 2);
+    assert_eq!(limited["baseline"]["n"], 2);
+    let truncated = content(1)["data"].clone();
+    for key in [
+        "n",
+        "refused",
+        "refusal_rate",
+        "ci95_low",
+        "ci95_high",
+        "prompts_sha256",
+    ] {
+        assert_eq!(limited[key], truncated[key], "{key}");
+    }
+    assert_eq!(outputs(limited), outputs(&truncated));
+    assert_eq!(content(2)["error"]["kind"], "invalid_arguments");
+    assert_eq!(content(3)["data"]["n"], 6);
+
+    let cli = refusal(dir.path(), &["--limit", "2"]);
+    for key in ["n", "refused", "refusal_rate", "ci95_low", "ci95_high"] {
+        assert_eq!(cli[key], limited[key], "{key}");
+    }
+    let (code, _) = surgeon(
+        dir.path(),
+        &[&NATIVE_REFUSAL[..], &["--limit", "0"]].concat(),
+    );
+    assert_ne!(code, 0);
+}
+
+#[test]
+fn mcp_refusal_probe_answers_as_a_heuristic() {
+    let dir = workspace();
+    let replies = mcp(
+        dir.path(),
+        &[
+            json!({"mode": "refusal_probe", "model": "qwen2-mini", "prompts": "pos.json"}),
+            json!({"mode": "refusal_probe", "model": "qwen2-mini", "prompts": "pos.json",
+                   "max_new_tokens": 8}),
+            json!({"mode": "refusal_probe", "model": "qwen2-mini", "prompts": "pos.json",
+                   "probe_method": "direction-projection"}),
+        ],
+    );
+    let content = |i: usize| replies[i]["result"]["structuredContent"].clone();
+    let ok = content(0);
+    assert_eq!(ok["ok"], true, "{ok}");
+    let data = &ok["data"];
+    assert_eq!(data["is_heuristic"], true);
+    assert_eq!(data["evidence_level"], "heuristic_screening");
+    assert_eq!(data["mode"], "first-token-prob");
+    assert_eq!(data["prompt_count"], 6);
+    for key in ["probe_refusal_rate", "mean_refusal_prob", "duration_ms"] {
+        assert!(data[key].is_number(), "{key}: {data}");
+    }
+    assert_eq!(data["items"].as_array().unwrap().len(), 6);
+    let warnings = ok["warnings"].to_string();
+    assert!(warnings.contains("mode refusal ou eval"), "{warnings}");
+    // A generation option is not a probe's; a direction without its file is refused.
+    assert_eq!(
+        content(1)["error"]["kind"],
+        "invalid_arguments",
+        "{}",
+        content(1)
+    );
+    let missing = content(2);
+    assert_eq!(missing["ok"], false, "{missing}");
+    assert!(missing["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--vector"));
 }
 
 #[test]

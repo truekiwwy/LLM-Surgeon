@@ -10,7 +10,7 @@ graphique s'en sert au premier démarrage. Code : `src/backend/`.
 | --- | --- | --- | --- |
 | `mistralrs` | GPU selon le build (CUDA, Metal...) ou CPU | Un serveur [mistral.rs](https://github.com/EricLBuehler/mistral.rs) local (`mistralrs-server`, ou `mistralrs serve`) qui charge le dossier SafeTensors tel quel, sans conversion (un `.gguf` est aussi accepté). | Recommandé par `backend detect` pour NVIDIA, Apple Silicon et le CPU quand il est installé, et sur AMD tant que hipfire ne répond pas (section 4). |
 | `llama-server` | GPU (Vulkan, CUDA, Metal...) ou CPU | Un serveur `llama.cpp` local pour toute l'exécution. Un dossier SafeTensors Qwen2, Llama, Mistral, Gemma, Gemma 2 ou Phi-3 est converti par `surgeon` lui-même en GGUF (Rust pur, sans Python). | Jamais recommandé : seulement sur `--backend llama-server` ou un fichier qui le nomme. |
-| `hipfire` | GPU AMD, HIP/ROCm | Démon externe [`warpfront/hipfire`](https://github.com/warpfront/hipfire), déjà lancé. | Recommandé pour un GPU AMD dès que son démon répond ; tout système, Windows compris par WSL2 (section 7). |
+| `hipfire` | GPU AMD, HIP/ROCm | Démon externe [`warpfront/hipfire`](https://github.com/warpfront/hipfire), déjà lancé ou démarré par `surgeon-gui`. | Recommandé pour un GPU AMD dès que son démon répond ; tout système, Windows compris par WSL2 (section 7). |
 | `native` | CPU | Générateur en Rust pur de `surgeon` (Qwen2, Llama/Mistral, Qwen3 en SafeTensors). Aucun programme externe. | Repli, défaut historique de `bench refusal` et du pipeline. |
 
 Tous partagent l'interface `TextGenerator` (`src/eval/generator.rs`) : un bench ne sait pas
@@ -22,7 +22,9 @@ et les libellés des rapports. Le convertisseur GGUF est `src/eval/safetensors_g
 ## 2. Réglages et priorité
 
 `BackendConfig` (`src/backend/config.rs`) : `backend`, `gpu_layers`, `batch_size`, `llama_cpp_dir`,
-`mistralrs_dir`, `mistralrs_bin`, `hipfire_bin`, `hipfire_url`, `gguf_dtype`. Chaque champ est
+`mistralrs_dir`, `mistralrs_bin`, `hipfire_bin`, `hipfire_url`, `gguf_dtype`, `models_dir`
+(dossier de modèles que surgeon-gui ouvre en lecture seule à ses agents), `hipfire_requantize`
+(`auto` ou `off`, section 7). Chaque champ est
 facultatif ; une couche ne dit que ce qu'elle sait.
 
 ```text
@@ -44,7 +46,7 @@ reste reproductible, un job repris garde son backend). Trois règles :
   prendre un autre dans le `PATH`.
 
 Options concernées : `--backend`, `--gpu-layers`, `--batch-size`, `--llama-cpp-dir`,
-`--mistralrs-dir`, `--mistralrs-bin`, `--hipfire-bin`, `--hipfire-url` (`bench eval`,
+`--mistralrs-dir`, `--mistralrs-bin`, `--hipfire-bin`, `--hipfire-url`, `--hipfire-requantize` (`bench eval`,
 `bench refusal`, `pipeline plan`, `pipeline run`) et `--gguf-dtype` (`bench eval`, `bench refusal`).
 
 ## 3. Configuration persistante
@@ -65,6 +67,8 @@ hipfire_url = "http://127.0.0.1:11435"
 gpu_layers = 99
 batch_size = 1
 gguf_dtype = "f16"
+models_dir = "C:\\models"
+hipfire_requantize = "auto"
 ```
 
 Sous-ensemble plat de TOML (`clé = "texte"` ou `clé = 123`, commentaires `#`, chaînes `'...'`
@@ -197,18 +201,92 @@ compris. `surgeon` ne lance pas le démon, il s'y connecte :
 
 1. **Où.** `hipfire_url` (`--hipfire-url`, boucle locale seulement : `http://127.0.0.1:<port>` ou
    `http://localhost:<port>`), sinon `127.0.0.1:11435` quand le binaire est trouvé
-   (`hipfire_bin` / `--hipfire-bin`, sinon le `PATH`). Ni l'un ni l'autre : erreur qui nomme ces
-   réglages et `--backend mistralrs, llama-server ou native`.
+   (`hipfire_bin` / `--hipfire-bin`, sinon le dossier de l'exécutable, sinon le `PATH`). Ni l'un
+   ni l'autre : erreur qui nomme ces réglages et `--backend mistralrs, llama-server ou native`.
 2. **Quoi.** Une requête vide sur `/v1/completions`, puis sur `/v1/chat/completions` : une route
    qui ne répond pas 404 ou 405 existe. Démon injoignable : « lancez `hipfire serve` ».
 3. **Comment.** `/v1/completions` garde le prompt brut. Si seul `/v1/chat/completions` existe, le
-   run continue, avec un avertissement (`backend show` et le bench) : le gabarit de chat de
-   hipfire s'ajoute à celui du bench et aucune graine n'est documentée, donc les mesures ne sont ni
-   reproductibles ni comparables aux autres backends.
+   run continue, avec un avertissement (`backend show` et le bench) : le prompt rendu est
+   redécoupé en messages (`system`, `user`... : `extract::chat_messages`), si bien que le gabarit
+   de hipfire est le seul appliqué, et la requête part en `temperature = 0` quel que soit le
+   réglage, faute de graine documentée. Un bench hipfire avec `--temperature > 0` est refusé
+   (code 2). Un prompt hors des familles connues, ou avec du texte hors de ses tours (`<bos>`
+   en tête, réponse amorcée), part tel quel en un seul message `user`. Les scores restent à
+   comparer sur hipfire seulement : `bench eval --baseline-model` mesure les deux modèles sur
+   le même backend.
 
 Le champ `model` des requêtes est le nom du modèle donné au bench (son dossier, ou son fichier sans
 extension) : le démon doit connaître un modèle sous ce nom. Comme pour mistral.rs, seul un faux
 démon l'a vérifié ici.
+
+Le démon ne lit donc jamais les poids du dossier, GGUF compris : une copie patchée devrait être
+re-quantifiée et réenregistrée, sinon la mesure porte sur les anciens poids. Une seule règle
+(`backend::hipfire::validate_hipfire_target`) vaut pour la CLI, le pipeline et MCP : le modèle
+d'origine passe sous son nom ; une copie de travail passe sous son alias quand elle a été
+requantifiée pour ses poids actuels, sinon elle est refusée. Est une copie de travail un chemin
+d'un projet surgeon-gui autre que la source de son manifeste (`copies/`, sorties des runs), le
+`work/` d'un job pipeline, ou un dossier à côté des sauvegardes d'`apply` (`<fichier>.bak-<s>-<n>`).
+
+**Copies requantifiées.** `hipfire_requantize = "auto"` (config.toml, `"backend"` de
+pipeline.json) ou `--hipfire-requantize` (`bench eval`, `bench refusal`, `pipeline plan`,
+`pipeline run`) : avant de mesurer une copie SafeTensors qui n'a pas d'alias pour ses poids
+actuels, surgeon la requantifie. Rien ne se passe après `apply` : seul un bench ou un pipeline
+hipfire déclenche la requantification.
+
+1. SHA-256 des `*.safetensors` du dossier (noms et empreintes, dans l'ordre des noms ; les
+   sauvegardes d'`apply` n'en font pas partie), alias `ws-<copie>-<sha8>` (nom du dossier,
+   caractères hors `[A-Za-z0-9_-]` remplacés par `-`, puis les 8 premiers chiffres hexadécimaux).
+2. Si `models.toml` de hipfire (`$HIPFIRE_HOME`, sinon `~/.hipfire`) a déjà cet alias, mêmes
+   poids : pas de quantification. Sinon `hipfire quantize <copie> --format q8f16 --stem <alias>
+   --output-dir <home>/models --install --register <alias>`, sortie sur stderr. `q8f16` : MQ4
+   change des réponses de Qwen2.5-0.5B sur cette configuration (17 + 25 = 32).
+3. Les poids sont rehachés (modifiés pendant la quantification : erreur), puis
+   `.hipfire-alias.json` est écrit dans la copie : `{"alias", "weights_sha256", "created_at"}`.
+
+À chaque mesure, le hash est recalculé : égal à `weights_sha256`, les requêtes portent
+`model = <alias>` ; différent (un shard réécrit après coup), la copie est refusée, ou
+requantifiée sous un nouvel alias en mode `auto`. Sous Windows, le script tourne dans WSL
+(`wsl.exe -d Ubuntu-24.04 -e bash -lc`, chemin traduit par `wslpath`) en tant qu'utilisateur par
+défaut de la distribution : son catalogue doit être celui que lit le démon (`start-hipfire.ps1`
+le lance sous ce même utilisateur ; le démon root de surgeon-gui lit `/root/.hipfire`). Ce qui
+dépend de l'installation : l'emplacement de `models.toml` et du dossier `models`, la forme des
+clés `[aliases]` et la prise en compte d'un nouvel alias par un démon déjà lancé, vérifiés sur
+hipfire 0.4.6 seulement. Les anciens alias ne sont jamais supprimés : `hipfire rm` les retire.
+
+Sous Windows, quand le démon hipfire ne répond pas, `surgeon doctor` (et l'onglet « Moteur et
+machine » de surgeon-gui, qui lance le même contrôle) exécute `wsl.exe -d Ubuntu-24.04 -e true` :
+une sortie contenant `HCS_E_SERVICE_NOT_AVAILABLE`, `WSL_E_WSL2_NEEDED` ou `CreateVm` remplace le
+conseil par un diagnostic (virtualisation du CPU dans le BIOS, SVM Mode ou VT-x ;
+`bcdedit /set hypervisorlaunchtype auto` ; redémarrage de Windows après l'activation de
+VirtualMachinePlatform ; llama.cpp (Vulkan) comme moteur en attendant). Le bouton « Démarrer
+hipfire » ne s'arrête plus sur un arrêt préalable en échec : si `wsl.exe` se termine avant que le
+démon réponde, l'erreur affichée est cette sortie (ou le même diagnostic).
+
+- **CLI.** `bench eval` et `bench refusal` refusent avant la première génération (modèle et
+  `--baseline-model`), code 2 ; `--allow-stale-hipfire` laisse passer, avec un avertissement dans
+  le rapport, une copie enregistrée à la main sous son nom. Avec `--baseline-model`, l'original et
+  la copie sont mesurés sur le même démon.
+- **Pipeline.** Les candidats sont toujours mesurés sur la copie de travail : le job échoue avant
+  le premier candidat et avant toute lecture du Test Set, sauf en mode `auto` (chaque candidat est
+  requantifié avant sa mesure) ; `pipeline run --allow-stale-hipfire`
+  (ligne de commande seulement) passe outre et l'écrit dans `notes` et `report.json`.
+- **MCP (agents, studio).** `surgeon_bench` `eval` et `refusal` d'une copie SafeTensors passent
+  sur `native` avec l'avertissement « backend hipfire écarté (<chemin>) », sauf si son alias
+  correspond à ses poids ; une copie `.gguf` est refusée. Aucune dérogation ni requantification
+  côté agent : le modèle et sa référence restent sur un seul backend.
+
+**Avec `surgeon-gui`.** Sur une machine AMD, ou quand `hipfire` est le backend enregistré, et sauf
+si `native` a été enregistré à la main, la fenêtre démarre le démon si rien ne répond sur
+`hipfire_url` et si le binaire est trouvé : `hipfire serve 127.0.0.1:<port> --no-prewarm`, sans
+console, sortie dans `hipfire.log` (dossier des journaux). Elle attend le port 5 s au plus sans
+bloquer l'interface, puis relance la détection. À la fermeture, elle arrête ce démon et son
+processus GPU, ce qui libère la VRAM ; un démon qu'elle n'a pas lancé n'est jamais touché. Sans
+binaire, rien ne change : le moteur de repli continue, et `surgeon_backends` donne
+`hipfire.binary: null`. Une fois la fenêtre fermée, un `surgeon` en ligne de commande réglé sur
+`hipfire` doit trouver un démon lancé autrement.
+
+hipfire sous WSL2 comparé à `llama-server` Vulkan sur une RX 7600 XT, et la recommandation qui en
+découle : [GPU_AMD_WINDOWS_EVAL.md](GPU_AMD_WINDOWS_EVAL.md).
 
 ## 8. Pipeline
 

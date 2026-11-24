@@ -1,7 +1,8 @@
 //! The rollback cycle over MCP and the CLI: `surgeon_apply` on a working copy, a measured
 //! regression (`surgeon_bench` dump + logits), then `surgeon_restore` from the `.bak-*` and
 //! from an `--allow-read` origin, each time back to the initial SHA-256 byte for byte. Also
-//! the sandbox (never a read-only root, `--read-only`) and the ambiguous detection.
+//! the sandbox (never a read-only root, `--read-only`), stacked applies undone one at a time,
+//! and what an agent needs around them: working files and the model's chat format.
 
 #[path = "../examples/make_fake_qwen2.rs"]
 #[allow(dead_code)]
@@ -215,15 +216,24 @@ fn apply_regression_then_restore_from_backup_and_from_origin() {
         .iter()
         .any(|f| f["rewritten"] == true && f["sha256_before"] != f["sha256_after"]));
 
-    // A second apply leaves two backups of the same shard: detection refuses to guess.
+    // Applied again from the restored state: that state is already saved.
     let second = apply(&w);
-    let (is_error, env) = one_call(&w.cfg, "surgeon_restore", json!({"model": s(&w.copy)}));
-    assert!(is_error);
-    assert_eq!(env["error"]["kind"], "ambiguous_backup", "{env}");
+    let backups = &second["data"]["backups"];
+    assert_eq!(backups, &applied["data"]["backups"], "no second copy");
+
+    // Stacked on it: a new checkpoint, and no argument goes back exactly one apply, as often
+    // as it is asked.
+    let patched = model_hashes(&w.copy);
+    let third = apply(&w);
+    assert_ne!(&third["data"]["backups"], backups);
+    for _ in 0..2 {
+        let (is_error, env) = one_call(&w.cfg, "surgeon_restore", json!({"model": s(&w.copy)}));
+        assert!(!is_error, "{env}");
+        assert_eq!(env["data"]["checkpoint"], "last_apply", "{env}");
+        assert_restored(&env, &w.copy, &patched);
+    }
 
     // The backups named by the apply report.
-    let backups = &second["data"]["backups"];
-    assert_ne!(backups, &applied["data"]["backups"]);
     let (is_error, env) = one_call(
         &w.cfg,
         "surgeon_restore",
@@ -312,4 +322,159 @@ fn restore_never_writes_a_read_root_nor_under_read_only() {
     );
     assert!(is_error);
     assert_eq!(env["error"]["kind"], "read_only", "{env}");
+    // A dry run writes nothing: it stays available.
+    let patch = json!({"schema_version": 1, "operations": [{
+        "id": "push", "layers": "all", "projections": ["down_proj"], "operation": "subtract",
+        "vector_file": s(&ro.root.join("v.json")), "alpha": 1.0, "axis": "cols"}]});
+    let (is_error, env) = one_call(
+        &ro.cfg,
+        "surgeon_apply",
+        json!({"model": s(&ro.copy), "patch": patch, "dry_run": true}),
+    );
+    assert!(!is_error, "{env}");
+    let (is_error, env) = one_call(
+        &ro.cfg,
+        "surgeon_apply",
+        json!({"model": s(&ro.copy), "patch": patch}),
+    );
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "read_only", "{env}");
+}
+
+#[test]
+fn working_files_are_written_under_work_and_feed_the_tools() {
+    let w = workspace(false);
+    let files = |args: Value| one_call(&w.cfg, "surgeon_files", args);
+    let lines = ["joie soleil", "rire fete", "danse musique"]
+        .map(|p| json!({ "text": p }).to_string())
+        .join("\n");
+    let (is_error, env) =
+        files(json!({"action": "write", "path": "sets/pos.jsonl", "content": lines}));
+    assert!(!is_error, "{env}");
+    let written = PathBuf::from(env["data"]["path"].as_str().unwrap());
+    let in_work = written.canonicalize().unwrap();
+    assert!(in_work.starts_with(w.root.join("work")), "{env}");
+
+    // The file is a dataset for the engine, and comes back as text.
+    let (is_error, env) = one_call(
+        &w.cfg,
+        "surgeon_extract",
+        json!({"model": s(&w.copy), "layer": 2, "pos_prompts_file": s(&written),
+            "neg_prompts_file": s(&w.root.join("neg.json")),
+            "out": s(&w.root.join("vectors/new/d.safetensors"))}),
+    );
+    assert!(!is_error, "the output folder is created: {env}");
+    let (is_error, env) = files(json!({"action": "read", "path": s(&written)}));
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["content"], lines);
+
+    // An existing file needs a decision; append and overwrite are that decision.
+    let again = json!({"action": "write", "path": "sets/pos.jsonl", "content": "x"});
+    let (is_error, env) = files(again.clone());
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "output_exists", "{env}");
+    let mut append = again.clone();
+    append["append"] = json!(true);
+    assert!(!files(append).0);
+    assert!(std::fs::read_to_string(&written).unwrap().ends_with('x'));
+    let mut overwrite = again;
+    overwrite["overwrite"] = json!(true);
+    assert!(!files(overwrite).0);
+    assert_eq!(std::fs::read_to_string(&written).unwrap(), "x");
+
+    // Never outside work/, never anything but text files.
+    let before = model_hashes(&w.copy);
+    for (path, kind) in [
+        (
+            s(&w.copy.join("config.json")).to_owned(),
+            "path_not_allowed",
+        ),
+        ("../project.surgeon.json".to_owned(), "path_not_allowed"),
+        ("poids.safetensors".to_owned(), "invalid_arguments"),
+    ] {
+        let (is_error, env) = files(json!({"action": "write", "path": path, "content": "{}"}));
+        assert!(is_error, "{path}");
+        assert_eq!(env["error"]["kind"], kind, "{env}");
+    }
+    assert_eq!(model_hashes(&w.copy), before);
+
+    // Weights are not text, and a read-only root can be listed to find models.
+    let weights = w.copy.join("model.safetensors");
+    let (is_error, env) = files(json!({"action": "read", "path": s(&weights)}));
+    assert!(is_error, "{env}");
+    let (is_error, env) = files(json!({"action": "list", "path": s(&w.root.join("origin"))}));
+    assert!(!is_error, "{env}");
+    let entries = env["data"]["entries"].as_array().unwrap();
+    assert!(entries
+        .iter()
+        .any(|e| e["name"] == "qwen2-mini" && e["model"] == true));
+    let outside = tempfile::tempdir().unwrap();
+    let (is_error, env) = files(json!({"action": "list", "path": s(outside.path())}));
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "path_not_allowed", "{env}");
+
+    // A read-only server reads but never writes.
+    let ro = workspace(true);
+    let (is_error, env) = one_call(
+        &ro.cfg,
+        "surgeon_files",
+        json!({"action": "write", "path": "a.txt", "content": "x"}),
+    );
+    assert!(is_error);
+    assert_eq!(env["error"]["kind"], "read_only", "{env}");
+    assert!(!one_call(&ro.cfg, "surgeon_files", json!({"action": "list"})).0);
+}
+
+#[test]
+fn the_chat_format_of_the_model_reaches_extract_autotune_and_the_measures() {
+    let w = workspace(false);
+    let system = "You are helpful.";
+    std::fs::write(
+        w.copy.join("tokenizer_config.json"),
+        json!({ "chat_template": format!(
+            "{{%- if m %}}{{{{- '<|im_start|>system\\n{system}<|im_end|>\\n' }}}}{{%- endif %}}"
+        )})
+        .to_string(),
+    )
+    .unwrap();
+    let dump = |extra: Value, out: &str| {
+        let mut args = json!({"mode": "dump", "model": s(&w.copy),
+            "prompts": s(&w.root.join("pos.json")), "out": s(&w.root.join(out))});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (is_error, env) = one_call(&w.cfg, "surgeon_bench", args);
+        assert!(!is_error, "{env}");
+        env["data"].clone()
+    };
+    let native = dump(json!({}), "a.safetensors");
+    assert_eq!(native["chat_template"], "chatml");
+    // Disabled on request only.
+    let raw = dump(json!({"chat_template": "none"}), "b.safetensors");
+    assert!(raw.get("chat_template").is_none(), "{raw}");
+    assert!(native["n_positions"].as_u64() > raw["n_positions"].as_u64());
+
+    // The vector remembers the wrapping, system message included, and autotune replays it.
+    let vector = w.root.join("d.safetensors");
+    let (is_error, env) = one_call(
+        &w.cfg,
+        "surgeon_extract",
+        json!({"model": s(&w.copy), "layer": 2, "pos_prompts_file": s(&w.root.join("pos.json")),
+            "neg_prompts_file": s(&w.root.join("neg.json")), "out": s(&vector)}),
+    );
+    assert!(!is_error, "{env}");
+    let (is_error, env) = one_call(
+        &w.cfg,
+        "surgeon_autotune",
+        json!({"model": s(&w.copy), "vector": s(&vector), "target_layer_range": "1-2",
+            "eval_dataset": s(&w.root.join("pos.json")), "max_delta_norm_ratio": 1e-4}),
+    );
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["chat_template"], "chatml", "{env}");
+    assert_eq!(env["data"]["chat_system"], system, "{env}");
+    // The ratio bound holds on every kept layer.
+    for layer in env["data"]["alphas"].as_array().unwrap() {
+        let ratio = layer["delta_norm_ratio"].as_f64().unwrap();
+        assert!(ratio <= 1e-4 * (1.0 + 1e-9), "{layer}");
+    }
 }

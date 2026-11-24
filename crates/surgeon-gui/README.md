@@ -72,10 +72,14 @@ patch timeline ([docs/GUI_3D.md](../../docs/GUI_3D.md)). The agent points at a t
 
 ## Build
 
-The crate has its own `Cargo.lock`, like `crates/surgeon-tui`: its windowing stack never
-enters the root lockfile that `tests/deps_purity.rs` checks. Details in `docs/GRAPH.md`,
-section 7.3.
+The crate is a member of the root Cargo workspace (one `Cargo.lock`, one `target/`), with the
+engine and `crates/surgeon-tui`. Its windowing stack never enters the engine's own tree, which
+`tests/deps_purity.rs` checks (`cargo tree -p weight-surgeon`). Details in `docs/GRAPH.md`,
+section 7.3. From this folder (or with `-p surgeon-gui` from the root):
 
 ```bash
 cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
 ```
+
+The desktop package builds it with the root manifest's `dist` profile (fat LTO):
+`cargo build --profile dist`, binary in `../../target/dist/`.

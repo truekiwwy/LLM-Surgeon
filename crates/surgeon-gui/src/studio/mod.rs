@@ -11,10 +11,14 @@
 //! - [`estimate`]: cost and time before launch, and the budget check.
 //! - [`live`]: the 3D layer of a run, live or replayed with a time cursor.
 //! - [`lock`]: the kernel lock that keeps the source model read-only while its project is open.
+//! - [`ollama`]: the `Modelfile` and the `ollama create` command of the project's artifact.
 //! - [`selftest`]: `surgeon-gui --self-test`, all of the above without a window.
+//! - [`vector_radar`]: the read-only cosine comparison of two direction files.
+//! - [`vectors`]: the extract-a-vector form and the layer scores of the last sweep and trace.
 //! - [`view`]: the Projects workspace of the window.
 
 pub mod bus;
+pub mod checkpoints;
 pub mod copy;
 pub mod estimate;
 pub mod exec;
@@ -23,7 +27,10 @@ pub mod jobs;
 pub mod ledger;
 pub mod live;
 pub mod lock;
+pub mod ollama;
 pub mod project;
 pub mod results;
 pub mod selftest;
+pub mod vector_radar;
+pub mod vectors;
 pub mod view;

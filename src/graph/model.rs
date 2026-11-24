@@ -191,6 +191,7 @@ pub struct SkippedTensor {
 pub struct Counters {
     pub nan: u64,
     pub inf: u64,
+    pub zeros: u64,
 }
 
 impl Counters {
@@ -568,6 +569,50 @@ impl ModelData {
             ))),
         }
     }
+
+    /// The stored bytes of every row of `tensor`, undecoded.
+    pub fn raw_bytes(&self, tensor: &TensorRef) -> Result<&[u8]> {
+        let out_of_file = || GraphError::Model(format!("{} : octets hors du fichier", tensor.name));
+        match (&self.store, &tensor.storage) {
+            (
+                Store::Safe(shards),
+                Storage::Safe {
+                    shard, row_stride, ..
+                },
+            ) => {
+                let model = shards.get(*shard).ok_or_else(|| {
+                    GraphError::Model(format!("{} : shard {shard} absent", tensor.name))
+                })?;
+                let view = model.tensor(&raw_name(&tensor.name))?;
+                let len = tensor
+                    .m()
+                    .checked_mul(*row_stride)
+                    .ok_or_else(out_of_file)?;
+                let end = tensor.row_offset.checked_add(len).ok_or_else(out_of_file)?;
+                view.bytes
+                    .get(tensor.row_offset..end)
+                    .ok_or_else(out_of_file)
+            }
+            (
+                Store::Gguf { map, .. },
+                Storage::Gguf {
+                    start, row_bytes, ..
+                },
+            ) => {
+                let start = usize::try_from(*start)
+                    .ok()
+                    .and_then(|s| s.checked_add(tensor.row_offset))
+                    .ok_or_else(out_of_file)?;
+                let len = tensor.m().checked_mul(*row_bytes).ok_or_else(out_of_file)?;
+                let end = start.checked_add(len).ok_or_else(out_of_file)?;
+                map.get(start..end).ok_or_else(out_of_file)
+            }
+            _ => Err(GraphError::Compute(format!(
+                "{} : stockage incompatible avec le format",
+                tensor.name
+            ))),
+        }
+    }
 }
 
 fn unsupported_storage(raw: &RawTensor) -> bool {
@@ -895,7 +940,7 @@ fn decode_safe_row(dtype: SafeDtype, bytes: &[u8], out: &mut [f32]) {
 }
 
 /// Streams one tensor for `rsvd`, applying the Gemma `1 + gamma` factor and replacing
-/// non-finite decoded values (already counted by [`pre_scan`]) with zero.
+/// non-finite decoded values with zero.
 pub struct NodeSource<'a> {
     model: &'a ModelData,
     tensor: &'a TensorRef,
@@ -934,47 +979,36 @@ impl<'a> NodeSource<'a> {
         Ok(())
     }
 
-    fn count_row(&self, row: &[f32], counters: &mut Counters) {
-        for value in row {
-            if value.is_nan() {
-                counters.nan += 1;
-            } else if value.is_infinite() {
-                counters.inf += 1;
-            }
-        }
-    }
-
-    pub fn pre_scan(&self) -> Result<Counters> {
-        let mut counters = Counters::default();
-        let mut row = vec![0.0f32; self.tensor.n()];
-        for index in 0..self.tensor.m() {
-            self.check_cancel()?;
-            self.model.read_row(self.tensor, index, &mut row)?;
-            if let Some(gamma) = self.gamma {
-                for (value, &g) in row.iter_mut().zip(gamma) {
-                    *value *= g;
-                }
-            }
-            self.count_row(&row, &mut counters);
-        }
-        Ok(counters)
-    }
-
-    /// One sanitised row: exactly the values `rsvd` sees.
-    pub fn read_sanitized_row(&self, index: usize, out: &mut [f32]) -> Result<()> {
+    /// One row exactly as `rsvd` sees it, counting the replaced and the zero entries.
+    pub fn read_counted_row(
+        &self,
+        index: usize,
+        out: &mut [f32],
+        counters: &mut Counters,
+    ) -> Result<()> {
         self.check_cancel()?;
         self.model.read_row(self.tensor, index, out)?;
+        self.fold(out, counters);
+        Ok(())
+    }
+
+    fn fold(&self, row: &mut [f32], counters: &mut Counters) {
         if let Some(gamma) = self.gamma {
-            for (value, &g) in out.iter_mut().zip(gamma) {
+            for (value, &g) in row.iter_mut().zip(gamma) {
                 *value *= g;
             }
         }
-        for value in out.iter_mut() {
-            if !value.is_finite() {
+        for value in row.iter_mut() {
+            if value.is_nan() {
+                counters.nan += 1;
                 *value = 0.0;
+            } else if value.is_infinite() {
+                counters.inf += 1;
+                *value = 0.0;
+            } else if *value == 0.0 {
+                counters.zeros += 1;
             }
         }
-        Ok(())
     }
 }
 
@@ -1002,16 +1036,7 @@ impl RowSource for NodeSource<'_> {
             self.model
                 .read_row(self.tensor, row, chunk)
                 .map_err(|e| crate::surgery::SurgeryError::Failed(e.to_string()))?;
-            if let Some(gamma) = self.gamma {
-                for (value, &g) in chunk.iter_mut().zip(gamma) {
-                    *value *= g;
-                }
-            }
-            for value in chunk.iter_mut() {
-                if !value.is_finite() {
-                    *value = 0.0;
-                }
-            }
+            self.fold(chunk, &mut Counters::default());
         }
         Ok(rows)
     }

@@ -69,6 +69,7 @@
 //! ```
 
 mod capture;
+mod causal;
 mod config;
 mod decoder;
 mod error;
@@ -81,6 +82,8 @@ mod prompts;
 mod stats;
 mod subspace;
 mod svd;
+mod sweep;
+pub mod weight_cache;
 mod weights;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -94,11 +97,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use capture::{pool, Pooling};
+pub use causal::{
+    argmax, causal_window, log_prob, ranking, run_trace, CausalWindow, Component, LayerEffect,
+    TraceReport, TraceRequest, DEFAULT_WINDOW_THRESHOLD, MIN_LOG_PROB_GAP,
+};
 pub use config::{
     load_config, parse_config, DecoderConfig, Llama3Scaling, Qwen2Config, Variant,
     SUPPORTED_MODEL_TYPES,
 };
-pub use decoder::{HookedDecoder, HookedQwen2, KvCache, Site};
+pub use decoder::{HookPoint, HookedDecoder, HookedQwen2, KvCache, LayerHook, Site};
 pub use error::{ExtractError, Result};
 pub use leace::{cross_cov_norm, erased_stats, fit as leace_fit, LeaceDiagnostics, LeaceFit};
 pub(crate) use method::compute_subspace as compute_method;
@@ -107,11 +114,12 @@ pub use method::{
     MethodOutput, SubspaceFit, DEFAULT_LEACE_RCOND, DEFAULT_LEACE_SHRINKAGE, MIN_HOLDOUT_PER_CLASS,
 };
 pub use output::{
-    check_output, companion_path, encode, encode_shaped, encode_tensors, leace_path, sidecar_path,
-    write_atomic, write_files_atomic, write_pair_atomic, TENSOR_NAME,
+    check_output, companion_path, encode, encode_shaped, encode_tensors, ensure_parent, leace_path,
+    sidecar_path, write_atomic, write_files_atomic, write_pair_atomic, TENSOR_NAME,
 };
 pub use prompts::{
-    check_texts, load_prompt_texts, load_tokenizer, tokenize, ChatTemplate, Tokenized,
+    chat_messages, check_texts, load_prompt_texts, load_tokenizer, model_folder, tokenize,
+    ChatTemplate, PromptFormat, Tokenized,
 };
 pub use stats::{
     mean_diff_direction, separation, separation_along, separation_with_projections, Separation,
@@ -119,6 +127,10 @@ pub use stats::{
 };
 pub use subspace::{load_labels, parse_labels, SubspaceDiagnostics, SubspaceOptions};
 pub use svd::{svd_direction, svd_subspace, SvdDiagnostics};
+pub use sweep::{
+    auc, best_layer_index, margin, resolve_layers, run_sweep, LayerSeparation, SweepReport,
+    SweepRequest,
+};
 pub use weights::{
     check_tensors, load_tensors, required_tensors, required_tensors_full, RawTensor,
     SafetensorsDir, TensorSource, TensorTotals,
@@ -132,6 +144,9 @@ use crate::plugin::{
 
 /// Fewer prompts per set make the mean, and so the direction, noisy.
 pub const MIN_RECOMMENDED_PROMPTS: usize = 8;
+/// Defaults of the CLI and of the MCP tool.
+pub const DEFAULT_LAYER: usize = 20;
+pub const DEFAULT_MAX_TOKENS: usize = 512;
 
 #[derive(
     Debug,
@@ -241,6 +256,7 @@ pub enum ExtractEvent {
         dtype_used: String,
         weight_bytes: u64,
         tensors: usize,
+        layer: usize,
     },
     LoadingWeights {
         done_tensors: usize,
@@ -252,6 +268,12 @@ pub enum ExtractEvent {
         total: usize,
     },
     Writing,
+    /// A decision worth a log line (the dtype, the free RAM it was taken on).
+    Note(String),
+    Forward {
+        done: usize,
+        total: usize,
+    },
 }
 
 /// Progress and cancellation: `Break` stops the run (checked between tensors and between
@@ -296,38 +318,102 @@ fn gib(bytes: u64) -> String {
     format!("{:.2} GiB", bytes as f64 / (1u64 << 30) as f64)
 }
 
-/// CPU only: RAM decides. `auto` prefers f32 and falls back to bf16.
+/// What [`dtype_decision`] chose, and on which numbers, for the logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DtypeDecision {
+    pub choice: DTypeChoice,
+    pub dtype: DType,
+    /// Free RAM when it was decided.
+    pub available_bytes: u64,
+    /// What the chosen dtype needs, margin included.
+    pub required_bytes: u64,
+    /// `auto` fell back to bf16: what f32 needed, margin included.
+    pub f32_required_bytes: Option<u64>,
+}
+
+impl DtypeDecision {
+    /// The log line of every load: dtype, how it was chosen, free RAM, need.
+    pub fn note(&self) -> String {
+        let how = match self.choice {
+            DTypeChoice::Auto => "auto",
+            _ => "demandé",
+        };
+        format!(
+            "dtype {} ({how}) : RAM libre {}, besoin {} marge incluse",
+            dtype_name(self.dtype),
+            gib(self.available_bytes),
+            gib(self.required_bytes)
+        )
+    }
+
+    /// The warning of a fallback to bf16, with the numbers that caused it.
+    pub fn fallback(&self) -> Option<String> {
+        let f32_needs = self.f32_required_bytes?;
+        Some(format!(
+            "repli en bf16 : f32 demande {} marge incluse, RAM libre {} ; bf16 est environ 2,5 \
+             fois plus lent sur CPU (forward de Qwen2.5-0.5B : 5,9 s en f32, 14,4 s en bf16). \
+             Un autre processus occupe-t-il la mémoire ? Libérez-la puis relancez pour revenir \
+             en f32",
+            gib(f32_needs),
+            gib(self.available_bytes)
+        ))
+    }
+}
+
+/// CPU only: RAM decides. `auto` prefers f32 and falls back to bf16 when f32 does not fit the
+/// RAM free at that moment; [`DtypeDecision::fallback`] says so with the numbers.
+pub fn dtype_decision(
+    choice: DTypeChoice,
+    plan: MemoryPlan,
+    probe: &dyn HardwareProbe,
+) -> Result<DtypeDecision> {
+    let policy = BudgetPolicy::default();
+    let available = probe
+        .system_ram()
+        .map_err(|e| ExtractError::InsufficientResources(e.to_string()))?
+        .available_bytes
+        + weight_cache::reclaimable_bytes();
+    let need = |bytes: u64| required_ram(bytes, &policy);
+    let fits = |bytes: u64| need(bytes) <= available;
+    let refuse = |bytes: u64, dtype: &str| {
+        ExtractError::InsufficientResources(format!(
+            "{dtype} : besoin de {} (marge incluse), disponible {}",
+            gib(need(bytes)),
+            gib(available)
+        ))
+    };
+    let decided = |dtype: DType, bytes: u64, fell_back: bool| DtypeDecision {
+        choice,
+        dtype,
+        available_bytes: available,
+        required_bytes: need(bytes),
+        f32_required_bytes: fell_back.then(|| need(plan.f32_bytes)),
+    };
+    match choice {
+        DTypeChoice::F32 if fits(plan.f32_bytes) => Ok(decided(DType::F32, plan.f32_bytes, false)),
+        DTypeChoice::F32 => Err(refuse(plan.f32_bytes, "f32")),
+        DTypeChoice::Bf16 if fits(plan.bf16_bytes) => {
+            Ok(decided(DType::BF16, plan.bf16_bytes, false))
+        }
+        DTypeChoice::Bf16 => Err(refuse(plan.bf16_bytes, "bf16")),
+        DTypeChoice::Auto if fits(plan.f32_bytes) => Ok(decided(DType::F32, plan.f32_bytes, false)),
+        DTypeChoice::Auto if fits(plan.bf16_bytes) => {
+            Ok(decided(DType::BF16, plan.bf16_bytes, true))
+        }
+        DTypeChoice::Auto => Err(refuse(plan.bf16_bytes, "bf16")),
+    }
+}
+
+/// [`dtype_decision`], its fallback warning added to `warnings`.
 pub(crate) fn choose_dtype(
     choice: DTypeChoice,
     plan: MemoryPlan,
     probe: &dyn HardwareProbe,
     warnings: &mut Vec<String>,
 ) -> Result<DType> {
-    let policy = BudgetPolicy::default();
-    let available = probe
-        .system_ram()
-        .map_err(|e| ExtractError::InsufficientResources(e.to_string()))?
-        .available_bytes;
-    let fits = |bytes: u64| required_ram(bytes, &policy) <= available;
-    let refuse = |bytes: u64, dtype: &str| {
-        ExtractError::InsufficientResources(format!(
-            "{dtype} : besoin de {} (marge incluse), disponible {}",
-            gib(required_ram(bytes, &policy)),
-            gib(available)
-        ))
-    };
-    match choice {
-        DTypeChoice::F32 if fits(plan.f32_bytes) => Ok(DType::F32),
-        DTypeChoice::F32 => Err(refuse(plan.f32_bytes, "f32")),
-        DTypeChoice::Bf16 if fits(plan.bf16_bytes) => Ok(DType::BF16),
-        DTypeChoice::Bf16 => Err(refuse(plan.bf16_bytes, "bf16")),
-        DTypeChoice::Auto if fits(plan.f32_bytes) => Ok(DType::F32),
-        DTypeChoice::Auto if fits(plan.bf16_bytes) => {
-            warnings.push("f32 ne tient pas en RAM : calcul en bf16 (précision réduite)".into());
-            Ok(DType::BF16)
-        }
-        DTypeChoice::Auto => Err(refuse(plan.bf16_bytes, "bf16")),
-    }
+    let decision = dtype_decision(choice, plan, probe)?;
+    warnings.extend(decision.fallback());
+    Ok(decision.dtype)
 }
 
 pub(crate) fn dtype_name(dtype: DType) -> &'static str {
@@ -335,6 +421,214 @@ pub(crate) fn dtype_name(dtype: DType) -> &'static str {
         DType::BF16 => "bf16",
         _ => "f32",
     }
+}
+
+struct ModelInput<'a> {
+    model_dir: &'a Path,
+    chat_template: ChatTemplate,
+    max_tokens: usize,
+    dtype: DTypeChoice,
+}
+
+impl ExtractRequest {
+    fn model_input(&self) -> ModelInput<'_> {
+        ModelInput {
+            model_dir: &self.model_dir,
+            chat_template: self.chat_template,
+            max_tokens: self.max_tokens,
+            dtype: self.dtype,
+        }
+    }
+}
+
+fn check_layer(cfg: &Qwen2Config, layer: usize) -> Result<()> {
+    match layer < cfg.num_hidden_layers {
+        true => Ok(()),
+        false => Err(ExtractError::InvalidArgument(format!(
+            "couche {layer} hors bornes : le modèle a num_hidden_layers = {} (couches 0 à {})",
+            cfg.num_hidden_layers,
+            cfg.num_hidden_layers - 1
+        ))),
+    }
+}
+
+struct Session {
+    depth: forward::Depth,
+    required: Vec<(String, Vec<usize>)>,
+    dtype: DType,
+    dtype_used: String,
+    tokenizer: tokenizers::Tokenizer,
+    format: PromptFormat,
+    max_tokens: usize,
+    warnings: Vec<String>,
+    truncated: usize,
+}
+
+fn open_session(
+    input: ModelInput,
+    cfg: &Qwen2Config,
+    depth: forward::Depth,
+    source: &dyn TensorSource,
+    probe: &dyn HardwareProbe,
+    observer: &mut dyn ExtractObserver,
+) -> Result<Session> {
+    let (layer, required) = match depth {
+        forward::Depth::UpTo(layer) => {
+            check_layer(cfg, layer)?;
+            (layer, required_tensors(cfg, layer))
+        }
+        forward::Depth::Full => (cfg.num_hidden_layers - 1, required_tensors_full(cfg)),
+    };
+    let totals = check_tensors(source, &required)?;
+    let decision = dtype_decision(
+        input.dtype,
+        plan_memory(cfg, totals, input.max_tokens),
+        probe,
+    )?;
+    let dtype_used = dtype_name(decision.dtype).to_owned();
+    let planned = ExtractEvent::Planned {
+        dtype_used: dtype_used.clone(),
+        weight_bytes: totals.elements * decision.dtype.size_in_bytes() as u64,
+        tensors: required.len(),
+        layer,
+    };
+    for event in [planned, ExtractEvent::Note(decision.note())] {
+        if observer.on_event(event).is_break() {
+            return Err(ExtractError::Cancelled);
+        }
+    }
+    Ok(Session {
+        depth,
+        required,
+        dtype: decision.dtype,
+        dtype_used,
+        tokenizer: load_tokenizer(input.model_dir)?,
+        format: input
+            .chat_template
+            .resolve(input.model_dir, ChatTemplate::NoTemplate),
+        max_tokens: input.max_tokens,
+        warnings: decision.fallback().into_iter().collect(),
+        truncated: 0,
+    })
+}
+
+impl Session {
+    fn encode(&mut self, set: &str, prompts: &[String]) -> Result<Vec<Vec<u32>>> {
+        let mut ids = Vec::with_capacity(prompts.len());
+        for (i, prompt) in prompts.iter().enumerate() {
+            let t = tokenize(&self.tokenizer, &self.format.apply(prompt), self.max_tokens)?;
+            if t.ids.is_empty() {
+                return Err(ExtractError::Prompts {
+                    set: set.into(),
+                    message: format!("prompt {i} : aucun token"),
+                });
+            }
+            self.truncated += usize::from(t.truncated);
+            ids.push(t.ids);
+        }
+        Ok(ids)
+    }
+
+    fn load(
+        &self,
+        cfg: &Qwen2Config,
+        source: &dyn TensorSource,
+        observer: &mut dyn ExtractObserver,
+    ) -> Result<Box<dyn forward::ResidualForward>> {
+        let device = Device::Cpu;
+        let tensors = load_tensors(
+            source,
+            &self.required,
+            self.dtype,
+            &device,
+            &mut |done, total| {
+                observer.on_event(ExtractEvent::LoadingWeights {
+                    done_tensors: done,
+                    total_tensors: total,
+                })
+            },
+        )?;
+        forward::build(cfg, tensors, self.depth, self.dtype, &device)
+    }
+}
+
+struct Captured {
+    pos: Vec<Vec<Vec<f64>>>,
+    neg: Vec<Vec<Vec<f64>>>,
+    session: Session,
+}
+
+fn capture_sets(
+    req: &ExtractRequest,
+    cfg: &Qwen2Config,
+    layers: &[usize],
+    source: &dyn TensorSource,
+    probe: &dyn HardwareProbe,
+    observer: &mut dyn ExtractObserver,
+) -> Result<Captured> {
+    let deepest = layers.iter().copied().max().unwrap_or(req.layer);
+    let depth = forward::Depth::UpTo(deepest);
+    let mut session = open_session(req.model_input(), cfg, depth, source, probe, observer)?;
+    let pos_ids = session.encode(PromptSet::Pos.as_str(), &req.pos_prompts)?;
+    let neg_ids = session.encode(PromptSet::Neg.as_str(), &req.neg_prompts)?;
+    let model = session.load(cfg, source, observer)?;
+    let pos = pool_layers(
+        model.as_ref(),
+        &pos_ids,
+        PromptSet::Pos,
+        layers,
+        req,
+        observer,
+    )?;
+    let neg = pool_layers(
+        model.as_ref(),
+        &neg_ids,
+        PromptSet::Neg,
+        layers,
+        req,
+        observer,
+    )?;
+    Ok(Captured { pos, neg, session })
+}
+
+fn pool_layers(
+    model: &dyn forward::ResidualForward,
+    ids: &[Vec<u32>],
+    set: PromptSet,
+    layers: &[usize],
+    req: &ExtractRequest,
+    observer: &mut dyn ExtractObserver,
+) -> Result<Vec<Vec<Vec<f64>>>> {
+    let point = req.site.hook_point();
+    let mut pooled = vec![Vec::with_capacity(ids.len()); layers.len()];
+    for (i, prompt_ids) in ids.iter().enumerate() {
+        let input = Tensor::new(prompt_ids.as_slice(), &Device::Cpu)?.unsqueeze(0)?;
+        let mut caught: Vec<Option<Tensor>> = vec![None; layers.len()];
+        model.forward_hooked(&input, &mut |layer, at, t| {
+            if let (true, Some(k)) = (at == point, layers.iter().position(|&l| l == layer)) {
+                caught[k] = Some(t.clone());
+            }
+            Ok(t)
+        })?;
+        for (rows, activation) in pooled.iter_mut().zip(caught) {
+            let activation =
+                activation.ok_or_else(|| ExtractError::Compute("couche cible absente".into()))?;
+            rows.push(pool(
+                &activation,
+                req.pooling,
+                &format!("{}[{i}]", set.as_str()),
+            )?);
+        }
+        let event = ExtractEvent::Prompt {
+            set,
+            done: i + 1,
+            total: ids.len(),
+        };
+        if observer.on_event(event).is_break() {
+            return Err(ExtractError::Cancelled);
+        }
+    }
+    Ok(pooled)
 }
 
 /// Opens the model directory and runs `mean_diff`.
@@ -446,97 +740,19 @@ fn run_pipeline(
     validate_request(req)?;
     let info = validate_method(req, method, params)?;
     let cfg = load_config(&req.model_dir)?;
-    if req.layer >= cfg.num_hidden_layers {
-        return Err(ExtractError::InvalidArgument(format!(
-            "couche {} hors bornes : le modèle a num_hidden_layers = {} (couches 0 à {})",
-            req.layer,
-            cfg.num_hidden_layers,
-            cfg.num_hidden_layers - 1
-        )));
-    }
-    let required = required_tensors(&cfg, req.layer);
-    let totals = check_tensors(source, &required)?;
-    let mut warnings = Vec::new();
-    let dtype = choose_dtype(
-        req.dtype,
-        plan_memory(&cfg, totals, req.max_tokens),
-        probe,
-        &mut warnings,
-    )?;
-    let tensor_bytes = totals.elements * dtype.size_in_bytes() as u64;
-    let dtype_used = dtype_name(dtype).to_owned();
-    if observer
-        .on_event(ExtractEvent::Planned {
-            dtype_used: dtype_used.clone(),
-            weight_bytes: tensor_bytes,
-            tensors: required.len(),
-        })
-        .is_break()
-    {
-        return Err(ExtractError::Cancelled);
-    }
-
-    let tokenizer = load_tokenizer(&req.model_dir)?;
-    let mut truncated = 0;
-    let mut encode_set = |set: PromptSet, prompts: &[String]| -> Result<Vec<Vec<u32>>> {
-        prompts
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let t = tokenize(&tokenizer, &req.chat_template.apply(p), req.max_tokens)?;
-                if t.ids.is_empty() {
-                    return Err(ExtractError::Prompts {
-                        set: set.as_str().into(),
-                        message: format!("prompt {i} : aucun token"),
-                    });
-                }
-                truncated += usize::from(t.truncated);
-                Ok(t.ids)
-            })
-            .collect()
-    };
-    let pos_ids = encode_set(PromptSet::Pos, &req.pos_prompts)?;
-    let neg_ids = encode_set(PromptSet::Neg, &req.neg_prompts)?;
-
-    let device = Device::Cpu;
-    let tensors = load_tensors(source, &required, dtype, &device, &mut |done, total| {
-        observer.on_event(ExtractEvent::LoadingWeights {
-            done_tensors: done,
-            total_tensors: total,
-        })
-    })?;
-    let model = forward::build(
-        &cfg,
-        tensors,
-        forward::Depth::UpTo(req.layer),
-        dtype,
-        &device,
-    )?;
-
-    let mut activations = |set: PromptSet, ids: &[Vec<u32>]| -> Result<Vec<Vec<f64>>> {
-        let mut pooled = Vec::with_capacity(ids.len());
-        for (i, prompt_ids) in ids.iter().enumerate() {
-            let input = Tensor::new(prompt_ids.as_slice(), &device)?.unsqueeze(0)?;
-            let activation = model.forward_capture(&input, req.site)?;
-            pooled.push(pool(
-                &activation,
-                req.pooling,
-                &format!("{}[{i}]", set.as_str()),
-            )?);
-            let event = ExtractEvent::Prompt {
-                set,
-                done: i + 1,
-                total: ids.len(),
-            };
-            if observer.on_event(event).is_break() {
-                return Err(ExtractError::Cancelled);
-            }
-        }
-        Ok(pooled)
-    };
-    let pos = activations(PromptSet::Pos, &pos_ids)?;
-    let neg = activations(PromptSet::Neg, &neg_ids)?;
-    drop(model);
+    let Captured {
+        mut pos,
+        mut neg,
+        session,
+    } = capture_sets(req, &cfg, &[req.layer], source, probe, observer)?;
+    let (pos, neg) = (pos.remove(0), neg.remove(0));
+    let Session {
+        format,
+        dtype_used,
+        mut warnings,
+        truncated,
+        ..
+    } = session;
 
     let ctx = ExtractContext {
         hidden_size: cfg.hidden_size,
@@ -561,19 +777,7 @@ fn run_pipeline(
         pos_projections,
         neg_projections,
     } = separation;
-    for (set, n) in [("positifs", pos.len()), ("négatifs", neg.len())] {
-        if n < MIN_RECOMMENDED_PROMPTS {
-            warnings.push(format!(
-                "seulement {n} prompts {set} (au moins {MIN_RECOMMENDED_PROMPTS} recommandés)"
-            ));
-        }
-    }
-    if truncated > 0 {
-        warnings.push(format!(
-            "{truncated} prompt(s) tronqué(s) à {} tokens",
-            req.max_tokens
-        ));
-    }
+    prompt_warnings(&mut warnings, req, truncated);
     if stats.d_prime.is_some_and(|d| d < 1.0) {
         warnings.push("séparation faible (d′ < 1) : direction peu fiable".into());
     }
@@ -583,7 +787,19 @@ fn run_pipeline(
     if observer.on_event(ExtractEvent::Writing).is_break() {
         return Err(ExtractError::Cancelled);
     }
-    let mut metadata = file_metadata(req, &cfg, &dtype_used, pos.len(), neg.len(), &stats);
+    let mut metadata = file_metadata(
+        req,
+        format.template,
+        &cfg,
+        &dtype_used,
+        pos.len(),
+        neg.len(),
+        &stats,
+    );
+    // Autotune replays the exact wrapping of the extraction from these two keys.
+    if let Some(system) = &format.system {
+        metadata.insert("chat_system".into(), system.clone());
+    }
     let method_meta = method_metadata(method.id(), &out.metadata)?;
     merge_metadata(&mut metadata, &method_meta)?;
     let method_diagnostics = out.diagnostics.map(|d| match d {
@@ -607,6 +823,7 @@ fn run_pipeline(
         pooling: req.pooling.as_str(),
         hidden_size: cfg.hidden_size,
         method_diagnostics: method_diagnostics.as_ref(),
+        layer_scores: None,
     };
     let mut companion_bytes =
         serde_json::to_vec_pretty(&companion).map_err(|e| ExtractError::Compute(e.to_string()))?;
@@ -754,6 +971,25 @@ fn holdout_report(
     }
 }
 
+fn prompt_warnings(warnings: &mut Vec<String>, req: &ExtractRequest, truncated: usize) {
+    for (set, n) in [
+        ("positifs", req.pos_prompts.len()),
+        ("négatifs", req.neg_prompts.len()),
+    ] {
+        if n < MIN_RECOMMENDED_PROMPTS {
+            warnings.push(format!(
+                "seulement {n} prompts {set} (au moins {MIN_RECOMMENDED_PROMPTS} recommandés)"
+            ));
+        }
+    }
+    if truncated > 0 {
+        warnings.push(format!(
+            "{truncated} prompt(s) tronqué(s) à {} tokens",
+            req.max_tokens
+        ));
+    }
+}
+
 fn invalid_output(message: String) -> ExtractError {
     PluginError::InvalidOutput(message).into()
 }
@@ -842,6 +1078,7 @@ fn sidecar_header(
 
 fn file_metadata(
     req: &ExtractRequest,
+    template: ChatTemplate,
     cfg: &Qwen2Config,
     dtype_used: &str,
     n_pos: usize,
@@ -855,7 +1092,7 @@ fn file_metadata(
         ("layer", req.layer.to_string()),
         ("site", req.site.as_str().into()),
         ("pooling", req.pooling.as_str().into()),
-        ("chat_template", req.chat_template.as_str().into()),
+        ("chat_template", template.as_str().into()),
         ("n_pos", n_pos.to_string()),
         ("n_neg", n_neg.to_string()),
         ("raw_diff_norm", stats.raw_diff_norm.to_string()),
@@ -897,6 +1134,8 @@ struct Companion<'a> {
     /// svd / leace only: absent for mean_diff, so its companion is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     method_diagnostics: Option<&'a Diagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layer_scores: Option<&'a [LayerSeparation]>,
 }
 
 /// Name of the model directory (absolute form first, so `.` still gets a name).
@@ -905,4 +1144,64 @@ pub fn model_name(model_dir: &Path) -> String {
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| model_dir.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hardware::{GpuInfo, MemoryInfo};
+
+    /// A machine with this much free RAM.
+    struct Free(u64);
+
+    impl HardwareProbe for Free {
+        fn system_ram(&self) -> crate::hardware::Result<MemoryInfo> {
+            Ok(MemoryInfo {
+                total_bytes: 64 << 30,
+                available_bytes: self.0,
+            })
+        }
+        fn gpus(&self) -> crate::hardware::Result<Vec<GpuInfo>> {
+            Ok(Vec::new())
+        }
+    }
+
+    const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn every_dtype_decision_is_logged_and_a_fallback_says_why() {
+        let plan = MemoryPlan {
+            f32_bytes: 4 * GIB,
+            bf16_bytes: 2 * GIB,
+        };
+        let policy = BudgetPolicy::default();
+        let f32_need = required_ram(plan.f32_bytes, &policy);
+        let bf16_need = required_ram(plan.bf16_bytes, &policy);
+
+        // Room for f32: f32, an info line, no warning.
+        let roomy = dtype_decision(DTypeChoice::Auto, plan, &Free(f32_need)).unwrap();
+        assert_eq!(roomy.dtype, DType::F32);
+        assert_eq!(roomy.fallback(), None);
+        let note = roomy.note();
+        assert!(note.starts_with("dtype f32 (auto) : RAM libre"), "{note}");
+        assert!(note.contains(&gib(f32_need)), "the need: {note}");
+
+        // Free RAM short of f32 at that moment: bf16, and the warning gives both numbers.
+        let short = dtype_decision(DTypeChoice::Auto, plan, &Free(f32_need - 1)).unwrap();
+        assert_eq!(short.dtype, DType::BF16);
+        assert_eq!(short.required_bytes, bf16_need);
+        let warning = short.fallback().unwrap();
+        assert!(warning.starts_with("repli en bf16"), "{warning}");
+        assert!(warning.contains(&gib(f32_need)) && warning.contains(&gib(f32_need - 1)));
+        assert!(warning.contains("2,5 fois plus lent"), "{warning}");
+        let mut warnings = Vec::new();
+        let dtype = choose_dtype(DTypeChoice::Auto, plan, &Free(f32_need - 1), &mut warnings);
+        assert_eq!((dtype.unwrap(), warnings), (DType::BF16, vec![warning]));
+
+        // An explicit choice is never a fallback; nothing that fits is an error.
+        let asked = dtype_decision(DTypeChoice::Bf16, plan, &Free(64 * GIB)).unwrap();
+        assert!(asked.note().contains("(demandé)") && asked.fallback().is_none());
+        assert!(dtype_decision(DTypeChoice::F32, plan, &Free(f32_need - 1)).is_err());
+        assert!(dtype_decision(DTypeChoice::Auto, plan, &Free(bf16_need - 1)).is_err());
+    }
 }

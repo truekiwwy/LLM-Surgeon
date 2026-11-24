@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -31,8 +32,13 @@ avec des outils typés. Outils : surgeon_check (budget RAM/VRAM), surgeon_inspec
 matrices MLP), surgeon_apply (applique un patch EN PLACE ; faire d'abord dry_run: true), \
 surgeon_restore (remet le modèle octet pour octet depuis la sauvegarde ou l'origine, SHA-256 \
 vérifié : le rollback quand surgeon_bench montre une régression), \
+surgeon_compose (une direction faite de plusieurs vecteurs, orthogonale aux directions de \
+capacité à préserver, et le patch qui la retire), \
+surgeon_doctor (la machine est-elle prête : RAM, cœurs, cache des références, démon hipfire), \
 surgeon_eval (non-régression et export GGUF), surgeon_extract (vecteur de direction depuis \
-une couche Qwen2 ; method est un identifiant du registre du moteur : mean_diff, svd, leace), \
+une couche Qwen2, ou de chaque couche avec layers ; method est un identifiant du registre du \
+moteur : mean_diff, svd, leace), surgeon_causal_trace (couches responsables d'un comportement \
+par restauration d'activation, fenêtre causale au format layers de surgeon_compose), \
 surgeon_bench (mesure d'une chirurgie : mode dump, logits, ppl ou eval), surgeon_autotune \
 (coefficients par couche ajustés par ridge, patch.json en sortie), surgeon_diff (patch \
 .surgery de faible rang entre deux checkpoints), surgeon_lora (fusion ou extraction d'un \
@@ -93,21 +99,72 @@ enum Event {
     TooLong,
 }
 
+/// How long a tool call may take to hand control back once stdin is closed before
+/// `surgeon mcp` exits anyway. The engine checks its flag between tensors, prompts and tokens:
+/// a cooperative call returns well within it.
+pub const EXIT_GRACE: Duration = Duration::from_secs(3);
+
+/// What the end of the input means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Eof {
+    /// A script (`serve`, tests, embedders): every message it held is answered, then the end.
+    Drain,
+    /// The client's shutdown (`surgeon mcp` on stdio, the MCP lifecycle): the running call is
+    /// cancelled and nothing more is answered, even what was read before. With `grace`, the
+    /// process exits that long after if the loop has not ended (a call that ignores the flag).
+    Shutdown { grace: Option<Duration> },
+}
+
 /// Shared with the reader thread so a cancellation lands while the request runs.
 #[derive(Default)]
 struct CancelState {
     current: Option<Value>,
     /// Cancellations of requests that have not started yet.
     pending: Vec<Value>,
+    /// The client shut down: `Some(whether a call was running)`.
+    closed: Option<bool>,
+    /// The loop has ended; what remains (the pipeline worker's stop) has its own grace.
+    done: bool,
 }
 
-/// Serves until EOF on `reader` (0) or until `writer` fails (1: the client is gone).
+/// Serves until EOF on `reader` (0, every message read answered) or until `writer` fails
+/// (1: the client is gone).
 pub fn serve<R, W>(
     reader: R,
     writer: W,
     err: &mut dyn Write,
     deps: &AppDeps,
     cfg: &McpConfig,
+) -> i32
+where
+    R: BufRead + Send + 'static,
+    W: Write,
+{
+    serve_until(reader, writer, err, deps, cfg, Eof::Drain)
+}
+
+/// `surgeon mcp` on the process's stdin: [`serve`], except that the end of stdin is the
+/// client's shutdown ([`Eof::Shutdown`]): a long benchmark does not outlive Claude Code.
+pub(super) fn serve_stdio(
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    deps: &AppDeps,
+    cfg: &McpConfig,
+) -> i32 {
+    let stdin = io::BufReader::new(io::stdin());
+    let eof = Eof::Shutdown {
+        grace: Some(EXIT_GRACE),
+    };
+    serve_until(stdin, out, err, deps, cfg, eof)
+}
+
+fn serve_until<R, W>(
+    reader: R,
+    writer: W,
+    err: &mut dyn Write,
+    deps: &AppDeps,
+    cfg: &McpConfig,
+    eof: Eof,
 ) -> i32
 where
     R: BufRead + Send + 'static,
@@ -120,7 +177,7 @@ where
         let cancel = Arc::clone(&cancel);
         let interrupted = Arc::clone(&deps.interrupted);
         // Detached on purpose: after a write failure it may stay blocked on stdin.
-        std::thread::spawn(move || read_loop(reader, tx, cancel, interrupted));
+        std::thread::spawn(move || read_loop(reader, tx, cancel, interrupted, eof));
     }
     // Declared before the session: dropped after it, it stops the pipeline worker.
     let pipeline = super::tools_pipeline::PipelineJobs::default();
@@ -133,7 +190,14 @@ where
         err,
         initialized: false,
     };
-    for event in rx {
+    let code = loop {
+        let Ok(event) = rx.recv() else {
+            break exit::OK;
+        };
+        // Read before the client shut down, never run after it.
+        if closed(&cancel).is_some() {
+            break exit::OK;
+        }
         let reply = match event {
             Event::ParseError => Some(error(&Value::Null, PARSE_ERROR, "JSON invalide")),
             Event::TooLong => Some(error(
@@ -148,10 +212,52 @@ where
         }
         if writer.is_broken() {
             let _ = writeln!(session.err, "surgeon mcp : stdout fermé, arrêt du serveur");
-            return exit::GENERAL;
+            break exit::GENERAL;
         }
+    };
+    if let Ok(mut state) = cancel.lock() {
+        state.done = true;
     }
-    exit::OK
+    if let Some(running) = closed(&cancel) {
+        let what = match running {
+            true => "stdin fermé pendant un outil : annulé, arrêt du serveur",
+            false => "stdin fermé, arrêt du serveur",
+        };
+        let _ = writeln!(session.err, "surgeon mcp : {what}");
+    }
+    code
+}
+
+/// `Some(whether a call was running)` once the client shut down.
+fn closed(cancel: &Mutex<CancelState>) -> Option<bool> {
+    cancel.lock().map_or(Some(false), |s| s.closed)
+}
+
+/// The client shut down (EOF or a broken pipe): the running call is cancelled, and every
+/// call that starts from now on sees the flag raised ([`Session::start`]). With `grace`, the
+/// process exits if the loop has not ended by then.
+fn shut_down(cancel: &Mutex<CancelState>, interrupted: &AtomicBool, grace: Option<Duration>) {
+    if let Ok(mut state) = cancel.lock() {
+        state.closed = Some(state.current.is_some());
+        interrupted.store(true, Ordering::SeqCst);
+    }
+    let Some(grace) = grace else {
+        return;
+    };
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        if cancel.lock().map_or(true, |s| s.done) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The session owns the injected stderr and is stuck in the call: the real one, then out.
+    let _ = writeln!(
+        io::stderr(),
+        "surgeon mcp : stdin fermé, l'outil en cours ne rend pas la main après {} s : arrêt forcé",
+        grace.as_secs()
+    );
+    std::process::exit(exit::GENERAL);
 }
 
 enum LineRead {
@@ -209,11 +315,19 @@ fn read_loop<R: BufRead>(
     tx: Sender<Event>,
     cancel: Arc<Mutex<CancelState>>,
     interrupted: Arc<AtomicBool>,
+    eof: Eof,
 ) {
     let mut buf = Vec::new();
     loop {
         let event = match read_line_capped(&mut reader, &mut buf, MAX_LINE_BYTES) {
-            Ok(LineRead::Eof) | Err(_) => return,
+            Ok(LineRead::Eof) | Err(_) => {
+                if let Eof::Shutdown { grace } = eof {
+                    // The loop wakes up (the channel closes) once the cancelled call returns.
+                    drop(tx);
+                    shut_down(&cancel, &interrupted, grace);
+                }
+                return;
+            }
             Ok(LineRead::TooLong) => Event::TooLong,
             Ok(LineRead::Line) => {
                 // Tolerates a UTF-8 BOM, `\r\n` and blank lines.
@@ -357,12 +471,23 @@ impl<W: Write> Session<'_, W> {
             pipeline: self.pipeline,
         };
         let started = tools_session::now_unix();
+        let journaled = arguments.clone();
         // A panic unwinds through BackupSet::drop (rollback) and never kills the server.
         let outcome = catch_unwind(AssertUnwindSafe(|| tools::call(name, arguments, &mut ctx)));
         self.finish();
         match outcome {
             Ok(mut tool_result) => {
-                tools_session::stamp(&ctx, name, started, &mut tool_result);
+                tools_session::stamp(&ctx, name, &journaled, started, &mut tool_result);
+                // A bench moved off hipfire says why in its result, and in the server's log.
+                let warnings = &tool_result["structuredContent"]["warnings"];
+                let set_aside = warnings
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str);
+                for w in set_aside.filter(|w| w.starts_with(tools::HIPFIRE_SET_ASIDE)) {
+                    let _ = writeln!(self.err, "surgeon mcp : {name} : {w}");
+                }
                 result(id, tool_result)
             }
             Err(payload) => {
@@ -388,9 +513,9 @@ impl<W: Write> Session<'_, W> {
             if let Some(i) = queued_cancel {
                 state.pending.remove(i);
             }
-            self.deps
-                .interrupted
-                .store(queued_cancel.is_some(), Ordering::SeqCst);
+            // A call that starts after the client shut down is cancelled from the start.
+            let cancelled = queued_cancel.is_some() || state.closed.is_some();
+            self.deps.interrupted.store(cancelled, Ordering::SeqCst);
             state.current = Some(id.clone());
         }
     }
@@ -467,7 +592,8 @@ impl<W: Write> ProgressSink for McpProgress<'_, W> {
             ProgressEvent::BenchJudgeVerdict { done, total } => {
                 (done, total, format!("verdict {done}/{total}"))
             }
-            ProgressEvent::AutotuneForward { done, total } => {
+            ProgressEvent::AutotuneForward { done, total }
+            | ProgressEvent::TraceForward { done, total } => {
                 (done, total, format!("forward {done}/{total}"))
             }
             ProgressEvent::GraphNode { id, done, total } => {

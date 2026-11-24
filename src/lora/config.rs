@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 use crate::surgery::error::{Result, SurgeryError};
 
 pub const CONFIG_FILE: &str = "adapter_config.json";
+/// The adapter file PEFT looks for in a folder.
+pub const ADAPTER_FILE: &str = "adapter_model.safetensors";
 
 /// The fields of a PEFT `adapter_config.json` that decide how an adapter is merged; the
 /// others are ignored.

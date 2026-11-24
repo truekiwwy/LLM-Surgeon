@@ -13,13 +13,14 @@ use super::super::components::{self as c, ButtonKind, Segment};
 use super::super::i18n::{t, tf};
 use super::super::icons::{Icon, State};
 use super::super::layout::Regions;
+use super::super::markdown;
 use super::super::theme::TOKENS as T;
 use super::{age, context, left_column, project_select};
 use crate::agent::evidence::{self, Status};
-use crate::agent::mission::{Mission, Symptom};
+use crate::agent::mission::{Merge, Mission, Operation, Symptom, Tensors};
 use crate::agent::policy::AgentMode;
 use crate::agent::provider::{Block, Role};
-use crate::agent::session::{Choice, Dirs};
+use crate::agent::session::{now_ms, Choice, Dirs};
 use crate::app::{Mode, RightPane, Section, SurgeonApp, Tab};
 use crate::studio::project::now_unix;
 
@@ -32,9 +33,37 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         t("panel.sessions"),
         sessions,
     );
+    session(ui, app, regions.center);
+    c::Panel::new("evidence").tabs().show_with(
+        ui,
+        regions.right,
+        app,
+        |ui, app| {
+            let panes = [
+                (RightPane::Evidence, t("panel.evidence")),
+                (RightPane::Results, t("panel.results")),
+                (RightPane::Checkpoints, t("panel.checkpoints")),
+            ];
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add_space(T.space.l - T.space.m);
+                c::segmented_small(ui, &mut app.right, &panes, t("pane.tip"));
+            });
+        },
+        |ui, app| match app.right {
+            RightPane::Evidence => evidence_log(ui, app),
+            RightPane::Results => super::results::show(ui, app),
+            RightPane::Checkpoints => super::checkpoints::show(ui, app),
+        },
+    );
+    consent(ui.ctx(), app);
+}
+
+/// The center of the agent in `rect`: the new-session form, else the session's thread with
+/// its approvals and message field (Live mode shows it beside the 3D graph).
+pub(super) fn session(ui: &mut Ui, app: &mut SurgeonApp, rect: Rect) {
     c::Panel::new("session").center().flush().show_with(
         ui,
-        regions.center,
+        rect,
         app,
         |_, _| {},
         |ui, app| {
@@ -49,27 +78,6 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
             }
         },
     );
-    let title = match app.right {
-        RightPane::Evidence => t("panel.evidence"),
-        RightPane::Results => t("panel.results"),
-    };
-    c::Panel::new("evidence").title(title).show_with(
-        ui,
-        regions.right,
-        app,
-        |ui, app| {
-            let panes = [
-                (RightPane::Evidence, t("panel.evidence")),
-                (RightPane::Results, t("panel.results")),
-            ];
-            c::segmented_small(ui, &mut app.right, &panes, t("pane.tip"));
-        },
-        |ui, app| match app.right {
-            RightPane::Evidence => evidence_log(ui, app),
-            RightPane::Results => super::results::show(ui, app),
-        },
-    );
-    consent(ui.ctx(), app);
 }
 
 /// Opens the settings on the AI providers.
@@ -146,7 +154,7 @@ fn sessions(ui: &mut Ui, app: &mut SurgeonApp) {
     c::section(ui, t("panel.sessions"));
     let current = app.agents.conversation().map(|c| c.id.clone());
     let now = now_unix();
-    let lines = app.agents.conversations().to_vec();
+    let lines = app.agents.conversations();
     if lines.is_empty() {
         c::empty(
             ui,
@@ -171,8 +179,15 @@ fn sessions(ui: &mut Ui, app: &mut SurgeonApp) {
                         c::line(ui, title.as_str());
                     });
                 });
-                if row.on_hover_text(id).clicked() && !selected {
-                    open = Some(id.clone());
+                let tip = match busy && !selected {
+                    true => t("chat.busy"),
+                    false => id.as_str(),
+                };
+                if row.on_hover_text(tip).clicked() && !selected {
+                    match busy {
+                        true => app.agents.message = Some((t("chat.busy").into(), true)),
+                        false => open = Some(id.clone()),
+                    }
                 }
             }
         });
@@ -289,6 +304,8 @@ fn form_steps(ui: &mut Ui, app: &mut SurgeonApp, mode: Mode) {
         }
     });
     ui.add_space(T.space.xl);
+    advanced(ui, app);
+    ui.add_space(T.space.xl);
 
     ui.horizontal(|ui| {
         c::secondary(ui, t("form.allow"));
@@ -328,6 +345,152 @@ fn form_steps(ui: &mut Ui, app: &mut SurgeonApp, mode: Mode) {
     }
 }
 
+/// The advanced (CLI) panel: what the agent must write in its patch instead of choosing it,
+/// as in a `patch.json` of the CLI. Closed, the agent follows the protocol alone.
+fn advanced(ui: &mut Ui, app: &mut SurgeonApp) {
+    let hub = &mut app.agents;
+    c::switch(
+        ui,
+        Icon::Sliders,
+        t("form.advanced"),
+        &mut hub.forced_on,
+        t("form.advanced.tip"),
+    );
+    if !hub.forced_on {
+        return;
+    }
+    ui.add_space(T.space.s);
+    c::inset_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let forced = &mut hub.forced;
+        let operations = [
+            Segment {
+                value: Operation::Auto,
+                label: "auto",
+                tooltip: t("forced.auto.tip"),
+            },
+            Segment {
+                value: Operation::ProjectOut,
+                label: "project_out",
+                tooltip: t("forced.project_out.tip"),
+            },
+            Segment {
+                value: Operation::Add,
+                label: "add",
+                tooltip: t("forced.add.tip"),
+            },
+        ];
+        let tensors = [
+            Segment {
+                value: Tensors::Both,
+                label: t("forced.both"),
+                tooltip: t("forced.tensors.tip"),
+            },
+            Segment {
+                value: Tensors::OProj,
+                label: "o_proj",
+                tooltip: t("forced.tensors.tip"),
+            },
+            Segment {
+                value: Tensors::DownProj,
+                label: "down_proj",
+                tooltip: t("forced.tensors.tip"),
+            },
+        ];
+        ui.horizontal(|ui| {
+            c::secondary(ui, t("form.advanced.operation"));
+            c::segmented(ui, &mut forced.operation, &operations, c::font_body());
+        });
+        ui.add_space(T.space.s);
+        ui.horizontal(|ui| {
+            c::secondary(ui, t("form.advanced.tensors"));
+            c::segmented(ui, &mut forced.tensors, &tensors, c::font_body());
+        });
+        ui.add_space(T.space.s);
+        merge(ui, forced);
+        ui.add_space(T.space.s);
+        let width = ((ui.available_width() - T.space.l) / 2.0).floor();
+        ui.horizontal(|ui| {
+            c::secondary(ui, t("form.advanced.layers"));
+            c::field_mono(
+                ui,
+                &mut forced.layers,
+                t("form.advanced.layers.hint"),
+                width * 0.6,
+            );
+            c::secondary(ui, t("form.advanced.alpha"));
+            c::field_mono(
+                ui,
+                &mut forced.alpha,
+                t("form.advanced.alpha.hint"),
+                width * 0.6,
+            );
+        });
+        if let Err(e) = forced.check() {
+            ui.add_space(T.space.s);
+            c::message(ui, &e, true);
+        }
+    });
+}
+
+/// How `surgeon_compose` merges the directions, and the settings of the method picked.
+fn merge(ui: &mut Ui, forced: &mut crate::agent::mission::Forced) {
+    let merges = [
+        Segment {
+            value: Merge::Auto,
+            label: "auto",
+            tooltip: t("forced.merge.auto.tip"),
+        },
+        Segment {
+            value: Merge::Linear,
+            label: t("forced.merge.linear"),
+            tooltip: t("forced.merge.linear.tip"),
+        },
+        Segment {
+            value: Merge::Orthogonal,
+            label: "Orthogonal f64",
+            tooltip: t("forced.merge.orthogonal.tip"),
+        },
+        Segment {
+            value: Merge::Ties,
+            label: "TIES-Merge",
+            tooltip: t("forced.merge.ties.tip"),
+        },
+        Segment {
+            value: Merge::Dare,
+            label: "DARE",
+            tooltip: t("forced.merge.dare.tip"),
+        },
+    ];
+    // A segment's id is its row's id and its label: this row has an "auto" too.
+    ui.push_id("forced-merge", |ui| {
+        ui.horizontal(|ui| {
+            c::secondary(ui, t("form.advanced.merge"));
+            c::segmented(ui, &mut forced.merge, &merges, c::font_body());
+        });
+    });
+    let width = ((ui.available_width() - T.space.l) / 2.0).floor() * 0.6;
+    let fields: Vec<(&str, &mut String, &str)> = match forced.merge {
+        Merge::Ties => vec![("density", &mut forced.density, t("forced.density.hint"))],
+        Merge::Dare => vec![
+            (
+                "drop_rate",
+                &mut forced.drop_rate,
+                t("forced.drop_rate.hint"),
+            ),
+            ("seed", &mut forced.seed, t("forced.seed.hint")),
+        ],
+        _ => return,
+    };
+    ui.add_space(T.space.s);
+    ui.horizontal(|ui| {
+        for (name, value, hint) in fields {
+            c::secondary(ui, name);
+            c::field_mono(ui, value, hint, width);
+        }
+    });
+}
+
 /// The working copy the agent works on, or the button that makes one.
 fn copy_line(ui: &mut Ui, app: &mut SurgeonApp) {
     let entries = app.ledger().to_vec();
@@ -339,7 +502,7 @@ fn copy_line(ui: &mut Ui, app: &mut SurgeonApp) {
                 _ => (State::Warn, t("copy.modified")),
             };
             c::status(ui, state, word);
-            c::mono_secondary(ui, copy.path.as_str());
+            c::mono_secondary(ui, copy.path.as_str()).on_hover_text(copy.path.as_str());
         }
         None => {
             c::status(ui, State::Idle, t("copy.none"));
@@ -358,11 +521,13 @@ fn start(ui: &mut Ui, app: &mut SurgeonApp, mode: Mode) {
     let hub = &app.agents;
     let described = mode == Mode::Advance || !hub.input.trim().is_empty();
     let copying = app.pending_start.is_some();
+    let forced_ok = !hub.forced_on || hub.forced.check().is_ok();
     let why = match (hub.connection().is_some(), hub.busy() || copying, described) {
         (false, _, _) => Some(t("agents.none")),
         (_, true, _) if copying => Some(t("form.copying")),
         (_, true, _) => Some(t("chat.busy")),
         (_, _, false) => Some(t("form.describe.why")),
+        _ if !forced_ok => Some(t("form.advanced.why")),
         _ => None,
     };
     if copying {
@@ -606,6 +771,7 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
     let Some(conv) = app.agents.conversation() else {
         return;
     };
+    let configured = app.dialog.saved().backend;
     let blocks = || conv.messages.iter().flat_map(|m| &m.blocks);
     // A result is shown inside its call's row, not as a row of its own.
     let results: HashMap<&str, (&str, bool)> = blocks()
@@ -624,30 +790,112 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
             _ => None,
         })
         .collect();
+    let busy = app.agents.busy();
+    let now = now_ms();
+    let mut named = false;
+    ui.add_space(T.space.s);
     for (n, message) in conv.messages.iter().enumerate() {
-        let mut named = false;
         for (k, block) in message.blocks.iter().enumerate() {
             let row_id = Id::new(("tool", &conv.id, n, k));
             match (block, message.role) {
                 (Block::Text { text }, Role::User) => {
                     c::bubble(ui, text);
                     ui.add_space(T.space.m);
+                    named = false;
                 }
                 (Block::Text { text }, Role::Assistant) => {
+                    if let Some(code) = legacy_exit(text) {
+                        run_end(ui, code, None, None, None);
+                        named = false;
+                        continue;
+                    }
                     if !named {
                         c::meta(ui, t("chat.agent"));
                         named = true;
                     }
-                    c::label(ui, text.as_str());
+                    markdown::show(ui, text);
                     ui.add_space(T.space.m);
                 }
+                (
+                    Block::RunEnd {
+                        code,
+                        cost_usd,
+                        secs,
+                        error,
+                    },
+                    _,
+                ) => {
+                    run_end(ui, *code, *cost_usd, *secs, error.as_deref());
+                    named = false;
+                }
                 (Block::ToolUse { id, name, input }, _) => {
-                    let result = results.get(id.as_str());
-                    let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
-                    let mut details = vec![pretty.as_str()];
-                    details.extend(result.map(|(content, _)| *content));
-                    let failed = result.is_some_and(|(_, error)| *error);
-                    c::tool_row(ui, row_id, name, &tool_summary(input), failed, &details);
+                    let result = results.get(id.as_str()).copied();
+                    // shortcut: read with today's backend configuration, not the one of the
+                    // call; record it with the call if the configuration changes mid-project.
+                    let project = app.agents.project.as_deref();
+                    let cli = weight_surgeon::mcp::cli_line(name, input, configured, project);
+                    let mut sections = vec![(
+                        t("tool.input"),
+                        serde_json::to_string_pretty(input).unwrap_or_default(),
+                    )];
+                    if let Some(line) = &cli {
+                        sections.push((t("tool.command"), line.command.clone()));
+                    }
+                    let (state, badge) = match result {
+                        Some((content, is_error)) => {
+                            sections.push((t("tool.output"), output(content)));
+                            outcome(content, is_error)
+                        }
+                        None if busy => (State::Active, t("tool.running").to_owned()),
+                        None => (State::Idle, t("tool.unanswered").to_owned()),
+                    };
+                    let elapsed = conv
+                        .tool_times
+                        .get(id.as_str())
+                        .filter(|time| time.end_ms.is_some() || busy)
+                        .map(|time| super::elapsed(Some(time.millis(now))));
+                    let summary = tool_summary(input);
+                    let card = c::ToolCard {
+                        title: tool_title(name),
+                        tool: name.rsplit("__").next().unwrap_or(name),
+                        state,
+                        badge,
+                        elapsed,
+                        summary: &summary,
+                        sections,
+                        copy: t("tool.copy"),
+                        copied: t("tool.copied"),
+                    };
+                    c::tool_card(ui, row_id, &card);
+                    if state == State::Active {
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(250));
+                    }
+                    if cli.as_ref().is_some_and(|l| l.hipfire_set_aside) {
+                        c::status(ui, State::Warn, t("bench.native"))
+                            .on_hover_text(weight_surgeon::mcp::HIPFIRE_SET_ASIDE);
+                    }
+                    // A CLI runtime names it `mcp__surgeon__<tool>`.
+                    let tool = name.rsplit("__").next().unwrap_or(name);
+                    if tool == "surgeon_bench" && input["mode"] == "refusal_probe" {
+                        c::status(ui, State::Warn, t("bench.heuristic"))
+                            .on_hover_text(weight_surgeon::bench::refusal::PROBE_CAVEAT);
+                    }
+                    if tool == "surgeon_compose" {
+                        let removed = file_names(&input["ablate"]);
+                        let kept = file_names(&input["keep"]);
+                        let line = tf("thread.compose", &[("removed", &removed), ("kept", &kept)]);
+                        c::status(ui, State::Idle, line);
+                    }
+                    if tool == "surgeon_doctor" {
+                        // The envelope inside the result, compact JSON: its `data.ready`.
+                        let content = result.map_or("", |(content, _)| content);
+                        if content.contains("\"ready\":true") {
+                            c::status(ui, State::Ok, t("thread.doctor.ready"));
+                        } else if content.contains("\"ready\":false") {
+                            c::status(ui, State::Warn, t("thread.doctor.not_ready"));
+                        }
+                    }
                 }
                 (
                     Block::ToolResult {
@@ -658,14 +906,19 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
                     _,
                 ) if !calls.contains(id.as_str()) => {
                     let summary = result_line(content);
-                    c::tool_row(
-                        ui,
-                        row_id,
-                        t("chat.result"),
-                        &summary,
-                        *is_error,
-                        &[content],
-                    );
+                    let (state, badge) = outcome(content, *is_error);
+                    let card = c::ToolCard {
+                        title: t("chat.result"),
+                        tool: t("chat.result"),
+                        state,
+                        badge,
+                        elapsed: None,
+                        summary: &summary,
+                        sections: vec![(t("tool.output"), output(content))],
+                        copy: t("tool.copy"),
+                        copied: t("tool.copied"),
+                    };
+                    c::tool_card(ui, row_id, &card);
                 }
                 _ => {}
             }
@@ -684,8 +937,10 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
     }
     if let Some(s) = &app.agents.session {
         if !s.streaming.is_empty() {
-            c::meta(ui, t("chat.agent"));
-            c::label(ui, s.streaming.as_str());
+            if !named {
+                c::meta(ui, t("chat.agent"));
+            }
+            markdown::show(ui, &s.streaming);
         }
         if let Some(e) = &s.error {
             c::message(ui, e, true);
@@ -715,27 +970,167 @@ fn plan_step(step: &str) -> &str {
     marked.map_or(step, str::trim_start)
 }
 
-/// What a folded tool row says of its input: the command, prompt or path it names, else
-/// its compact JSON, on one line.
+/// The file names of a list of paths (`chemin` or `chemin:alpha`), `-` when it is empty.
+fn file_names(list: &serde_json::Value) -> String {
+    let names: Vec<&str> = list
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str())
+        .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p))
+        .collect();
+    match names.is_empty() {
+        true => "-".into(),
+        false => names.join(", "),
+    }
+}
+
 fn tool_summary(input: &serde_json::Value) -> String {
-    const KEYS: [&str; 10] = [
+    const KEYS: [&str; 16] = [
         "command",
         "cmd",
         "description",
         "prompt",
+        "mode",
+        "model",
+        "layers",
+        "layer",
+        "method",
+        "dataset",
+        "alpha",
+        "target",
         "file_path",
         "path",
         "pattern",
         "text",
-        "target",
-        "model",
     ];
-    let text = KEYS
+    let value = |v: &serde_json::Value| -> Option<String> {
+        let text = match v {
+            serde_json::Value::String(s) => {
+                let line = s.lines().find(|l| !l.trim().is_empty())?.trim();
+                match line.contains(['/', '\\']) && !line.contains(' ') {
+                    true => line
+                        .trim_end_matches(['/', '\\'])
+                        .rsplit(['/', '\\'])
+                        .next()?,
+                    false => line,
+                }
+                .to_owned()
+            }
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Array(items) if !items.is_empty() => items
+                .iter()
+                .map(|i| i.as_str().map_or_else(|| i.to_string(), str::to_owned))
+                .collect::<Vec<_>>()
+                .join(","),
+            _ => return None,
+        };
+        Some(text.chars().take(60).collect())
+    };
+    let parts: Vec<String> = KEYS
         .iter()
-        .find_map(|k| input[k].as_str())
-        .map_or_else(|| input.to_string(), str::to_owned);
-    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    line.trim().chars().take(120).collect()
+        .filter_map(|k| value(&input[k]))
+        .take(3)
+        .collect();
+    match parts.is_empty() {
+        true => input.to_string().chars().take(120).collect(),
+        false => parts.join(" \u{b7} "),
+    }
+}
+
+fn tool_title(name: &str) -> &str {
+    match name.rsplit("__").next().unwrap_or(name) {
+        "surgeon_apply" => t("tool.surgeon_apply"),
+        "surgeon_autotune" => t("tool.surgeon_autotune"),
+        "surgeon_backends" => t("tool.surgeon_backends"),
+        "surgeon_bench" => t("tool.surgeon_bench"),
+        "surgeon_causal_trace" => t("tool.surgeon_causal_trace"),
+        "surgeon_check" => t("tool.surgeon_check"),
+        "surgeon_checkpoint" => t("tool.surgeon_checkpoint"),
+        "surgeon_compose" => t("tool.surgeon_compose"),
+        "surgeon_diff" => t("tool.surgeon_diff"),
+        "surgeon_doctor" => t("tool.surgeon_doctor"),
+        "surgeon_eval" => t("tool.surgeon_eval"),
+        "surgeon_extract" => t("tool.surgeon_extract"),
+        "surgeon_files" => t("tool.surgeon_files"),
+        "surgeon_graph" => t("tool.surgeon_graph"),
+        "surgeon_inspect" => t("tool.surgeon_inspect"),
+        "surgeon_lora" => t("tool.surgeon_lora"),
+        "surgeon_pipeline" => t("tool.surgeon_pipeline"),
+        "surgeon_restore" => t("tool.surgeon_restore"),
+        "surgeon_sweep" => t("tool.surgeon_sweep"),
+        "surgeon_workspace" => t("tool.surgeon_workspace"),
+        "record_finding" => t("tool.record_finding"),
+        "show_in_3d" => t("tool.show_in_3d"),
+        "update_plan" => t("tool.update_plan"),
+        "ask_user" => t("tool.ask_user"),
+        _ => name,
+    }
+}
+
+fn envelope(content: &str) -> Option<serde_json::Value> {
+    let body = content.trim();
+    let body = match body.starts_with('<') {
+        true => body.split_once('\n')?.1.rsplit_once('\n')?.0,
+        false => body,
+    };
+    match serde_json::from_str(body).ok()? {
+        serde_json::Value::Array(items) => {
+            serde_json::from_str(items.first()?["text"].as_str()?).ok()
+        }
+        value => Some(value),
+    }
+}
+
+fn outcome(content: &str, is_error: bool) -> (State, String) {
+    let code = envelope(content).and_then(|e| e["exit_code"].as_i64());
+    match (is_error || code.is_some_and(|c| c != 0), code) {
+        (true, Some(code)) => (State::Error, tf("tool.error_code", &[("code", &code)])),
+        (true, None) => (State::Error, t("tool.error").to_owned()),
+        (false, _) => (State::Ok, t("tool.ok").to_owned()),
+    }
+}
+
+fn output(content: &str) -> String {
+    envelope(content)
+        .and_then(|e| serde_json::to_string_pretty(&e).ok())
+        .unwrap_or_else(|| content.to_owned())
+}
+
+fn legacy_exit(text: &str) -> Option<Option<i32>> {
+    let code = text
+        .strip_prefix("[fin du processus, code ")?
+        .strip_suffix(']')?;
+    Some(
+        code.strip_prefix("Some(")
+            .and_then(|c| c.strip_suffix(')'))
+            .and_then(|c| c.parse().ok()),
+    )
+}
+
+fn run_end(
+    ui: &mut Ui,
+    code: Option<i32>,
+    cost: Option<f64>,
+    secs: Option<u64>,
+    error: Option<&str>,
+) {
+    let (state, title) = match code {
+        Some(0) if error.is_none() => (State::Ok, tf("run.done", &[("code", &0)])),
+        Some(code) => (State::Error, tf("run.failed", &[("code", &code)])),
+        None => (State::Warn, t("run.killed").to_owned()),
+    };
+    let detail: Vec<String> = [
+        secs.map(super::duration),
+        cost.map(|c| format!("{c:.4} $")),
+        error.map(str::to_owned),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    ui.add_space(T.space.xs);
+    c::banner(ui, state, &title, &detail.join(" \u{b7} "));
+    ui.add_space(T.space.m);
 }
 
 /// One line for a tool result: `← surgeon_inspect · run r…` for an engine result (its
@@ -832,18 +1227,25 @@ fn evidence_log(ui: &mut Ui, app: &mut SurgeonApp) {
         c::empty(ui, Icon::Check, t("finding.none"), t("finding.none.hint"));
         return;
     }
+    c::meta(ui, tf("finding.count", &[("n", &findings.len())]));
+    c::separator(ui);
     ScrollArea::vertical()
         .id_salt("evidence")
         .auto_shrink(false)
         .show(ui, |ui| {
+            ui.set_max_width(ui.available_width() - T.space.s);
             for f in findings.iter().rev() {
                 let (state, word) = match f.status(&entries) {
                     Status::Measured(_) => (State::Ok, t("finding.measured")),
+                    Status::Heuristic(_) => (State::Warn, t("finding.heuristic")),
                     Status::Inferred(_) => (State::Idle, t("finding.inferred")),
                     Status::Unknown(_) => (State::Warn, t("finding.unknown")),
                 };
-                c::status(ui, state, word);
-                c::label(ui, f.text.as_str());
+                c::inset_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    c::status(ui, state, word);
+                    markdown::show(ui, &f.text);
+                });
                 ui.add_space(T.space.s);
             }
         });
@@ -852,7 +1254,7 @@ fn evidence_log(ui: &mut Ui, app: &mut SurgeonApp) {
 // ------------------------------------------------------------------ consent
 
 /// Before the first request to a connection: what leaves the machine, and to whom.
-fn consent(ctx: &egui::Context, app: &mut SurgeonApp) {
+pub(super) fn consent(ctx: &egui::Context, app: &mut SurgeonApp) {
     let Some(id) = app.agents.consent_for.clone() else {
         return;
     };
@@ -925,9 +1327,42 @@ mod tests {
     fn a_tool_summary_names_the_command_else_the_compact_input() {
         let shell = serde_json::json!({"command": "Get-ChildItem\n-Recurse", "timeout": 5});
         assert_eq!(tool_summary(&shell), "Get-ChildItem");
-        let engine = serde_json::json!({"model": "copies/c1"});
-        assert_eq!(tool_summary(&engine), "copies/c1");
+        let engine = serde_json::json!({"model": r"C:\Users\me\copies\c1", "layers": [11, 14], "mode": "ppl"});
+        assert_eq!(tool_summary(&engine), "ppl \u{b7} c1 \u{b7} 11,14");
         let other = serde_json::json!({"n": 1});
         assert_eq!(tool_summary(&other), r#"{"n":1}"#);
+    }
+
+    #[test]
+    fn a_tool_result_reads_its_exit_code_through_the_frame_or_the_mcp_content() {
+        let framed = "<donnees_non_fiables outil=\"surgeon_bench\" run=\"r1\">\n{\"ok\":false,\"exit_code\":9}\n</donnees_non_fiables>";
+        assert_eq!(outcome(framed, false).0, State::Error);
+        assert!(outcome(framed, false).1.contains('9'));
+        let mcp = r#"[{"type":"text","text":"{\"ok\":true,\"exit_code\":0}"}]"#;
+        assert_eq!(outcome(mcp, false).0, State::Ok);
+        assert!(output(mcp).contains("\"exit_code\": 0"), "pretty JSON");
+        assert_eq!(outcome("plain text", true).0, State::Error);
+        assert_eq!(output("plain text"), "plain text");
+    }
+
+    #[test]
+    fn the_old_end_of_process_line_is_read_back_as_its_code() {
+        assert_eq!(
+            legacy_exit("[fin du processus, code Some(0)]"),
+            Some(Some(0))
+        );
+        assert_eq!(legacy_exit("[fin du processus, code None]"), Some(None));
+        assert_eq!(legacy_exit("Bonjour"), None);
+    }
+
+    #[test]
+    fn a_composition_names_the_vectors_it_removes_and_keeps() {
+        let ablate =
+            serde_json::json!(["work/dir_L14.safetensors:0.5", r"C:\p\work\b.safetensors"]);
+        assert_eq!(
+            file_names(&ablate),
+            "dir_L14.safetensors:0.5, b.safetensors"
+        );
+        assert_eq!(file_names(&serde_json::Value::Null), "-", "keep left out");
     }
 }

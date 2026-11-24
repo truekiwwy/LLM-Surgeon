@@ -39,6 +39,15 @@ pub enum Block {
         provider: String,
         raw: Value,
     },
+    RunEnd {
+        code: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secs: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

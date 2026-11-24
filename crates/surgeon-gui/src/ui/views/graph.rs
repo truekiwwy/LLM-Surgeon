@@ -19,6 +19,7 @@ use crate::camera::Orbit;
 use crate::source::Step;
 use crate::studio::bus::RunView;
 use crate::studio::live::Layer;
+use crate::studio::vectors::LayerScores;
 use crate::viewport::{self, node_title, View};
 
 pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
@@ -38,7 +39,7 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
         .title(t("panel.graph"))
         .canvas()
         .show_with(ui, parts[0], app, view_controls, |ui, app| {
-            viewport(ui, app)
+            viewport(ui, app, false)
         });
     if has_bar {
         c::Panel::new("graph-bar")
@@ -52,12 +53,16 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     let right = layout::stack(regions.right, &[Part::Flex(1.6), Part::Flex(1.0)]);
     c::Panel::new("inspector")
         .title(t("panel.inspector"))
-        .show(ui, right[0], |ui| inspector(ui, app));
+        .show(ui, right[0], |ui| {
+            c::selectable(ui, |ui| inspector(ui, app))
+        });
     c::Panel::new("chronology")
         .title(t("panel.chronology"))
         .flush()
         .divided()
-        .show(ui, right[1], |ui| chronology(ui, app));
+        .show(ui, right[1], |ui| {
+            c::selectable(ui, |ui| chronology(ui, app))
+        });
 }
 
 /// Header of the 3D panel, right to left: recenter, diff, layout.
@@ -108,8 +113,9 @@ fn view_controls(ui: &mut Ui, app: &mut SurgeonApp) {
     );
 }
 
-/// The 3D canvas.
-fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
+/// The 3D canvas. `live`: the layers the agent works on stay lit, the others step back, and
+/// the origin is overlaid when asked.
+pub(super) fn viewport(ui: &mut Ui, app: &mut SurgeonApp, live: bool) {
     let target = match app.layout {
         LayoutMode::Column => 0.0,
         LayoutMode::Constellation => 1.0,
@@ -120,6 +126,10 @@ fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
         .ctx()
         .animate_value_with_time(egui::Id::new("layout-blend"), target, time);
     let blend = t_ * t_ * (3.0 - 2.0 * t_);
+    let scores = match live {
+        true => app.layer_scores().clone(),
+        false => LayerScores::default(),
+    };
     let Some(step) = app.timeline.current() else {
         let (title, hint) = match app.feed {
             Some(_) => (t("graph.waiting"), t("graph.waiting.hint")),
@@ -149,6 +159,14 @@ fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
         true => app.agents.conversation().and_then(activity::current),
         false => None,
     };
+    let layer = run.is_some().then_some(&app.layer);
+    let focus = match live {
+        true => {
+            let last = app.agents.conversation().and_then(activity::last);
+            super::live::focus(step, layer, last.as_ref(), &scores)
+        }
+        false => None,
+    };
     let view = View {
         step,
         blend,
@@ -156,9 +174,11 @@ fn viewport(ui: &mut Ui, app: &mut SurgeonApp) {
         visible: &visible,
         selected,
         targets: &targets,
-        layer: run.is_some().then_some(&app.layer),
+        layer,
         activity: activity.as_ref(),
         animate: app.motion,
+        focus: focus.as_deref(),
+        ghost: (live && app.ghost).then(|| app.timeline.get(0)).flatten(),
     };
     if let Some(click) = viewport::show(ui, &view, &mut app.camera, &mut app.buffers) {
         app.selected = click.map(|i| step.report.nodes[i].id.clone());
@@ -335,7 +355,11 @@ fn chronology(ui: &mut Ui, app: &mut SurgeonApp) {
                 let index = format!("{:03}", i + 1);
                 let count = step.touched.len().to_string();
                 let cells = [Cell::dim(&index), Cell::new(&first), Cell::new(&count)];
-                if table.row(ui, i == cursor, &cells).clicked() {
+                if table
+                    .row(ui, i == cursor, &cells)
+                    .on_hover_text(&first)
+                    .clicked()
+                {
                     seek = Some(i);
                 }
             }
@@ -348,6 +372,7 @@ fn chronology(ui: &mut Ui, app: &mut SurgeonApp) {
 // ------------------------------------------------------------------ inspector
 
 pub fn inspector(ui: &mut Ui, app: &mut SurgeonApp) {
+    let scores = app.layer_scores().clone();
     let Some(step) = app.timeline.current() else {
         c::empty(
             ui,
@@ -366,6 +391,7 @@ pub fn inspector(ui: &mut Ui, app: &mut SurgeonApp) {
         .show(ui, |ui| match selected {
             Some(i) => {
                 node_inspector(ui, step, &step.report.nodes[i]);
+                layer_scores(ui, &scores, step.report.nodes[i].layer);
                 if let Some(run) = run {
                     run_inspector(ui, run, layer, step, i);
                 }
@@ -425,6 +451,37 @@ fn warnings(ui: &mut Ui, list: &[String]) {
     }
 }
 
+fn layer_scores(ui: &mut Ui, scores: &LayerScores, layer: Option<usize>) {
+    let Some(layer) = layer else {
+        return;
+    };
+    let causal = scores.causal.get(&layer);
+    let auc = scores.auc.get(&layer);
+    if causal.is_none() && auc.is_none() {
+        return;
+    }
+    c::section(ui, t("inspector.scores"));
+    if let Some(score) = causal {
+        let component = scores.component.as_deref().unwrap_or("-");
+        c::kv(
+            ui,
+            t("inspector.causal"),
+            &format!("{score:+.3} · {component}"),
+        );
+        let window = match scores.lit(Some(layer)) {
+            true => t("inspector.window.in"),
+            false => t("inspector.window.out"),
+        };
+        c::kv(ui, t("inspector.window"), window);
+    }
+    if let Some(auc) = auc {
+        c::kv(ui, "AUC", &format!("{auc:.3}"));
+    }
+    if let Some(margin) = scores.margin.get(&layer) {
+        c::kv(ui, t("inspector.margin"), &format!("{margin:+.3}"));
+    }
+}
+
 fn run_inspector(ui: &mut Ui, run: &RunView, layer: &Layer, step: &Step, i: usize) {
     let node = &step.report.nodes[i];
     c::section(ui, t("inspector.run"));
@@ -445,8 +502,9 @@ fn run_inspector(ui: &mut Ui, run: &RunView, layer: &Layer, step: &Step, i: usiz
 
 fn node_inspector(ui: &mut Ui, step: &Step, node: &NodeReport) {
     let m = &node.metrics;
-    c::strong(ui, node_title(node));
-    c::mono_secondary(ui, node.tensor.as_str());
+    c::strong(ui, node_title(node)).on_hover_text(node.tensor.as_str());
+    c::mono_wrapped(ui, node.tensor.as_str(), T.color.text_secondary)
+        .on_hover_text(node.tensor.as_str());
     let measured = step.report.parameters.rank > 0;
     if !measured {
         c::secondary(ui, t("inspector.unmeasured"));
@@ -580,7 +638,7 @@ fn delta_table(ui: &mut Ui, m: &NodeMetrics, diff: &NodeDiff) {
 fn model_summary(ui: &mut Ui, report: &GraphReport) {
     let (m, g) = (&report.model, &report.global);
     c::strong(ui, m.architecture.as_str());
-    c::mono_secondary(ui, m.path.as_str());
+    c::mono_wrapped(ui, m.path.as_str(), T.color.text_secondary);
     if report.parameters.rank == 0 {
         c::secondary(ui, t("inspector.unmeasured"));
     }

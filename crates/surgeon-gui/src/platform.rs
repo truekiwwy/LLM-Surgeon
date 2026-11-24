@@ -17,57 +17,7 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd
 }
 
-/// Runs `cmd`, killing it after `timeout`; the exit code (`None` when killed or signalled)
-/// and stdout then stderr, lossily decoded.
-pub fn run_capture(
-    mut cmd: Command,
-    timeout: std::time::Duration,
-) -> std::io::Result<(Option<i32>, String)> {
-    use std::io::Read;
-    use std::process::Stdio;
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    // Drained on threads: a full pipe would otherwise block the child before the deadline.
-    let drain = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut text = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut text);
-            }
-            text
-        })
-    };
-    let out = drain(
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let err = drain(
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let deadline = std::time::Instant::now() + timeout;
-    let code = loop {
-        if let Some(status) = child.try_wait()? {
-            break status.code();
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            break None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    };
-    let mut text = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
-    text.push_str(&String::from_utf8_lossy(&err.join().unwrap_or_default()));
-    Ok((code, text))
-}
+pub use weight_surgeon::process::run_capture;
 
 /// `NAME    REG_SZ    value` from `reg query` output.
 pub fn parse_reg_value(output: &str, name: &str) -> Option<String> {

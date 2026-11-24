@@ -138,6 +138,33 @@ struct Subspace {
     k: usize,
     /// `[k, len]` tensors rather than the 1D form.
     ranked: bool,
+    /// The kernel's alpha: the patch alpha, or 1 when it is folded into `a`.
+    strength: f32,
+}
+
+/// `add_direction`, `W + α u (uᵀ W)` with `u = v / ‖v‖` (f64), as the eraser
+/// `W − 1 · a (uᵀ W)` with `a = −α u`: the f64 projection kernel, whose strength stays
+/// in [0, 1], runs it on every backend. Returns `a`, the read side and `‖v‖`.
+fn amplifier(v: &[f32], alpha: f32) -> std::result::Result<(Vec<f32>, Subspace, f64), String> {
+    let norm = v
+        .iter()
+        .map(|x| f64::from(*x) * f64::from(*x))
+        .sum::<f64>()
+        .sqrt();
+    if !(norm.is_finite() && norm > 0.0) {
+        return Err(format!(
+            "add_direction : ‖v‖ = {norm}, le vecteur doit être non nul et fini"
+        ));
+    }
+    let u: Vec<f32> = v.iter().map(|x| (f64::from(*x) / norm) as f32).collect();
+    let a = u.iter().map(|x| -(alpha * x)).collect();
+    let read = Subspace {
+        b: u,
+        k: 1,
+        ranked: false,
+        strength: 1.0,
+    };
+    Ok((a, read, norm))
 }
 
 /// Runs a validated patch.
@@ -223,7 +250,13 @@ fn load_subspace(
         }
         warnings.push(format!("opération {} : {message}", op.id));
     }
-    Ok((a, Subspace { b, k, ranked }))
+    let subspace = Subspace {
+        b,
+        k,
+        ranked,
+        strength: op.alpha,
+    };
+    Ok((a, subspace))
 }
 
 /// [`apply_patch`] with explicit limits.
@@ -262,6 +295,19 @@ pub fn apply_patch_with(
             }
             (OperationKind::ProjectOut, None) => {
                 return Err(untouched("project_out sans vecteur b".into()));
+            }
+            (OperationKind::AddDirection, _) => {
+                let v = backend
+                    .load_vector(&op.vector_file, tensors.map(VectorTensor::direction))
+                    .map_err(|e| untouched(e.to_string()))?;
+                let (a, read, norm) = amplifier(&v, op.alpha).map_err(untouched)?;
+                if (norm - 1.0).abs() > 1e-6 {
+                    warnings.push(format!(
+                        "opération {} : add_direction renormalise v (‖v‖ = {norm:.6})",
+                        op.id
+                    ));
+                }
+                (a, Some(read))
             }
             _ => {
                 let vector = backend
@@ -307,7 +353,7 @@ pub fn apply_patch_with(
         let mut tensors = Vec::with_capacity(targets.len());
         for name in targets {
             let shifted = match &read {
-                Some(s) => backend.project_out_subspace(&name, &vector, &s.b, s.k, op.alpha),
+                Some(s) => backend.project_out_subspace(&name, &vector, &s.b, s.k, s.strength),
                 None => backend.shift_tensor(&name, &vector, op.alpha, op.kind, op.axis),
             }
             .and_then(|stats| match stats.nan_or_inf_produced {
@@ -717,6 +763,133 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// One f32 `[rows, cols]` writer projected by the engine kernel, and one direction.
+    struct Dense {
+        w: Vec<u8>,
+        shape: [usize; 2],
+        v: Vec<f32>,
+        calls: usize,
+    }
+
+    impl Dense {
+        fn new(w: &[f32], shape: [usize; 2], v: &[f32]) -> Self {
+            Self {
+                w: w.iter().flat_map(|x| x.to_le_bytes()).collect(),
+                shape,
+                v: v.to_vec(),
+                calls: 0,
+            }
+        }
+
+        fn weights(&self) -> Vec<f32> {
+            self.w
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect()
+        }
+    }
+
+    impl PatchBackend for Dense {
+        fn resolve_targets(&self, _: &LayerSelection, _: &[Projection]) -> Result<Vec<String>> {
+            Ok(vec!["down".into()])
+        }
+        fn load_vector(&self, _: &Path, _: Option<&str>) -> Result<Vec<f32>> {
+            Ok(self.v.clone())
+        }
+        fn shift_tensor(
+            &mut self,
+            _: &str,
+            _: &[f32],
+            _: f32,
+            _: OperationKind,
+            _: Axis,
+        ) -> Result<OpStats> {
+            Err(PatchError::Backend("shift inattendu".into()))
+        }
+        fn project_out_subspace(
+            &mut self,
+            _: &str,
+            a: &[f32],
+            b: &[f32],
+            k: usize,
+            alpha: f32,
+        ) -> Result<OpStats> {
+            self.calls += 1;
+            let p = SubspaceProjection { a, b, alpha, k };
+            crate::engine::project_out_subspace(
+                &mut self.w,
+                crate::engine::DType::F32,
+                &self.shape,
+                &p,
+            )
+            .map(OpStats::from)
+            .map_err(|e| PatchError::Backend(e.to_string()))
+        }
+        fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn add_direction_patch(alpha: f32) -> ValidatedPatch {
+        let mut p = patch(&["amplify"]);
+        p.operations[0].kind = OperationKind::AddDirection;
+        p.operations[0].alpha = alpha;
+        p
+    }
+
+    /// `W + α u (uᵀ W)` with `u = v / ‖v‖`, all in f64.
+    fn amplified(w: &[f32], [rows, cols]: [usize; 2], v: &[f32], alpha: f32) -> Vec<f64> {
+        let norm = v.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
+        let u: Vec<f64> = v.iter().map(|x| f64::from(*x) / norm).collect();
+        let r: Vec<f64> = (0..cols)
+            .map(|j| (0..rows).map(|i| u[i] * f64::from(w[i * cols + j])).sum())
+            .collect();
+        (0..rows * cols)
+            .map(|n| {
+                let (i, j) = (n / cols, n % cols);
+                f64::from(w[n]) + f64::from(alpha) * u[i] * r[j]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn add_direction_is_the_additive_dual_of_project_out_in_f64() {
+        let shape = [4, 3];
+        let w: Vec<f32> = (0..12).map(|n| n as f32 * 0.25 - 1.0).collect();
+
+        let mut axis = Dense::new(&w, shape, &[2.0, 0.0, 0.0, 0.0]);
+        let report = apply_patch(&add_direction_patch(0.5), &mut axis, None, false).unwrap();
+        let mut expected = w.clone();
+        expected[..3].iter_mut().for_each(|x| *x *= 1.5);
+        assert_eq!(axis.weights(), expected);
+        assert_eq!(report.operations[0].vector_len, 4);
+        assert_eq!(report.operations[0].rank, None);
+        assert!(report.warnings[0].contains("renormalise"), "{report:?}");
+
+        for (v, alpha) in [(vec![3.0f32, -1.0, 4.0, 0.5], 0.75f32), (vec![0.5; 4], 2.0)] {
+            let mut dense = Dense::new(&w, shape, &v);
+            let report = apply_patch(&add_direction_patch(alpha), &mut dense, None, false).unwrap();
+            assert_eq!(dense.calls, 1);
+            let reference = amplified(&w, shape, &v, alpha);
+            for (got, want) in dense.weights().iter().zip(&reference) {
+                assert!(
+                    (f64::from(*got) - want).abs() <= 1e-6 * (1.0 + want.abs()),
+                    "{got} != {want}"
+                );
+            }
+            assert_eq!(
+                report.warnings.is_empty(),
+                v == [0.5; 4],
+                "‖v‖ = 1 is not renormalised"
+            );
+        }
+
+        let mut zero = Dense::new(&w, shape, &[0.0; 4]);
+        let err = apply_patch(&add_direction_patch(1.0), &mut zero, None, false).unwrap_err();
+        assert!(untouched_cause(err).contains("non nul"));
+        assert_eq!((zero.calls, zero.weights()), (0, w));
     }
 
     /// `[k, len]` tensors by name, and a rank-k `project_out` that records what it gets.

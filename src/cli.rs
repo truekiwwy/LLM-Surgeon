@@ -68,6 +68,12 @@ pub enum Commands {
     Apply(ApplyArgs),
     /// Put a model back byte for byte, from an `apply` backup or from the origin model.
     Restore(RestoreArgs),
+    /// One direction from several extracted vectors, kept orthogonal to the directions to
+    /// preserve, and the patch that removes it.
+    Compose(ComposeArgs),
+    /// Check in a few seconds that the machine is ready for a campaign: RAM, cores, the
+    /// reference cache and the hipfire daemon.
+    Doctor(DoctorArgs),
     /// Evaluate a model on prompts.
     Eval(EvalArgs),
     /// Extract a steering vector from a Qwen2, Llama/Mistral or Qwen3 layer (pure Rust, CPU).
@@ -207,6 +213,10 @@ pub struct EngineArgs {
     /// hipfire: a daemon already running, http://127.0.0.1:<port> (loopback only).
     #[arg(long)]
     pub hipfire_url: Option<String>,
+    /// hipfire: requantize a working copy that has no alias for its current weights before
+    /// measuring it (`hipfire_requantize = "auto"` in the user configuration).
+    #[arg(long)]
+    pub hipfire_requantize: bool,
 }
 
 impl EngineArgs {
@@ -218,6 +228,9 @@ impl EngineArgs {
             mistralrs_bin: self.mistralrs_bin.clone(),
             hipfire_bin: self.hipfire_bin.clone(),
             hipfire_url: self.hipfire_url.clone(),
+            hipfire_requantize: self
+                .hipfire_requantize
+                .then_some(crate::backend::config::Requantize::Auto),
             ..Default::default()
         }
     }
@@ -228,6 +241,8 @@ impl EngineArgs {
         self.mistralrs_bin.clone_from(&config.mistralrs_bin);
         self.hipfire_bin.clone_from(&config.hipfire_bin);
         self.hipfire_url.clone_from(&config.hipfire_url);
+        self.hipfire_requantize =
+            config.hipfire_requantize == Some(crate::backend::config::Requantize::Auto);
     }
 }
 
@@ -244,6 +259,10 @@ pub struct PipelineRunArgs {
     /// Consult a Test Set already consulted; the report is marked as contaminated.
     #[arg(long)]
     pub allow_test_reuse: bool,
+    /// Measure the candidates on hipfire although it serves its own cache of the model, not
+    /// the patched working copy (logged in the report).
+    #[arg(long)]
+    pub allow_stale_hipfire: bool,
     /// Run the worker in the background (output in <job>/worker.log) and return.
     #[arg(long)]
     pub detach: bool,
@@ -334,6 +353,11 @@ pub struct ExtractMethodArgs {
     /// index, or an array of m numbers).
     #[arg(long)]
     pub labels_file: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Layers to sweep (all, A-B or a list): one direction per layer in a single forward pass, the best one as `direction`, every one as `layers.<i>`; replaces --layer"
+    )]
+    pub layers: Option<LayerSelection>,
 }
 
 impl ExtractMethodArgs {
@@ -389,20 +413,24 @@ pub struct AutotuneArgs {
     #[arg(long)]
     pub target_projection: Option<f64>,
     /// Ridge λ > 0, or auto (LOOCV over 1e-6..1e2).
-    #[arg(long, default_value = "1e-3")]
+    #[arg(long, default_value = crate::patch::autotune::DEFAULT_L2_REG)]
     pub l2_reg: crate::patch::autotune::L2Reg,
-    /// Finite-difference step δ of the response measure.
-    #[arg(long, default_value_t = 0.05)]
+    /// Finite-difference step δ of the response measure (unit of alpha).
+    #[arg(long, default_value_t = crate::patch::autotune::DEFAULT_PROBE_ALPHA)]
     pub probe_alpha: f64,
-    #[arg(long, default_value_t = 1.0)]
+    /// Bound on |alpha|, the coefficient of W -= alpha·v.
+    #[arg(long, default_value_t = crate::patch::autotune::DEFAULT_ALPHA_MAX)]
     pub alpha_max: f64,
+    /// Bound per layer on ‖ΔW‖/‖W‖ (Frobenius norms), e.g. 0.01 for 1 %.
+    #[arg(long)]
+    pub max_delta_norm_ratio: Option<f64>,
     /// Coefficients smaller than this are dropped.
-    #[arg(long, default_value_t = 1e-4)]
+    #[arg(long, default_value_t = crate::patch::autotune::DEFAULT_MIN_ALPHA)]
     pub min_alpha: f64,
     /// Refuses the run, before any computation, above this many forwards.
-    #[arg(long, default_value_t = 2000)]
+    #[arg(long, default_value_t = crate::patch::autotune::DEFAULT_MAX_FORWARDS)]
     pub max_forwards: usize,
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = crate::patch::autotune::DEFAULT_MAX_TOKENS)]
     pub max_tokens: usize,
     #[arg(long, value_enum, default_value_t = DTypeChoice::Auto)]
     pub dtype: DTypeChoice,
@@ -420,6 +448,30 @@ pub struct AutotuneArgs {
     pub out: Option<PathBuf>,
     #[arg(long)]
     pub overwrite: bool,
+    /// Prompts the patched model should stop refusing (file or builtin:refusals): tries the
+    /// fitted alphas at several scales and writes the smallest one whose generated answers
+    /// reach --target-refusal-rate (native generation, 40 tokens).
+    #[arg(long)]
+    pub refusal_prompts: Option<PathBuf>,
+    /// Refusal rate (0..1) the selected scale must reach in generation.
+    #[arg(long, default_value_t = crate::patch::autotune_select::DEFAULT_TARGET_REFUSAL_RATE, requires = "refusal_prompts")]
+    pub target_refusal_rate: f64,
+    /// Candidate scales c of the fitted alphas, comma separated.
+    #[arg(long, value_delimiter = ',', default_values_t = crate::patch::autotune_select::DEFAULT_SCALES, requires = "refusal_prompts")]
+    pub scales: Vec<f64>,
+    /// Candidates the first-token probe hands to the full generation.
+    #[arg(long, default_value_t = crate::patch::autotune_select::DEFAULT_TOP_K, requires = "refusal_prompts")]
+    pub probe_top_k: usize,
+    /// Generate every candidate scale instead of screening them with the probe first.
+    #[arg(long, requires = "refusal_prompts")]
+    pub no_probe_prefilter: bool,
+    /// Capability set also generated on the finalists and the base, as bench eval does
+    /// (file or builtin:math, builtin:logic, builtin:general).
+    #[arg(long, requires = "refusal_prompts")]
+    pub retention_dataset: Option<PathBuf>,
+    /// First N questions of --retention-dataset.
+    #[arg(long, default_value_t = crate::patch::autotune_select::DEFAULT_RETENTION_LIMIT, requires = "retention_dataset")]
+    pub retention_limit: usize,
 }
 
 /// Exit codes: 0 ok (warnings included), 1 insufficient resources, llama.cpp binary not
@@ -444,10 +496,46 @@ pub enum BenchCommand {
     Dump(BenchDumpArgs),
     /// Refusal rate of a Qwen2, Llama/Mistral or Qwen3 model on prompts (greedy, pure Rust, CPU).
     Refusal(BenchRefusalArgs),
+    /// Refusal estimated without generating, one forward pass per prompt: a fast heuristic to
+    /// explore with, `bench refusal` stays the proof.
+    RefusalProbe(BenchRefusalProbeArgs),
     /// Sample the answers of a `bench refusal` run for human labelling.
     JudgeSample(BenchJudgeSampleArgs),
     /// Agreement of a judge model with human labels; writes the calibration file.
     JudgeEval(BenchJudgeEvalArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchRefusalProbeArgs {
+    /// Qwen2, Llama/Mistral or Qwen3 SafeTensors directory (native forward, CPU).
+    #[arg(long)]
+    pub model: PathBuf,
+    /// JSON array of strings or of {"text": ...}, JSONL, plain text, or builtin:<set>.
+    #[arg(long)]
+    pub prompts: PathBuf,
+    /// first-token-prob: probability that the first answer token opens a refusal;
+    /// direction-projection: residual stream projected on an extracted refusal direction.
+    #[arg(long, value_enum, default_value_t = crate::bench::refusal::RefusalProbeMode::FirstTokenProb)]
+    pub method: crate::bench::refusal::RefusalProbeMode,
+    /// first-token-prob: words a refusal starts with, comma separated (their first token).
+    #[arg(long, value_delimiter = ',', default_values_t = crate::bench::refusal::DEFAULT_PROBE_PREFIXES.map(String::from))]
+    pub prefixes: Vec<String>,
+    /// direction-projection: the direction file of `surgeon extract` (resid_post), with its
+    /// .stats.json for the calibrated threshold.
+    #[arg(long)]
+    pub vector: Option<PathBuf>,
+    /// Decision threshold of the score (default: 0.5 for first-token-prob, the direction's
+    /// calibrated threshold for direction-projection).
+    #[arg(long)]
+    pub threshold: Option<f64>,
+    /// Wrapping of each prompt, as in bench refusal: auto follows the model (ChatML if it
+    /// declares nothing).
+    #[arg(long, value_enum, default_value_t = ChatTemplate::Auto)]
+    pub chat_template: ChatTemplate,
+    /// Also generate the answers (bench refusal, default budget) and report the agreement,
+    /// the correlation and both durations.
+    #[arg(long)]
+    pub compare_generation: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -483,7 +571,7 @@ pub struct BenchPplArgs {
     /// .gguf, or a SafeTensors directory converted to a temporary GGUF.
     #[arg(long)]
     pub model: PathBuf,
-    /// Text file evaluated by llama-perplexity.
+    /// Text file evaluated, or builtin:wikitext (embedded WikiText-2 excerpt, --backend native).
     #[arg(long)]
     pub text: PathBuf,
     /// Reference model, measured first.
@@ -519,6 +607,17 @@ pub struct BenchPplArgs {
     /// Exit with code 9 when the delta exceeds --warn-delta.
     #[arg(long)]
     pub fail_on_warn: bool,
+    #[arg(
+        long,
+        value_enum,
+        help = "llama (default: llama-perplexity on a GGUF) or native (pure Rust forward on a SafeTensors folder, f64 log-softmax, sliding windows)"
+    )]
+    pub backend: Option<crate::bench::score::Backend>,
+    #[arg(
+        long,
+        help = "native: step between the sliding windows of --ctx tokens (default --ctx / 2); each token is scored once"
+    )]
+    pub stride: Option<u32>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -546,6 +645,9 @@ pub struct BenchEvalArgs {
     /// Template with {question}, or @FILE.
     #[arg(long)]
     pub prompt_template: Option<String>,
+    /// Wrapping of the rendered template: auto follows the model (raw if it declares nothing).
+    #[arg(long, value_enum, default_value_t = ChatTemplate::Auto)]
+    pub chat_template: ChatTemplate,
     #[arg(long, value_enum, default_value_t = crate::bench::dataset::DatasetFormat::Auto)]
     pub format: crate::bench::dataset::DatasetFormat,
     #[arg(long, env = "LLAMA_CPP_DIR")]
@@ -559,6 +661,10 @@ pub struct BenchEvalArgs {
     /// Exit with code 9 when the accuracy is below --min-accuracy.
     #[arg(long)]
     pub fail_on_warn: bool,
+    /// Regenerate the --baseline-model answers instead of reading them from the reference
+    /// cache (the entry is overwritten).
+    #[arg(long)]
+    pub no_ref_cache: bool,
     #[command(flatten)]
     pub generation: Box<GenerationArgs>,
 }
@@ -610,6 +716,10 @@ pub struct GenerationArgs {
     /// (lossless from bf16, twice the size).
     #[arg(long, value_enum)]
     pub gguf_dtype: Option<crate::eval::WeightType>,
+    /// hipfire: measure a working copy anyway (requantized and registered in hipfire under
+    /// its name); refused otherwise, since the daemon serves the weights of its own cache.
+    #[arg(long)]
+    pub allow_stale_hipfire: bool,
 }
 
 impl GenerationArgs {
@@ -631,6 +741,8 @@ impl GenerationArgs {
             threads: self.threads,
             gpu_layers: self.gpu_layers,
             ctx_size: self.ctx_size,
+            allow_stale_hipfire: self.allow_stale_hipfire,
+            batch_auto: self.batch_size.is_none(),
         }
     }
 }
@@ -646,6 +758,9 @@ pub struct BenchDumpArgs {
     /// Output .safetensors (tensors `logits` and `prompt_offsets`).
     #[arg(long)]
     pub out: PathBuf,
+    /// Wrapping of each prompt: auto follows the model (raw if it declares nothing).
+    #[arg(long, value_enum, default_value_t = ChatTemplate::Auto)]
+    pub chat_template: ChatTemplate,
     #[arg(long, value_enum, default_value_t = DTypeChoice::Auto)]
     pub dtype: DTypeChoice,
     #[arg(long, value_enum, default_value_t = crate::bench::dump::OutDtype::F32)]
@@ -672,10 +787,13 @@ pub struct BenchRefusalArgs {
     /// Reference model on the same prompts (paired comparison, Newcombe interval).
     #[arg(long)]
     pub baseline_model: Option<PathBuf>,
+    /// First N prompts, in file order (default: all); the rate and its interval are over N.
+    #[arg(long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    pub limit: Option<usize>,
     #[arg(long, default_value_t = crate::bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS)]
     pub max_new_tokens: u32,
-    /// Wrapping of each prompt before generation.
-    #[arg(long, value_enum, default_value_t = ChatTemplate::Chatml)]
+    /// Wrapping of each prompt: auto follows the model (ChatML if it declares nothing).
+    #[arg(long, value_enum, default_value_t = ChatTemplate::Auto)]
     pub chat_template: ChatTemplate,
     /// Verdict: rules (refusal markers), llm (markers and a judge model) or both (plus
     /// their agreement).
@@ -701,6 +819,10 @@ pub struct BenchRefusalArgs {
     /// Exit with code 9 when --max-unparsable is exceeded.
     #[arg(long)]
     pub fail_on_warn: bool,
+    /// Regenerate the --baseline-model answers instead of reading them from the reference
+    /// cache (the entry is overwritten).
+    #[arg(long)]
+    pub no_ref_cache: bool,
     /// Generator: native (pure Rust), mistralrs (mistral.rs on the SafeTensors directory as
     /// is), llama-server or llama-completion (on a GGUF, a SafeTensors model converted first;
     /// --llama-cpp-dir) or hipfire (an AMD HIP daemon). Default: the user configuration, else
@@ -832,8 +954,72 @@ pub struct ApplyArgs {
     pub surgery: crate::surgery::cli_args::SurgeryApplyArgs,
 }
 
-/// `surgeon restore` (`patch::restore`). Without `--backup` nor `--from-origin`: the newest
-/// `<name>.bak-*` of each backed up file of the model.
+/// `surgeon doctor` (`doctor`). Exit code 0: `data.ready` says whether a check failed.
+#[derive(Debug, Clone, Args)]
+pub struct DoctorArgs {
+    /// Model folder: its exact RAM need, the dtype it gets (f32, or the slow bf16 fallback)
+    /// and its native batch.
+    #[arg(long)]
+    pub model: Option<PathBuf>,
+    /// Remove the reference cache files that can never be read again (unreadable, another
+    /// schema, temporary files).
+    #[arg(long)]
+    pub clean_cache: bool,
+    /// hipfire daemon URL (default: the configuration's, else http://127.0.0.1:11435).
+    #[arg(long)]
+    pub hipfire_url: Option<String>,
+    /// hipfire daemon log, where it writes the GPU memory of each load (default: the one
+    /// start-hipfire.ps1 writes).
+    #[arg(long)]
+    pub hipfire_log: Option<PathBuf>,
+}
+
+/// `surgeon compose` (`patch::compose`).
+#[derive(Debug, Clone, Args)]
+pub struct ComposeArgs {
+    /// Vector to remove: a `surgeon extract` file (or a JSON array), as `file` or
+    /// `file:alpha` (its weight in the sum, default 1); repeatable.
+    #[arg(long, required = true)]
+    pub ablate: Vec<String>,
+    /// Direction to preserve (a capability vector); repeatable.
+    #[arg(long)]
+    pub keep: Vec<PathBuf>,
+    /// orthogonal-preserve: the vectors to remove are projected out of the subspace of the
+    /// kept directions; standard: their plain weighted sum; ties and dare: a TIES or DARE
+    /// merge of them, then projected out of the kept directions when --keep is given.
+    #[arg(long, value_enum, default_value_t = crate::patch::compose::ComposeMode::OrthogonalPreserve)]
+    pub mode: crate::patch::compose::ComposeMode,
+    /// ties: share of each vector's coordinates kept (the largest in magnitude), in ]0, 1].
+    #[arg(long, default_value_t = crate::patch::compose::DEFAULT_DENSITY)]
+    pub density: f64,
+    /// dare: probability of dropping a coordinate, in [0, 0.95]; survivors scaled by 1/(1-p).
+    #[arg(long, default_value_t = crate::patch::compose::DEFAULT_DROP_RATE)]
+    pub drop_rate: f64,
+    /// dare: seed of the drop masks (the same seed gives the same direction).
+    #[arg(long, default_value_t = 0)]
+    pub seed: u64,
+    /// Composed direction (.safetensors): `direction`, and `a` = `b` = its unit vector.
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Also write a patch.json that removes it (project_out), with the recipe in
+    /// `composition`.
+    #[arg(long)]
+    pub patch_out: Option<PathBuf>,
+    /// Layers of the patch: all, A-B, or a list.
+    #[arg(long, default_value = "all")]
+    pub layers: String,
+    /// Matrices of the patch, comma separated.
+    #[arg(long, value_delimiter = ',', default_values_t = ["o_proj".to_owned(), "down_proj".to_owned()])]
+    pub projections: Vec<String>,
+    /// Strength of the project_out, in [0, 1] (1 removes the direction entirely).
+    #[arg(long, default_value_t = 1.0)]
+    pub alpha: f32,
+    #[arg(long)]
+    pub overwrite: bool,
+}
+
+/// `surgeon restore` (`patch::restore`). Without `--backup` nor `--from-origin`: the state
+/// before the last `apply`, from its checkpoint of `<name>.bak-*` files.
 #[derive(Debug, Clone, Args)]
 pub struct RestoreArgs {
     /// File or folder to put back.
@@ -856,7 +1042,7 @@ pub struct EvalArgs {
     pub model: PathBuf,
     #[arg(long)]
     pub prompts: PathBuf,
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = crate::eval::DEFAULT_MAX_NEW_TOKENS)]
     pub max_new_tokens: u32,
     #[arg(long)]
     pub export_gguf: Option<PathBuf>,
@@ -881,7 +1067,7 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub neg_prompts: PathBuf,
     /// 0-based layer; must be < num_hidden_layers.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = crate::extract::DEFAULT_LAYER)]
     pub layer: usize,
     /// Output .safetensors (one 1D F32 tensor named `direction`).
     #[arg(long)]
@@ -890,10 +1076,11 @@ pub struct ExtractArgs {
     pub pooling: Pooling,
     #[arg(long, value_enum, default_value_t = Site::ResidPost)]
     pub site: Site,
-    #[arg(long, value_enum, default_value_t = ChatTemplate::NoTemplate)]
+    /// Wrapping of each prompt: auto follows the model (raw if it declares nothing).
+    #[arg(long, value_enum, default_value_t = ChatTemplate::Auto)]
     pub chat_template: ChatTemplate,
     /// Prompts are truncated on the right beyond this many tokens.
-    #[arg(long, default_value_t = 512)]
+    #[arg(long, default_value_t = crate::extract::DEFAULT_MAX_TOKENS)]
     pub max_tokens: usize,
     #[arg(long, value_enum, default_value_t = DTypeChoice::Auto)]
     pub dtype: DTypeChoice,

@@ -68,6 +68,14 @@ pub fn effective(target: Backend, hipfire_up: bool, mistral_found: bool) -> Back
     }
 }
 
+/// Whether the app should have a hipfire daemon running: the hardware or the saved backend
+/// calls for it, and the native engine was not saved by hand (`auto`: the saved backend is
+/// only the app's own latest choice).
+pub fn wants_hipfire(target: Backend, saved: Option<Backend>, auto: bool) -> bool {
+    let pinned_native = saved == Some(Backend::Native) && !auto;
+    !pinned_native && (target == Backend::Hipfire || saved == Some(Backend::Hipfire))
+}
+
 /// The daemon address an AMD machine is given when none is set (hipfire's own default, also
 /// reached through WSL2 or Docker).
 pub fn hipfire_url() -> String {
@@ -181,6 +189,20 @@ mod tests {
             Backend::Native,
             "hipfire is AMD's"
         );
+    }
+
+    #[test]
+    fn the_daemon_is_wanted_on_amd_or_by_choice_unless_native_is_pinned() {
+        let (amd, other) = (Backend::Hipfire, Backend::MistralRs);
+        assert!(wants_hipfire(amd, None, true), "first launch on AMD");
+        assert!(
+            wants_hipfire(amd, Some(Backend::Native), true),
+            "native only as the automatic fallback"
+        );
+        assert!(wants_hipfire(amd, Some(Backend::MistralRs), false));
+        assert!(wants_hipfire(other, Some(Backend::Hipfire), false));
+        assert!(!wants_hipfire(amd, Some(Backend::Native), false), "pinned");
+        assert!(!wants_hipfire(other, Some(Backend::MistralRs), true));
     }
 
     #[test]

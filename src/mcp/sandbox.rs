@@ -107,6 +107,27 @@ impl Sandbox {
         self.resolve_in(argument, path, base, true)
     }
 
+    /// The agent's working folder: `work/` of the first allowed directory.
+    pub fn work_dir(&self) -> PathBuf {
+        self.base().join("work")
+    }
+
+    /// A working file: relative paths start at [`Self::work_dir`], and the result stays
+    /// under it, links and `..` resolved.
+    pub fn resolve_work(&self, argument: &str, path: &Path) -> Result<PathBuf, SandboxError> {
+        let work = self.work_dir();
+        let resolved = self.resolve(argument, path, &work)?;
+        match resolve_lenient(&work).is_some_and(|root| {
+            resolve_lenient(&resolved).is_some_and(|file| file != root && within(&file, &root))
+        }) {
+            true => Ok(resolved),
+            false => Err(SandboxError {
+                argument: argument.to_owned(),
+                read_only_root: false,
+            }),
+        }
+    }
+
     /// Under an `--allow-read` root, even one nested in an `--allow-dir` (which `resolve`
     /// accepts): for the tools that must never write the source model.
     pub fn is_read_only(&self, path: &Path) -> bool {
@@ -144,6 +165,13 @@ impl Sandbox {
             .ancestors()
             .any(|dir| dir.join(crate::pipeline::job::PRIVATE_MARKER).is_file());
         if private {
+            return Err(refused());
+        }
+        let checkpoints = write
+            && resolved
+                .ancestors()
+                .any(|dir| dir.join(crate::checkpoint::MARKER).is_file());
+        if checkpoints {
             return Err(refused());
         }
         let in_read_root = self.read_roots.iter().any(|root| within(&resolved, root));
@@ -301,6 +329,42 @@ mod tests {
         let sibling = origin.path().join("other.json");
         std::fs::write(&sibling, "{}").unwrap();
         assert!(one.resolve_read("model", &sibling, &base).is_err());
+    }
+
+    #[test]
+    fn working_files_stay_under_work() {
+        let (allowed, outside, sb) = sandbox();
+        let work = sb.work_dir();
+        let file = sb
+            .resolve_work("path", Path::new("sets/pos.jsonl"))
+            .unwrap();
+        assert!(file.ends_with("work/sets/pos.jsonl") || file.ends_with(r"work\sets\pos.jsonl"));
+        assert!(sb.resolve_work("path", &work.join("a.json")).is_ok());
+        for path in [
+            PathBuf::from("../m.safetensors"),
+            PathBuf::from("."),
+            allowed.path().join("m.safetensors"),
+            outside.path().join("x.json"),
+        ] {
+            assert!(sb.resolve_work("path", &path).is_err(), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn the_checkpoint_store_is_read_but_never_written_through_a_tool() {
+        let (_allowed, _outside, sb) = sandbox();
+        let store = sb.work_dir().join(crate::checkpoint::STORE_DIR);
+        let snapshot = store.join("0001").join("model");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let base = sb.base().to_path_buf();
+        assert!(sb.resolve_work("path", &store.join("notes.json")).is_ok());
+        std::fs::write(store.join(crate::checkpoint::MARKER), b"").unwrap();
+        assert!(sb.resolve_read("model", &snapshot, &base).is_ok());
+        for path in [snapshot.join("config.json"), store.join("notes.json")] {
+            assert!(sb.resolve("out", &path, &base).is_err(), "{path:?}");
+            assert!(sb.resolve_work("path", &path).is_err(), "{path:?}");
+        }
+        assert!(sb.resolve_work("path", Path::new("sets/pos.jsonl")).is_ok());
     }
 
     #[cfg(unix)]

@@ -20,6 +20,7 @@ use super::project::{now_unix, write_atomic, Project, ProjectState, SourceModel,
 
 /// The working-copy job (not an engine tool).
 pub const COPY_TOOL: &str = "studio_copy";
+pub const EXPORT_TOOL: &str = "studio_export";
 /// Replaced in every string argument by the run's output folder.
 pub const OUT: &str = "{out}";
 const PARAMS: &str = "params.json";
@@ -27,7 +28,13 @@ const STATUS: &str = "status.json";
 const LOCK: &str = "project.lock";
 
 /// Tools that rewrite their `model` in place: only a working copy may be given.
-const IN_PLACE: [&str; 3] = ["surgeon_apply", "surgeon_lora", "surgeon_restore"];
+const IN_PLACE: [&str; 5] = [
+    "surgeon_apply",
+    "surgeon_lora",
+    "surgeon_restore",
+    "surgeon_checkpoint",
+    "surgeon_sweep",
+];
 /// Arguments a tool writes to: never inside the source model.
 const WRITE_KEYS: [&str; 7] = [
     "out",
@@ -111,7 +118,7 @@ impl StatusFile {
 pub fn is_heavy(spec: &JobSpec) -> bool {
     let light_tool = matches!(
         spec.tool.as_str(),
-        "surgeon_check" | "surgeon_inspect" | "surgeon_backends"
+        "surgeon_check" | "surgeon_inspect" | "surgeon_backends" | "surgeon_files"
     );
     let light_preview =
         spec.tool != "surgeon_pipeline" && super::estimate::is_preview(&spec.tool, &spec.args);
@@ -221,7 +228,8 @@ pub struct Manager {
     seq: u64,
     /// The worst end since the project last became `Running`.
     worst: Option<Transition>,
-    _lock: ProjectLock,
+    /// Shared with every job thread: the lock outlives a manager dropped mid-job.
+    lock: Arc<ProjectLock>,
 }
 
 impl Manager {
@@ -269,7 +277,7 @@ impl Manager {
             running: Vec::new(),
             seq: 0,
             worst: None,
-            _lock: lock,
+            lock: Arc::new(lock),
         })
     }
 
@@ -428,7 +436,7 @@ impl Manager {
     /// Why a job may not be submitted, if it may not: unknown tool, an in-place tool on
     /// anything but a working copy, an output inside the source model, a pipeline budget.
     pub fn check(&self, spec: &JobSpec) -> Result<(), String> {
-        if spec.tool != COPY_TOOL
+        if ![COPY_TOOL, EXPORT_TOOL].contains(&spec.tool.as_str())
             && !weight_surgeon::mcp::tool_definitions()
                 .as_array()
                 .is_some_and(|tools| tools.iter().any(|t| t["name"] == spec.tool.as_str()))
@@ -445,7 +453,8 @@ impl Manager {
         let resolve = |v: &Value| v.as_str().map(|s| absolute(&self.project.dir, s));
         let in_place = IN_PLACE.contains(&spec.tool.as_str())
             && args["dry_run"] != true
-            && (spec.tool != "surgeon_lora" || args["mode"] == "merge");
+            && (spec.tool != "surgeon_lora" || args["mode"] == "merge")
+            && (spec.tool != "surgeon_checkpoint" || args["action"] != "list");
         if in_place {
             let copies = canonical(&self.project.copies_dir());
             let model = resolve(&args["model"]).map(|m| canonical(&m));
@@ -519,7 +528,10 @@ impl Manager {
         let exec = Arc::clone(&self.exec);
         let wake = Arc::clone(&self.wake);
         let spec = q.spec.clone();
+        // The thread is detached: it keeps the project locked until it stops writing there.
+        let lock = Arc::clone(&self.lock);
         std::thread::spawn(move || {
+            let _lock = lock;
             let source = ctx
                 .source
                 .as_ref()
@@ -591,6 +603,7 @@ impl Manager {
             .as_str()
             .map(String::from)
             .or(run.stopped_by.clone());
+        e.elapsed_ms = Some(run.started.elapsed().as_millis() as u64);
         if let Err(err) = ledger::append(&self.project.ledger_path(), &e) {
             eprintln!("surgeon-gui : {err}");
         }
@@ -640,6 +653,7 @@ fn entry(
         exit_code: status.exit_code.unwrap_or(-1),
         result,
         error: status.note.clone(),
+        elapsed_ms: None,
     }
 }
 

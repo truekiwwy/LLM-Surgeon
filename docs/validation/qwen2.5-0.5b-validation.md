@@ -467,3 +467,88 @@ Job réel sur Qwen2.5-0.5B-Instruct, sans `--llama-cpp-dir` ni option de backend
 Les piliers `kl` et `logits` restent natifs (logits). La durée n'est pas estimée par `pipeline plan` pour
 un backend GPU (la calibration mesure le CPU), et le plan le dit. `hipfire` est reconnu et refusé avec un
 message qui renvoie vers `llama-server` : il cible Linux/ROCm et n'expose qu'un endpoint de chat.
+
+## 13. Addendum du 2026-11-20 : budget des refus, lots natifs automatiques, cache des références
+
+Branche `perf/native-speed-and-probe`. Intel Core i5-12400F (6 cœurs, 12 threads), 38 Go de RAM
+libre, Windows 11, binaire release. Modèles : `Qwen2.5-0.5B-Instruct` (d'origine) et
+`Qwen2.5-0.5B-Patched` (copie patchée, autres poids). Backend natif, glouton, f32.
+
+**Lots natifs.** `bench refusal`, `builtin:refusals` (18 prompts), 40 tokens, modèle d'origine.
+
+| `--batch-size` | `--threads` | Durée | Refus |
+| --- | --- | --- | --- |
+| 1 | 12 (défaut d'avant) | 57,8 s | 3/18 |
+| 1 | 6 | 56,5 s | 3/18 |
+| 8 | 12 | 16,2 s | 3/18 |
+| 8 | 6 | 14,5 s | 3/18 |
+| 16 | 6 | 11,9 s | 3/18 |
+| 18 | 6 | 11,2 s | 3/18 |
+| 18 | 12 | 12,1 s | 3/18 |
+
+Mêmes verdicts, prompt par prompt, dans les sept réglages. Sans `--batch-size`, le backend natif
+prend désormais des lots de 16 séquences au plus (moins si la moitié de la RAM libre après
+chargement ne tient pas leurs caches KV), un thread par cœur physique, et l'écrit sur une ligne
+`[INFO]`.
+
+**Budget des refus.** Défaut de `bench refusal --max-new-tokens` : 256 puis 40. Verdicts par prompt
+comparés sur les quatre jeux intégrés, avec les lots automatiques :
+
+| Modèle | Jeu | Refus à 256 | Refus à 40 | Verdicts différents | Durée 256 / 40 |
+| --- | --- | --- | --- | --- | --- |
+| origine | `refusals` (18) | 3 | 3 | 0 | 65,6 / 11,8 s |
+| origine | `general` (18) | 0 | 0 | 0 | 18,3 / 10,6 s |
+| origine | `logic` (16) | 0 | 0 | 0 | 50,2 / 14,2 s |
+| origine | `math` (18) | 0 | 0 | 0 | 72,3 / 18,1 s |
+| patchée | `refusals` (18) | 4 | 4 | 0 | 83,3 / 14,7 s |
+| patchée | `general` (18) | 0 | 0 | 0 | 26,5 / 12,5 s |
+| patchée | `logic` (16) | 0 | 0 | 0 | 68,4 / 16,2 s |
+| patchée | `math` (18) | 0 | 0 | 0 | 74,8 / 17,5 s |
+
+140 verdicts, aucun différent. Dans les réponses de 256 tokens, chaque marqueur trouvé commence
+entre le caractère 0 et le caractère 11 (« I'm sorry, but I can't assist with that. »,
+« Sorry, but I can't assist with that. »). Temps cumulé des seize runs : 457,9 s puis 114,5 s.
+Les piliers `safety` et `unblocking` du pipeline gardent 256 tokens : un job repris doit mesurer
+ses jeux Dev et Test de la même façon. Limite : 70 prompts et un seul modèle de 0,5B ; un modèle
+qui refuse après un préambule plus long serait mesuré à tort avec 40 tokens
+(`--max-new-tokens 256` reste possible).
+
+**dtype.** `bench dump` de `builtin:refusals` (742 positions) : 5,9 s en f32, 14,4 s en bf16. Le
+repli automatique en bf16, quand f32 ne tient pas dans la RAM libre au lancement, coûte donc environ
+2,5 fois le temps ; il reste en place, mais chaque chargement écrit le dtype, la RAM libre et le
+besoin, et un repli est un avertissement qui donne les deux chiffres.
+
+**Cache des références.** Copie patchée contre l'original, deux lancements identiques, cache vide
+au départ :
+
+| Commande | 1er lancement (miss) | 2e lancement (hit) | Référence miss / hit |
+| --- | --- | --- | --- |
+| `bench refusal --prompts builtin:refusals` (40 tokens) | 28,9 s | 14,9 s | 13,7 / 0,86 s |
+| `bench eval --dataset builtin:math --max-new-tokens 256` | 178,9 s | 99,8 s | 92,1 / 0,75 s |
+
+Le hit comprend le SHA-256 des fichiers du modèle d'origine (1,26 Go). Comparaisons appariées
+identiques entre les deux lancements.
+
+## 14. Addendum du 2026-11-20 : sonde de refus sans génération (`bench refusal-probe`)
+
+Même machine que la section 13, binaire release, `Qwen2.5-0.5B-Instruct`. Chaque ligne est un
+`bench refusal-probe --compare-generation` : la sonde, puis la génération complète des mêmes
+prompts par le même modèle chargé (`bench refusal`, 40 tokens, lots natifs automatiques).
+`dev_combined.json` : 65 prompts de `overrefusal-exp` (OR-Bench limites et AdvBench). Direction :
+`refusal_L16.safetensors` (couche 16, `resid_post`, last, d′ 4,29, seuil 6,161).
+
+| Méthode | Prompts | Sonde | Génération | Refus sonde / générés | Accord | r point-bisérial |
+| --- | --- | --- | --- | --- | --- | --- |
+| `first-token-prob` | `builtin:refusals` (18) | 4,3 s | 11,8 s | 2 / 3 | 17/18 | 0,84 |
+| `first-token-prob` | `dev_combined` (65) | 15,2 s | 26,3 s | 59 / 62 | 62/65 | 0,62 |
+| `direction-projection` | `builtin:refusals` (18) | 2,0 s | 12,2 s | 11 / 3 | 8/18 | 0,38 |
+| `direction-projection` | `dev_combined` (65) | 8,6 s | 30,6 s | 64 / 62 | 63/65 | 0,36 |
+
+La génération historique (un prompt à la fois, 256 tokens, 12 threads) prend 430,4 s sur
+`builtin:refusals` : la sonde `first-token-prob` va 100 fois plus vite qu'elle, mais seulement
+2,7 fois plus vite que la génération par lots de 40 tokens de la section 13 (la sonde passe les
+prompts un par un). Ses écarts sont tous des refus manqués (générés, non sondés), aucun faux refus.
+La direction, calibrée sur AdvBench contre des prompts neutres, classe 11 des 18 demandes
+légitimes « limites » de `builtin:refusals` comme des refus alors que le modèle n'en refuse que
+3 : elle mesure la nocivité perçue d'un prompt plus que le refus. Limites : un modèle de 0,5B, 83
+prompts dont 65 surtout refusés ; les seuils par défaut ne sont pas réglés.

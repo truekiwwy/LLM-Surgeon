@@ -16,9 +16,10 @@ use super::server::McpConfig;
 use crate::app::{
     core_apply_routed, core_autotune, core_bench_dump, core_bench_eval, core_bench_judge_eval,
     core_bench_judge_sample, core_bench_logits, core_bench_ppl, core_bench_refusal, core_check,
-    core_eval, core_extract_method, core_inspect, envelope_of, exit, AppDeps, ApplyRequest,
-    CoreResult, Outcome, ProgressSink,
+    core_eval, core_extract_method, core_extract_sweep, core_inspect, envelope_of, exit, AppDeps,
+    ApplyRequest, CoreResult, Outcome, ProgressSink,
 };
+use crate::backend::hipfire;
 use crate::bench;
 use crate::bench::calibration::{JudgeEvalRequest, SampleRequest};
 use crate::bench::dump::DumpRequest;
@@ -28,6 +29,7 @@ use crate::bench::markers::Markers;
 use crate::bench::ppl_runner::{PplBaseline, PplRequest};
 use crate::bench::prompt::Template;
 use crate::bench::refusal::RefusalRequest;
+use crate::bench::score::Backend;
 use crate::bench::score::EvalRequest;
 use crate::cli::{CheckArgs, EvalArgs, InspectArgs, SchemaKind};
 use crate::eval::{load_prompts, EvalPrompt};
@@ -35,7 +37,8 @@ use crate::extract::{
     self, ChatTemplate, DTypeChoice, ExtractRequest, MethodOptions, Pooling, Site,
     DEFAULT_LEACE_RCOND, DEFAULT_LEACE_SHRINKAGE,
 };
-use crate::patch::autotune::{parse_layer_range, AutotuneRequest, EvalSource, L2Reg};
+use crate::patch::autotune::{self, parse_layer_range, AutotuneRequest, EvalSource, L2Reg};
+use crate::patch::autotune_select::{self, SelectionRequest};
 use crate::patch::{LayerSelection, LayersField, PatchFile, Projection, ValidationIssue};
 use crate::plugin::{unknown_method_message, Registry, DEFAULT_METHOD};
 use crate::ui::Ui;
@@ -58,7 +61,6 @@ const TOOLS: [&str; 7] = [
 ];
 
 const DEFAULT_MAX_TENSORS: u32 = 500;
-const DEFAULT_MAX_NEW_TOKENS: u32 = 256;
 const DEFAULT_QUANT: &str = "Q4_K_M";
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -203,7 +205,7 @@ pub struct EvalToolArgs {
 }
 
 fn default_max_new_tokens() -> u32 {
-    DEFAULT_MAX_NEW_TOKENS
+    crate::eval::DEFAULT_MAX_NEW_TOKENS
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -246,6 +248,9 @@ pub struct ExtractToolArgs {
     #[serde(default)]
     pub site: Site,
     #[serde(default)]
+    #[schemars(
+        description = "Habillage des prompts : auto (défaut, le format déclaré par le modèle dans tokenizer_config.json, système compris ; texte brut s'il n'en déclare aucun), none pour le désactiver, ou chatml, llama3, inst, gemma."
+    )]
     pub chat_template: ChatTemplate,
     #[serde(default = "default_extract_max_tokens")]
     #[schemars(
@@ -296,6 +301,11 @@ pub struct ExtractToolArgs {
         description = "leace : fichier JSON dans un dossier autorisé, un label par prompt (les positifs puis les négatifs) : indice de classe entier, ou tableau de m nombres. Efface tous les labels à la fois ; a et b de <out>.leace.safetensors sont alors de forme [k, hidden], à passer tels quels à project_out."
     )]
     pub labels_file: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "Balayage de couches (remplace layer) : une seule passe avant par prompt, une direction par couche avec AUC, marge et d′ (data.layers), la meilleure couche (data.best_layer) en tenseur `direction` et chaque couche en `layers.<i>` dans out (comparables couche par couche au radar). mean_diff ou svd (PCA des différences appariées), rang 1 seulement."
+    )]
+    pub layers: Option<LayersField>,
 }
 
 /// `method` of `surgeon_extract`: an identifier of the built-in registry. Its schema lists
@@ -376,11 +386,11 @@ impl<'de> Deserialize<'de> for MethodId {
 }
 
 fn default_extract_layer() -> u32 {
-    20
+    extract::DEFAULT_LAYER as u32
 }
 
 fn default_extract_max_tokens() -> u32 {
-    512
+    extract::DEFAULT_MAX_TOKENS as u32
 }
 
 /// Draft-07 with every subschema inlined: many MCP clients mishandle `$ref`.
@@ -430,7 +440,13 @@ pub fn tool_definitions() -> Value {
         list.extend(super::tools_graph::definitions());
         list.extend(super::tools_backend::definitions());
         list.extend(super::tools_restore::definitions());
+        list.extend(super::tools_compose::definitions());
+        list.extend(super::tools_doctor::definitions());
+        list.extend(super::tools_files::definitions());
+        list.extend(super::tools_workspace::definitions());
         list.extend(super::tools_session::definitions());
+        list.extend(super::tools_trace::definitions());
+        list.extend(super::tools_checkpoint::definitions());
     }
     sorted(tools)
 }
@@ -475,14 +491,14 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_BENCH,
             "Mesure d'une chirurgie",
-            "Mesure l'effet d'une chirurgie, selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH ou un jeu intégré builtin:math|logic|general, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts ou builtin:refusals, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe), judge_sample et judge_eval (calibration du juge de refusal : échantillon stratifié à faire étiqueter par un humain, puis accord du juge avec ces étiquettes et fichier de calibration). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision ; en cas de régression, surgeon_restore.",
+            "Mesure l'effet d'une chirurgie ; eval, dump et refusal habillent les prompts avec le format de chat du modèle (chat_template, défaut auto). Selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH ou un jeu intégré builtin:math|logic|general, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts ou builtin:refusals, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe), refusal_probe (refus estimé sans générer, une passe avant par prompt : first-token-prob ou direction-projection ; réponse marquée is_heuristic: true et evidence_level heuristic_screening, à confirmer par le mode refusal ou eval, jamais une preuve finale), judge_sample et judge_eval (calibration du juge de refusal : échantillon stratifié à faire étiqueter par un humain, puis accord du juge avec ces étiquettes et fichier de calibration). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision ; en cas de régression, surgeon_restore.",
             schema_value::<BenchToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
         tool(
             TOOL_AUTOTUNE,
             "Réglage des coefficients par couche",
-            "Mesure en mémoire la réponse de la projection d'une couche de lecture sur le vecteur quand chaque couche candidate est décalée (différences finies, arrondi au dtype comme sur disque), ajuste les α par régression ridge (λ fixe ou LOOCV), valide en appliquant tous les α ensemble, et produit un patch.json compatible surgeon_apply (écrit seulement si out est fourni). Ne mesure pas les effets secondaires : utiliser surgeon_bench ensuite.",
+            "Mesure en mémoire la réponse de la projection d'une couche de lecture sur le vecteur quand chaque couche candidate est décalée (différences finies, arrondi au dtype comme sur disque), ajuste les α par régression ridge (λ fixe ou LOOCV), valide en appliquant tous les α ensemble, et produit un patch.json compatible surgeon_apply (écrit seulement si out est fourni). Unités : target_projection et les décalages rapportés sont des projections d'activation ; α est le coefficient de W ∓= α·v ; data.alphas[].delta_norm_ratio donne ‖ΔW‖_F / ‖W‖_F par couche, borné par max_delta_norm_ratio. Le patch ne contient que des décalages additifs de rang 1 (operation subtract) sur la seule projection proj : ce n'est pas une ablation. Pour retirer une direction (refus excessifs), utiliser surgeon_apply avec operation project_out sur o_proj et down_proj. Ne mesure pas les effets secondaires : utiliser surgeon_bench ensuite.",
             schema_value::<AutotuneToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
@@ -512,7 +528,13 @@ pub(crate) fn is_known(name: &str) -> bool {
         || super::tools_graph::NAMES.contains(&name)
         || super::tools_backend::NAMES.contains(&name)
         || super::tools_restore::NAMES.contains(&name)
+        || super::tools_compose::NAMES.contains(&name)
+        || super::tools_doctor::NAMES.contains(&name)
+        || super::tools_files::NAMES.contains(&name)
+        || super::tools_workspace::NAMES.contains(&name)
         || super::tools_session::NAMES.contains(&name)
+        || super::tools_trace::NAMES.contains(&name)
+        || super::tools_checkpoint::NAMES.contains(&name)
 }
 
 pub(crate) struct ToolContext<'a> {
@@ -522,6 +544,18 @@ pub(crate) struct ToolContext<'a> {
     /// The pipeline worker started by this server (stopped with it).
     pub pipeline: &'a super::tools_pipeline::PipelineJobs,
 }
+
+/// Tools that can rewrite a model's weights (or its rollback can): the weight cache is
+/// checked against the files after them, whatever their outcome.
+const WRITES_WEIGHTS: [&str; 7] = [
+    TOOL_APPLY,
+    super::tools_restore::TOOL_RESTORE,
+    super::tools_checkpoint::TOOL_CHECKPOINT,
+    super::tools_checkpoint::TOOL_SWEEP,
+    super::tools_p13::TOOL_LORA,
+    super::tools_pipeline::TOOL_PIPELINE,
+    super::tools_workspace::TOOL_WORKSPACE,
+];
 
 /// `tools/call` result for a known tool. Every failure here is a tool execution error
 /// (`isError: true`), never a JSON-RPC error: the agent reads it and can correct itself.
@@ -546,8 +580,21 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         super::tools_graph::TOOL_GRAPH => super::tools_graph::call(arguments, ctx),
         super::tools_backend::TOOL_BACKENDS => super::tools_backend::call(arguments, ctx),
         super::tools_restore::TOOL_RESTORE => super::tools_restore::call(arguments, ctx),
+        super::tools_compose::TOOL_COMPOSE => super::tools_compose::call(arguments, ctx),
+        super::tools_doctor::TOOL_DOCTOR => super::tools_doctor::call(arguments, ctx),
+        super::tools_files::TOOL_FILES => super::tools_files::call(arguments, ctx),
+        super::tools_workspace::TOOL_WORKSPACE => super::tools_workspace::call(arguments, ctx),
+        super::tools_trace::TOOL_CAUSAL_TRACE => super::tools_trace::call(arguments, ctx),
+        super::tools_checkpoint::TOOL_CHECKPOINT | super::tools_checkpoint::TOOL_SWEEP => {
+            super::tools_checkpoint::call(name, arguments, ctx)
+        }
         _ => ("extract", extract_direction(arguments, ctx)),
     };
+    if WRITES_WEIGHTS.contains(&name) {
+        if let Some(cache) = crate::extract::weight_cache::global() {
+            cache.revalidate();
+        }
+    }
     let mut outcome = result.unwrap_or_else(|failure| failure);
     if !outcome.is_ok() && ctx.deps.interrupted.load(Ordering::SeqCst) {
         outcome = outcome.with_kind("cancelled");
@@ -584,7 +631,7 @@ fn sandboxed(
 
 /// A read path that may name a built-in probe set (`builtin:<set>`), embedded in the
 /// binary: no file to sandbox then.
-fn readable_or_builtin(
+pub(super) fn readable_or_builtin(
     ctx: &ToolContext,
     argument: &str,
     path: &Path,
@@ -597,7 +644,7 @@ fn readable_or_builtin(
 }
 
 /// A path the tool only reads: the `--allow-read` roots (the source model) count too.
-fn readable(
+pub(super) fn readable(
     ctx: &ToolContext,
     argument: &str,
     path: &Path,
@@ -657,13 +704,13 @@ fn inspect(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
 }
 
 fn apply(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
-    if ctx.cfg.read_only {
+    let args: ApplyToolArgs = parse(arguments)?;
+    if ctx.cfg.read_only && !args.dry_run {
         return Err(invalid(
             "read_only",
-            "serveur lancé avec --read-only : surgeon_apply est désactivé",
+            "serveur lancé avec --read-only : surgeon_apply n'accepte que dry_run",
         ));
     }
-    let args: ApplyToolArgs = parse(arguments)?;
     let root = ctx.cfg.sandbox.base().to_path_buf();
     let model = sandboxed(ctx, "model", &args.model, &root)?;
     let base_dir = match &args.base_dir {
@@ -763,7 +810,8 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     }
     let args: ExtractToolArgs = parse(arguments)?;
     let root = ctx.cfg.sandbox.base().to_path_buf();
-    let model_dir = readable(ctx, "model", &args.model, &root)?;
+    let model_dir =
+        extract::model_folder(&readable(ctx, "model", &args.model, &root)?).to_path_buf();
     let pos_prompts = prompt_set(
         ctx,
         "pos",
@@ -810,7 +858,26 @@ fn extract_direction(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     };
     let params = extract::params_with_subspace(&options, args.rank.map(|r| r as usize), labels);
     let method = args.method.map_or(DEFAULT_METHOD.to_owned(), |m| m.0);
-    core_extract_method(&request, &method, &params, ctx.deps, &Ui::off(), ctx.sink)
+    let Some(layers) = &args.layers else {
+        return core_extract_method(&request, &method, &params, ctx.deps, &Ui::off(), ctx.sink);
+    };
+    let layers = layers
+        .to_selection()
+        .map_err(|e| invalid("invalid_arguments", format!("layers : {e}")))?;
+    let sweep = extract::SweepRequest {
+        extract: request,
+        layers,
+    };
+    core_extract_sweep(&sweep, &method, &params, ctx.deps, &Ui::off(), ctx.sink)
+}
+
+pub(super) fn trace_prompts(
+    ctx: &ToolContext,
+    set: &str,
+    inline: Option<Vec<String>>,
+    file: Option<&Path>,
+) -> Result<Vec<String>, Outcome> {
+    prompt_set(ctx, set, inline, file, ctx.cfg.sandbox.base())
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -857,11 +924,20 @@ pub struct AutotuneToolArgs {
     #[schemars(description = "λ > 0, ou \"auto\" (LOOCV sur 1e-6..1e2) ; défaut 1e-3.")]
     pub l2_reg: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Pas δ des différences finies, défaut 0.05.")]
+    #[schemars(
+        description = "Pas δ des différences finies, dans l'unité de α (coefficient de W ∓= α·v), défaut 0.05."
+    )]
     pub probe_alpha: Option<f64>,
     #[serde(default)]
-    #[schemars(description = "Écrêtage |α| ≤ alpha_max, défaut 1.")]
+    #[schemars(
+        description = "Écrêtage |α| ≤ alpha_max, défaut 1. α est le coefficient de W ∓= α·v, pas un décalage d'activation ni un pourcentage des poids."
+    )]
     pub alpha_max: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Borne par couche de ‖ΔW‖_F / ‖W‖_F (0.01 : 1 % de la norme), convertie en |α| pour chaque couche ; data.alphas[].delta_norm_ratio donne la valeur obtenue. Absent : pas de borne."
+    )]
+    pub max_delta_norm_ratio: Option<f64>,
     #[serde(default)]
     #[schemars(description = "Couches à |α| < min_alpha retirées, défaut 1e-4.")]
     pub min_alpha: Option<f64>,
@@ -881,6 +957,9 @@ pub struct AutotuneToolArgs {
     #[serde(default)]
     pub pooling: Option<Pooling>,
     #[serde(default)]
+    #[schemars(
+        description = "Habillage des prompts ; défaut : celui de l'extraction du vecteur (système compris). auto relit le modèle, none le désactive."
+    )]
     pub chat_template: Option<ChatTemplate>,
     #[serde(default)]
     #[schemars(
@@ -889,6 +968,43 @@ pub struct AutotuneToolArgs {
     pub out: Option<PathBuf>,
     #[serde(default)]
     pub overwrite: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Prompts que le modèle patché ne doit plus refuser (fichier ou builtin:refusals) : essaie les α du ridge à plusieurs échelles et écrit la plus petite dont les réponses générées atteignent target_refusal_rate. Sonde first-token-prob d'abord, génération complète (40 tokens, natif) des probe_top_k finalistes ; data.selection détaille sonde et génération."
+    )]
+    pub refusal_prompts: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "Avec refusal_prompts : taux de refus (0..1) à atteindre en génération, défaut 0.1."
+    )]
+    pub target_refusal_rate: Option<f64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Avec refusal_prompts : échelles c candidates des α, défaut [0.25, 0.5, 0.75, 1, 1.25, 1.5]."
+    )]
+    pub scales: Option<Vec<f64>>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "Avec refusal_prompts : candidats passés de la sonde à la génération complète, défaut 2."
+    )]
+    pub probe_top_k: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "Avec refusal_prompts : génère chaque candidat sans sonde préalable (défaut false)."
+    )]
+    pub no_probe_prefilter: Option<bool>,
+    #[serde(default)]
+    #[schemars(
+        description = "Avec refusal_prompts : jeu de capacités aussi généré sur les finalistes et la base, comme surgeon_bench mode eval (fichier ou builtin:math, builtin:logic, builtin:general)."
+    )]
+    pub retention_dataset: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "Avec retention_dataset : N premières questions, défaut 20."
+    )]
+    pub retention_limit: Option<u32>,
 }
 
 fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
@@ -902,7 +1018,7 @@ fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
     let root = ctx.cfg.sandbox.base().to_path_buf();
     let bad = |m: String| invalid("invalid_arguments", m);
     let request = AutotuneRequest {
-        model: readable(ctx, "model", &args.model, &root)?,
+        model: extract::model_folder(&readable(ctx, "model", &args.model, &root)?).to_path_buf(),
         vector: readable(ctx, "vector", &args.vector, &root)?,
         eval: match (&args.eval_dataset, args.eval_prompts) {
             (Some(path), None) => {
@@ -928,14 +1044,19 @@ fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         l2_reg: args
             .l2_reg
             .as_deref()
-            .unwrap_or("1e-3")
+            .unwrap_or(autotune::DEFAULT_L2_REG)
             .parse::<L2Reg>()
             .map_err(&bad)?,
-        probe_alpha: args.probe_alpha.unwrap_or(0.05),
-        alpha_max: args.alpha_max.unwrap_or(1.0),
-        min_alpha: args.min_alpha.unwrap_or(1e-4),
-        max_forwards: args.max_forwards.map_or(2000, |m| m as usize),
-        max_tokens: args.max_tokens.map_or(256, |m| m as usize),
+        probe_alpha: args.probe_alpha.unwrap_or(autotune::DEFAULT_PROBE_ALPHA),
+        alpha_max: args.alpha_max.unwrap_or(autotune::DEFAULT_ALPHA_MAX),
+        max_delta_norm_ratio: args.max_delta_norm_ratio,
+        min_alpha: args.min_alpha.unwrap_or(autotune::DEFAULT_MIN_ALPHA),
+        max_forwards: args
+            .max_forwards
+            .map_or(autotune::DEFAULT_MAX_FORWARDS, |m| m as usize),
+        max_tokens: args
+            .max_tokens
+            .map_or(autotune::DEFAULT_MAX_TOKENS, |m| m as usize),
         dtype: args.dtype,
         site: args.site,
         pooling: args.pooling,
@@ -946,6 +1067,47 @@ fn autotune(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             .map(|o| sandboxed(ctx, "out", o, &root))
             .transpose()?,
         overwrite: args.overwrite,
+        selection: match &args.refusal_prompts {
+            None => {
+                let orphan = args.target_refusal_rate.is_some()
+                    || args.scales.is_some()
+                    || args.probe_top_k.is_some()
+                    || args.no_probe_prefilter.is_some()
+                    || args.retention_dataset.is_some()
+                    || args.retention_limit.is_some();
+                if orphan {
+                    return Err(bad(
+                        "target_refusal_rate, scales, probe_top_k, no_probe_prefilter et retention_* demandent refusal_prompts".into(),
+                    ));
+                }
+                None
+            }
+            Some(prompts) => Some(SelectionRequest {
+                prompts: readable_or_builtin(ctx, "refusal_prompts", prompts, &root)?,
+                target_refusal_rate: args
+                    .target_refusal_rate
+                    .unwrap_or(autotune_select::DEFAULT_TARGET_REFUSAL_RATE),
+                scales: args
+                    .scales
+                    .unwrap_or_else(|| autotune_select::DEFAULT_SCALES.to_vec()),
+                top_k: args
+                    .probe_top_k
+                    .map_or(autotune_select::DEFAULT_TOP_K, |k| k as usize),
+                prefilter: !args.no_probe_prefilter.unwrap_or(false),
+                retention: args
+                    .retention_dataset
+                    .as_ref()
+                    .map(|d| readable_or_builtin(ctx, "retention_dataset", d, &root))
+                    .transpose()?
+                    .map(|d| {
+                        let limit = args
+                            .retention_limit
+                            .map_or(autotune_select::DEFAULT_RETENTION_LIMIT, |n| n as usize);
+                        (d, limit)
+                    }),
+                ref_cache: crate::bench::ref_cache::RefCache::from_env(),
+            }),
+        },
     };
     core_autotune(&request, ctx.deps, &Ui::off(), ctx.sink)
 }
@@ -1006,7 +1168,7 @@ fn normalize_prompts(mut prompts: Vec<EvalPrompt>) -> Result<Vec<EvalPrompt>, Ou
 pub enum BenchMode {
     /// Compare deux dumps de logits (before, after).
     Logits,
-    /// Perplexité via llama-perplexity (model, text).
+    /// Perplexité via llama-perplexity, ou le moteur natif en f64 avec backend native (model, text).
     Ppl,
     /// Pass@1 exact match glouton sur un dataset (model, dataset).
     Eval,
@@ -1014,6 +1176,8 @@ pub enum BenchMode {
     Dump,
     /// Taux de refus d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, génération native (model, prompts).
     Refusal,
+    /// Refus estimé sans générer, une passe avant par prompt (model, prompts) : heuristique d'exploration, jamais une preuve.
+    RefusalProbe,
     /// Échantillon stratifié d'un run refusal à étiqueter à la main (responses, prompts, out).
     JudgeSample,
     /// Juge LLM confronté aux étiquettes humaines, fichier de calibration en option (labels, judge_model).
@@ -1025,7 +1189,7 @@ pub enum BenchMode {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Arguments de surgeon_bench : mode, puis les champs de ce mode (logits : before, after ; ppl : model, text ; eval : model, dataset ; dump : model, prompts, out ; refusal : model, prompts ; judge_sample : responses, prompts, out ; judge_eval : labels, judge_model)."
+    description = "Arguments de surgeon_bench : mode, puis les champs de ce mode (logits : before, after ; ppl : model, text ; eval : model, dataset ; dump : model, prompts, out ; refusal : model, prompts ; refusal_probe : model, prompts ; judge_sample : responses, prompts, out ; judge_eval : labels, judge_model)."
 )]
 pub struct BenchToolArgs {
     pub mode: BenchMode,
@@ -1062,11 +1226,13 @@ pub struct BenchToolArgs {
     pub fail_on_warn: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "ppl, eval : .gguf ou dossier SafeTensors (converti en GGUF temporaire, sauf eval avec backend native) ; dump, refusal : dossier Qwen2, Llama/Mistral ou Qwen3."
+        description = "ppl, eval : .gguf ou dossier SafeTensors (converti en GGUF temporaire, sauf avec backend native qui lit le dossier) ; dump, refusal : dossier Qwen2, Llama/Mistral ou Qwen3."
     )]
     pub model: Option<PathBuf>,
     #[serde(default)]
-    #[schemars(description = "ppl : fichier texte évalué.")]
+    #[schemars(
+        description = "ppl : fichier texte évalué, ou builtin:wikitext (extrait WikiText-2 intégré, backend native)."
+    )]
     pub text: Option<PathBuf>,
     #[serde(default)]
     #[schemars(description = "ppl, eval, refusal : modèle de référence, mesuré en premier.")]
@@ -1086,8 +1252,17 @@ pub struct BenchToolArgs {
     )]
     pub ctx: Option<u32>,
     #[serde(default)]
-    #[schemars(range(min = 1), description = "ppl : --chunks.")]
+    #[schemars(
+        range(min = 1),
+        description = "ppl : --chunks de llama-perplexity, ou nombre maximal de fenêtres en native."
+    )]
     pub chunks: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1),
+        description = "ppl en native : pas entre deux fenêtres de ctx tokens (défaut ctx / 2, au plus ctx) ; chaque token est noté une fois."
+    )]
+    pub stride: Option<u32>,
     #[serde(default)]
     #[schemars(
         range(min = 1),
@@ -1162,17 +1337,19 @@ pub struct BenchToolArgs {
     #[serde(default)]
     #[schemars(
         range(min = 1),
-        description = "eval : N premières entrées dans l'ordre du fichier (défaut 50)."
+        description = "eval : N premières entrées dans l'ordre du fichier (défaut 50) ; refusal : N premiers prompts dans l'ordre du fichier (défaut : tous), taux et intervalle calculés sur ces N."
     )]
     pub limit: Option<u32>,
     #[serde(default)]
     #[schemars(
         range(min = 1),
-        description = "eval : tokens générés au plus par question (défaut 512) ; refusal : par prompt (défaut 256)."
+        description = "eval : tokens générés au plus par question (défaut 512) ; refusal : par prompt (défaut 40). Réduire fausse la mesure : réponses coupées avant la réponse finale ou le refus."
     )]
     pub max_new_tokens: Option<u32>,
     #[serde(default)]
-    #[schemars(description = "eval : gabarit contenant {question} (texte, jamais un chemin).")]
+    #[schemars(
+        description = "eval : gabarit contenant {question} (texte, jamais un chemin), ensuite habillé par chat_template."
+    )]
     pub prompt_template: Option<String>,
     #[serde(default)]
     pub format: Option<crate::bench::dataset::DatasetFormat>,
@@ -1181,12 +1358,12 @@ pub struct BenchToolArgs {
     pub min_accuracy: Option<f64>,
     #[serde(default)]
     #[schemars(
-        description = "eval : llama (défaut, llama.cpp sur un GGUF), llama-completion (idem), llama-server (serveur local, GPU selon le build) ou native (Rust pur sur un dossier Qwen2, Llama/Mistral ou Qwen3) ; refusal : native (défaut), llama-server ou llama-completion."
+        description = "eval : llama (défaut, llama.cpp sur un GGUF), llama-completion (idem), llama-server (serveur local, GPU selon le build) ou native (Rust pur sur un dossier Qwen2, Llama/Mistral ou Qwen3) ; refusal : native (défaut), llama-server ou llama-completion ; ppl : llama (défaut, llama-perplexity) ou native (passe avant Rust par fenêtres glissantes, log-softmax en f64, lecture seule)."
     )]
     pub backend: Option<crate::bench::score::Backend>,
     #[serde(default)]
     #[schemars(
-        description = "refusal : gabarit appliqué à chaque prompt, chatml (défaut) ou none."
+        description = "eval, dump, refusal : habillage de chaque prompt. auto (défaut) suit le format déclaré par le modèle (tokenizer_config.json, chat_template.jinja ou GGUF), système compris ; s'il n'en déclare aucun : texte brut, ou ChatML pour refusal. none le désactive ; chatml, llama3, inst et gemma l'imposent. Un prompt déjà habillé n'est jamais habillé deux fois."
     )]
     pub chat_template: Option<ChatTemplate>,
     #[serde(default)]
@@ -1278,6 +1455,21 @@ pub struct BenchToolArgs {
     pub markers_file: Option<PathBuf>,
     #[serde(default)]
     #[schemars(
+        description = "refusal_probe : first-token-prob (défaut : probabilité que le premier token de réponse ouvre un refus) ou direction-projection (projection du flux résiduel sur direction_path, contre son seuil calibré)."
+    )]
+    pub probe_method: Option<crate::bench::refusal::RefusalProbeMode>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal_probe en direction-projection : fichier de direction de surgeon_extract (resid_post), avec son .stats.json."
+    )]
+    pub direction_path: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "refusal_probe : seuil de décision du score (défaut 0.5 en first-token-prob, le seuil calibré de la direction en direction-projection)."
+    )]
+    pub threshold: Option<f64>,
+    #[serde(default)]
+    #[schemars(
         description = "judge_sample : sortie JSON (enveloppe ou data) d'un surgeon_bench mode refusal."
     )]
     pub responses: Option<PathBuf>,
@@ -1295,7 +1487,17 @@ pub struct BenchToolArgs {
 }
 
 /// (mode, required fields, optional fields).
-const BENCH_FIELDS: [(&str, &[&str], &[&str]); 7] = [
+pub(super) const BENCH_FIELDS: [(&str, &[&str], &[&str]); 8] = [
+    (
+        "refusal-probe",
+        &["model", "prompts"],
+        &[
+            "probe_method",
+            "direction_path",
+            "threshold",
+            "chat_template",
+        ],
+    ),
     (
         "judge-sample",
         &["responses", "prompts", "out"],
@@ -1344,6 +1546,8 @@ const BENCH_FIELDS: [(&str, &[&str], &[&str]); 7] = [
             "warn_delta",
             "timeout_secs",
             "fail_on_warn",
+            "backend",
+            "stride",
         ],
     ),
     (
@@ -1354,6 +1558,7 @@ const BENCH_FIELDS: [(&str, &[&str], &[&str]); 7] = [
             "limit",
             "max_new_tokens",
             "prompt_template",
+            "chat_template",
             "format",
             "llama_cpp_dir",
             "timeout_secs",
@@ -1379,6 +1584,7 @@ const BENCH_FIELDS: [(&str, &[&str], &[&str]); 7] = [
         &["model", "prompts"],
         &[
             "baseline_model",
+            "limit",
             "max_new_tokens",
             "chat_template",
             "judge",
@@ -1415,6 +1621,7 @@ const BENCH_FIELDS: [(&str, &[&str], &[&str]); 7] = [
         "dump",
         &["model", "prompts", "out"],
         &[
+            "chat_template",
             "dtype",
             "out_dtype",
             "max_tokens",
@@ -1447,25 +1654,79 @@ fn generation(args: &BenchToolArgs) -> crate::bench::generation::GenOptions {
         ctx_size: args.ctx,
         gguf_dtype: Default::default(),
         gpu_api: None,
+        // Never over MCP: an agent cannot vouch for hipfire's cache.
+        allow_stale_hipfire: false,
+        batch_auto: args.batch_size.is_none(),
     }
 }
 
-/// The backend and generation options of an eval or refusal call: the arguments over the
-/// operator's user configuration (the agent never names a binary), as the CLI resolves them.
+/// The backend of `eval` and of `refusal` when neither the call nor the user configuration
+/// names one.
+pub(super) const EVAL_BACKEND: Backend = Backend::Llama;
+pub(super) const REFUSAL_BACKEND: Backend = Backend::Native;
+
+/// The start of the warning of a bench taken off hipfire by [`bench_backend`].
+pub const HIPFIRE_SET_ASIDE: &str = "backend hipfire écarté : la cible est une copie de \
+     travail, et hipfire sert le cache quantifié enregistré sous son nom, pas ses poids \
+     modifiés ; mesure faite sur native";
+
+/// The backend an eval or refusal of `models` runs on, `resolved` being the call's choice
+/// over the user configuration, through [`hipfire::validate_hipfire_target`]: a SafeTensors
+/// working copy refused by hipfire runs on native instead, with the warning saying why; a
+/// GGUF one (native cannot read it) is refused. An agent has no `--allow-stale-hipfire`.
+pub fn bench_backend(
+    resolved: Option<Backend>,
+    default: Backend,
+    models: &[&Path],
+) -> Result<(Backend, Option<String>), String> {
+    let backend = resolved.unwrap_or(default);
+    if backend != Backend::Hipfire {
+        return Ok((backend, None));
+    }
+    for model in models {
+        if let Err(reason) =
+            hipfire::validate_hipfire_target(model, hipfire::is_working_copy(model), false)
+        {
+            if crate::eval::is_gguf(model) {
+                return Err(reason);
+            }
+            let warning = format!("{HIPFIRE_SET_ASIDE} ({})", model.display());
+            return Ok((Backend::Native, Some(warning)));
+        }
+    }
+    Ok((backend, None))
+}
+
+/// The warning of a bench that left hipfire first among its warnings, failed or not.
+fn set_aside(result: CoreResult, warning: Option<String>) -> CoreResult {
+    let warn = |mut outcome: Outcome| {
+        if let Some(w) = &warning {
+            outcome.warnings.insert(0, w.clone());
+        }
+        outcome
+    };
+    result.map(warn).map_err(warn)
+}
+
+/// The backend and generation options of an eval or refusal call on `models` (resolved
+/// paths): the arguments over the operator's user configuration (the agent never names a
+/// binary), as the CLI resolves them, then [`bench_backend`], whose warning comes last (the
+/// server also writes it to stderr).
 fn effective_generation(
     args: &BenchToolArgs,
     user: &Result<crate::backend::BackendConfig, String>,
-    default: crate::bench::score::Backend,
+    default: Backend,
     llama_cpp_dir: Option<&Path>,
+    models: &[&Path],
 ) -> Result<
     (
-        crate::bench::score::Backend,
+        Backend,
         crate::bench::generation::GenOptions,
         crate::backend::BackendConfig,
+        Option<String>,
     ),
     Outcome,
 > {
-    use crate::bench::score::Backend;
     let user = user
         .clone()
         .map_err(|e| invalid("invalid_input", format!("configuration utilisateur : {e}")))?;
@@ -1476,7 +1737,8 @@ fn effective_generation(
         ..Default::default()
     };
     let effective = crate::backend::resolve(top, &user);
-    let backend = effective.backend.unwrap_or(default);
+    let (backend, set_aside) = bench_backend(effective.backend, default, models)
+        .map_err(|e| invalid("invalid_input", e))?;
     let mut options = generation(args);
     options.gpu_layers = effective.gpu_layers;
     options.batch_size = effective.batch_size.unwrap_or(options.batch_size);
@@ -1489,16 +1751,17 @@ fn effective_generation(
         llama_cpp_dir: llama_cpp_dir.map(Path::to_path_buf),
         ..effective
     };
-    Ok((backend, options, engines))
+    Ok((backend, options, engines, set_aside))
 }
 
-fn bench_command(arguments: &Value) -> &'static str {
+pub(super) fn bench_command(arguments: &Value) -> &'static str {
     match arguments.get("mode").and_then(Value::as_str) {
         Some("logits") => "bench logits",
         Some("ppl") => "bench ppl",
         Some("eval") => "bench eval",
         Some("dump") => "bench dump",
         Some("refusal") => "bench refusal",
+        Some("refusal_probe") => "bench refusal-probe",
         Some("judge_sample") => "bench judge-sample",
         Some("judge_eval") => "bench judge-eval",
         _ => "bench",
@@ -1655,7 +1918,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             };
             let req = PplRequest {
                 model: path(ctx, "model", &args.model)?,
-                text: path(ctx, "text", &args.text)?,
+                text: source(ctx, "text", &args.text)?,
                 baseline,
                 ctx: args.ctx.unwrap_or(bench::DEFAULT_CTX),
                 chunks: args.chunks,
@@ -1666,6 +1929,8 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 timeout,
                 // Never from an agent: no free-form argument reaches llama.cpp over MCP.
                 llama_args: Vec::new(),
+                backend: args.backend.unwrap_or_default(),
+                stride: args.stride,
             };
             core_bench_ppl(&req, fail_on_warn, ctx.deps, &ui, ctx.sink)
         }
@@ -1675,35 +1940,48 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 None => Ok(Template::default()),
             }
             .map_err(|e| invalid("invalid_arguments", e))?;
-            let (eval_backend, eval_generation, engines) = effective_generation(
+            let model = path(ctx, "model", &args.model)?;
+            let baseline_model = optional_path(ctx, "baseline_model", &args.baseline_model)?;
+            let models: Vec<&Path> = std::iter::once(&model)
+                .chain(&baseline_model)
+                .map(PathBuf::as_path)
+                .collect();
+            let (eval_backend, eval_generation, engines, hipfire_set_aside) = effective_generation(
                 &args,
                 &user,
-                crate::bench::score::Backend::Llama,
+                EVAL_BACKEND,
                 llama_cpp_dir.as_deref(),
+                &models,
             )?;
             let req = EvalRequest {
-                model: path(ctx, "model", &args.model)?,
+                model,
                 dataset: source(ctx, "dataset", &args.dataset)?,
                 backend: eval_backend,
-                baseline_model: optional_path(ctx, "baseline_model", &args.baseline_model)?,
+                baseline_model,
                 limit: args.limit.map_or(bench::DEFAULT_LIMIT, |l| l as usize),
                 max_new_tokens: args.max_new_tokens.unwrap_or(bench::DEFAULT_MAX_NEW_TOKENS),
                 template,
+                chat_template: args.chat_template.unwrap_or_default(),
                 format: args.format.unwrap_or_default(),
                 llama_cpp_dir,
                 timeout,
                 min_accuracy: args.min_accuracy,
                 generation: eval_generation,
+                ref_cache: bench::ref_cache::RefCache::from_env(),
             };
-            core_bench_eval(&req, &engines, fail_on_warn, ctx.deps, &ui, ctx.sink)
+            set_aside(
+                core_bench_eval(&req, &engines, fail_on_warn, ctx.deps, &ui, ctx.sink),
+                hipfire_set_aside,
+            )
         }
         BenchMode::Dump => {
             let prompts_file = source(ctx, "prompts", &args.prompts)?;
             let prompts = extract::load_prompt_texts(&prompts_file)
                 .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?;
             let req = DumpRequest {
-                model: path(ctx, "model", &args.model)?,
+                model: extract::model_folder(&path(ctx, "model", &args.model)?).to_path_buf(),
                 prompts,
+                chat_template: args.chat_template.unwrap_or_default(),
                 out: sandboxed(ctx, "out", &required("out", &args.out)?, &root)?,
                 dtype: args.dtype.unwrap_or_default(),
                 out_dtype: args.out_dtype.unwrap_or_default(),
@@ -1719,31 +1997,45 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         }
         BenchMode::Refusal => {
             let prompts_file = source(ctx, "prompts", &args.prompts)?;
-            let prompts = extract::load_prompt_texts(&prompts_file)
+            let mut prompts = extract::load_prompt_texts(&prompts_file)
                 .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?;
+            match args.limit {
+                Some(0) => return Err(invalid("invalid_arguments", "limit : au moins 1")),
+                Some(limit) => prompts.truncate(limit as usize),
+                None => {}
+            }
             let markers_file = optional_path(ctx, "markers_file", &args.markers_file)?;
             let markers = Markers::new(
                 args.marker_langs.as_deref().unwrap_or_default(),
                 markers_file.as_deref(),
             )
             .map_err(|e| invalid("invalid_arguments", e))?;
-            let (refusal_backend, refusal_generation, engines) = effective_generation(
-                &args,
-                &user,
-                crate::bench::score::Backend::Native,
-                llama_cpp_dir.as_deref(),
-            )?;
+            let model = path(ctx, "model", &args.model)?;
+            let baseline_model = optional_path(ctx, "baseline_model", &args.baseline_model)?;
+            let models: Vec<&Path> = std::iter::once(&model)
+                .chain(&baseline_model)
+                .map(PathBuf::as_path)
+                .collect();
+            let (refusal_backend, refusal_generation, engines, hipfire_set_aside) =
+                effective_generation(
+                    &args,
+                    &user,
+                    REFUSAL_BACKEND,
+                    llama_cpp_dir.as_deref(),
+                    &models,
+                )?;
             let req = RefusalRequest {
-                model: path(ctx, "model", &args.model)?,
+                model,
                 prompts,
-                baseline_model: optional_path(ctx, "baseline_model", &args.baseline_model)?,
+                baseline_model,
                 max_new_tokens: args
                     .max_new_tokens
                     .unwrap_or(bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS),
-                chat_template: args.chat_template.unwrap_or(ChatTemplate::Chatml),
+                chat_template: args.chat_template.unwrap_or_default(),
                 markers,
                 generation: refusal_generation,
                 backend: refusal_backend.label().into(),
+                ref_cache: bench::ref_cache::RefCache::from_env(),
             };
             // Every judge path is sandboxed; nothing an agent writes reaches llama.cpp but
             // the rubric text, the prompts and the answers.
@@ -1773,16 +2065,37 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                     min_kappa: args.min_kappa.unwrap_or(bench::DEFAULT_MIN_KAPPA),
                 }),
             };
-            core_bench_refusal(
-                &req,
-                refusal_backend,
-                judging.as_ref(),
-                &engines,
-                fail_on_warn,
-                ctx.deps,
-                &ui,
-                ctx.sink,
+            set_aside(
+                core_bench_refusal(
+                    &req,
+                    refusal_backend,
+                    judging.as_ref(),
+                    &engines,
+                    fail_on_warn,
+                    ctx.deps,
+                    &ui,
+                    ctx.sink,
+                ),
+                hipfire_set_aside,
             )
+        }
+        BenchMode::RefusalProbe => {
+            let prompts_file = source(ctx, "prompts", &args.prompts)?;
+            let req = crate::bench::refusal::ProbeRequest {
+                model: path(ctx, "model", &args.model)?,
+                prompts: extract::load_prompt_texts(&prompts_file)
+                    .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?,
+                mode: args.probe_method.unwrap_or_default(),
+                chat_template: args.chat_template.unwrap_or_default(),
+                prefixes: crate::bench::refusal::DEFAULT_PROBE_PREFIXES
+                    .map(String::from)
+                    .to_vec(),
+                vector: optional_path(ctx, "direction_path", &args.direction_path)?,
+                threshold: args.threshold,
+                // The full generation is mode refusal: the probe stays a probe here.
+                compare_generation: false,
+            };
+            crate::app::core_bench_refusal_probe(&req, ctx.deps, &ui, ctx.sink)
         }
         BenchMode::JudgeSample => {
             let prompts_file = source(ctx, "prompts", &args.prompts)?;

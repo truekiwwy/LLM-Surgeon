@@ -44,6 +44,9 @@ pub enum Command {
     NewCopy,
     ExportLedger,
     CheckUpdate,
+    /// The interference radar of the open project's direction files.
+    Radar,
+    Vector,
 }
 
 fn label(command: &Command) -> String {
@@ -61,6 +64,8 @@ fn label(command: &Command) -> String {
         Command::NewCopy => t("cmd.copy").into(),
         Command::ExportLedger => t("cmd.ledger").into(),
         Command::CheckUpdate => t("cmd.update").into(),
+        Command::Radar => t("cmd.radar").into(),
+        Command::Vector => t("cmd.vector").into(),
     }
 }
 
@@ -72,6 +77,8 @@ pub fn commands(query: &str) -> Vec<(Command, String)> {
         Command::Session(Mode::Scalping),
         Command::NewCopy,
         Command::ExportLedger,
+        Command::Radar,
+        Command::Vector,
         Command::ResetCamera,
         Command::Settings,
         Command::Backend,
@@ -101,7 +108,10 @@ pub fn commands(query: &str) -> Vec<(Command, String)> {
 
 fn run(ctx: &egui::Context, app: &mut SurgeonApp, command: Command) {
     match command {
-        Command::Tab(tab) => app.tab = tab,
+        Command::Tab(tab) => {
+            app.tab = tab;
+            app.live = false;
+        }
         Command::Session(mode) => {
             app.set_mode(mode);
             app.agents.new_conversation();
@@ -122,6 +132,11 @@ fn run(ctx: &egui::Context, app: &mut SurgeonApp, command: Command) {
             app.settings = Some(Section::Updates);
             app.desktop.check_update(ctx);
         }
+        Command::Radar => match &app.studio.manager {
+            Some(manager) => app.radar.open_on(&manager.project.dir.join("work")),
+            None => app.studio.message = Some((t("radar.no_project").into(), true)),
+        },
+        Command::Vector => super::views::vector::open(app),
     }
 }
 

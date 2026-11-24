@@ -7,14 +7,17 @@
 //! `1 - range_energy`, and every interval below is derived from it without assuming that
 //! the singular values are exact.
 //!
-//! Statistics (mean, M2, M3, M4, kurtosis) use Pébay's one-pass update, in row-major order,
-//! so they do not depend on the rayon thread count. Full-spectrum diagnostics are opt-in:
-//! the existing Gram SVD is quadratic in memory and refuses both dimensions above 1024,
-//! so they are skipped (with a warning) outside those limits.
+//! One linear pass reads every entry once for the norm, the counts, the moments and the
+//! optional difference to a baseline tensor. Moments are exact two-pass sums per block of
+//! [`BLOCK_ROWS`] rows, merged with Pébay's pairwise formulas in block order, so they do not
+//! depend on the rayon thread count. The exact spectrum is only computed when the smallest
+//! dimension is within 4 of `rank + oversample`, where the randomized range is nearly the
+//! whole space anyway.
 
 use std::sync::atomic::AtomicBool;
 
-use crate::linalg::gram::thin_svd;
+use rayon::prelude::*;
+
 use crate::linalg::jacobi::MAX_N;
 use crate::surgery::rsvd::{rsvd, Rsvd, RsvdParams};
 
@@ -22,8 +25,11 @@ use super::error::{self, GraphError, Result};
 use super::model::{Counters, ModelData, NodeSource, TensorRef};
 use super::GraphRole;
 
-/// Above this many elements the full-spectrum matrix is not materialised (f32 -> f64).
-pub const FULL_SPECTRUM_PRODUCT_CAP: usize = 4_000_000;
+const BLOCK_ROWS: usize = 64;
+/// Blocks read at once: bounds the per-block channel moments held in memory.
+const WAVE_BLOCKS: usize = 64;
+/// The exact spectrum is computed when `min(m, n) <= rank + oversample + EXACT_MARGIN`.
+pub const EXACT_MARGIN: usize = 4;
 
 /// The residual-stream direction basis of a node, row-major `rows x cols`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -187,19 +193,84 @@ struct Moments {
 }
 
 impl Moments {
-    fn push(&mut self, x: f64) {
-        let n1 = self.n as f64;
-        self.n += 1;
-        let n = self.n as f64;
-        let delta = x - self.mean;
-        let delta_n = delta / n;
-        let delta_n2 = delta_n * delta_n;
-        let term1 = delta * delta_n * n1;
-        self.m4 += term1 * delta_n2 * (n * n - 3.0 * n + 3.0) + 6.0 * delta_n2 * self.m2
-            - 4.0 * delta_n * self.m3;
-        self.m3 += term1 * delta_n * (n - 2.0) - 3.0 * delta_n * self.m2;
-        self.m2 += term1;
-        self.mean += delta_n;
+    fn of(values: &[f32]) -> Self {
+        if values.is_empty() {
+            return Self::default();
+        }
+        let mean = values.iter().map(|&x| f64::from(x)).sum::<f64>() / values.len() as f64;
+        let mut out = Self {
+            n: values.len() as u64,
+            mean,
+            ..Self::default()
+        };
+        for &x in values {
+            out.add_centered(f64::from(x) - mean);
+        }
+        out
+    }
+
+    fn add_centered(&mut self, d: f64) {
+        let d2 = d * d;
+        self.m2 += d2;
+        self.m3 += d2 * d;
+        self.m4 += d2 * d2;
+    }
+
+    /// Moments of each column of a row-major block.
+    fn columns(block: &[f32], cols: usize) -> Vec<Self> {
+        let rows = block.len() / cols;
+        let mut out = vec![Self::default(); cols];
+        if rows == 0 {
+            return out;
+        }
+        for row in block.chunks_exact(cols) {
+            for (acc, &x) in out.iter_mut().zip(row) {
+                acc.mean += f64::from(x);
+            }
+        }
+        for acc in &mut out {
+            acc.n = rows as u64;
+            acc.mean /= rows as f64;
+        }
+        for row in block.chunks_exact(cols) {
+            for (acc, &x) in out.iter_mut().zip(row) {
+                acc.add_centered(f64::from(x) - acc.mean);
+            }
+        }
+        out
+    }
+
+    /// Pébay's pairwise update: the moments of both samples together.
+    fn merge(&mut self, other: &Self) {
+        if other.n == 0 {
+            return;
+        }
+        if self.n == 0 {
+            *self = *other;
+            return;
+        }
+        let (na, nb) = (self.n as f64, other.n as f64);
+        let n = na + nb;
+        let d = other.mean - self.mean;
+        let (d2, d3, d4) = (d * d, d * d * d, d * d * d * d);
+        let m4 = self.m4
+            + other.m4
+            + d4 * na * nb * (na * na - na * nb + nb * nb) / (n * n * n)
+            + 6.0 * d2 * (na * na * other.m2 + nb * nb * self.m2) / (n * n)
+            + 4.0 * d * (na * other.m3 - nb * self.m3) / n;
+        let m3 = self.m3
+            + other.m3
+            + d3 * na * nb * (na - nb) / (n * n)
+            + 3.0 * d * (na * other.m2 - nb * self.m2) / n;
+        self.m2 += other.m2 + d2 * na * nb / n;
+        self.m3 = m3;
+        self.m4 = m4;
+        self.mean += d * nb / n;
+        self.n += other.n;
+    }
+
+    fn sum_squares(&self) -> f64 {
+        self.m2 + self.n as f64 * self.mean * self.mean
     }
 
     /// Population kurtosis (normal distribution: 3).
@@ -258,6 +329,9 @@ pub struct NodeMetrics {
     pub e_write: Option<f64>,
     pub e_read: Option<f64>,
     pub non_finite: u64,
+    /// Exact zeros among the finite entries.
+    #[serde(default)]
+    pub zeros: u64,
     pub singular_values: Vec<f32>,
 }
 
@@ -311,6 +385,7 @@ impl NodeAnalysis {
                 e_write: None,
                 e_read: None,
                 non_finite: 0,
+                zeros: 0,
                 singular_values: Vec::new(),
             },
             basis: Basis {
@@ -325,20 +400,20 @@ impl NodeAnalysis {
 
 pub struct AnalyzeOptions<'a> {
     pub params: RsvdParams,
-    pub full_spectrum_max_dim: usize,
     pub kurtosis_threshold: f64,
     pub vector: Option<&'a [f32]>,
     pub cancel: &'a AtomicBool,
     pub external: Option<&'a AtomicBool>,
 }
 
-/// Runs the randomized SVD, the streaming statistics and the optional full spectrum.
+/// The linear pass and the randomized SVD of one node. With `peer` (same shape, see
+/// [`same_weights`]), the pass also returns `||W - W_peer||_F`.
 pub fn analyze(
     model: &ModelData,
     tensor: &TensorRef,
-    hidden: usize,
     options: &AnalyzeOptions<'_>,
-) -> Result<NodeAnalysis> {
+    peer: Option<(&ModelData, &TensorRef)>,
+) -> Result<(NodeAnalysis, Option<f64>)> {
     let gamma = model.gamma_for(tensor);
     let source = NodeSource::new(
         model,
@@ -347,17 +422,51 @@ pub fn analyze(
         options.cancel,
         options.external,
     );
-    let counters = source.pre_scan()?;
+    let peer_gamma = peer.and_then(|(peer_model, peer_tensor)| peer_model.gamma_for(peer_tensor));
+    let peer_source = peer.map(|(peer_model, peer_tensor)| {
+        NodeSource::new(
+            peer_model,
+            peer_tensor,
+            peer_gamma.as_deref(),
+            options.cancel,
+            options.external,
+        )
+    });
+    let pass = linear_pass(
+        &source,
+        tensor,
+        options.kurtosis_threshold,
+        peer_source.as_ref(),
+    )?;
+    let diff = pass.diff2.map(f64::sqrt);
     let svd = rsvd(&source, &options.params, options.cancel).map_err(error::surgery)?;
     let (basis, energy_weights) = basis_of(tensor.role, &svd)?;
-    let stats = streaming_stats(&source, tensor, options.kurtosis_threshold)?;
-    let full = full_spectrum(&source, tensor, options, hidden, &svd)?;
-    let metrics = build_metrics(&svd, tensor, counters, stats, full, &basis, options.vector)?;
-    Ok(NodeAnalysis {
+    let full = exact_spectrum(&source, tensor, &options.params, options.cancel, &svd)?;
+    let metrics = build_metrics(&svd, tensor, pass, full, &basis, options.vector)?;
+    let analysis = NodeAnalysis {
         metrics,
         basis,
         energy_weights,
-    })
+    };
+    Ok((analysis, diff))
+}
+
+/// `Some(true)`: same shape, dtype, Gemma factor and stored bytes. `Some(false)`: same shape
+/// only. `None`: the shapes differ, so the two matrices cannot be subtracted.
+pub fn same_weights(
+    model: &ModelData,
+    tensor: &TensorRef,
+    peer_model: &ModelData,
+    peer_tensor: &TensorRef,
+) -> Result<Option<bool>> {
+    if tensor.shape != peer_tensor.shape {
+        return Ok(None);
+    }
+    Ok(Some(
+        tensor.dtype == peer_tensor.dtype
+            && model.gamma_for(tensor) == peer_model.gamma_for(peer_tensor)
+            && model.raw_bytes(tensor)? == peer_model.raw_bytes(peer_tensor)?,
+    ))
 }
 
 fn basis_of(role: GraphRole, svd: &Rsvd) -> Result<(Basis, Vec<f32>)> {
@@ -399,90 +508,139 @@ fn basis_of(role: GraphRole, svd: &Rsvd) -> Result<(Basis, Vec<f32>)> {
     ))
 }
 
-struct StreamingStats {
+struct LinearPass {
+    counters: Counters,
     global: Moments,
     channels: ChannelStats,
+    /// `||W - W_peer||_F^2`, with a peer only.
+    diff2: Option<f64>,
 }
 
-fn streaming_stats(
+struct BlockPass {
+    counters: Counters,
+    global: Moments,
+    /// One entry per column, or one per row of the block for writers.
+    channels: Vec<Moments>,
+    diff2: f64,
+}
+
+fn linear_pass(
     source: &NodeSource<'_>,
     tensor: &TensorRef,
     threshold: f64,
-) -> Result<StreamingStats> {
+    peer: Option<&NodeSource<'_>>,
+) -> Result<LinearPass> {
     let (m, n) = (tensor.m(), tensor.n());
     // Writers store residual channels as rows; readers (and embeddings) as columns.
-    let channels_are_columns = !matches!(tensor.role, GraphRole::AttnOut | GraphRole::MlpOut);
-    let channel_count = match channels_are_columns {
-        true => n,
-        false => m,
-    };
+    let by_columns = !matches!(tensor.role, GraphRole::AttnOut | GraphRole::MlpOut);
+    let mut counters = Counters::default();
     let mut global = Moments::default();
-    let mut rows = vec![0.0f32; n];
-    let mut norms = vec![0.0f64; channel_count];
-    let mut channel_moments = match channels_are_columns {
-        true => vec![Moments::default(); channel_count],
-        false => Vec::new(),
+    let mut channels = match by_columns {
+        true => vec![Moments::default(); n],
+        false => Vec::with_capacity(m),
     };
-    let mut channel_kurtosis = vec![0.0f64; channel_count];
-    if channels_are_columns {
-        for row in 0..m {
-            source.read_sanitized_row(row, &mut rows)?;
-            for (channel, &value) in rows.iter().enumerate() {
-                let value = f64::from(value);
-                global.push(value);
-                channel_moments[channel].push(value);
-                norms[channel] += value * value;
+    let mut diff2 = 0.0;
+    let blocks = m.div_ceil(BLOCK_ROWS);
+    for first in (0..blocks).step_by(WAVE_BLOCKS) {
+        let last = (first + WAVE_BLOCKS).min(blocks);
+        let parts = (first..last)
+            .into_par_iter()
+            .map(|b| {
+                let start = b * BLOCK_ROWS;
+                block_pass(
+                    source,
+                    peer,
+                    start..(start + BLOCK_ROWS).min(m),
+                    n,
+                    by_columns,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for part in parts {
+            counters.nan += part.counters.nan;
+            counters.inf += part.counters.inf;
+            counters.zeros += part.counters.zeros;
+            global.merge(&part.global);
+            diff2 += part.diff2;
+            match by_columns {
+                true => {
+                    for (acc, block) in channels.iter_mut().zip(&part.channels) {
+                        acc.merge(block);
+                    }
+                }
+                false => channels.extend(part.channels),
             }
         }
-        for (channel, moments) in channel_moments.iter().enumerate() {
-            channel_kurtosis[channel] = moments.kurtosis();
-        }
-    } else {
-        for row in 0..m {
-            source.read_sanitized_row(row, &mut rows)?;
-            let mut local = Moments::default();
-            let mut norm2 = 0.0;
-            for &value in &rows {
-                let value = f64::from(value);
-                global.push(value);
-                local.push(value);
-                norm2 += value * value;
-            }
-            norms[row] = norm2;
-            channel_kurtosis[row] = local.kurtosis();
+    }
+    Ok(LinearPass {
+        counters,
+        global,
+        channels: channel_stats(&channels, threshold),
+        diff2: peer.map(|_| diff2),
+    })
+}
+
+fn block_pass(
+    source: &NodeSource<'_>,
+    peer: Option<&NodeSource<'_>>,
+    rows: std::ops::Range<usize>,
+    n: usize,
+    by_columns: bool,
+) -> Result<BlockPass> {
+    let mut counters = Counters::default();
+    let mut block = vec![0.0f32; rows.len() * n];
+    for (row, out) in rows.clone().zip(block.chunks_exact_mut(n)) {
+        source.read_counted_row(row, out, &mut counters)?;
+    }
+    let mut diff2 = 0.0;
+    if let Some(peer) = peer {
+        let mut other = vec![0.0f32; n];
+        let mut ignored = Counters::default();
+        for (row, mine) in rows.zip(block.chunks_exact(n)) {
+            peer.read_counted_row(row, &mut other, &mut ignored)?;
+            diff2 += mine
+                .iter()
+                .zip(&other)
+                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+                .sum::<f64>();
         }
     }
-    for norm in &mut norms {
-        *norm = norm.sqrt();
-    }
+    let channels = match by_columns {
+        true => Moments::columns(&block, n),
+        false => block.chunks_exact(n).map(Moments::of).collect(),
+    };
+    Ok(BlockPass {
+        counters,
+        global: Moments::of(&block),
+        channels,
+        diff2,
+    })
+}
+
+fn channel_stats(channels: &[Moments], threshold: f64) -> ChannelStats {
+    let norms: Vec<f64> = channels.iter().map(|c| c.sum_squares().sqrt()).collect();
+    let kurtosis: Vec<f64> = channels.iter().map(Moments::kurtosis).collect();
     let mut sorted = norms.clone();
     sorted.sort_by(f64::total_cmp);
-    let norm_median = median(&sorted);
     let norm_argmax = norms
         .iter()
         .enumerate()
         .max_by(|(ia, a), (ib, b)| a.total_cmp(b).then_with(|| ib.cmp(ia)))
         .map(|(index, _)| index)
         .unwrap_or(0);
-    let norm_max = norms.get(norm_argmax).copied().unwrap_or(0.0);
-    let kurtosis_max = channel_kurtosis.iter().copied().fold(0.0f64, f64::max);
-    let outliers = channel_kurtosis
-        .iter()
-        .enumerate()
-        .filter(|(_, kurtosis)| **kurtosis > threshold)
-        .map(|(channel, _)| channel)
-        .collect();
-    Ok(StreamingStats {
-        global,
-        channels: ChannelStats {
-            count: channel_count,
-            norm_median,
-            norm_max,
-            norm_argmax,
-            kurtosis_max,
-            outliers,
-        },
-    })
+    ChannelStats {
+        count: channels.len(),
+        norm_median: median(&sorted),
+        norm_max: norms.get(norm_argmax).copied().unwrap_or(0.0),
+        norm_argmax,
+        kurtosis_max: kurtosis.iter().copied().fold(0.0f64, f64::max),
+        outliers: kurtosis
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| **k > threshold)
+            .map(|(channel, _)| channel)
+            .collect(),
+    }
 }
 
 fn median(sorted: &[f64]) -> f64 {
@@ -502,32 +660,34 @@ struct FullSpectrum {
     erank_energy: f64,
 }
 
-fn full_spectrum(
+/// Every singular value, from a randomized SVD whose range is the whole smaller side.
+fn exact_spectrum(
     source: &NodeSource<'_>,
     tensor: &TensorRef,
-    options: &AnalyzeOptions<'_>,
-    _hidden: usize,
+    params: &RsvdParams,
+    cancel: &AtomicBool,
     svd: &Rsvd,
 ) -> Result<Option<FullSpectrum>> {
-    let (m, n) = (tensor.m(), tensor.n());
-    let smallest = m.min(n);
-    if options.full_spectrum_max_dim == 0
-        || smallest > options.full_spectrum_max_dim
-        || smallest > MAX_N
-        || m.saturating_mul(n) > FULL_SPECTRUM_PRODUCT_CAP
-    {
+    let smallest = tensor.m().min(tensor.n());
+    let reach = params
+        .rank
+        .saturating_add(params.oversample)
+        .saturating_add(EXACT_MARGIN)
+        .min(MAX_N);
+    if smallest > reach {
         return Ok(None);
     }
-    let mut matrix = vec![0.0f64; m * n];
-    let mut row = vec![0.0f32; n];
-    for index in 0..m {
-        source.read_sanitized_row(index, &mut row)?;
-        for (target, &value) in matrix[index * n..(index + 1) * n].iter_mut().zip(&row) {
-            *target = f64::from(value);
-        }
-    }
-    let svd_full = thin_svd(&matrix, m, n)?;
-    let sigma = svd_full.sigma;
+    let all = RsvdParams {
+        rank: smallest,
+        oversample: 0,
+        ..*params
+    };
+    let sigma: Vec<f64> = rsvd(source, &all, cancel)
+        .map_err(error::surgery)?
+        .s
+        .iter()
+        .map(|&s| f64::from(s))
+        .collect();
     let sum: f64 = sigma.iter().sum();
     let erank_l1 = match sum > 0.0 {
         true => {
@@ -576,8 +736,7 @@ fn full_spectrum(
 fn build_metrics(
     svd: &Rsvd,
     tensor: &TensorRef,
-    counters: Counters,
-    stats: StreamingStats,
+    pass: LinearPass,
     full: Option<FullSpectrum>,
     basis: &Basis,
     vector: Option<&[f32]>,
@@ -633,7 +792,7 @@ fn build_metrics(
         rows: svd.m,
         cols: svd.n,
         rank,
-        frobenius_norm: svd.frob_norm,
+        frobenius_norm: pass.global.sum_squares().sqrt(),
         energy: svd.energy,
         residual_energy: (1.0 - svd.energy).clamp(0.0, 1.0),
         range_energy: svd.range_energy,
@@ -648,12 +807,13 @@ fn build_metrics(
         erank_energy_upper: erank_upper,
         erank_l1: full.map(|f| f.erank_l1),
         full_spectrum: full.is_some(),
-        kurtosis: stats.global.kurtosis(),
-        kurtosis_excess: stats.global.kurtosis() - 3.0,
-        channels: stats.channels,
+        kurtosis: pass.global.kurtosis(),
+        kurtosis_excess: pass.global.kurtosis() - 3.0,
+        channels: pass.channels,
         e_write,
         e_read,
-        non_finite: counters.total(),
+        non_finite: pass.counters.total(),
+        zeros: pass.counters.zeros,
         singular_values: svd.s.clone(),
     })
 }
@@ -768,16 +928,145 @@ mod tests {
     }
 
     #[test]
-    fn moment_accumulation_matches_direct_kurtosis() {
-        let values = [1.0, 2.0, 3.0, 4.0, 10.0, -2.0];
-        let mut moments = Moments::default();
-        for value in values {
-            moments.push(value);
+    fn merged_block_moments_match_direct_kurtosis() {
+        let values = [1.0f32, 2.0, 3.0, 4.0, 10.0, -2.0, 0.5];
+        let direct = |xs: &[f32]| {
+            let n = xs.len() as f64;
+            let mean = xs.iter().map(|&x| f64::from(x)).sum::<f64>() / n;
+            let m2: f64 = xs.iter().map(|&x| (f64::from(x) - mean).powi(2)).sum();
+            let m4: f64 = xs.iter().map(|&x| (f64::from(x) - mean).powi(4)).sum();
+            n * m4 / (m2 * m2)
+        };
+        for split in 0..=values.len() {
+            let mut merged = Moments::of(&values[..split]);
+            merged.merge(&Moments::of(&values[split..]));
+            assert!(
+                (merged.kurtosis() - direct(&values)).abs() < 1e-10,
+                "{split}"
+            );
+            let sum_squares: f64 = values.iter().map(|&x| f64::from(x).powi(2)).sum();
+            assert!((merged.sum_squares() - sum_squares).abs() < 1e-10);
         }
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let m2: f64 = values.iter().map(|x| (x - mean).powi(2)).sum();
-        let m4: f64 = values.iter().map(|x| (x - mean).powi(4)).sum();
-        let expected = values.len() as f64 * m4 / (m2 * m2);
-        assert!((moments.kurtosis() - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn column_moments_match_each_column_alone() {
+        let block = [1.0f32, -4.0, 2.0, 0.0, 3.0, 8.0, 7.0, 1.0];
+        let columns = Moments::columns(&block, 2);
+        for (j, column) in columns.iter().enumerate() {
+            let alone: Vec<f32> = block.iter().skip(j).step_by(2).copied().collect();
+            let expected = Moments::of(&alone);
+            assert_eq!(column.n, expected.n);
+            assert!((column.m2 - expected.m2).abs() < 1e-12);
+            assert!((column.m4 - expected.m4).abs() < 1e-12);
+        }
+    }
+
+    /// `H D`: a normalized Sylvester Hadamard matrix times a scattered diagonal, so the
+    /// singular values are exactly `spectrum` while every row is dense on the diagonal's
+    /// columns. The randomized SVD's Gaussian test matrix is rotation invariant, so its
+    /// accuracy here is the one it has on `U diag(spectrum) V^T` for any orthogonal `U`, `V`.
+    struct KnownSpectrum {
+        m: usize,
+        n: usize,
+        spectrum: Vec<f32>,
+    }
+
+    impl KnownSpectrum {
+        fn column(&self, t: usize) -> usize {
+            t * 2749 % self.n
+        }
+    }
+
+    impl crate::surgery::rsvd::RowSource for KnownSpectrum {
+        fn rows(&self) -> usize {
+            self.m
+        }
+        fn cols(&self) -> usize {
+            self.n
+        }
+        fn read_rows(&self, start: usize, out: &mut [f32]) -> crate::surgery::Result<usize> {
+            let rows = (out.len() / self.n).min(self.m - start);
+            let scale = 1.0 / (self.m as f32).sqrt();
+            for (i, row) in out.chunks_exact_mut(self.n).take(rows).enumerate() {
+                row.fill(0.0);
+                for (t, &s) in self.spectrum.iter().enumerate() {
+                    let sign = match ((start + i) & t).count_ones() % 2 {
+                        0 => 1.0,
+                        _ => -1.0,
+                    };
+                    row[self.column(t)] = sign * s * scale;
+                }
+            }
+            Ok(rows)
+        }
+    }
+
+    struct Measured {
+        elapsed: std::time::Duration,
+        sigma1_ratio: f64,
+        energy_ratio: f64,
+        energy_error: f64,
+    }
+
+    fn measure(spectrum: Vec<f32>) -> Measured {
+        let source = KnownSpectrum {
+            m: 2048,
+            n: 5632,
+            spectrum,
+        };
+        let params = RsvdParams {
+            rank: super::super::DEFAULT_RANK,
+            oversample: super::super::DEFAULT_OVERSAMPLE,
+            power_iters: super::super::DEFAULT_POWER_ITERS,
+            seed: 0,
+        };
+        let started = std::time::Instant::now();
+        let svd = rsvd(&source, &params, &AtomicBool::new(false)).unwrap();
+        let elapsed = started.elapsed();
+        let exact: Vec<f64> = source.spectrum.iter().map(|&s| f64::from(s)).collect();
+        let total: f64 = exact.iter().map(|s| s * s).sum();
+        let exact_energy = exact[..params.rank].iter().map(|s| s * s).sum::<f64>() / total;
+        let measured = Measured {
+            elapsed,
+            sigma1_ratio: f64::from(svd.s[0]) / exact[0],
+            energy_ratio: svd.energy / exact_energy,
+            energy_error: (svd.energy - exact_energy).abs(),
+        };
+        println!(
+            "2048x5632 rank {} k {} q {}: {:.2?}, sigma1 {:.6}, energy {:.6} (abs error {:.2e})",
+            params.rank,
+            params.rank + params.oversample,
+            params.power_iters,
+            measured.elapsed,
+            measured.sigma1_ratio,
+            measured.energy_ratio,
+            measured.energy_error
+        );
+        measured
+    }
+
+    /// `cargo test --release --lib spectral_block_benchmark -- --nocapture`
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "timing: run with --release")]
+    fn spectral_block_benchmark_2048x5632() {
+        let decaying = measure((0..2048).map(|t| (1.0 + t as f32).recip()).collect());
+        assert!((decaying.sigma1_ratio - 1.0).abs() < 1e-3);
+        assert!((decaying.energy_ratio - 1.0).abs() < 1e-3);
+        assert!(decaying.elapsed.as_millis() < 500, "{:?}", decaying.elapsed);
+
+        // A flat bulk under a few spikes, as in trained weights: sigma1 stays exact, the
+        // rank-r energy is underestimated by a few percent of itself with k = r + 8, q = 2.
+        let flat = measure(
+            (0..2048)
+                .map(|t| match t < 8 {
+                    true => 4.0 / (1.0 + t as f32),
+                    false => 1.0 - 0.5 * t as f32 / 2048.0,
+                })
+                .collect(),
+        );
+        assert!((flat.sigma1_ratio - 1.0).abs() < 1e-3);
+        assert!(flat.energy_error < 5e-3, "{}", flat.energy_error);
+        assert!(flat.elapsed.as_millis() < 500, "{:?}", flat.elapsed);
     }
 }

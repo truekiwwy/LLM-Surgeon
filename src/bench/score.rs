@@ -24,6 +24,7 @@ use super::error::{BenchError, Result};
 use super::extract_answer::{extract, number_re};
 use super::generation::{by_prompt, GenOptions};
 use super::prompt::Template;
+use super::ref_cache::{self, Lookup, RefCache};
 use super::report::{
     BenchEvalReport, BenchRun, EvalBaseline, EvalScore, EvalTiming, ItemResult, PairedComparison,
     Verdict,
@@ -33,6 +34,7 @@ use crate::eval::{
     ensure_gguf_as, truncate_chars, CommandRunner, EvalError, LoopDetector, LoopDetectorConfig,
     LoopVerdict, TextGenerator, LLAMA_DIR_REQUIRED,
 };
+use crate::extract::{ChatTemplate, PromptFormat};
 
 /// Fixed seed of the greedy decoding (greedy ignores it, set anyway for reproducibility).
 pub const SEED: u32 = 42;
@@ -254,6 +256,18 @@ pub fn judge(item: &Item, output: &str, loop_detected: bool) -> ItemResult {
     }
 }
 
+/// What the model receives for each question: the template, then its chat format.
+pub(crate) fn render_prompts(
+    items: &[Item],
+    template: &Template,
+    format: &PromptFormat,
+) -> Vec<String> {
+    items
+        .iter()
+        .map(|item| format.apply(&template.render(&item.question)))
+        .collect()
+}
+
 /// Every question in order. A timeout fails that question only; any other generator
 /// error (process crash, missing binary) stops the suite.
 ///
@@ -263,14 +277,14 @@ pub fn judge(item: &Item, output: &str, loop_detected: bool) -> ItemResult {
 pub fn run_suite(
     generator: &mut dyn TextGenerator,
     items: &[Item],
-    template: &Template,
+    prompts: &[String],
     max_new_tokens: u32,
     generation: &GenOptions,
     cancel: &AtomicBool,
     on_question: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<ItemResult>> {
     let samples = generation.samples;
-    let jobs = generation.jobs(items.iter().map(|item| template.render(&item.question)));
+    let jobs = generation.jobs(prompts.iter().cloned());
     let total = jobs.len();
     let mut detectors: Vec<LoopDetector> = (0..total)
         .map(|_| LoopDetector::new(LoopDetectorConfig::default()))
@@ -410,12 +424,38 @@ pub struct EvalRequest {
     pub limit: usize,
     pub max_new_tokens: u32,
     pub template: Template,
+    /// Wraps the rendered template; `auto` follows each evaluated model.
+    pub chat_template: ChatTemplate,
     pub format: DatasetFormat,
     pub llama_cpp_dir: Option<PathBuf>,
     /// Per question.
     pub timeout: Option<Duration>,
     pub min_accuracy: Option<f64>,
     pub generation: GenOptions,
+    /// Where the baseline's results are kept between runs; `None`: always generated.
+    pub ref_cache: Option<RefCache>,
+}
+
+/// What, besides the model files, changes the answers of an eval of `model`: the key of its
+/// baseline in the [`RefCache`].
+pub(crate) fn cache_inputs(
+    req: &EvalRequest,
+    model: &Path,
+    dataset_sha256: &str,
+) -> serde_json::Value {
+    let chat = req.chat_template.resolve(model, ChatTemplate::NoTemplate);
+    serde_json::json!({
+        "dataset_sha256": dataset_sha256,
+        "format": req.format.as_str(),
+        "limit": req.limit,
+        "prompt_template_sha256": req.template.sha256(),
+        "chat_template": chat.template.as_str(),
+        "chat_system": chat.system,
+        "max_new_tokens": req.max_new_tokens,
+        "timeout_ms": req.timeout.map(|t| t.as_millis() as u64),
+        "backend": req.backend.label(),
+        "generation": req.generation.answer_inputs(req.backend == Backend::Native),
+    })
 }
 
 /// Builds a generator for a model: a GGUF with [`Backend::Llama`] (the app's
@@ -478,10 +518,11 @@ pub fn run(
         };
         let mut generator = make_generator(gguf.as_ref().map_or(model, |g| g.path()))?;
         generator.configure(&req.generation.decoding(req.timeout));
+        let format = req.chat_template.resolve(model, ChatTemplate::NoTemplate);
         let results = run_suite(
             generator.as_mut(),
             &items,
-            &req.template,
+            &render_prompts(&items, &req.template, &format),
             req.max_new_tokens,
             &req.generation,
             cancel,
@@ -489,14 +530,37 @@ pub fn run(
         )?;
         Ok((results, started.elapsed().as_millis() as u64))
     };
+    // The reference is not patched between experiments: read back when nothing changed.
+    let mut cache_notes = Vec::new();
     let baseline = match &req.baseline_model {
-        Some(model) => Some((model.clone(), evaluate(model, "bench-eval-base")?)),
+        Some(model) => {
+            let started = Instant::now();
+            let key = match &req.ref_cache {
+                Some(_) => ref_cache::key(
+                    "eval",
+                    &ref_cache::model_sha256(model)?,
+                    cache_inputs(req, model, &dataset_sha256),
+                ),
+                None => String::new(),
+            };
+            let cache = req.ref_cache.as_ref();
+            let got = ref_cache::cached(cache, &key, "eval", model, || {
+                evaluate(model, "bench-eval-base")
+            })?;
+            let ms = match got.lookup {
+                Lookup::Hit => started.elapsed().as_millis() as u64,
+                Lookup::Miss => got.timing_ms,
+            };
+            cache_notes = got.notes;
+            let cache = cache.map(|_| got.lookup.as_str().to_owned());
+            Some((model.clone(), (got.items, ms), cache))
+        }
         None => None,
     };
     let (results, total_ms) = evaluate(&req.model, "bench-eval")?;
     let main = score(&results);
 
-    let mut warnings = Vec::new();
+    let mut warnings = cache_notes;
     let mut threshold_warnings = Vec::new();
     if main.n < SMALL_SAMPLE {
         warnings.push(format!(
@@ -526,33 +590,39 @@ pub fn run(
     let paired_cmp = baseline
         .as_ref()
         .filter(|_| samples == 1)
-        .map(|(_, (base, _))| paired(&results, base));
+        .map(|(_, (base, _), _)| paired(&results, base));
     let hits = |items: &[ItemResult]| by_prompt(items.iter().map(|i| i.correct), samples);
     let generation = (!req.generation.is_historical(req.backend == Backend::Llama)).then(|| {
         req.generation.report(
             req.backend.label(),
             Some(&hits(&results)),
-            baseline.as_ref().map(|(_, (b, _))| hits(b)).as_deref(),
+            baseline.as_ref().map(|(_, (b, _), _)| hits(b)).as_deref(),
         )
     });
+    let chat = req
+        .chat_template
+        .resolve(&req.model, ChatTemplate::NoTemplate);
     let report = BenchEvalReport {
         model: req.model.clone(),
         dataset: req.dataset.clone(),
         dataset_sha256,
         format: req.format.as_str().into(),
         prompt_template_sha256: req.template.sha256(),
+        chat_template: chat.family().map(str::to_owned),
+        chat_system: chat.system,
         max_new_tokens: req.max_new_tokens,
         seed: SEED,
         score: main,
         items: results,
         timing_ms: EvalTiming {
             total: total_ms,
-            baseline: baseline.as_ref().map(|(_, (_, ms))| *ms),
+            baseline: baseline.as_ref().map(|(_, (_, ms), _)| *ms),
         },
-        baseline: baseline.map(|(model, (items, _))| EvalBaseline {
+        baseline: baseline.map(|(model, (items, _), cache)| EvalBaseline {
             model,
             score: score(&items),
             items,
+            cache,
         }),
         paired: paired_cmp,
         min_accuracy: req.min_accuracy,
@@ -707,11 +777,13 @@ mod tests {
             limit: 50,
             max_new_tokens: 64,
             template: Template::default(),
+            chat_template: ChatTemplate::Auto,
             format: DatasetFormat::Auto,
             llama_cpp_dir: None,
             timeout: None,
             min_accuracy: None,
             generation: Default::default(),
+            ref_cache: None,
         };
         (dir, req)
     }
@@ -762,6 +834,17 @@ mod tests {
         let run = evaluate(&req, vec![after_replies()]).unwrap();
         assert_eq!(run.report.score.truncated, 0);
         assert!(!run.warnings.iter().any(|w| w.contains("max_new_tokens")));
+    }
+
+    #[test]
+    fn the_chat_format_wraps_the_rendered_template() {
+        let (_dir, req) = fixture();
+        let items = dataset::load(&req.dataset, req.format, 1).unwrap();
+        let template = Template::new("Q: {question}").unwrap();
+        assert_eq!(
+            render_prompts(&items, &template, &ChatTemplate::Chatml.format()),
+            ["<|im_start|>user\nQ: 2+3?<|im_end|>\n<|im_start|>assistant\n"]
+        );
     }
 
     #[test]
@@ -854,6 +937,63 @@ mod tests {
         };
         let again = evaluate(&req, vec![baseline, after_replies()]).unwrap();
         assert_eq!(json(&run), json(&again));
+    }
+
+    /// The flag raised while the second question generates (a closed MCP stdin, Ctrl-C): that
+    /// generation stops at its next token, no later question starts, and the run is a
+    /// cancellation, not a score.
+    #[test]
+    fn a_raised_flag_stops_the_suite_between_tokens_and_questions() {
+        struct Cancelling<'a> {
+            flag: &'a AtomicBool,
+            asked: &'a std::cell::Cell<usize>,
+        }
+        impl TextGenerator for Cancelling<'_> {
+            fn generate(
+                &mut self,
+                _prompt: &str,
+                _max_new_tokens: u32,
+                on_chunk: &mut dyn FnMut(&str) -> ControlFlow<()>,
+            ) -> crate::eval::Result<GenerationOutcome> {
+                self.asked.set(self.asked.get() + 1);
+                if self.asked.get() == 2 {
+                    self.flag.store(true, Ordering::SeqCst);
+                }
+                let mut text = String::new();
+                for token in ["#### ", "5", " and", " more"] {
+                    if on_chunk(token).is_break() {
+                        break;
+                    }
+                    text.push_str(token);
+                }
+                Ok(GenerationOutcome {
+                    text,
+                    stopped_early: false,
+                    truncated: false,
+                    duration_ms: 0,
+                })
+            }
+        }
+        let (_dir, req) = fixture();
+        let items = dataset::load(&req.dataset, req.format, req.limit).unwrap();
+        let prompts = render_prompts(&items, &req.template, &ChatTemplate::NoTemplate.format());
+        let flag = AtomicBool::new(false);
+        let asked = std::cell::Cell::new(0);
+        let mut generator = Cancelling {
+            flag: &flag,
+            asked: &asked,
+        };
+        let result = run_suite(
+            &mut generator,
+            &items,
+            &prompts,
+            64,
+            &GenOptions::default(),
+            &flag,
+            &mut |_, _| {},
+        );
+        assert!(matches!(result, Err(BenchError::Cancelled)), "{result:?}");
+        assert_eq!(asked.get(), 2, "no question after the flag");
     }
 
     #[test]

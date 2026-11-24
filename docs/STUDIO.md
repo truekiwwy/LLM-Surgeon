@@ -20,7 +20,7 @@ option `surgeon-gui --workspace <DOSSIER>`) :
 | `copies/<id>/` | Copies de travail, les seuls modèles que le studio écrit |
 | `chat/` | Conversations, actions et journal des preuves de l'agent ([AGENTS.md](AGENTS.md)) |
 | `ledger.jsonl` | Journal d'expériences, en ajout seul |
-| `project.lock` | PID du studio qui a ouvert le projet |
+| `project.lock` | PID du studio qui a ouvert le projet ; tenu aussi par chaque job en cours, jusqu'à la fin de son thread |
 
 Le nom de projet accepte 1 à 64 lettres, chiffres, `-`, `_` et `.`, sans point initial.
 
@@ -69,12 +69,20 @@ Transitions permises (toute autre est refusée) :
 Quand plusieurs jobs se terminent pendant que le projet est `En cours`, c'est la pire fin
 qui compte (échec, puis annulation, puis succès).
 
+Tant qu'un job tourne ou attend, le studio ne quitte pas le projet : ouvrir un autre projet,
+changer de dossier de projets (assistant, réglages, dossier déposé ou passé en argument) et
+ouvrir un projet qui vient d'être créé sont refusés avec « un job tourne : attendez ou
+annulez-le » (`Studio::can_switch`), dans la bannière ou la notification. Pendant la création
+d'un projet, ce refus vaut aussi. Le thread d'un job, détaché, garde `project.lock` jusqu'à ce
+qu'il ait fini d'écrire, même si la fenêtre se ferme entre-temps.
+
 ## 2. Copies de travail : garanties
 
 Le modèle d'origine n'est jamais écrit par le studio.
 
 1. Il n'est jamais passé à un outil qui écrit un modèle en place. `surgeon_apply` (hors
-   `dry_run: true`) et `surgeon_lora` en `mode: merge` exigent un `model` situé sous
+   `dry_run: true`), `surgeon_lora` en `mode: merge`, `surgeon_restore`,
+   `surgeon_checkpoint` (hors `list`) et `surgeon_sweep` exigent un `model` situé sous
    `copies/` du projet ; sinon le job est refusé avant d'être mis en file.
 2. Aucun argument de sortie (`out`, `out_dir`, `backup_dir`, `export_gguf`, `judge_cache`,
    `cache_dir`, `job_dir`) ne peut viser le modèle d'origine ou son dossier.
@@ -210,6 +218,87 @@ avec une seule écriture puis `sync`). Chaque entrée contient :
 
 `Exporter JSON` et `Exporter Markdown` écrivent `ledger.json` et `ledger.md` à la racine
 du projet.
+
+### Extraire un vecteur, couches causales
+
+Le bouton `Extraire un vecteur` du panneau Projet (et la palette, `Ctrl+K`) ouvre un
+dialogue qui lance, sur le modèle d'origine du projet (lu, jamais écrit), l'un de deux jobs
+du gestionnaire (`studio/vectors.rs`) :
+
+- **Balayage contrastif** : `surgeon_extract` avec `layers`, méthode `mean_diff` ou `svd`
+  (PCA des paires), écrit `work/<nom>.safetensors` : `direction` (meilleure couche) et
+  `layers.<i>` par couche, lisibles aussitôt par `surgeon_compose` et le radar d'interférence ;
+- **Traçage causal** : `surgeon_causal_trace` (`resid`, `attn` ou `mlp`), sans fichier.
+
+Les prompts s'écrivent un par ligne ; le dialogue refuse avant le job des ensembles vides,
+des paires inégales (traçage, `svd`), un nom hors `[A-Za-z0-9._-]` et une sélection de
+couches illisible. Le dernier traçage et le dernier balayage réussis du projet (ledger et
+`chat/mcp_runs.jsonl`, donc aussi ceux d'un agent) donnent les scores par couche : le Mode
+Live garde allumées les couches de la fenêtre causale, et l'Inspecteur affiche pour la
+couche du tenseur sélectionné le score causal, sa place dans la fenêtre, l'AUC et la marge.
+
+### Checkpoints et front de Pareto
+
+Le volet `Pareto` du panneau de droite de l'agent (à côté de `Résultats` et `Preuves`) lit
+`work/checkpoints/` du projet (`studio/checkpoints.rs`), relu seulement quand
+`heads.json` change :
+
+- l'arbre des checkpoints, l'état actuel de la copie marqué `actuel`, et l'empreinte disque
+  réelle (un fichier partagé par liens physiques compté une fois) ;
+- les checkpoints mesurés (gain en ordonnée, dérive en abscisse) et leur front non dominé ;
+- pour le checkpoint sélectionné : parent, SHA-256, taille propre, cible avant et après,
+  gain et dérive.
+
+`Restaurer ce checkpoint` lance le job `surgeon_checkpoint` `restore`. Une fois ce run
+réussi, le studio relance le dernier `surgeon_graph` et le dernier `surgeon_bench` réussis
+de cette copie avec leurs propres arguments : la vue 3D, qui suit le graphe le plus récent,
+et le banc Avant/Après du volet `Résultats` décrivent alors les poids restaurés.
+
+### Perplexité et export Ollama (volet Résultats)
+
+Un run `surgeon_bench` `ppl` affiche dans son titre « Perplexité <avant> → <après> · <Δ %> »
+(2 décimales, delta signé). Le point d'état est vert quand Δ <= +2 %, ambre jusqu'à +5 %,
+rouge au-dessus. Sans référence (`baseline_model`), seule la valeur est affichée.
+
+Un sélecteur de format se trouve à côté du bouton « Exporter vers Ollama » :
+
+| Format | Ce que fait l'export |
+| --- | --- |
+| `SafeTensors` (défaut) | Le Modelfile pointe sur le dossier de la copie de travail (`ollama create` le convertit). Pour un projet GGUF, sans copie SafeTensors, il pointe comme avant sur le `.gguf` le plus récent du projet. |
+| `GGUF Q8_0`, `GGUF Q4_K_M` | Le job `studio_export` quantifie la copie SafeTensors en `runs/<id>/out/<copie>-Q8_0.gguf` ou `<copie>-Q4_K_M.gguf`. |
+
+`studio_export` est un job interne du studio, pas un outil MCP (le nombre d'outils reste 23).
+Il prend la place du job lourd, affiche sa progression par tenseur et s'annule. Il quantifie en
+Rust (pas de llama.cpp ni de python), tenseur par tenseur depuis les shards mappés en mémoire ;
+la copie et l'origine ne sont que lues. Le fichier s'écrit dans `out.partial/` et n'est renommé
+qu'au succès : un échec ou une annulation ne laisse aucun fichier partiel. À la fin,
+`<projet>/Modelfile` est écrit avec ce nouveau `.gguf` (paramètres d'échantillonnage, contexte
+et stops lus depuis la copie, comme avant) et la commande
+`ollama create <nom> -f "<projet>/Modelfile"` s'affiche avec son bouton de copie.
+
+Il faut une copie SafeTensors (dossier avec `config.json`) d'une famille convertie nativement :
+Qwen2, Llama 2/3/3.1/3.2, Mistral, Gemma, Gemma 2, Phi-3. Sinon le panneau le dit.
+
+Quantification (`weight_surgeon::eval::quantize_safetensors`, le convertisseur de la conversion
+native SafeTensors vers GGUF) :
+
+- `Q8_0` : toutes les matrices en Q8_0 (`quantize_row_q8_0_ref`) ; `general.file_type` 7.
+- `Q4_K_M` : le mélange de types de llama-quantize ; Q6_K pour `output.weight` (ou
+  `token_embd.weight` quand la tête est liée), Q6_K pour `attn_v` et `ffn_down` sur le premier
+  et le dernier huitième des couches puis une couche sur trois entre les deux, Q5_K pour
+  `attn_qkv` fusionné de Phi-3, Q4_K ailleurs ; `general.file_type` 15.
+- Repli quand la longueur d'une ligne n'est pas un multiple de 256 : Q4_K devient Q5_0, Q5_K
+  devient Q5_1, Q6_K devient Q8_0 ; pas un multiple de 32 : F16. Les tenseurs à une dimension
+  (normes, biais) restent en F32.
+
+Limite : les K-quants utilisent un quantificateur min/max (échelles arrondies vers le haut),
+pas la recherche itérative d'échelle de llama-quantize, et aucune matrice d'importance.
+
+Mesuré sur Qwen2.5-0.5B-Instruct (extrait wikitext, ctx 512, 12 blocs, `llama-perplexity` sur
+CPU) : F16 17.07, Q8_0 17.18, Q4_K_M 17.50, contre 17.44 pour le Q4_K_M de llama-quantize
+depuis le même F16. Le fichier Q4_K_M a exactement la taille de celui de llama-quantize
+(397 807 232 octets), donc le même mélange de types. La quantification a pris environ 2 s pour
+ce modèle, en build release.
 
 ## 6. Graphe éphémère
 

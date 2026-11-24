@@ -1,25 +1,81 @@
 //! The results of the project's measuring runs, as the Results panel shows them: every
-//! `surgeon_bench`, `surgeon_graph`, `surgeon_extract` and `surgeon_autotune` run of the
-//! ledger (studio jobs) and of `chat/mcp_runs.jsonl` (CLI agents), newest first. A bench run
-//! is read from its report: dataset, score of the copy against the origin with their 95 %
-//! intervals, gained and lost items, and each item with its question when the set is known.
+//! `surgeon_bench`, `surgeon_graph`, `surgeon_extract`, `surgeon_autotune` and
+//! `surgeon_lora` run of the ledger (studio jobs) and of `chat/mcp_runs.jsonl` (CLI agents),
+//! newest first. A bench run is read from its report: dataset, score of the copy against the
+//! origin with their 95 % intervals, gained and lost items, and each item with its question
+//! when the set is known. A LoRA extraction gives its rank and the fidelity of its SVD.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use weight_surgeon::bench::{builtin, dataset};
 
+use super::jobs::{Budgets, JobSpec};
 use super::ledger::{Entry, Verdict};
 
 /// The tools whose runs the panel lists.
-pub const TOOLS: [&str; 4] = [
+pub const TOOLS: [&str; 5] = [
     "surgeon_bench",
     "surgeon_graph",
     "surgeon_extract",
     "surgeon_autotune",
+    "surgeon_lora",
 ];
+
+/// The ranks the Results panel offers for a LoRA extraction.
+pub const LORA_RANKS: [u32; 4] = [8, 16, 32, 64];
+
+/// The job that extracts the working copy `copy` against the origin `origin` as a rank-`rank`
+/// PEFT adapter, written in `out/lora-r<rank>/` of the project (created here) and replaced
+/// by the next extraction of that rank. The origin is only read.
+pub fn lora_job(project: &Path, origin: &Path, copy: &Path, rank: u32) -> Result<JobSpec, String> {
+    let out = project.join("out").join(format!("lora-r{rank}"));
+    std::fs::create_dir_all(&out).map_err(|e| format!("{} : {e}", out.display()))?;
+    Ok(JobSpec {
+        tool: "surgeon_lora".into(),
+        label: format!("LoRA r{rank}"),
+        args: serde_json::json!({"mode": "extract", "base": origin, "patched": copy,
+                                 "out": out, "rank": rank, "overwrite": true}),
+        priority: 0,
+        budgets: Budgets::default(),
+        resumed_from: None,
+        read_only: false,
+    })
+}
+
+/// What a LoRA extraction wrote.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lora {
+    pub rank: u64,
+    pub tensors: u64,
+    /// `1 − mean ‖ΔW − BA‖F / ‖ΔW‖F` over the tensors: how much of the difference the
+    /// adapter rebuilds.
+    pub fidelity: f64,
+    /// The tensor the rank fits worst, and its relative error.
+    pub worst: Option<(String, f64)>,
+    pub out: PathBuf,
+}
+
+/// `data.lora` of an extraction (a merge reports no error: `None`).
+fn lora(data: &Value) -> Option<Lora> {
+    let l = &data["lora"];
+    let worst = l["per_tensor"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| Some((t["name"].as_str()?.to_owned(), t["rel_error"].as_f64()?)))
+        .max_by(|a, b| a.1.total_cmp(&b.1));
+    Some(Lora {
+        rank: l["rank"].as_u64()?,
+        tensors: l["tensors"].as_u64()?,
+        fidelity: 1.0 - l["mean_rel_error"].as_f64()?,
+        worst,
+        out: PathBuf::from(l["out"].as_str()?),
+    })
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Run {
@@ -27,11 +83,28 @@ pub struct Run {
     pub tool: String,
     pub verdict: Verdict,
     pub finished_unix: u64,
-    pub seconds: u64,
+    pub millis: Option<u64>,
     pub error: Option<String>,
     /// The graph file a `surgeon_graph` run wrote, still on disk.
     pub graph: Option<PathBuf>,
     pub bench: Option<Bench>,
+    pub lora: Option<Lora>,
+    pub ppl: Option<Ppl>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ppl {
+    pub before: Option<f64>,
+    pub after: f64,
+    pub delta_pct: Option<f64>,
+}
+
+fn ppl(data: &Value) -> Option<Ppl> {
+    Some(Ppl {
+        before: data["baseline"]["ppl"].as_f64(),
+        after: data["ppl"].as_f64()?,
+        delta_pct: data["delta"]["delta_relative_pct"].as_f64(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,11 +166,20 @@ pub fn runs<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Vec<Run> {
             tool: e.tool.clone(),
             verdict: e.verdict,
             finished_unix: e.finished_unix,
-            seconds: e.finished_unix.saturating_sub(e.started_unix),
+            millis: e.elapsed_ms.or_else(|| {
+                (e.started_unix > 0 && e.finished_unix > e.started_unix)
+                    .then(|| (e.finished_unix - e.started_unix) * 1000)
+            }),
             error: e.error.clone(),
             graph: graph_output(e),
             bench: (e.tool == "surgeon_bench")
                 .then(|| bench(&e.result, &e.params))
+                .flatten(),
+            lora: (e.tool == "surgeon_lora")
+                .then(|| lora(&e.result))
+                .flatten(),
+            ppl: (e.tool == "surgeon_bench")
+                .then(|| ppl(&e.result))
                 .flatten(),
         })
         .collect();
@@ -196,27 +278,44 @@ fn eval(data: &Value) -> Option<Bench> {
     })
 }
 
-fn refusal(data: &Value, params: &Value) -> Option<Bench> {
-    // The report keeps only the prompts' hash: a built-in set is recognised by it.
-    let known = builtin::names()
-        .split(", ")
-        .filter_map(|name| {
-            let prompts = builtin::prompts(Path::new(name))?.ok()?;
-            let json = serde_json::to_string(&prompts).ok()?;
-            let sha: String = Sha256::digest(json.as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
-            (data["prompts_sha256"].as_str() == Some(sha.as_str()))
-                .then(|| (name.to_owned(), prompts))
-        })
-        .next();
+type PromptSet = (String, String, Vec<String>);
+
+fn builtin_prompt_sets() -> &'static [PromptSet] {
+    static SETS: OnceLock<Vec<PromptSet>> = OnceLock::new();
+    SETS.get_or_init(|| {
+        builtin::names()
+            .split(", ")
+            .filter_map(|name| {
+                let prompts = builtin::prompts(Path::new(name))?.ok()?;
+                let json = serde_json::to_string(&prompts).ok()?;
+                let sha: String = Sha256::digest(json.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                Some((name.to_owned(), sha, prompts))
+            })
+            .collect()
+    })
+}
+
+// The report keeps only the prompts' hash: a built-in set is recognised by it.
+fn known_prompts(data: &Value) -> Option<&'static PromptSet> {
+    let sha = data["prompts_sha256"].as_str()?;
+    builtin_prompt_sets().iter().find(|(_, s, _)| s == sha)
+}
+
+pub(crate) fn refusal_dataset(data: &Value, params: &Value) -> Option<String> {
     // shortcut: a prompts file is named only by a studio run, its texts are not read back.
-    let dataset = known
-        .as_ref()
-        .map(|(name, _)| name.clone())
-        .or_else(|| params["prompts"].as_str().map(str::to_owned));
-    let questions = known.map(|(_, prompts)| prompts).unwrap_or_default();
+    known_prompts(data)
+        .map(|(name, ..)| name.clone())
+        .or_else(|| params["prompts"].as_str().map(str::to_owned))
+}
+
+fn refusal(data: &Value, params: &Value) -> Option<Bench> {
+    let dataset = refusal_dataset(data, params);
+    let questions = known_prompts(data)
+        .map(|(.., prompts)| prompts.clone())
+        .unwrap_or_default();
     let answer = |item: &Value| Answer {
         text: item["output"].as_str().unwrap_or_default().to_owned(),
         good: !item["refused"].as_bool().unwrap_or(false),
@@ -276,6 +375,7 @@ mod tests {
             exit_code: 0,
             result,
             error: None,
+            elapsed_ms: None,
         }
     }
 
@@ -302,7 +402,7 @@ mod tests {
     fn a_paired_eval_reads_scores_gains_and_items_with_their_questions() {
         let runs = runs(&[entry("r1", "surgeon_bench", 100, eval_report())]);
         let b = runs[0].bench.as_ref().unwrap();
-        assert_eq!(runs[0].seconds, 42);
+        assert_eq!(runs[0].millis, Some(42_000));
         assert_eq!(b.mode, Mode::Eval);
         assert_eq!(b.dataset.as_deref(), Some("builtin:math"));
         assert_eq!((b.after.rate, b.before.unwrap().rate), (1.0, 0.5));
@@ -362,5 +462,33 @@ mod tests {
         assert_eq!(ids, ["d", "c", "a"]);
         assert_eq!(newest_graph(&entries), Some(("a".into(), file)));
         assert!(runs(&entries)[0].bench.is_none(), "no detail for a ppl run");
+        assert!(
+            runs(&entries)[0].ppl.is_none(),
+            "no ppl value in that report"
+        );
+    }
+
+    #[test]
+    fn a_ppl_run_reads_its_value_its_baseline_and_the_relative_delta() {
+        let report = json!({"backend": "native", "ppl": 17.4998, "ppl_err": 0.9,
+                            "baseline": {"source": "model", "ppl": 17.0724},
+                            "delta": {"delta": 0.4274, "delta_relative_pct": 2.5034}});
+        let runs = runs(&[
+            entry("p1", "surgeon_bench", 10, report),
+            entry("p2", "surgeon_bench", 5, json!({"ppl": 9.5})),
+        ]);
+        let with_baseline = Ppl {
+            before: Some(17.0724),
+            after: 17.4998,
+            delta_pct: Some(2.5034),
+        };
+        assert_eq!(runs[0].ppl, Some(with_baseline));
+        let alone = Ppl {
+            before: None,
+            after: 9.5,
+            delta_pct: None,
+        };
+        assert_eq!(runs[1].ppl, Some(alone));
+        assert!(runs[0].bench.is_none());
     }
 }

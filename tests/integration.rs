@@ -1,6 +1,9 @@
 //! End-to-end flows through `app::run_with` with fake hardware, processes and generator,
 //! plus smoke tests of the real binary.
 
+#[path = "support/mcp_client.rs"]
+mod mcp_client;
+
 use std::cell::RefCell;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -1218,7 +1221,6 @@ fn no_print_macros_outside_tests() {
 
 // ------------------------------------------------------------------ schema & MCP (prompt 7)
 
-use std::io::Read as _;
 use std::time::{Duration, Instant};
 
 use weight_surgeon::app::{core_apply, ApplyRequest, ProgressEvent, ProgressSink, RollbackOutcome};
@@ -1290,7 +1292,7 @@ fn schema_mirrors_serde_and_validation() {
     assert_eq!(ops["items"]["additionalProperties"], false);
     assert_eq!(
         op["operation"]["enum"],
-        json!(["subtract", "add", "project_out"])
+        json!(["subtract", "add", "project_out", "add_direction"])
     );
     assert_eq!(
         op["projections"]["items"]["enum"],
@@ -1533,7 +1535,7 @@ fn mcp_full_session_is_pure_json_rpc() {
         .contains("sauvegarde"));
     assert_eq!(
         responses[1]["result"]["tools"].as_array().unwrap().len(),
-        16
+        23
     );
     let (is_error, env) = envelope(&responses, 3);
     assert!(!is_error, "{env}");
@@ -2168,9 +2170,16 @@ fn schema_tools_kind_equals_tools_list() {
             "surgeon_graph",
             "surgeon_backends",
             "surgeon_restore",
+            "surgeon_compose",
+            "surgeon_doctor",
+            "surgeon_files",
+            "surgeon_workspace",
             "record_finding",
             "show_in_3d",
-            "update_plan"
+            "update_plan",
+            "surgeon_causal_trace",
+            "surgeon_checkpoint",
+            "surgeon_sweep"
         ]
     );
     for tool in exported.as_array().unwrap() {
@@ -2238,58 +2247,38 @@ fn mcp_binary_speaks_only_json_rpc_on_stdout() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let input = [
+    let lines = json_lines(&[
         init("2025-06-18"),
         INITIALIZED.to_owned(),
         rpc(json!(2), "tools/list", json!({})),
         call(3, "surgeon_check", json!({"model": "model.safetensors"})),
-    ]
-    .join("\n")
-        + "\n";
-    {
-        use std::io::Write as _;
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(input.as_bytes()).unwrap();
-    } // stdin closed: EOF ends the server
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(30) {
-            let _ = child.kill();
-            panic!("surgeon mcp did not exit within 30 s");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let (mut out, mut err) = (String::new(), String::new());
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut out)
-        .unwrap();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut err)
-        .unwrap();
+    ]);
+    let stderr = drain(child.stderr.take().unwrap());
+    // Strict JSON on every stdout line, which rules out ANSI escapes there.
+    let (responses, status) = mcp_client::exchange(&mut child, &lines);
+    let err = stderr.join().unwrap();
     assert_eq!(status.code(), Some(0), "{err}");
-    assert!(
-        !out.contains('\x1b') && !err.contains('\x1b'),
-        "no ANSI even with CLICOLOR_FORCE"
-    );
-    let responses: Vec<Value> = out
-        .lines()
-        .map(|l| {
-            let v: Value = serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l:?}"));
-            assert_eq!(v["jsonrpc"], "2.0");
-            v
-        })
-        .collect();
+    assert!(!err.contains('\x1b'), "no ANSI even with CLICOLOR_FORCE");
+    assert!(responses.iter().all(|v| v["jsonrpc"] == "2.0"));
     assert_eq!(responses.len(), 3);
     assert!(!envelope(&responses, 3).0);
+}
+
+/// Raw JSON-RPC lines as values, for [`mcp_client::exchange`].
+fn json_lines(lines: &[String]) -> Vec<Value> {
+    lines
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+/// Reads a pipe to its end on a thread (a full pipe would block the child).
+fn drain(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        pipe.read_to_string(&mut text).unwrap();
+        text
+    })
 }
 
 // ------------------------------------------------------------------ extract (prompt 8)
@@ -2826,12 +2815,19 @@ fn extract_never_leaves_a_partial_or_clobbered_file() {
         "no output nor temporary: {names:?}"
     );
 
-    let (code, v) = run_args(&deps(), &f.args("missing/dir/out.safetensors", &[]));
+    // A missing output folder is created; a file in its place is refused.
+    let (code, v) = run_args(&deps(), &f.args("new/dir/out.safetensors", &[]));
+    assert_eq!(code, 0, "{v}");
+    assert!(f.dir.path().join("new/dir/out.safetensors").is_file());
+    let (code, v) = run_args(
+        &deps(),
+        &f.args("new/dir/out.safetensors/x.safetensors", &[]),
+    );
     assert_eq!(code, exit::INVALID_INPUT);
     assert!(v["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("inexistant"));
+        .contains("dossier de sortie"));
 
     let (code, _) = run_args(&deps(), &f.args("taken.safetensors", &["--overwrite"]));
     assert_eq!(code, 0, "--overwrite replaces it");
@@ -2995,6 +2991,11 @@ fn extract_human_ui_golden_and_json_without_ui_bytes() {
     let d_prime = stats["d_prime"]
         .as_f64()
         .map_or("∞".to_owned(), |d| format!("{d:.2}"));
+    // The dtype line is a log on stderr: the report on stdout stays the golden.
+    assert!(
+        strip_ansi(&err).contains("[INFO]     dtype f32 (auto) : RAM libre "),
+        "{err}"
+    );
     let expected = [
         format!(
             "[EXTRACT]  Qwen2 · couche 2 · resid_post · pooling last  {}",
@@ -3101,7 +3102,7 @@ fn mcp_extract_tool_end_to_end() {
             .as_array()
             .unwrap()
             .len(),
-        16
+        23
     );
     let (is_error, env) = envelope(&responses, 2);
     assert!(!is_error, "{env}");
@@ -3156,60 +3157,29 @@ fn mcp_binary_extract_speaks_only_json_rpc() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let input = [
+    let lines = json_lines(&[
         init("2025-06-18"),
         rpc(json!(1), "tools/list", json!({})),
-        call(2, "surgeon_extract", json!({"model": "qwen2-mini", "pos_prompts_file": "pos.json", "neg_prompts_file": "neg.json", "layer": 1, "out": "bin.safetensors"})),
-    ]
-    .join("\n")
-        + "\n";
-    {
-        use std::io::Write as _;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-    }
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(60) {
-            let _ = child.kill();
-            panic!("surgeon mcp did not exit within 60 s");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let (mut out, mut err) = (String::new(), String::new());
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut out)
-        .unwrap();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut err)
-        .unwrap();
+        call(
+            2,
+            "surgeon_extract",
+            json!({"model": "qwen2-mini", "pos_prompts_file": "pos.json", "neg_prompts_file": "neg.json", "layer": 1, "out": "bin.safetensors"}),
+        ),
+    ]);
+    let stderr = drain(child.stderr.take().unwrap());
+    // Read while it runs: tools/list alone is larger than a pipe buffer.
+    let (responses, status) = mcp_client::exchange(&mut child, &lines);
+    let err = stderr.join().unwrap();
     assert_eq!(status.code(), Some(0), "{err}");
-    assert!(!out.contains('\x1b') && !err.contains('\x1b'));
-    let responses: Vec<Value> = out
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
-        .collect();
+    assert!(!err.contains('\x1b'));
     assert_eq!(
         reply(&responses, json!(1))["result"]["tools"]
             .as_array()
             .unwrap()
             .len(),
-        16
+        23
     );
-    assert!(!envelope(&responses, 2).0, "{out}");
+    assert!(!envelope(&responses, 2).0, "{responses:?}");
     assert!(f.dir.path().join("bin.safetensors").exists());
 }
 
@@ -4270,10 +4240,13 @@ fn bench_human_output_golden_in_truecolor() {
     assert_eq!(code, 0, "{err}");
     let text = strip_ansi(&out);
     let lines: Vec<&str> = text.lines().collect();
-    assert!(lines[0].starts_with("[BENCH]    ppl · ctx 512  "), "{text}");
+    assert!(
+        lines[0].starts_with("[BENCH]    ppl · llama · ctx 512  "),
+        "{text}"
+    );
     assert_eq!(
         lines[1],
-        "[PPL]      7.2000 ± 0.04 → 7.2500 ± 0.04 · Δ +0.0500 (dans le bruit)"
+        "[PPL]      7.2000 ± 0.04 → 7.2500 ± 0.04 · Δ +0.0500 (dans le bruit) · +0.69 %"
     );
     assert_eq!(lines[2], "[VERDICT]  ok · seuils respectés");
 
@@ -4320,6 +4293,8 @@ fn bench_json_on_the_binary_is_one_clean_document_even_with_forced_colors() {
             "--after",
             s(&after),
         ])
+        // NO_COLOR beats CLICOLOR_FORCE: a terminal that sets it must not decide this test.
+        .env_remove("NO_COLOR")
         .env("CLICOLOR_FORCE", "1")
         .env("COLORTERM", "truecolor")
         .output()
@@ -4345,6 +4320,7 @@ fn bench_json_on_the_binary_is_one_clean_document_even_with_forced_colors() {
             "--after",
             s(&after),
         ])
+        .env_remove("NO_COLOR")
         .env("CLICOLOR_FORCE", "1")
         .env("COLORTERM", "truecolor")
         .output()
@@ -4807,6 +4783,96 @@ fn bench_ppl_failures_are_typed_and_the_temporary_gguf_is_removed() {
     }
 }
 
+#[test]
+fn bench_ppl_native_scores_the_safetensors_folder_without_any_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let model = write_fake_qwen2_dir(root, "F32", false);
+    let text = root.join("text.txt");
+    std::fs::write(
+        &text,
+        "le soleil est une joie et la nuit est tres froid ".repeat(3),
+    )
+    .unwrap();
+    let weights = std::fs::read(model.join("model.safetensors")).unwrap();
+    let native = |extra: &[&str]| -> (i32, Value) {
+        let (deps, calls) = ppl_deps(ColorMode::Plain, vec![]);
+        let mut args = vec![
+            "bench",
+            "ppl",
+            "--model",
+            s(&model),
+            "--text",
+            s(&text),
+            "--backend",
+            "native",
+            "--ctx",
+            "8",
+        ];
+        args.extend_from_slice(extra);
+        let out = run_json(&deps, &args);
+        assert!(calls.borrow().is_empty(), "no llama.cpp process");
+        out
+    };
+
+    let (code, v) = native(&[]);
+    assert_eq!(code, 0, "{v}");
+    let data = &v["data"];
+    assert_eq!(data["backend"], "native");
+    assert!(data["binary"].is_null() && data["args"].as_array().unwrap().is_empty());
+    assert_eq!(
+        (data["stride"].as_u64(), data["tokens"].as_u64()),
+        (Some(4), Some(32))
+    );
+    let ppl = data["ppl"].as_f64().unwrap();
+    assert!(ppl.is_finite() && ppl > 1.0, "{ppl}");
+    assert!(data["ppl_err"].as_f64().unwrap() > 0.0);
+    assert_eq!(native(&[]).1["data"]["ppl"], data["ppl"], "deterministic");
+
+    let (code, v) = native(&["--chunks", "1", "--baseline-model", s(&model)]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["data"]["tokens"], 7, "one window of 8 tokens");
+    assert_eq!(v["data"]["baseline"]["source"], "model");
+    assert_eq!(v["data"]["delta"]["delta"], 0.0);
+
+    let (code, v) = native(&["--threads", "2"]);
+    assert_eq!(code, exit::INVALID_INPUT, "{v}");
+    assert_eq!(
+        std::fs::read(model.join("model.safetensors")).unwrap(),
+        weights
+    );
+
+    let (deps, calls) = ppl_deps(ColorMode::Plain, vec![]);
+    let read_only = McpConfig::new(&[root.to_path_buf()], true, false).unwrap();
+    let responses = session(
+        &deps,
+        &read_only,
+        &[
+            init("2025-06-18"),
+            call(
+                1,
+                "surgeon_bench",
+                json!({"mode": "ppl", "model": "qwen2-mini", "text": "builtin:wikitext", "backend": "native", "ctx": 16, "chunks": 2}),
+            ),
+            call(
+                2,
+                "surgeon_bench",
+                json!({"mode": "ppl", "model": "qwen2-mini", "text": "builtin:wikitext"}),
+            ),
+        ],
+    );
+    let (is_error, env) = envelope(&responses, 1);
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["backend"], "native");
+    assert_eq!(env["data"]["tokens"], 23, "15 then 8 new tokens");
+    assert_eq!(env["data"]["text_sha256"].as_str().unwrap().len(), 64);
+    assert!(
+        envelope(&responses, 2).0,
+        "builtin text needs the native backend"
+    );
+    assert!(calls.borrow().is_empty());
+}
+
 // -------------------------------------------------------------- bench eval
 
 struct Fixed(&'static str);
@@ -5141,7 +5207,7 @@ fn mcp_binary_bench_speaks_only_json_rpc() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let input = [
+    let lines = json_lines(&[
         init("2025-06-18"),
         INITIALIZED.to_owned(),
         call(
@@ -5149,22 +5215,11 @@ fn mcp_binary_bench_speaks_only_json_rpc() {
             "surgeon_bench",
             json!({"mode": "logits", "before": "before.safetensors", "after": "after.safetensors"}),
         ),
-    ]
-    .join("\n")
-        + "\n";
-    {
-        use std::io::Write as _;
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(input.as_bytes()).unwrap();
-    }
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(output.status.code(), Some(0));
-    let out = String::from_utf8(output.stdout).unwrap();
-    assert!(!out.contains('\x1b') && !String::from_utf8_lossy(&output.stderr).contains('\x1b'));
-    let responses: Vec<Value> = out
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
-        .collect();
+    ]);
+    let stderr = drain(child.stderr.take().unwrap());
+    let (responses, status) = mcp_client::exchange(&mut child, &lines);
+    assert_eq!(status.code(), Some(0));
+    assert!(!stderr.join().unwrap().contains('\x1b'));
     assert!(responses.iter().all(|r| r["jsonrpc"] == "2.0"));
     assert!(!envelope(&responses, 2).0);
 }
