@@ -575,7 +575,10 @@ pub enum Event {
         name: String,
         input: Value,
     },
-    ToolResult(String),
+    ToolResult {
+        content: String,
+        is_error: bool,
+    },
     Done {
         cost_usd: Option<f64>,
         summary: String,
@@ -610,7 +613,10 @@ pub fn parse_claude(line: &str) -> Vec<Event> {
         Some("user") => content()
             .iter()
             .filter(|b| b["type"] == "tool_result")
-            .map(|b| Event::ToolResult(short(&b["content"])))
+            .map(|b| Event::ToolResult {
+                content: short(&b["content"]),
+                is_error: b["is_error"].as_bool().unwrap_or(false),
+            })
             .collect(),
         Some("result") => vec![Event::Done {
             cost_usd: v["total_cost_usd"].as_f64(),
@@ -637,7 +643,10 @@ pub fn parse_codex(line: &str) -> Vec<Event> {
             input: item["arguments"].clone(),
         }],
         (Some("item.completed"), Some("mcp_tool_call")) => {
-            vec![Event::ToolResult(short(&item["result"]))]
+            vec![Event::ToolResult {
+                content: short(&item["result"]),
+                is_error: item["status"] == "failed",
+            }]
         }
         (Some("turn.completed"), _) => vec![Event::Done {
             cost_usd: None,
@@ -675,8 +684,14 @@ pub fn parse_opencode(line: &str) -> Vec<Event> {
                 input: state["input"].clone(),
             }];
             match state["status"].as_str() {
-                Some("completed") => events.push(Event::ToolResult(short(&state["output"]))),
-                Some("error") => events.push(Event::Error(short(&state["error"]))),
+                Some("completed") => events.push(Event::ToolResult {
+                    content: short(&state["output"]),
+                    is_error: false,
+                }),
+                Some("error") => events.push(Event::ToolResult {
+                    content: short(&state["error"]),
+                    is_error: true,
+                }),
                 _ => {}
             }
             events

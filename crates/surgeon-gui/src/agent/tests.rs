@@ -1732,7 +1732,20 @@ fn opencode_and_antigravity_streams_are_read() {
         r#"{"type":"tool_use","part":{"type":"tool","tool":"execute","state":{"status":"completed","input":{"code":"await tools.surgeon.surgeon_check()"},"output":"ok"}}}"#,
     );
     assert!(matches!(&e[0], runtime::Event::Tool { name, .. } if name == "execute"));
-    assert_eq!(e[1], runtime::Event::ToolResult("ok".into()));
+    assert_eq!(
+        e[1],
+        runtime::Event::ToolResult {
+            content: "ok".into(),
+            is_error: false
+        }
+    );
+    let failed = runtime::parse_opencode(
+        r#"{"type":"tool_use","part":{"type":"tool","tool":"execute","state":{"status":"error","input":{},"error":"boom"}}}"#,
+    );
+    assert!(
+        matches!(&failed[1], runtime::Event::ToolResult { content, is_error: true } if content == "boom"),
+        "a failed call is answered, so the next result goes to the next call"
+    );
     let e = runtime::parse_opencode(r#"{"type":"text","part":{"type":"text","text":"OK"}}"#);
     assert_eq!(e, vec![runtime::Event::Text("OK".into())]);
     let tools =

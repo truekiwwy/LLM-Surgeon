@@ -12,6 +12,8 @@ use weight_surgeon::backend::detect::BackendReport;
 use weight_surgeon::bench::score::Backend;
 
 use crate::theme;
+use crate::ui::components::{self as c, ButtonKind};
+use crate::ui::icons::Icon;
 
 /// Default of the form when the user file has no value.
 const BATCH_SIZE: usize = 1;
@@ -169,9 +171,15 @@ impl BackendDialog {
         if !self.open {
             return;
         }
+        let mut close = false;
         let modal = egui::Modal::new(egui::Id::new("backend-setup")).show(ctx, |ui| {
             ui.set_width(460.0);
-            ui.label(RichText::new("Backend d'inférence").strong());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Backend d'inférence").strong());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    close = c::icon_button(ui, Icon::Close, "Fermer").clicked();
+                });
+            });
             ui.label(
                 RichText::new(
                     "Rust seulement : mistral.rs (NVIDIA, Apple Silicon, CPU), hipfire (GPU \
@@ -187,9 +195,15 @@ impl BackendDialog {
             ui.separator();
             self.buttons(ui);
         });
-        if modal.should_close() {
-            self.open = false;
+        if close || modal.should_close() {
+            self.discard();
         }
+    }
+
+    fn discard(&mut self) {
+        self.show_config(self.saved.clone());
+        self.error = None;
+        self.open = false;
     }
 
     fn choices(&mut self, ui: &mut egui::Ui, report: Option<&BackendReport>) {
@@ -262,14 +276,20 @@ impl BackendDialog {
             shown.on_hover_text(path.display().to_string());
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui
-                .add_enabled(self.path.is_some(), egui::Button::new("Enregistrer"))
-                .clicked()
+            let why = "configuration utilisateur désactivée";
+            if c::button_if(
+                ui,
+                self.path.is_some(),
+                "Enregistrer",
+                ButtonKind::Primary,
+                why,
+            )
+            .clicked()
             {
                 self.save();
             }
-            if ui.button("Annuler").clicked() {
-                self.open = false;
+            if c::button(ui, "Annuler", ButtonKind::Ghost).clicked() {
+                self.discard();
             }
         });
         if let Some(e) = &self.error {
@@ -348,6 +368,28 @@ mod tests {
         );
         form.batch_size = "0".into();
         assert!(form.to_config().unwrap_err().contains("batch_size"));
+    }
+
+    #[test]
+    fn closing_without_saving_drops_the_edits() {
+        let mut form = dialog(BackendConfig {
+            backend: Some(Backend::Hipfire),
+            ..Default::default()
+        });
+        form.open = true;
+        form.backend = Backend::Native;
+        form.batch_size = "0".into();
+        form.error = Some("batch_size".into());
+        form.discard();
+        assert_eq!(
+            (
+                form.backend,
+                form.batch_size.as_str(),
+                form.open,
+                form.error
+            ),
+            (Backend::Hipfire, "1", false, None)
+        );
     }
 
     #[test]

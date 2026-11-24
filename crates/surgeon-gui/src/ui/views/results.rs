@@ -276,7 +276,7 @@ fn lora_block(ui: &mut Ui, l: &Lora) {
         c::kv(ui, t("lora.worst"), &format!("{:.2} %", error * 100.0));
         c::mono_secondary(ui, name.as_str());
     }
-    c::mono_secondary(ui, l.out.display().to_string());
+    c::mono_wrapped(ui, l.out.display().to_string(), T.color.text_secondary);
 }
 
 fn rate(s: &Score) -> String {

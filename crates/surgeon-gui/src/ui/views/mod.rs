@@ -196,7 +196,7 @@ pub fn context(ui: &mut Ui, app: &mut SurgeonApp) {
                 _ => (icons::State::Warn, t("copy.modified")),
             };
             c::status(ui, state, word);
-            c::mono_secondary(ui, copy.path.as_str());
+            c::mono_secondary(ui, copy.path.as_str()).on_hover_text(copy.path.as_str());
         }
         None => {
             c::status(ui, icons::State::Idle, t("copy.none"));

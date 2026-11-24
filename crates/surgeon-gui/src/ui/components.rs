@@ -157,6 +157,18 @@ fn rich(text: impl Into<String>, font: FontId, color: Color32) -> RichText {
     RichText::new(text).font(font).color(color)
 }
 
+fn fit(
+    painter: &Painter,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
+    painter.layout_job(job)
+}
+
 /// Running text, wrapped.
 pub fn label(ui: &mut Ui, text: impl Into<String>) -> Response {
     ui.add(Label::new(rich(text, font_body(), T.color.text)).wrap())
@@ -352,6 +364,11 @@ impl<'a> Panel<'a> {
         self
     }
 
+    pub fn tabs(mut self) -> Self {
+        self.title = Some("");
+        self
+    }
+
     /// No inner padding: the content (a canvas, a table, a list) reaches the border.
     pub fn flush(mut self) -> Self {
         self.flush = true;
@@ -530,7 +547,13 @@ pub fn kv(ui: &mut Ui, key: &str, value: &str) {
     let (rect, _) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), T.size.row), Sense::hover());
     let painter = ui.painter_at(rect);
-    let value_galley = painter.layout_no_wrap(value.to_owned(), font_mono(), T.color.text);
+    let value_galley = fit(
+        &painter,
+        value,
+        font_mono(),
+        T.color.text,
+        rect.width() * 0.65,
+    );
     let value_x = rect.right() - value_galley.size().x;
     painter.galley(
         Pos2::new(value_x, rect.center().y - value_galley.size().y / 2.0),
@@ -879,20 +902,24 @@ pub fn select<R>(
     width: f32,
     body: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(rich(current, font_body(), T.color.text))
-        .width(width)
-        .truncate()
-        .icon(|ui, rect, _, _| {
-            icons::paint(
-                ui.painter(),
-                rect,
-                Icon::ChevronDown,
-                T.color.text_secondary,
-            )
-        })
-        .show_ui(ui, body)
-        .inner
+    let size = Vec2::new(width + 2.0 * ui.spacing().button_padding.x, T.size.control);
+    ui.allocate_ui(size, |ui| {
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(rich(current, font_body(), T.color.text))
+            .width(width)
+            .truncate()
+            .icon(|ui, rect, _, _| {
+                icons::paint(
+                    ui.painter(),
+                    rect,
+                    Icon::ChevronDown,
+                    T.color.text_secondary,
+                )
+            })
+            .show_ui(ui, body)
+            .inner
+    })
+    .inner
 }
 
 /// An option of a [`select`]; `true` when it was just picked.
@@ -1215,17 +1242,19 @@ impl Table<'_> {
             ui.allocate_exact_size(Vec2::new(ui.available_width(), T.size.row), Sense::hover());
         let painter = ui.painter_at(rect);
         for (column, span) in self.columns.iter().zip(self.spans(rect)) {
-            let (x, align) = match column.right {
-                true => (span.max, Align2::RIGHT_CENTER),
-                false => (span.min, Align2::LEFT_CENTER),
-            };
-            painter.text(
-                Pos2::new(x, rect.center().y),
-                align,
+            let galley = fit(
+                &painter,
                 column.title,
                 font_meta(),
                 T.color.text_secondary,
+                span.span(),
             );
+            let x = match column.right {
+                true => span.max - galley.size().x,
+                false => span.min,
+            };
+            let pos = Pos2::new(x, rect.center().y - galley.size().y / 2.0);
+            painter.galley(pos, galley, T.color.text_secondary);
         }
         hline(
             &painter,
@@ -1265,17 +1294,13 @@ impl Table<'_> {
                 );
                 left += T.size.dot + T.space.s;
             }
-            let (x, align) = match column.right {
-                true => (span.max, Align2::RIGHT_CENTER),
-                false => (left, Align2::LEFT_CENTER),
+            let galley = fit(&painter, cell.text, font_mono(), ink, span.max - left);
+            let x = match column.right {
+                true => span.max - galley.size().x,
+                false => left,
             };
-            painter.text(
-                Pos2::new(x, rect.center().y),
-                align,
-                cell.text,
-                font_mono(),
-                ink,
-            );
+            let pos = Pos2::new(x, rect.center().y - galley.size().y / 2.0);
+            painter.galley(pos, galley, ink);
         }
         response
     }
@@ -1552,32 +1577,85 @@ pub fn capsule(ui: &mut Ui, segs: &[Seg<'_>]) -> Vec<Response> {
     out
 }
 
-/// A tool call in the thread, folded on one row: the chevron, the tool's name and a short
-/// summary. A click unfolds `details` (the input, the result) under it.
-pub fn tool_row(ui: &mut Ui, id: Id, name: &str, summary: &str, failed: bool, details: &[&str]) {
+pub fn spinner(ui: &mut Ui) -> Response {
+    ui.add(
+        egui::Spinner::new()
+            .size(T.size.icon - T.space.xs)
+            .color(T.color.text_secondary),
+    )
+}
+
+pub fn busy(ui: &mut Ui, text: impl Into<String>) -> Response {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = T.space.s;
+        let rtl = ui.layout().prefer_right_to_left();
+        if !rtl {
+            spinner(ui);
+        }
+        let label = ui.add(Label::new(rich(text, font_body(), T.color.text_secondary)));
+        if rtl {
+            spinner(ui);
+        }
+        label
+    })
+    .inner
+}
+
+pub struct ToolCard<'a> {
+    pub title: &'a str,
+    pub tool: &'a str,
+    pub state: State,
+    pub badge: String,
+    pub elapsed: Option<String>,
+    pub summary: &'a str,
+    pub sections: Vec<(&'a str, String)>,
+    pub copy: &'a str,
+    pub copied: &'a str,
+}
+
+pub fn tool_card(ui: &mut Ui, id: Id, card: &ToolCard<'_>) {
     let open_id = id.with("open");
     let open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
-    let response = row(ui, false, name, |ui| {
+    let response = row(ui, false, card.title, |ui| {
         ui.spacing_mut().item_spacing.x = T.space.s;
         let (glyph, _) = ui.allocate_exact_size(Vec2::splat(T.size.icon), Sense::hover());
-        let chevron = if open {
-            Icon::ChevronDown
-        } else {
-            Icon::ChevronRight
+        let chevron = match open {
+            true => Icon::ChevronDown,
+            false => Icon::ChevronRight,
         };
         icons::paint(ui.painter(), glyph, chevron, T.color.text_secondary);
-        if failed {
-            let (dot, _) = ui.allocate_exact_size(Vec2::splat(T.size.dot), Sense::hover());
-            icons::dot(ui.painter(), dot.center(), State::Error);
+        match card.state {
+            State::Active => {
+                spinner(ui);
+            }
+            state => {
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(T.size.dot), Sense::hover());
+                icons::dot(ui.painter(), dot.center(), state);
+            }
         }
-        // Not selectable: a click on the text unfolds the row like a click beside it.
-        ui.add(Label::new(rich(name, font_mono(), T.color.text)).selectable(false));
+        ui.add(Label::new(rich(card.title, font_strong(), T.color.text)).selectable(false));
+        if card.tool != card.title {
+            ui.add(
+                Label::new(rich(card.tool, font_mono(), T.color.text_secondary)).selectable(false),
+            );
+        }
+        let ink = match card.state {
+            State::Ok | State::Error | State::Warn => icons::state_color(card.state),
+            _ => T.color.text_secondary,
+        };
+        ui.add(Label::new(rich(&card.badge, font_meta(), ink)).selectable(false));
+        if let Some(elapsed) = &card.elapsed {
+            ui.add(
+                Label::new(rich(elapsed, font_meta(), T.color.text_secondary)).selectable(false),
+            );
+        }
         ui.add(
-            Label::new(rich(summary, font_meta(), T.color.text_secondary))
+            Label::new(rich(card.summary, font_meta(), T.color.text_secondary))
                 .truncate()
                 .selectable(false),
         );
     });
+    let response = response.on_hover_text(card.summary);
     if response.clicked() {
         ui.data_mut(|d| d.insert_temp(open_id, !open));
     }
@@ -1585,15 +1663,49 @@ pub fn tool_row(ui: &mut Ui, id: Id, name: &str, summary: &str, failed: bool, de
         return;
     }
     ui.horizontal_top(|ui| {
-        // Under the name, past the chevron's column.
         ui.add_space(T.space.s + T.size.icon);
         inset_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            for (k, detail) in details.iter().enumerate() {
+            for (k, (label, body)) in card.sections.iter().enumerate() {
                 if k > 0 {
                     separator(ui);
                 }
-                mono_wrapped(ui, *detail, T.color.text_secondary);
+                let copied_id = id.with(("copied", k));
+                let now = ui.input(|i| i.time);
+                let copied = ui
+                    .data(|d| d.get_temp::<f64>(copied_id))
+                    .is_some_and(|at| now - at < 1.5);
+                ui.horizontal(|ui| {
+                    meta(ui, *label);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if copied {
+                            status(ui, State::Ok, card.copied);
+                            ui.ctx()
+                                .request_repaint_after(std::time::Duration::from_millis(500));
+                        } else if button(ui, card.copy, ButtonKind::Ghost).clicked() {
+                            ui.ctx().copy_text(body.clone());
+                            ui.data_mut(|d| d.insert_temp(copied_id, now));
+                        }
+                    });
+                });
+                mono_wrapped(ui, body.as_str(), T.color.text_secondary);
+            }
+        });
+    });
+    ui.add_space(T.space.xs);
+}
+
+pub fn banner(ui: &mut Ui, state: State, text: &str, detail: &str) {
+    inset_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = T.space.s;
+            let (dot, _) =
+                ui.allocate_exact_size(Vec2::new(T.size.dot, T.size.row), Sense::hover());
+            icons::dot(ui.painter(), dot.center(), state);
+            ui.add(Label::new(rich(text, font_strong(), T.color.text)));
+            if !detail.is_empty() {
+                ui.add(Label::new(rich(detail, font_meta(), T.color.text_secondary)).wrap());
             }
         });
     });
@@ -1718,7 +1830,7 @@ pub fn bubble(ui: &mut Ui, text: &str) {
                 ui.set_max_width(max);
                 // The bubble's own layout is left to right, or the wrapped lines align right.
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                    ui.add(Label::new(rich(text, font_body(), T.color.text)).wrap());
+                    super::markdown::show(ui, text);
                 });
             });
     });

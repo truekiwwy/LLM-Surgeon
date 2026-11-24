@@ -10,6 +10,7 @@ pub mod i18n;
 pub mod icons;
 pub mod layout;
 pub mod logo;
+pub mod markdown;
 pub mod palette;
 pub mod shell;
 pub mod theme;

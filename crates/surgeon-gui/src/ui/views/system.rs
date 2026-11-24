@@ -96,17 +96,15 @@ pub fn dialog(ctx: &egui::Context, app: &mut SurgeonApp) {
             let shut = Rect::from_min_size(
                 Pos2::new(
                     body.right() - T.space.s - T.size.control,
-                    body.top() + T.space.s,
+                    body.top() + (T.size.header - T.size.control) / 2.0,
                 ),
                 Vec2::splat(T.size.control),
             );
             close = c::region(ui, shut, "settings-close", |ui| {
                 c::icon_button(ui, Icon::Close, t("settings.close")).clicked()
             });
-            let right = Rect::from_min_max(
-                Pos2::new(body.right() - T.size.right, body.top() + T.size.header),
-                body.max,
-            );
+            let right =
+                Rect::from_min_max(Pos2::new(body.right() - T.size.right, body.top()), body.max);
             let center = Rect::from_min_max(body.min, Pos2::new(right.left(), body.bottom()));
             let regions = Regions {
                 titlebar: Rect::NOTHING,
@@ -204,17 +202,11 @@ fn general(ui: &mut Ui, app: &mut SurgeonApp) {
             let folder = app.studio.workspace.display().to_string();
             let ctx = ui.ctx().clone();
             setting(ui, t("settings.workspace"), &folder, |ui| {
-                let free = !app.workspace_picker.busy();
-                let why = t("project.source.picking");
-                if cfg!(windows)
-                    && c::button_if(
-                        ui,
-                        free,
-                        t("settings.workspace.change"),
-                        ButtonKind::Secondary,
-                        why,
-                    )
-                    .clicked()
+                if app.workspace_picker.busy() {
+                    c::busy(ui, t("project.source.picking"));
+                } else if cfg!(windows)
+                    && c::button(ui, t("settings.workspace.change"), ButtonKind::Secondary)
+                        .clicked()
                 {
                     app.pick_workspace(&ctx, t("wiz.workspace.hint"));
                 }
@@ -241,7 +233,11 @@ fn machine(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
             regions.right,
             app,
             |ui, app| {
+                ui.add_space(T.size.control + T.space.s);
                 let probing = app.desktop.probing();
+                if probing {
+                    c::spinner(ui);
+                }
                 let label = if probing {
                     t("diag.probing")
                 } else {
@@ -660,7 +656,7 @@ fn harnesses(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                         c::meta(ui, word);
                     });
                 });
-                c::mono_secondary(ui, dir.display().to_string());
+                c::mono_wrapped(ui, dir.display().to_string(), T.color.text_secondary);
                 ui.add_space(T.space.s);
             }
         });
@@ -748,15 +744,9 @@ fn providers(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
             regions.center,
             app,
             |ui, app| {
-                let scanning = app.agents.scanning();
-                let label = if scanning {
-                    t("scan.running")
-                } else {
-                    t("scan.again")
-                };
-                if c::button_if(ui, !scanning, label, ButtonKind::Ghost, t("scan.running"))
-                    .clicked()
-                {
+                if app.agents.scanning() {
+                    c::busy(ui, t("scan.running"));
+                } else if c::button(ui, t("scan.again"), ButtonKind::Ghost).clicked() {
                     app.agents.rescan();
                 }
             },
@@ -1094,15 +1084,12 @@ pub(crate) fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
             false => (State::Idle, t("prov.to_test")),
         };
         c::status(ui, state, word);
-        let checking = hub.checking_cli(&id);
-        if c::button_if(
+        if hub.checking_cli(&id) {
+            c::busy(ui, t("conn.testing"));
+        } else if c::button_if(
             ui,
-            !checking && !local_only,
-            if checking {
-                t("conn.testing")
-            } else {
-                t("prov.test")
-            },
+            !local_only,
+            t("prov.test"),
             ButtonKind::Secondary,
             t("prov.test.why"),
         )
@@ -1114,12 +1101,10 @@ pub(crate) fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
         if let Some((_, command)) = hub.login.clone().filter(|(k, _)| *k == id) {
             ui.add_space(T.space.s);
             c::secondary(ui, t("prov.login"));
-            ui.horizontal(|ui| {
-                c::mono(ui, command);
-                if c::button(ui, t("prov.copy"), ButtonKind::Ghost).clicked() {
-                    ctx.copy_text(command.to_owned());
-                }
-            });
+            c::mono_wrapped(ui, command, T.color.text);
+            if c::button(ui, t("prov.copy"), ButtonKind::Ghost).clicked() {
+                ctx.copy_text(command.to_owned());
+            }
         }
     } else {
         if !conn.is_local() {
@@ -1137,15 +1122,12 @@ pub(crate) fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
             }
             c::field_secret(ui, &mut hub.key_input, t("conn.key.hint"), width);
             ui.add_space(T.space.xs);
-            let trying = hub.trying_key(&id);
-            if c::button_if(
+            if hub.trying_key(&id) {
+                c::busy(ui, t("conn.testing"));
+            } else if c::button_if(
                 ui,
-                !trying && !hub.key_input.trim().is_empty(),
-                if trying {
-                    t("conn.testing")
-                } else {
-                    t("prov.key.try")
-                },
+                !hub.key_input.trim().is_empty(),
+                t("prov.key.try"),
                 ButtonKind::Secondary,
                 t("prov.key.try.why"),
             )
@@ -1155,20 +1137,9 @@ pub(crate) fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
             }
         }
         c::section(ui, t("prov.models.title"));
-        let testing = hub.testing(&id);
-        if c::button_if(
-            ui,
-            !testing,
-            if testing {
-                t("conn.testing")
-            } else {
-                t("prov.test")
-            },
-            ButtonKind::Secondary,
-            t("conn.testing"),
-        )
-        .clicked()
-        {
+        if hub.testing(&id) {
+            c::busy(ui, t("conn.testing"));
+        } else if c::button(ui, t("prov.test"), ButtonKind::Secondary).clicked() {
             hub.test_models(&conn);
         }
         if !conn.models.is_empty() {

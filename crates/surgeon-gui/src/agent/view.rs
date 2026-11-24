@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use eframe::egui;
 
@@ -45,6 +45,9 @@ struct CliChat {
     focus_seen: SystemTime,
     plan_seen: SystemTime,
     tools: CliTools,
+    started: Instant,
+    cost_usd: Option<f64>,
+    error: Option<String>,
 }
 
 /// The tool blocks of a CLI run. Its events carry no ids, and the CLIs answer their calls in
@@ -56,19 +59,34 @@ struct CliTools {
 }
 
 impl CliTools {
-    fn call(&mut self, name: String, input: serde_json::Value) -> Block {
+    fn after(conv: &Conversation) -> Self {
+        let made = conv
+            .messages
+            .iter()
+            .flat_map(|m| &m.blocks)
+            .filter(|b| matches!(b, Block::ToolUse { .. }))
+            .count();
+        Self {
+            made,
+            ..Self::default()
+        }
+    }
+
+    fn call(&mut self, name: String, input: serde_json::Value) -> (String, Block) {
         self.made += 1;
         let id = format!("cli-{}", self.made);
         self.unanswered.push_back(id.clone());
-        Block::ToolUse { id, name, input }
+        (id.clone(), Block::ToolUse { id, name, input })
     }
 
-    fn result(&mut self, content: String) -> Block {
-        Block::ToolResult {
-            id: self.unanswered.pop_front().unwrap_or_default(),
+    fn result(&mut self, content: String, is_error: bool) -> (String, Block) {
+        let id = self.unanswered.pop_front().unwrap_or_default();
+        let block = Block::ToolResult {
+            id: id.clone(),
             content,
-            is_error: false,
-        }
+            is_error,
+        };
+        (id, block)
     }
 }
 
@@ -935,6 +953,7 @@ impl Hub {
             ..Conversation::default()
         });
         conv.messages.push(Message::user_text(text));
+        let tools = CliTools::after(conv);
         self.session = None;
         let now = SystemTime::now();
         self.cli = Some(CliChat {
@@ -942,7 +961,10 @@ impl Hub {
             kind: conn.kind,
             focus_seen: now,
             plan_seen: now,
-            tools: CliTools::default(),
+            tools,
+            started: Instant::now(),
+            cost_usd: None,
+            error: None,
         });
         Ok(())
     }
@@ -983,26 +1005,47 @@ impl Hub {
         };
         let mut ended = false;
         let mut blocks = Vec::new();
-        let text = |text: String| Block::Text { text };
+        let mut failure = None;
         while let Ok(e) = cli.run.rx.try_recv() {
             match e {
-                runtime::Event::Text(t) => blocks.push(text(t)),
-                // Real tool blocks, so the thread folds each call on one row.
-                runtime::Event::Tool { name, input } => blocks.push(cli.tools.call(name, input)),
-                runtime::Event::ToolResult(content) => blocks.push(cli.tools.result(content)),
-                runtime::Event::Done { cost_usd, summary } => blocks.push(text(format!(
-                    "[{} terminé : {summary}{}]",
-                    cli.kind.label(),
-                    cost_usd
-                        .map(|c| format!(", {c:.4} $ selon l'outil"))
-                        .unwrap_or_default()
-                ))),
-                runtime::Event::Error(e) => blocks.push(text(format!("[erreur : {e}]"))),
+                runtime::Event::Text(text) => blocks.push(Block::Text { text }),
+                runtime::Event::Tool { name, input } => {
+                    let (id, block) = cli.tools.call(name, input);
+                    if let Some(conv) = &mut self.cli_conv {
+                        conv.tool_started(&id);
+                    }
+                    blocks.push(block);
+                }
+                runtime::Event::ToolResult { content, is_error } => {
+                    let (id, block) = cli.tools.result(content, is_error);
+                    if let Some(conv) = &mut self.cli_conv {
+                        conv.tool_ended(&id);
+                    }
+                    blocks.push(block);
+                }
+                runtime::Event::Done { cost_usd, summary } => {
+                    cli.cost_usd = cost_usd.or(cli.cost_usd);
+                    if summary.starts_with("error") {
+                        cli.error = Some(summary);
+                    }
+                }
+                runtime::Event::Error(e) => {
+                    cli.error = Some(e.clone());
+                    failure = Some(e);
+                }
                 runtime::Event::Exit(code) => {
-                    blocks.push(text(format!("[fin du processus, code {code:?}]")));
+                    blocks.push(Block::RunEnd {
+                        code,
+                        cost_usd: cli.cost_usd,
+                        secs: Some(cli.started.elapsed().as_secs()),
+                        error: cli.error.take(),
+                    });
                     ended = true;
                 }
             }
+        }
+        if let Some(e) = failure {
+            self.message = Some((e, true));
         }
         if let Some(conv) = &mut self.cli_conv {
             if !blocks.is_empty() {
@@ -1066,16 +1109,29 @@ mod tests {
     #[test]
     fn cli_results_go_to_their_calls_in_order() {
         let mut tools = CliTools::default();
-        let a = tools.call("execute".into(), serde_json::json!({"command": "ls"}));
-        let b = tools.call("surgeon_check".into(), serde_json::json!({}));
-        let id = |block: &Block| match block {
-            Block::ToolUse { id, .. } | Block::ToolResult { id, .. } => id.clone(),
-            _ => String::new(),
-        };
-        assert_ne!(id(&a), id(&b));
-        assert_eq!(id(&tools.result("first".into())), id(&a));
-        assert_eq!(id(&tools.result("second".into())), id(&b));
+        let (a, _) = tools.call("execute".into(), serde_json::json!({"command": "ls"}));
+        let (b, _) = tools.call("surgeon_check".into(), serde_json::json!({}));
+        assert_ne!(a, b);
+        assert_eq!(tools.result("first".into(), false).0, a);
+        let (second, block) = tools.result("second".into(), true);
+        assert_eq!(second, b);
+        assert!(matches!(block, Block::ToolResult { is_error: true, .. }));
         // A result with no call left stays apart: it matches no row's call.
-        assert_eq!(id(&tools.result("stray".into())), "");
+        assert_eq!(tools.result("stray".into(), false).0, "");
+    }
+
+    #[test]
+    fn a_new_cli_run_never_reuses_the_ids_of_the_previous_one() {
+        let mut first = CliTools::default();
+        let (id, call) = first.call("surgeon_check".into(), serde_json::json!({}));
+        let conv = Conversation {
+            messages: vec![Message {
+                role: Role::Assistant,
+                blocks: vec![call],
+            }],
+            ..Conversation::default()
+        };
+        let (next, _) = CliTools::after(&conv).call("surgeon_check".into(), serde_json::json!({}));
+        assert_ne!(next, id);
     }
 }

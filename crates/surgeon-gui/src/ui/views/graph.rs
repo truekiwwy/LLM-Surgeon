@@ -495,7 +495,7 @@ fn run_inspector(ui: &mut Ui, run: &RunView, layer: &Layer, step: &Step, i: usiz
 fn node_inspector(ui: &mut Ui, step: &Step, node: &NodeReport) {
     let m = &node.metrics;
     c::strong(ui, node_title(node));
-    c::mono_secondary(ui, node.tensor.as_str());
+    c::mono_wrapped(ui, node.tensor.as_str(), T.color.text_secondary);
     let measured = step.report.parameters.rank > 0;
     if !measured {
         c::secondary(ui, t("inspector.unmeasured"));
@@ -629,7 +629,7 @@ fn delta_table(ui: &mut Ui, m: &NodeMetrics, diff: &NodeDiff) {
 fn model_summary(ui: &mut Ui, report: &GraphReport) {
     let (m, g) = (&report.model, &report.global);
     c::strong(ui, m.architecture.as_str());
-    c::mono_secondary(ui, m.path.as_str());
+    c::mono_wrapped(ui, m.path.as_str(), T.color.text_secondary);
     if report.parameters.rank == 0 {
         c::secondary(ui, t("inspector.unmeasured"));
     }

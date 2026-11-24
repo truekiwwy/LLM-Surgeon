@@ -62,7 +62,7 @@ pub fn body(req: &Request) -> Value {
                     } => Some(json!({"type": "tool_result", "tool_use_id": id,
                         "content": content, "is_error": is_error})),
                     Block::Opaque { provider, raw } if provider == PROVIDER => Some(raw.clone()),
-                    Block::Opaque { .. } => None,
+                    Block::Opaque { .. } | Block::RunEnd { .. } => None,
                 })
                 .collect();
             let role = match m.role {

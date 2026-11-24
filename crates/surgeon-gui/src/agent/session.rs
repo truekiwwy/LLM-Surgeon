@@ -4,6 +4,7 @@
 //! runs, ledger and cancellation as a job launched by hand), and results come back framed as
 //! untrusted data. Budgets, pause and stop apply at any time.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -119,9 +120,44 @@ pub struct Conversation {
     /// The patch settings forced from the advanced (CLI) panel of the form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forced: Option<Forced>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_times: BTreeMap<String, ToolTime>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolTime {
+    pub start_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ms: Option<u64>,
+}
+
+impl ToolTime {
+    pub fn secs(&self, now_ms: u64) -> f64 {
+        self.end_ms.unwrap_or(now_ms).saturating_sub(self.start_ms) as f64 / 1000.0
+    }
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 impl Conversation {
+    pub fn tool_started(&mut self, id: &str) {
+        let time = ToolTime {
+            start_ms: now_ms(),
+            end_ms: None,
+        };
+        self.tool_times.insert(id.to_owned(), time);
+    }
+
+    pub fn tool_ended(&mut self, id: &str) {
+        if let Some(time) = self.tool_times.get_mut(id) {
+            time.end_ms.get_or_insert_with(now_ms);
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self, String> {
         let text =
             std::fs::read_to_string(path).map_err(|e| format!("{} : {e}", path.display()))?;
@@ -167,7 +203,7 @@ impl Conversation {
                         "Résultat{} :\n\n```\n{content}\n```\n\n",
                         if *is_error { " (erreur)" } else { "" }
                     )),
-                    Block::Opaque { .. } => {}
+                    Block::Opaque { .. } | Block::RunEnd { .. } => {}
                 }
             }
         }
@@ -474,6 +510,7 @@ impl Session {
         for call in &mut self.pending {
             if let CallState::Running(run) = &call.state {
                 host.cancel(run);
+                self.conv.tool_ended(&call.id);
             }
             if !matches!(call.state, CallState::Done { .. }) {
                 call.state = CallState::Done {
@@ -558,6 +595,7 @@ impl Session {
             content,
             is_error: ended.verdict != Verdict::Ok,
         };
+        self.conv.tool_ended(&id);
         self.log(&id, &tool, &args, event, None, Some(&ended.id));
     }
 
@@ -905,6 +943,7 @@ impl Session {
         let (id, tool, args) = (call.id.clone(), call.tool.clone(), call.args.clone());
         match host.submit(job) {
             Ok(run) => {
+                self.conv.tool_started(&id);
                 self.log(&id, &tool, &args, "submitted", None, Some(&run));
                 self.pending[i].state = CallState::Running(run);
             }
@@ -1208,6 +1247,7 @@ pub fn estimate(messages: &[Message]) -> u64 {
             Block::ToolUse { input, .. } => input.to_string().len(),
             Block::ToolResult { content, .. } => content.len(),
             Block::Opaque { raw, .. } => raw.to_string().len(),
+            Block::RunEnd { .. } => 0,
         })
         .sum();
     (chars / 4) as u64
