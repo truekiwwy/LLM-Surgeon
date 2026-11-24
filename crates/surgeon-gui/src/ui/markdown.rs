@@ -1,5 +1,5 @@
 use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{self, FontId, Label, ScrollArea, Stroke, Ui};
+use eframe::egui::{self, FontId, Label, Stroke, Ui};
 
 use super::components as c;
 use super::theme::TOKENS as T;
@@ -293,29 +293,106 @@ fn blocks(ui: &mut Ui, text: &str) {
     }
 }
 
+fn cell(row: &[String], k: usize) -> &str {
+    row.get(k).map_or("", String::as_str)
+}
+
+fn cell_job(r: usize, text: &str) -> LayoutJob {
+    let text = match r {
+        0 => format!("**{text}**"),
+        _ => text.to_owned(),
+    };
+    job(&text, c::font_body(), T.color.text)
+}
+
+fn wrapped(ui: &mut Ui, job: LayoutJob) -> egui::Response {
+    ui.add(Label::new(job).wrap().selectable(true))
+}
+
+fn column_widths(natural: &[f32], room: f32) -> Option<Vec<f32>> {
+    let floor: Vec<f32> = natural.iter().map(|w| w.min(8.0 * T.text.body)).collect();
+    let extra = room - floor.iter().sum::<f32>();
+    if natural.len() > 3 || extra < 0.0 {
+        return None;
+    }
+    let slack: f32 = natural.iter().zip(&floor).map(|(n, f)| n - f).sum();
+    let scale = match slack > 0.0 {
+        true => (extra / slack).min(1.0),
+        false => 0.0,
+    };
+    Some(
+        natural
+            .iter()
+            .zip(&floor)
+            .map(|(n, f)| f + (n - f) * scale)
+            .collect(),
+    )
+}
+
 fn table(ui: &mut Ui, rows: &[Vec<String>], salt: usize) {
     let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
-    ScrollArea::horizontal()
-        .id_salt(("md-table", salt))
-        .auto_shrink([false, true])
+    let gap = T.space.l;
+    let natural: Vec<f32> = (0..columns)
+        .map(|k| {
+            rows.iter()
+                .enumerate()
+                .map(|(r, row)| ui.painter().layout_job(cell_job(r, cell(row, k))).size().x)
+                .fold(0.0, f32::max)
+                .ceil()
+        })
+        .collect();
+    let room = ui.available_width() - gap * columns.saturating_sub(1) as f32;
+    match column_widths(&natural, room) {
+        Some(widths) => grid(ui, rows, &widths, gap, salt),
+        None if rows.len() < 2 => grid(ui, rows, &natural, gap, salt),
+        None => cards(ui, rows, columns),
+    }
+}
+
+fn grid(ui: &mut Ui, rows: &[Vec<String>], widths: &[f32], gap: f32, salt: usize) {
+    let response = egui::Grid::new(("md-grid", salt))
+        .striped(true)
+        .spacing([gap, T.space.xs])
         .show(ui, |ui| {
-            egui::Grid::new(("md-grid", salt))
-                .striped(true)
-                .spacing([T.space.l, T.space.xs])
-                .show(ui, |ui| {
-                    for (r, row) in rows.iter().enumerate() {
-                        for k in 0..columns {
-                            let cell = row.get(k).map_or("", String::as_str);
-                            let text = match r {
-                                0 => format!("**{cell}**"),
-                                _ => cell.to_owned(),
-                            };
-                            ui.add(Label::new(job(&text, c::font_body(), T.color.text)));
-                        }
-                        ui.end_row();
-                    }
-                });
-        });
+            for (r, row) in rows.iter().enumerate() {
+                for (k, width) in widths.iter().enumerate() {
+                    ui.vertical(|ui| {
+                        ui.set_max_width(*width);
+                        wrapped(ui, cell_job(r, cell(row, k)));
+                    });
+                }
+                ui.end_row();
+            }
+        })
+        .response;
+    c::record(ui.ctx(), "md-table-grid", response.rect);
+}
+
+fn cards(ui: &mut Ui, rows: &[Vec<String>], columns: usize) {
+    let header = &rows[0];
+    let response = ui.vertical(|ui| {
+        for (n, row) in rows[1..].iter().enumerate() {
+            if n > 0 {
+                ui.add_space(T.space.xs);
+            }
+            c::inset_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let title = cell(row, 0);
+                if !title.is_empty() {
+                    wrapped(ui, cell_job(0, title));
+                }
+                for k in 1..columns {
+                    let (key, value) = (cell(header, k), cell(row, k));
+                    let text = match key.is_empty() {
+                        true => value.to_owned(),
+                        false => format!("**{key} :** {value}"),
+                    };
+                    wrapped(ui, job(&text, c::font_body(), T.color.text));
+                }
+            });
+        }
+    });
+    c::record(ui.ctx(), "md-table-cards", response.response.rect);
 }
 
 #[cfg(test)]
@@ -386,5 +463,67 @@ mod tests {
         let italic = spans("*penché* et ~~barré~~");
         assert!(italic[0].1.italic && italic[2].1.strike);
         assert_eq!(spans("\\*pas\\* italique")[0].0, "*pas* italique");
+    }
+
+    fn layout(width: f32, text: &str) -> (egui::Rect, Vec<(String, egui::Rect)>) {
+        let ctx = egui::Context::default();
+        super::super::theme::apply(&ctx);
+        super::super::fonts::install(&ctx);
+        let mut area = egui::Rect::NOTHING;
+        let mut dump = Vec::new();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                c::begin_dump(ui.ctx(), true);
+                area = ui.available_rect_before_wrap();
+                show(ui, text);
+            });
+            output.textures_delta.clear();
+            dump = c::take_dump(&ctx);
+        }
+        (area, dump)
+    }
+
+    fn region(dump: &[(String, egui::Rect)], name: &str) -> Option<egui::Rect> {
+        dump.iter().find(|(n, _)| n == name).map(|(_, r)| *r)
+    }
+
+    #[test]
+    fn column_widths_keep_small_tables_and_reject_wide_ones() {
+        assert_eq!(column_widths(&[40.0, 60.0], 300.0), Some(vec![40.0, 60.0]));
+        let squeezed = column_widths(&[400.0, 400.0], 400.0).unwrap();
+        assert!((squeezed.iter().sum::<f32>() - 400.0).abs() < 0.01);
+        assert_eq!(column_widths(&[10.0; 4], 1000.0), None);
+        assert_eq!(column_widths(&[400.0, 400.0, 400.0], 100.0), None);
+    }
+
+    #[test]
+    fn a_two_column_table_stays_a_grid_within_the_bubble() {
+        let text = "| Couche | Score |\n|---|---|\n| 12 | 0.91 tres au-dessus du seuil fixe pour ce modele, a surveiller de pres lors du prochain bench |\n| 13 | 0.40 |";
+        let (area, dump) = layout(420.0, text);
+        let grid = region(&dump, "md-table-grid").expect("the table is laid out as a grid");
+        assert!(region(&dump, "md-table-cards").is_none());
+        assert!(
+            grid.right() <= area.right() + 0.5,
+            "{grid:?} overflows {area:?}"
+        );
+    }
+
+    #[test]
+    fn a_wide_table_in_a_narrow_bubble_becomes_stacked_cards() {
+        let text = "| Couche | Methode | Score | KL | Note |\n|---|---|---|---|---|\n| 12 | mean_diff | 0.91 | 0.003 | garde la capacite de code |\n| 13 | leace | 0.40 | 0.020 | regression legere sur GSM8K |";
+        let (area, dump) = layout(300.0, text);
+        let cards = region(&dump, "md-table-cards").expect("the table is laid out as cards");
+        assert!(region(&dump, "md-table-grid").is_none());
+        assert!(
+            cards.right() <= area.right() + 0.5 && cards.width() <= area.width() + 0.5,
+            "{cards:?} overflows {area:?}"
+        );
     }
 }
