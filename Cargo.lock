@@ -4507,7 +4507,6 @@ dependencies = [
  "half",
  "memmap2",
  "ratatui",
- "rayon",
  "safetensors",
  "serde",
  "serde_json",

@@ -188,7 +188,8 @@ pub fn cleanup_script(conf: &str) -> String {
     format!(
         r#"set -euo pipefail
 if grep -qxF '{BLOCK_START}' {conf} 2>/dev/null; then
-  sed -i '/^# >>> weight-surgeon/,/^# <<< weight-surgeon/d' {conf}
+  # Temp file rather than `sed -i`, whose argument differs between GNU and BSD sed.
+  sed '/^# >>> weight-surgeon/,/^# <<< weight-surgeon/d' {conf} > {conf}.tmp && mv {conf}.tmp {conf}
   echo "bloc weight-surgeon retiré de {conf} (original gardé : {conf}.bak)"
 else
   echo "rien à retirer : aucun bloc weight-surgeon dans {conf}"
