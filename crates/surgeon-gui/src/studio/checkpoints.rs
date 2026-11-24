@@ -149,6 +149,7 @@ mod tests {
             exit_code: 0,
             result: Value::Null,
             error: None,
+            elapsed_ms: None,
         }
     }
 

@@ -1789,6 +1789,27 @@ fn codex_json_events_are_read() {
 }
 
 #[test]
+fn the_running_conversation_is_listed_before_it_reaches_the_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = super::view::Hub::new(
+        dir.path().join("agents.json"),
+        Box::new(SessionStore::default()),
+        Arc::new(|| {}),
+    );
+    hub.project = Some(dir.path().join("project"));
+    assert!(hub.conversations().is_empty());
+    hub.cli_conv = Some(Conversation {
+        id: "c1".into(),
+        created_unix: 7,
+        messages: vec![super::provider::Message::user_text("Retirer les refus")],
+        ..Conversation::default()
+    });
+    let lines = hub.conversations();
+    assert_eq!(lines.len(), 1);
+    assert_eq!((lines[0].0.as_str(), lines[0].2), ("c1", 7));
+}
+
+#[test]
 fn a_project_inherits_the_default_connection_until_it_picks_its_own() {
     let dir = tempfile::tempdir().unwrap();
     let mut hub = super::view::Hub::new(

@@ -13,6 +13,7 @@ use weight_surgeon::bench::score::Backend;
 
 use crate::theme;
 use crate::ui::components::{self as c, ButtonKind};
+use crate::ui::i18n::{t, tf};
 use crate::ui::icons::Icon;
 
 /// Default of the form when the user file has no value.
@@ -114,10 +115,7 @@ impl BackendDialog {
 
     /// Writes `cfg` (the automatic choice) and shows it.
     pub fn save_config(&mut self, cfg: BackendConfig) -> Result<(), String> {
-        let path = self
-            .path
-            .clone()
-            .ok_or("configuration utilisateur désactivée (WEIGHT_SURGEON_NO_USER_CONFIG)")?;
+        let path = self.path.clone().ok_or(t("backend.disabled"))?;
         config::save_to(&path, &cfg)?;
         self.show_config(cfg);
         Ok(())
@@ -131,7 +129,7 @@ impl BackendDialog {
             .parse::<usize>()
             .ok()
             .filter(|&b| b >= 1)
-            .ok_or_else(|| format!("batch_size « {} » : entier >= 1 attendu", self.batch_size))?;
+            .ok_or_else(|| tf("backend.batch_size.invalid", &[("value", &self.batch_size)]))?;
         let text = |text: &str| Some(text.trim().to_owned()).filter(|t| !t.is_empty());
         // Unticked: `off` only when the file named a mode; otherwise the key stays absent.
         let requantize = match (self.requantize, self.saved.hipfire_requantize) {
@@ -175,19 +173,12 @@ impl BackendDialog {
         let modal = egui::Modal::new(egui::Id::new("backend-setup")).show(ctx, |ui| {
             ui.set_width(460.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Backend d'inférence").strong());
+                ui.label(RichText::new(t("backend.title")).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    close = c::icon_button(ui, Icon::Close, "Fermer").clicked();
+                    close = c::icon_button(ui, Icon::Close, t("settings.close")).clicked();
                 });
             });
-            ui.label(
-                RichText::new(
-                    "Rust seulement : mistral.rs (NVIDIA, Apple Silicon, CPU), hipfire (GPU \
-                     AMD), native (CPU, intégré).",
-                )
-                .small()
-                .color(theme::DIM),
-            );
+            ui.label(RichText::new(t("backend.lead")).small().color(theme::DIM));
             ui.separator();
             self.choices(ui, report);
             ui.separator();
@@ -208,18 +199,14 @@ impl BackendDialog {
 
     fn choices(&mut self, ui: &mut egui::Ui, report: Option<&BackendReport>) {
         let mistralrs_note = match report.and_then(|r| r.mistralrs.as_ref()) {
-            Some(m) => format!("mistral.rs : {}", m.binary.display()),
-            None => "mistral.rs introuvable : installez-le depuis l'assistant (étape 04)".into(),
+            Some(m) => tf("backend.mistralrs.found", &[("path", &m.binary.display())]),
+            None => t("backend.mistralrs.missing").into(),
         };
-        let hipfire_note = report.map_or("détection en cours".into(), |r| r.hipfire.note.clone());
+        let hipfire_note = report.map_or(t("backend.detecting").into(), |r| r.hipfire.note.clone());
         for (backend, name, note) in [
             (Backend::MistralRs, "mistralrs", mistralrs_note),
             (Backend::Hipfire, "hipfire", hipfire_note),
-            (
-                Backend::Native,
-                "native",
-                "CPU, Rust pur, intégré, dossier SafeTensors".into(),
-            ),
+            (Backend::Native, "native", t("backend.native.note").into()),
         ] {
             ui.radio_value(&mut self.backend, backend, name);
             ui.label(RichText::new(note).small().color(theme::DIM));
@@ -253,12 +240,8 @@ impl BackendDialog {
                 );
                 ui.end_row();
                 ui.label(theme::mono("hipfire_requantize"));
-                ui.checkbox(&mut self.requantize, "auto").on_hover_text(
-                    "auto : une copie de travail sans alias pour ses poids actuels est \
-                         requantifiée (q8f16, alias ws-<copie>-<sha8>) avant d'être mesurée sur \
-                         hipfire ; off : jamais sur hipfire (native pour un agent, refus en \
-                         ligne de commande).",
-                );
+                ui.checkbox(&mut self.requantize, "auto")
+                    .on_hover_text(t("backend.requantize.tip"));
                 ui.end_row();
             });
     }
@@ -266,21 +249,18 @@ impl BackendDialog {
     fn buttons(&mut self, ui: &mut egui::Ui) {
         let target = match &self.path {
             Some(path) => theme::mono(path.display().to_string()).color(theme::DIM),
-            None => RichText::new(
-                "configuration utilisateur désactivée (WEIGHT_SURGEON_NO_USER_CONFIG)",
-            )
-            .color(theme::WARN),
+            None => RichText::new(t("backend.disabled")).color(theme::WARN),
         };
         let shown = ui.add(egui::Label::new(target.small()).truncate());
         if let Some(path) = &self.path {
             shown.on_hover_text(path.display().to_string());
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let why = "configuration utilisateur désactivée";
+            let why = t("backend.disabled");
             if c::button_if(
                 ui,
                 self.path.is_some(),
-                "Enregistrer",
+                t("backend.save"),
                 ButtonKind::Primary,
                 why,
             )
@@ -288,7 +268,7 @@ impl BackendDialog {
             {
                 self.save();
             }
-            if c::button(ui, "Annuler", ButtonKind::Ghost).clicked() {
+            if c::button(ui, t("action.cancel"), ButtonKind::Ghost).clicked() {
                 self.discard();
             }
         });

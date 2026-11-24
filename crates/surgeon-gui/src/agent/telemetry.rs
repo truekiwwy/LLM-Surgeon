@@ -144,6 +144,7 @@ pub fn of(conv: &Conversation) -> Telemetry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Progress {
     pub metric: &'static str,
+    pub dataset: Option<String>,
     pub before: Option<f64>,
     pub after: f64,
     pub heuristic: bool,
@@ -151,24 +152,32 @@ pub struct Progress {
 
 /// The newest successful `surgeon_bench` run of `entries` with a rate it can read.
 pub fn progress(entries: &[Entry]) -> Option<Progress> {
-    entries
+    let (e, metric) = entries
         .iter()
         .filter(|e| e.tool == "surgeon_bench" && e.verdict == Verdict::Ok)
         .filter_map(|e| {
-            let r = &e.result;
             let metric = ["probe_refusal_rate", "refusal_rate", "accuracy"]
                 .into_iter()
-                .find(|m| r[*m].is_number())?;
-            let progress = Progress {
-                metric,
-                before: r["baseline"][metric].as_f64(),
-                after: r[metric].as_f64()?,
-                heuristic: metric == "probe_refusal_rate" || r["is_heuristic"] == true,
-            };
-            Some((e.finished_unix, progress))
+                .find(|m| e.result[*m].is_number())?;
+            Some((e, metric))
         })
-        .max_by_key(|(finished, _)| *finished)
-        .map(|(_, progress)| progress)
+        .max_by_key(|(e, _)| e.finished_unix)?;
+    let r = &e.result;
+    let dataset = (metric == "refusal_rate")
+        .then(|| crate::studio::results::refusal_dataset(r, &e.params))
+        .flatten();
+    let shown = match (metric, dataset.as_deref()) {
+        ("refusal_rate", Some("builtin:refusals")) => "false_refusal_rate",
+        ("refusal_rate", Some(_)) => "safety_refusal_rate",
+        (metric, _) => metric,
+    };
+    Some(Progress {
+        metric: shown,
+        dataset,
+        before: r["baseline"][metric].as_f64(),
+        after: r[metric].as_f64()?,
+        heuristic: metric == "probe_refusal_rate" || r["is_heuristic"] == true,
+    })
 }
 
 #[cfg(test)]
@@ -257,6 +266,7 @@ mod tests {
             exit_code: 0,
             result,
             error: None,
+            elapsed_ms: None,
         }
     }
 
@@ -275,6 +285,7 @@ mod tests {
             p,
             Progress {
                 metric: "refusal_rate",
+                dataset: None,
                 before: Some(0.62),
                 after: 0.08,
                 heuristic: false
@@ -285,5 +296,18 @@ mod tests {
             (p.metric, p.before, p.heuristic),
             ("probe_refusal_rate", None, true)
         );
+    }
+
+    #[test]
+    fn a_refusal_rate_tells_false_refusals_from_safety_refusals() {
+        let on = |prompts: &str| {
+            let mut e = bench("r", 1, json!({"refusal_rate": 0.1}));
+            e.params = json!({"prompts": prompts});
+            progress(&[e]).unwrap()
+        };
+        assert_eq!(on("builtin:refusals").metric, "false_refusal_rate");
+        let safety = on("work/dangerous.json");
+        assert_eq!(safety.metric, "safety_refusal_rate");
+        assert_eq!(safety.dataset.as_deref(), Some("work/dangerous.json"));
     }
 }

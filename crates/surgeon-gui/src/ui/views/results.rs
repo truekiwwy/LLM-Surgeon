@@ -9,7 +9,7 @@ use super::super::components as c;
 use super::super::i18n::{t, tf};
 use super::super::icons::{self, Icon, State};
 use super::super::theme::TOKENS as T;
-use super::{age, duration};
+use super::{age, elapsed};
 use crate::agent::experiments;
 use crate::agent::paths::ProjectPaths;
 use crate::app::{SurgeonApp, Tab};
@@ -189,6 +189,17 @@ fn fold(ui: &mut Ui, id: egui::Id, label: &str, head: impl FnOnce(&mut Ui)) -> b
     open
 }
 
+const TOOK_WIDTH: f32 = 72.0;
+const AGE_WIDTH: f32 = 52.0;
+
+fn cell(ui: &mut Ui, width: f32, text: &str) {
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, T.size.row),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| c::meta(ui, text),
+    );
+}
+
 fn ppl_state(delta_pct: f64) -> State {
     match delta_pct {
         d if d <= 2.0 => State::Ok,
@@ -223,16 +234,16 @@ fn run_block(ui: &mut Ui, run: &Run) -> Option<std::path::PathBuf> {
         (None, None, Some(dataset)) => format!("{tool} · {dataset}"),
         (None, None, None) => tool.to_owned(),
     };
-    let when = format!(
-        "{} · {}",
-        duration(run.seconds),
-        age(now_unix().saturating_sub(run.finished_unix))
-    );
+    let took = elapsed(run.millis);
+    let ago = age(now_unix().saturating_sub(run.finished_unix));
     let id = egui::Id::new(("result", &run.id));
     let open = fold(ui, id, &title, |ui| {
-        c::status(ui, state, title.as_str());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            c::meta(ui, when.as_str());
+            cell(ui, AGE_WIDTH, &ago);
+            cell(ui, TOOK_WIDTH, &took);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                c::status(ui, state, title.as_str()).on_hover_text(title.as_str());
+            });
         });
     });
     if !open {
@@ -243,7 +254,7 @@ fn run_block(ui: &mut Ui, run: &Run) -> Option<std::path::PathBuf> {
         if let Some(e) = &run.error {
             c::status(ui, State::Error, e.as_str());
         }
-        c::kv(ui, t("results.duration"), &duration(run.seconds));
+        c::kv(ui, t("results.duration"), &took);
         if let Some(bench) = &run.bench {
             bench_block(ui, id, bench);
         }

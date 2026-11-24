@@ -154,7 +154,7 @@ fn sessions(ui: &mut Ui, app: &mut SurgeonApp) {
     c::section(ui, t("panel.sessions"));
     let current = app.agents.conversation().map(|c| c.id.clone());
     let now = now_unix();
-    let lines = app.agents.conversations().to_vec();
+    let lines = app.agents.conversations();
     if lines.is_empty() {
         c::empty(
             ui,
@@ -179,8 +179,15 @@ fn sessions(ui: &mut Ui, app: &mut SurgeonApp) {
                         c::line(ui, title.as_str());
                     });
                 });
-                if row.on_hover_text(id).clicked() && !selected {
-                    open = Some(id.clone());
+                let tip = match busy && !selected {
+                    true => t("chat.busy"),
+                    false => id.as_str(),
+                };
+                if row.on_hover_text(tip).clicked() && !selected {
+                    match busy {
+                        true => app.agents.message = Some((t("chat.busy").into(), true)),
+                        false => open = Some(id.clone()),
+                    }
                 }
             }
         });
@@ -846,7 +853,7 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
                         .tool_times
                         .get(id.as_str())
                         .filter(|time| time.end_ms.is_some() || busy)
-                        .map(|time| elapsed(time.secs(now)));
+                        .map(|time| super::elapsed(Some(time.millis(now))));
                     let summary = tool_summary(input);
                     let card = c::ToolCard {
                         title: tool_title(name),
@@ -1088,13 +1095,6 @@ fn output(content: &str) -> String {
     envelope(content)
         .and_then(|e| serde_json::to_string_pretty(&e).ok())
         .unwrap_or_else(|| content.to_owned())
-}
-
-fn elapsed(secs: f64) -> String {
-    match secs < 10.0 {
-        true => format!("{secs:.1} s"),
-        false => super::duration(secs as u64),
-    }
 }
 
 fn legacy_exit(text: &str) -> Option<Option<i32>> {

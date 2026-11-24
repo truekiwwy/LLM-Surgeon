@@ -350,9 +350,9 @@ impl Hub {
     }
 
     /// The project's conversations, newest first; read from disk only when the folder changed.
-    pub fn conversations(&mut self) -> &[ConvLine] {
+    pub fn conversations(&mut self) -> Vec<ConvLine> {
         let Some(project) = &self.project else {
-            return &[];
+            return Vec::new();
         };
         let dirs = Dirs::of(project);
         let modified = std::fs::metadata(&dirs.chat)
@@ -370,7 +370,16 @@ impl Hub {
                 .collect();
             self.convs = Some((dirs.chat.clone(), modified, lines));
         }
-        self.convs.as_ref().map_or(&[], |(_, _, l)| l)
+        let mut lines = self
+            .convs
+            .as_ref()
+            .map_or_else(Vec::new, |(_, _, l)| l.clone());
+        if let Some(conv) = self.conversation() {
+            if !lines.iter().any(|(id, _, _)| *id == conv.id) {
+                lines.insert(0, (conv.id.clone(), conv.title(), conv.created_unix));
+            }
+        }
+        lines
     }
 
     /// Reopens a conversation of the project by its id.
@@ -954,6 +963,7 @@ impl Hub {
         });
         conv.messages.push(Message::user_text(text));
         let tools = CliTools::after(conv);
+        self.save_cli_conv();
         self.session = None;
         let now = SystemTime::now();
         self.cli = Some(CliChat {
@@ -1047,25 +1057,15 @@ impl Hub {
         if let Some(e) = failure {
             self.message = Some((e, true));
         }
-        if let Some(conv) = &mut self.cli_conv {
-            if !blocks.is_empty() {
-                conv.messages.push(Message {
-                    role: Role::Assistant,
-                    blocks,
-                });
-            }
-            if ended {
-                if let Some(dir) = &self.project {
-                    let dirs = Dirs::of(dir);
-                    if let Ok(bytes) = serde_json::to_vec_pretty(conv) {
-                        let _ = std::fs::create_dir_all(&dirs.chat);
-                        let _ = crate::studio::project::write_atomic(
-                            &dirs.conversation(&conv.id),
-                            &bytes,
-                        );
-                    }
-                }
-            }
+        let changed = !blocks.is_empty();
+        if let Some(conv) = self.cli_conv.as_mut().filter(|_| changed) {
+            conv.messages.push(Message {
+                role: Role::Assistant,
+                blocks,
+            });
+        }
+        if changed || ended {
+            self.save_cli_conv();
         }
         if ended {
             if let Some(cli) = self.cli.take() {
@@ -1074,10 +1074,37 @@ impl Hub {
         }
     }
 
+    fn save_cli_conv(&self) {
+        let (Some(dir), Some(conv)) = (&self.project, &self.cli_conv) else {
+            return;
+        };
+        let dirs = Dirs::of(dir);
+        if let Ok(bytes) = serde_json::to_vec_pretty(conv) {
+            let _ = std::fs::create_dir_all(&dirs.chat);
+            if let Err(e) =
+                crate::studio::project::write_atomic(&dirs.conversation(&conv.id), &bytes)
+            {
+                crate::logging::warn(&format!("agent : {e}"));
+            }
+        }
+    }
+
     fn stop_cli(&mut self) {
         if let Some(cli) = self.cli.take() {
             cli.run.stop();
             end_cli(&cli);
+            if let Some(conv) = &mut self.cli_conv {
+                conv.messages.push(Message {
+                    role: Role::Assistant,
+                    blocks: vec![Block::RunEnd {
+                        code: None,
+                        cost_usd: cli.cost_usd,
+                        secs: Some(cli.started.elapsed().as_secs()),
+                        error: None,
+                    }],
+                });
+            }
+            self.save_cli_conv();
         }
     }
 

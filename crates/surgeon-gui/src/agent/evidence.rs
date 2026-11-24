@@ -177,6 +177,7 @@ pub fn mcp_runs(path: &Path) -> Vec<Entry> {
                 exit_code: run["exit_code"].as_i64().unwrap_or(1) as i32,
                 result: run["data"].clone(),
                 error: None,
+                elapsed_ms: None,
             })
         })
         .collect()
@@ -215,6 +216,7 @@ mod tests {
             exit_code: 0,
             result,
             error: None,
+            elapsed_ms: None,
         }
     }
 

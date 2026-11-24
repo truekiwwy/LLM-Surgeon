@@ -115,14 +115,16 @@ fn strip(ui: &mut Ui, app: &mut SurgeonApp) {
         cell
     });
     card(ui, place, "live-where", t("live.where"), None, |ui| {
-        c::mono(ui, target.as_deref().unwrap_or("-"));
+        let target = target.as_deref().unwrap_or("-");
+        c::mono(ui, target).on_hover_text(target);
     });
     card(ui, when, "live-when", t("live.when"), None, |ui| {
         frieze(ui, now.stage);
     });
     let evidence = now.method.as_ref().and_then(|m| m.evidence);
     card(ui, how, "live-how", t("live.how"), evidence, |ui| {
-        c::mono(ui, now.method.as_ref().map_or("-", |m| m.text.as_str()));
+        let method = now.method.as_ref().map_or("-", |m| m.text.as_str());
+        c::mono(ui, method).on_hover_text(method);
     });
     let evidence = progress.as_ref().map(|p| match p.heuristic {
         true => Evidence::Heuristic,
@@ -136,8 +138,17 @@ fn strip(ui: &mut Ui, app: &mut SurgeonApp) {
         evidence,
         |ui| match &progress {
             Some(p) => {
-                c::mono_secondary(ui, p.metric);
-                c::mono(ui, rates(p));
+                let tip = match p.metric {
+                    "false_refusal_rate" => t("live.false_refusal.tip"),
+                    "safety_refusal_rate" => t("live.safety_refusal.tip"),
+                    _ => p.metric,
+                };
+                let tip = match &p.dataset {
+                    Some(dataset) => format!("{tip}\n{dataset}"),
+                    None => tip.to_owned(),
+                };
+                c::mono_secondary(ui, p.metric).on_hover_text(&tip);
+                c::mono(ui, rates(p)).on_hover_text(&tip);
             }
             None => {
                 c::mono(ui, "-");
@@ -190,7 +201,56 @@ fn badge(ui: &mut Ui, evidence: Evidence) {
 
 /// `1. Santé → 2. Sonde → 3. Compose → 4. Mesure`: the stage reached in full text, the ones
 /// before it secondary, the ones after it disabled.
+fn stage_name(s: Stage) -> &'static str {
+    match s {
+        Stage::Health => t("live.stage.health"),
+        Stage::Probe => t("live.stage.probe"),
+        Stage::Compose => t("live.stage.compose"),
+        Stage::Measure => t("live.stage.measure"),
+    }
+}
+
+fn rows(widths: &[f32], room: f32, gap: f32) -> usize {
+    let mut rows = 1;
+    let mut x = 0.0;
+    for w in widths {
+        if x > 0.0 && x + w > room {
+            rows += 1;
+            x = 0.0;
+        }
+        x += w + gap;
+    }
+    rows
+}
+
 fn frieze(ui: &mut Ui, stage: Option<Stage>) {
+    let labels: Vec<String> = Stage::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(k, s)| format!("{}. {}", k + 1, stage_name(s)))
+        .collect();
+    let measure = |text: &str| {
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), c::font_meta(), T.color.text)
+            .size()
+            .x
+    };
+    let arrow = measure("→");
+    let widths: Vec<f32> = labels
+        .iter()
+        .enumerate()
+        .map(|(k, l)| measure(l) + if k > 0 { arrow + T.space.xs } else { 0.0 })
+        .collect();
+    if rows(&widths, ui.available_width(), T.space.xs) > 2 {
+        let full = labels.join(" → ");
+        let now = stage.map_or("-".to_owned(), |s| {
+            let k = Stage::ALL.iter().position(|x| *x == s).unwrap_or(0);
+            format!("{}/{} {}", k + 1, Stage::ALL.len(), stage_name(s))
+        });
+        ui.add(Label::new(rich(&now, T.color.text)).truncate())
+            .on_hover_text(full);
+        return;
+    }
     // Rows as tall as the text, not as a control: two of them fit the card when it wraps.
     ui.spacing_mut().interact_size.y = T.space.l;
     ui.horizontal_wrapped(|ui| {
@@ -199,12 +259,7 @@ fn frieze(ui: &mut Ui, stage: Option<Stage>) {
             if k > 0 {
                 ui.add(Label::new(rich("→", T.color.text_disabled)));
             }
-            let name = match s {
-                Stage::Health => t("live.stage.health"),
-                Stage::Probe => t("live.stage.probe"),
-                Stage::Compose => t("live.stage.compose"),
-                Stage::Measure => t("live.stage.measure"),
-            };
+            let name = stage_name(s);
             let color = match stage.map(|now| s.cmp(&now)) {
                 Some(std::cmp::Ordering::Equal) => T.color.text,
                 Some(std::cmp::Ordering::Less) => T.color.text_secondary,
@@ -271,11 +326,19 @@ mod tests {
     fn rates_read_from_the_origin_to_the_copy() {
         let p = Progress {
             metric: "refusal_rate",
+            dataset: None,
             before: Some(0.62),
             after: 0.08,
             heuristic: false,
         };
         assert_eq!(rates(&p), "62.0 % → 8.0 %");
         assert_eq!(rates(&Progress { before: None, ..p }), "8.0 %");
+    }
+
+    #[test]
+    fn the_frieze_counts_the_rows_it_would_wrap_into() {
+        assert_eq!(rows(&[40.0, 40.0, 40.0, 40.0], 400.0, 4.0), 1);
+        assert_eq!(rows(&[40.0, 40.0, 40.0, 40.0], 90.0, 4.0), 2);
+        assert_eq!(rows(&[40.0, 40.0, 40.0, 40.0], 50.0, 4.0), 4);
     }
 }

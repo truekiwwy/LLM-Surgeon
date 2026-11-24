@@ -132,8 +132,8 @@ pub struct ToolTime {
 }
 
 impl ToolTime {
-    pub fn secs(&self, now_ms: u64) -> f64 {
-        self.end_ms.unwrap_or(now_ms).saturating_sub(self.start_ms) as f64 / 1000.0
+    pub fn millis(&self, now_ms: u64) -> u64 {
+        self.end_ms.unwrap_or(now_ms).saturating_sub(self.start_ms)
     }
 }
 

@@ -43,6 +43,15 @@ pub fn duration(secs: u64) -> String {
     }
 }
 
+pub fn elapsed(millis: Option<u64>) -> String {
+    match millis {
+        None => "-".into(),
+        Some(ms) if ms < 1000 => format!("{ms} ms"),
+        Some(ms) if ms < 10_000 => format!("{:.1} s", ms as f64 / 1000.0),
+        Some(ms) => duration(ms / 1000),
+    }
+}
+
 /// How long ago, in the largest whole unit: `now`, `5 min`, `3 h`, `2 d`.
 pub fn age(secs: u64) -> String {
     match secs {
@@ -388,6 +397,11 @@ pub(crate) mod tests {
         assert_eq!(num(-2.5e6), "-2.500e6");
         assert_eq!(duration(42), "42 s");
         assert_eq!(duration(65), "1 min 05 s");
+        assert_eq!(elapsed(None), "-");
+        assert_eq!(elapsed(Some(0)), "0 ms");
+        assert_eq!(elapsed(Some(340)), "340 ms");
+        assert_eq!(elapsed(Some(2_450)), "2.5 s");
+        assert_eq!(elapsed(Some(65_400)), "1 min 05 s");
         crate::ui::i18n::set_lang(crate::settings::Lang::En);
         assert_eq!(age(59), "now");
         assert_eq!(age(3599), "59 min");

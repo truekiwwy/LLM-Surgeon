@@ -351,7 +351,11 @@ fn chronology(ui: &mut Ui, app: &mut SurgeonApp) {
                 let index = format!("{:03}", i + 1);
                 let count = step.touched.len().to_string();
                 let cells = [Cell::dim(&index), Cell::new(&first), Cell::new(&count)];
-                if table.row(ui, i == cursor, &cells).clicked() {
+                if table
+                    .row(ui, i == cursor, &cells)
+                    .on_hover_text(&first)
+                    .clicked()
+                {
                     seek = Some(i);
                 }
             }
@@ -494,8 +498,9 @@ fn run_inspector(ui: &mut Ui, run: &RunView, layer: &Layer, step: &Step, i: usiz
 
 fn node_inspector(ui: &mut Ui, step: &Step, node: &NodeReport) {
     let m = &node.metrics;
-    c::strong(ui, node_title(node));
-    c::mono_wrapped(ui, node.tensor.as_str(), T.color.text_secondary);
+    c::strong(ui, node_title(node)).on_hover_text(node.tensor.as_str());
+    c::mono_wrapped(ui, node.tensor.as_str(), T.color.text_secondary)
+        .on_hover_text(node.tensor.as_str());
     let measured = step.report.parameters.rank > 0;
     if !measured {
         c::secondary(ui, t("inspector.unmeasured"));

@@ -648,7 +648,12 @@ pub fn show(ui: &mut egui::Ui, view: &View, camera: &mut Orbit, buf: &mut Buffer
             }
         }
         let run = view.layer.map(|l| run_line(l, i));
-        hover_card(&painter, rect, pointer, &report.nodes[i], run);
+        let above = egui::LayerId::new(
+            egui::Order::Middle,
+            painter.layer_id().id.with("node-hover"),
+        );
+        let top = painter.ctx().layer_painter(above).with_clip_rect(rect);
+        hover_card(&top, rect, pointer, &report.nodes[i], run);
     }
     if let Some(activity) = view.activity {
         let beat = match view.animate {
@@ -871,11 +876,15 @@ fn hover_card(
     min.x = min.x.min(rect.right() - size.x - 4.0);
     min.y = min.y.min(rect.bottom() - size.y - 4.0);
     let card = Rect::from_min_size(min, size);
-    painter.rect_filled(card, CornerRadius::same(2), theme::PANEL);
+    painter.rect_filled(
+        card,
+        CornerRadius::same(2),
+        theme::TOKENS.color.surface_hover,
+    );
     painter.rect_stroke(
         card,
         CornerRadius::same(2),
-        Stroke::new(1.0, theme::BORDER),
+        Stroke::new(1.0, theme::TOKENS.color.text_disabled),
         StrokeKind::Inside,
     );
     let mut y = card.top() + 4.0;

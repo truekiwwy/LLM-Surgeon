@@ -603,6 +603,7 @@ impl Manager {
             .as_str()
             .map(String::from)
             .or(run.stopped_by.clone());
+        e.elapsed_ms = Some(run.started.elapsed().as_millis() as u64);
         if let Err(err) = ledger::append(&self.project.ledger_path(), &e) {
             eprintln!("surgeon-gui : {err}");
         }
@@ -652,6 +653,7 @@ fn entry(
         exit_code: status.exit_code.unwrap_or(-1),
         result,
         error: status.note.clone(),
+        elapsed_ms: None,
     }
 }
 

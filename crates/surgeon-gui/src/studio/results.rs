@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -82,7 +83,7 @@ pub struct Run {
     pub tool: String,
     pub verdict: Verdict,
     pub finished_unix: u64,
-    pub seconds: u64,
+    pub millis: Option<u64>,
     pub error: Option<String>,
     /// The graph file a `surgeon_graph` run wrote, still on disk.
     pub graph: Option<PathBuf>,
@@ -165,7 +166,10 @@ pub fn runs<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Vec<Run> {
             tool: e.tool.clone(),
             verdict: e.verdict,
             finished_unix: e.finished_unix,
-            seconds: e.finished_unix.saturating_sub(e.started_unix),
+            millis: e.elapsed_ms.or_else(|| {
+                (e.started_unix > 0 && e.finished_unix > e.started_unix)
+                    .then(|| (e.finished_unix - e.started_unix) * 1000)
+            }),
             error: e.error.clone(),
             graph: graph_output(e),
             bench: (e.tool == "surgeon_bench")
@@ -274,27 +278,44 @@ fn eval(data: &Value) -> Option<Bench> {
     })
 }
 
-fn refusal(data: &Value, params: &Value) -> Option<Bench> {
-    // The report keeps only the prompts' hash: a built-in set is recognised by it.
-    let known = builtin::names()
-        .split(", ")
-        .filter_map(|name| {
-            let prompts = builtin::prompts(Path::new(name))?.ok()?;
-            let json = serde_json::to_string(&prompts).ok()?;
-            let sha: String = Sha256::digest(json.as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
-            (data["prompts_sha256"].as_str() == Some(sha.as_str()))
-                .then(|| (name.to_owned(), prompts))
-        })
-        .next();
+type PromptSet = (String, String, Vec<String>);
+
+fn builtin_prompt_sets() -> &'static [PromptSet] {
+    static SETS: OnceLock<Vec<PromptSet>> = OnceLock::new();
+    SETS.get_or_init(|| {
+        builtin::names()
+            .split(", ")
+            .filter_map(|name| {
+                let prompts = builtin::prompts(Path::new(name))?.ok()?;
+                let json = serde_json::to_string(&prompts).ok()?;
+                let sha: String = Sha256::digest(json.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                Some((name.to_owned(), sha, prompts))
+            })
+            .collect()
+    })
+}
+
+// The report keeps only the prompts' hash: a built-in set is recognised by it.
+fn known_prompts(data: &Value) -> Option<&'static PromptSet> {
+    let sha = data["prompts_sha256"].as_str()?;
+    builtin_prompt_sets().iter().find(|(_, s, _)| s == sha)
+}
+
+pub(crate) fn refusal_dataset(data: &Value, params: &Value) -> Option<String> {
     // shortcut: a prompts file is named only by a studio run, its texts are not read back.
-    let dataset = known
-        .as_ref()
-        .map(|(name, _)| name.clone())
-        .or_else(|| params["prompts"].as_str().map(str::to_owned));
-    let questions = known.map(|(_, prompts)| prompts).unwrap_or_default();
+    known_prompts(data)
+        .map(|(name, ..)| name.clone())
+        .or_else(|| params["prompts"].as_str().map(str::to_owned))
+}
+
+fn refusal(data: &Value, params: &Value) -> Option<Bench> {
+    let dataset = refusal_dataset(data, params);
+    let questions = known_prompts(data)
+        .map(|(.., prompts)| prompts.clone())
+        .unwrap_or_default();
     let answer = |item: &Value| Answer {
         text: item["output"].as_str().unwrap_or_default().to_owned(),
         good: !item["refused"].as_bool().unwrap_or(false),
@@ -354,6 +375,7 @@ mod tests {
             exit_code: 0,
             result,
             error: None,
+            elapsed_ms: None,
         }
     }
 
@@ -380,7 +402,7 @@ mod tests {
     fn a_paired_eval_reads_scores_gains_and_items_with_their_questions() {
         let runs = runs(&[entry("r1", "surgeon_bench", 100, eval_report())]);
         let b = runs[0].bench.as_ref().unwrap();
-        assert_eq!(runs[0].seconds, 42);
+        assert_eq!(runs[0].millis, Some(42_000));
         assert_eq!(b.mode, Mode::Eval);
         assert_eq!(b.dataset.as_deref(), Some("builtin:math"));
         assert_eq!((b.after.rate, b.before.unwrap().rate), (1.0, 0.5));

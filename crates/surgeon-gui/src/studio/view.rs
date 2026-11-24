@@ -644,6 +644,7 @@ mod tests {
             exit_code: 0,
             result: Value::Null,
             error: None,
+            elapsed_ms: None,
         };
         let on_c1 = serde_json::json!({"model": "copies/c1", "patch": "p.json"});
         let ok = ledger::Verdict::Ok;

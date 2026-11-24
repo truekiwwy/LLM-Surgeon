@@ -1347,6 +1347,7 @@ mod tests {
             exit_code: 0,
             result: report,
             error: None,
+            elapsed_ms: None,
         };
         ledger::append(&ledger_path, &studio_run).unwrap();
         let line = serde_json::json!({"run_id": "mcp-7", "tool": "surgeon_extract", "ok": false,
@@ -1358,7 +1359,7 @@ mod tests {
         assert_eq!(ids, ["mcp-7", "r1"], "newest first, both sources");
         assert_eq!(runs[0].verdict, ledger::Verdict::Failed);
         let bench = runs[1].bench.as_ref().unwrap();
-        assert_eq!(runs[1].seconds, 60);
+        assert_eq!(runs[1].millis, Some(60_000));
         assert_eq!(bench.dataset.as_deref(), Some("builtin:math"));
         assert_eq!((bench.after.rate, bench.before.unwrap().rate), (1.0, 0.0));
         assert_eq!((bench.gained, bench.lost), (1, 0));

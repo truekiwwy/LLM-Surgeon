@@ -134,6 +134,7 @@ fn heavy_jobs_run_one_at_a_time_by_priority_and_light_ones_alongside() {
         let view =
             RunView::replay(&m.project.runs_dir().join(&e.run_id).join(EVENTS_FILE)).unwrap();
         assert_eq!(view.end, Some(SurgeonEvent::Finished { exit_code: 0 }));
+        assert!(e.elapsed_ms.is_some(), "{}: no measured duration", e.run_id);
     }
 }
 

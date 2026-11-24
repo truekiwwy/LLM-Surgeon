@@ -363,6 +363,7 @@ mod tests {
             exit_code: 0,
             result,
             error: None,
+            elapsed_ms: None,
         }
     }
 

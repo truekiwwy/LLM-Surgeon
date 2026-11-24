@@ -29,6 +29,8 @@ pub struct Entry {
     pub result: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -198,6 +200,7 @@ mod tests {
             exit_code: 0,
             result: Value::Null,
             error: None,
+            elapsed_ms: None,
         }
     }
 
