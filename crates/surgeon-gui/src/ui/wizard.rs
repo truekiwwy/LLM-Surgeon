@@ -713,12 +713,12 @@ fn outcomes(ui: &mut Ui, app: &SurgeonApp) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::actions::Env;
     use crate::desktop::Desktop;
 
-    fn app(dir: &std::path::Path) -> SurgeonApp {
+    pub(crate) fn app(dir: &std::path::Path) -> SurgeonApp {
         let env = Env {
             components: dir.join("data").join("components"),
             config: None,

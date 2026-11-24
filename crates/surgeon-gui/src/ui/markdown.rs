@@ -237,6 +237,10 @@ fn paragraph(ui: &mut Ui, text: &str, font: FontId, color: egui::Color32) {
 }
 
 pub fn show(ui: &mut Ui, text: &str) {
+    c::selectable(ui, |ui| blocks(ui, text));
+}
+
+fn blocks(ui: &mut Ui, text: &str) {
     let blocks = parse(text);
     for (k, block) in blocks.iter().enumerate() {
         if k > 0 {

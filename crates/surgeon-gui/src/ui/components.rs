@@ -5,9 +5,9 @@
 
 use eframe::egui::emath::GuiRounding as _;
 use eframe::egui::{
-    self, Align, Align2, Color32, FontFamily, FontId, Id, Label, Layout, Painter, Pos2, Rangef,
-    Rect, Response, RichText, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, Vec2, WidgetInfo,
-    WidgetType,
+    self, Align, Align2, Color32, CursorIcon, FontFamily, FontId, Id, Label, Layout, Painter, Pos2,
+    Rangef, Rect, Response, RichText, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, Vec2,
+    WidgetInfo, WidgetType,
 };
 
 use super::icons::{self, Icon, State};
@@ -206,6 +206,16 @@ pub fn mono_secondary(ui: &mut Ui, text: impl Into<String>) -> Response {
 /// Tabular text over several lines (logs, JSON parameters).
 pub fn mono_wrapped(ui: &mut Ui, text: impl Into<String>, color: Color32) -> Response {
     ui.add(Label::new(rich(text, font_mono(), color)).wrap())
+}
+
+/// A zone of text to read or copy (messages, tool output, values, logs): its labels can be
+/// selected, unlike the rest of the interface.
+pub fn selectable<R>(ui: &mut Ui, body: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.scope(|ui| {
+        ui.style_mut().interaction.selectable_labels = true;
+        body(ui)
+    })
+    .inner
 }
 
 /// The question that opens a page, then the sentence that says what to do.
@@ -528,6 +538,7 @@ pub fn row_background(ui: &Ui, rect: Rect, response: &Response, selected: bool) 
 pub fn row(ui: &mut Ui, selected: bool, label: &str, body: impl FnOnce(&mut Ui)) -> Response {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), T.size.row), Sense::click());
+    let response = response.on_hover_cursor(CursorIcon::PointingHand);
     response
         .widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, label));
     row_background(ui, rect, &response, selected);
@@ -538,6 +549,8 @@ pub fn row(ui: &mut Ui, selected: bool, label: &str, body: impl FnOnce(&mut Ui))
             .layout(Layout::left_to_right(Align::Center)),
     );
     child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    // A selectable label would take the press and drag from the row.
+    child.style_mut().interaction.selectable_labels = false;
     body(&mut child);
     response
 }
@@ -736,7 +749,9 @@ fn track_option(
     active: bool,
     tooltip: &str,
 ) -> Response {
-    let response = ui.interact(rect, ui.id().with(("segment", text)), Sense::click());
+    let response = ui
+        .interact(rect, ui.id().with(("segment", text)), Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand);
     response.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, active, text));
     let painter = ui.painter();
     let rect = snap(painter, rect);
@@ -875,7 +890,9 @@ pub fn window_button(ui: &mut Ui, rect: Rect, icon: Icon, tooltip: &str, danger:
 
 /// A tab of the title bar, painted in `rect`: the active one carries the accent underline.
 pub fn tab(ui: &mut Ui, rect: Rect, text: &str, active: bool) -> Response {
-    let response = ui.interact(rect, ui.id().with(("tab", text)), Sense::click());
+    let response = ui
+        .interact(rect, ui.id().with(("tab", text)), Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand);
     response.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, active, text));
     let painter = ui.painter();
     let ink = match (active, response.hovered()) {
@@ -1464,7 +1481,9 @@ pub fn activity(
     tooltip: &str,
     badge: usize,
 ) -> Response {
-    let response = ui.interact(rect, ui.id().with(("activity", tooltip)), Sense::click());
+    let response = ui
+        .interact(rect, ui.id().with(("activity", tooltip)), Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand);
     response.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, active, tooltip));
     let painter = ui.painter();
     let cell = snap(
@@ -1618,20 +1637,23 @@ pub fn tool_card(ui: &mut Ui, id: Id, card: &ToolCard<'_>) {
     let open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
     let response = row(ui, false, card.title, |ui| {
         ui.spacing_mut().item_spacing.x = T.space.s;
-        let (glyph, _) = ui.allocate_exact_size(Vec2::splat(T.size.icon), Sense::hover());
+        // Two fixed icon columns, so the chevron and the spinner never overlap.
+        let (slots, _) = ui.allocate_exact_size(
+            Vec2::new(2.0 * T.size.icon + T.space.s, T.size.icon),
+            Sense::hover(),
+        );
+        let glyph = Rect::from_min_size(slots.min, Vec2::splat(T.size.icon));
+        let mark = glyph.translate(Vec2::new(T.size.icon + T.space.s, 0.0));
         let chevron = match open {
             true => Icon::ChevronDown,
             false => Icon::ChevronRight,
         };
         icons::paint(ui.painter(), glyph, chevron, T.color.text_secondary);
         match card.state {
-            State::Active => {
-                spinner(ui);
-            }
-            state => {
-                let (dot, _) = ui.allocate_exact_size(Vec2::splat(T.size.dot), Sense::hover());
-                icons::dot(ui.painter(), dot.center(), state);
-            }
+            State::Active => egui::Spinner::new()
+                .color(T.color.text_secondary)
+                .paint_at(ui, mark.shrink(T.space.xs / 2.0)),
+            state => icons::dot(ui.painter(), mark.center(), state),
         }
         ui.add(Label::new(rich(card.title, font_strong(), T.color.text)).selectable(false));
         if card.tool != card.title {
@@ -1655,16 +1677,23 @@ pub fn tool_card(ui: &mut Ui, id: Id, card: &ToolCard<'_>) {
                 .selectable(false),
         );
     });
-    let response = response.on_hover_text(card.summary);
+    record(ui.ctx(), "tool-header", response.rect);
     if response.clicked() {
         ui.data_mut(|d| d.insert_temp(open_id, !open));
     }
     if !open {
         return;
     }
-    ui.horizontal_top(|ui| {
-        ui.add_space(T.space.s + T.size.icon);
-        inset_frame().show(ui, |ui| {
+    // A top-down child: a frame inherits its parent's layout, and in a horizontal one the
+    // sections would sit side by side, the output wrapped to a sliver of width.
+    let mut room = ui.available_rect_before_wrap();
+    room.min.x += 2.0 * T.space.s + T.size.icon;
+    let detail = UiBuilder::new()
+        .max_rect(room)
+        .layout(Layout::top_down(Align::Min));
+    ui.scope_builder(detail, |ui| {
+        ui.style_mut().interaction.selectable_labels = true;
+        let detail = inset_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
             for (k, (label, body)) in card.sections.iter().enumerate() {
                 if k > 0 {
@@ -1691,6 +1720,7 @@ pub fn tool_card(ui: &mut Ui, id: Id, card: &ToolCard<'_>) {
                 mono_wrapped(ui, body.as_str(), T.color.text_secondary);
             }
         });
+        record(ui.ctx(), "tool-detail", detail.response.rect);
     });
     ui.add_space(T.space.xs);
 }
@@ -1834,4 +1864,76 @@ pub fn bubble(ui: &mut Ui, text: &str) {
                 });
             });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_open_tool_card_unfolds_right_under_its_header() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        super::super::fonts::install(&ctx);
+        let id = Id::new("card");
+        ctx.data_mut(|d| d.insert_temp(id.with("open"), true));
+        let card = ToolCard {
+            title: "Mesure",
+            tool: "surgeon_bench",
+            state: State::Active,
+            badge: "running".into(),
+            elapsed: Some("2.5 s".into()),
+            summary: "mode: ppl",
+            sections: vec![
+                (
+                    "Parameters",
+                    "{\n  \"mode\": \"ppl\",\n  \"model\": \"m\"\n}".into(),
+                ),
+                ("Command", "surgeon bench --mode ppl m".into()),
+                ("Output", "{\"ok\":true,\"ppl\":7.31}".into()),
+            ],
+            copy: "Copy",
+            copied: "Copied",
+        };
+        let mut dump = Vec::new();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 700.0))),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                begin_dump(ui.ctx(), true);
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        label(ui, "before");
+                        tool_card(ui, id, &card);
+                        label(ui, "after");
+                    });
+            });
+            output.textures_delta.clear();
+            dump = take_dump(&ctx);
+        }
+        let rect = |name: &str| {
+            dump.iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, r)| *r)
+                .unwrap_or_else(|| panic!("{name} was not laid out"))
+        };
+        let (header, detail) = (rect("tool-header"), rect("tool-detail"));
+        assert!(
+            detail.top() >= header.bottom(),
+            "{detail:?} starts above {header:?}"
+        );
+        assert!(
+            detail.top() - header.bottom() <= T.space.s,
+            "{detail:?} floats under {header:?}"
+        );
+        assert!(detail.left() > header.left() && detail.right() <= header.right() + 1.0);
+        assert!(
+            detail.height() < 12.0 * T.size.row,
+            "{detail:?} is not compact"
+        );
+    }
 }

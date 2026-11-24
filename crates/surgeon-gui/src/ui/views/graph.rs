@@ -53,12 +53,16 @@ pub fn show(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
     let right = layout::stack(regions.right, &[Part::Flex(1.6), Part::Flex(1.0)]);
     c::Panel::new("inspector")
         .title(t("panel.inspector"))
-        .show(ui, right[0], |ui| inspector(ui, app));
+        .show(ui, right[0], |ui| {
+            c::selectable(ui, |ui| inspector(ui, app))
+        });
     c::Panel::new("chronology")
         .title(t("panel.chronology"))
         .flush()
         .divided()
-        .show(ui, right[1], |ui| chronology(ui, app));
+        .show(ui, right[1], |ui| {
+            c::selectable(ui, |ui| chronology(ui, app))
+        });
 }
 
 /// Header of the 3D panel, right to left: recenter, diff, layout.

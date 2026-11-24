@@ -88,6 +88,7 @@ pub fn dialog(ctx: &egui::Context, app: &mut SurgeonApp) {
                         icons::paint(ui.painter(), glyph, section_icon(s), ink);
                         c::line(ui, label);
                     });
+                    c::record(ui.ctx(), label, row.rect);
                     if row.clicked() {
                         app.settings = Some(s);
                     }
@@ -576,6 +577,7 @@ fn journal(ui: &mut Ui, app: &mut SurgeonApp, regions: &Regions) {
                 .auto_shrink(false)
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
+                    ui.style_mut().interaction.selectable_labels = true;
                     for line in lines.iter().map(|l| clock(l)) {
                         let state = match () {
                             _ if line.contains("WARN") => Some(State::Warn),
@@ -1194,6 +1196,60 @@ mod tests {
         assert_eq!(super::short_version("codex-cli 0.166.0"), "0.166.0");
         assert_eq!(super::short_version("opencode v2.2.7"), "v2.2.7");
         assert_eq!(super::short_version("weird"), "weird");
+    }
+
+    #[test]
+    fn a_click_on_a_section_name_opens_it_without_selecting_text() {
+        use super::*;
+        use eframe::egui::{text_selection::LabelSelectionState, Event, PointerButton, RawInput};
+
+        crate::ui::i18n::set_lang(Lang::Fr);
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = crate::ui::wizard::tests::app(dir.path());
+        crate::ui::theme::apply(&ctx);
+        crate::ui::fonts::install(&ctx);
+        app.settings = Some(Section::General);
+        let frame = |events: Vec<Event>, app: &mut SurgeonApp| {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                c::begin_dump(ui.ctx(), true);
+                super::dialog(ui.ctx(), app);
+            });
+            output.textures_delta.clear();
+            c::take_dump(&ctx)
+        };
+        frame(vec![], &mut app);
+        let dump = frame(vec![], &mut app);
+        let row = dump
+            .iter()
+            .find(|(name, _)| name == "Moteur et machine")
+            .map(|(_, rect)| *rect)
+            .expect("the engine section is listed");
+        // On the word itself, past the icon column.
+        let at = Pos2::new(
+            row.left() + T.space.s + T.size.icon + 2.0 * T.space.s,
+            row.center().y,
+        );
+        let press = |pressed| Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![Event::PointerMoved(at)], &mut app);
+        frame(vec![press(true)], &mut app);
+        frame(vec![press(false)], &mut app);
+        frame(vec![], &mut app);
+        assert_eq!(app.settings, Some(Section::Engine));
+        let selected = ctx
+            .with_plugin::<LabelSelectionState, _>(|s| s.has_selection())
+            .unwrap_or(false);
+        assert!(!selected, "the label text was selected instead");
     }
 
     #[test]
