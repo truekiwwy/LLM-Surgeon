@@ -129,5 +129,6 @@ pub fn run_stdio(args: &McpArgs, deps: &AppDeps, out: &mut dyn Write, err: &mut 
         cfg.sandbox.read_roots().len(),
         if cfg.read_only { ", lecture seule" } else { "" }
     );
+    crate::extract::weight_cache::enable();
     server::serve_stdio(out, err, deps, &cfg)
 }

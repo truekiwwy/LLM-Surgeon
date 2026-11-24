@@ -1169,6 +1169,7 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--model` | required | Qwen2, Llama/Mistral or Qwen3 folder (`config.json` `model_type` `qwen2`, `llama`, `mistral` or `qwen3`). |
 | `--prompts` | required | JSON array of strings or `{"text": ...}`, JSONL, or plain text. |
 | `--baseline-model` | none | Reference model on the same prompts, generated first (paired comparison). |
+| `--limit` | all | First N prompts, in file order; the refusal rate, its 95% Wilson interval and the comparison with `--baseline-model` cover those N. 0 is refused. |
 | `--no-ref-cache` | off | Generate the `--baseline-model` answers again instead of reading them from the reference cache, and overwrite its entry. The cache (`%LOCALAPPDATA%\weight-surgeon\cache\ref_bench`, `~/.cache/weight-surgeon/ref_bench`, or `WEIGHT_SURGEON_CACHE_DIR`) is keyed by the SHA-256 of the reference model files, the dataset or prompts, and every option that changes the answers; `baseline.cache` says `hit` or `miss`. |
 | `--max-new-tokens` | 40 | Generation budget per prompt: a refusal shows in the first words (40 gave the verdicts of 256 on the built-in sets). |
 | `--chat-template` | `auto` | Wrapping of each prompt: `auto` (the model's format, ChatML if it declares none), `none`, `chatml`, `llama3`, `inst` or `gemma`. |

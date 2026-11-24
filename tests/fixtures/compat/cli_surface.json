@@ -4502,6 +4502,24 @@
             {
               "action": "Set",
               "aliases": null,
+              "default_values": [],
+              "env": null,
+              "global": false,
+              "hidden": false,
+              "id": "limit",
+              "long": "limit",
+              "num_args": "1",
+              "positional": false,
+              "possible_values": [],
+              "required": false,
+              "short": null,
+              "value_names": [
+                "LIMIT"
+              ]
+            },
+            {
+              "action": "Set",
+              "aliases": null,
               "default_values": [
                 "40"
               ],

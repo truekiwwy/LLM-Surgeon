@@ -787,6 +787,9 @@ pub struct BenchRefusalArgs {
     /// Reference model on the same prompts (paired comparison, Newcombe interval).
     #[arg(long)]
     pub baseline_model: Option<PathBuf>,
+    /// First N prompts, in file order (default: all); the rate and its interval are over N.
+    #[arg(long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    pub limit: Option<usize>,
     #[arg(long, default_value_t = crate::bench::DEFAULT_REFUSAL_MAX_NEW_TOKENS)]
     pub max_new_tokens: u32,
     /// Wrapping of each prompt: auto follows the model (ChatML if it declares nothing).

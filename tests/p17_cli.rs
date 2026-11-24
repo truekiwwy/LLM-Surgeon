@@ -669,6 +669,69 @@ fn autotune_picks_its_scale_by_probe_then_generation() {
 }
 
 #[test]
+fn refusal_limit_scores_the_first_prompts_only() {
+    let dir = workspace();
+    let all: Vec<String> =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("pos.json")).unwrap())
+            .unwrap();
+    assert_eq!(all.len(), 6);
+    std::fs::write(
+        dir.path().join("first2.json"),
+        serde_json::to_string(&all[..2]).unwrap(),
+    )
+    .unwrap();
+    let call = |prompts: &str, limit: Option<u64>| {
+        let mut args = json!({"mode": "refusal", "model": "qwen2-mini", "prompts": prompts,
+                              "baseline_model": "qwen2-mini", "max_new_tokens": 6,
+                              "backend": "native"});
+        if let Some(limit) = limit {
+            args["limit"] = json!(limit);
+        }
+        args
+    };
+    let replies = mcp(
+        dir.path(),
+        &[
+            call("pos.json", Some(2)),
+            call("first2.json", None),
+            call("pos.json", Some(0)),
+            call("pos.json", Some(100)),
+        ],
+    );
+    let content = |i: usize| replies[i]["result"]["structuredContent"].clone();
+    let limited = content(0);
+    assert_eq!(limited["ok"], true, "{limited}");
+    let limited = &limited["data"];
+    assert_eq!(limited["n"], 2);
+    assert_eq!(limited["items"].as_array().unwrap().len(), 2);
+    assert_eq!(limited["baseline"]["n"], 2);
+    let truncated = content(1)["data"].clone();
+    for key in [
+        "n",
+        "refused",
+        "refusal_rate",
+        "ci95_low",
+        "ci95_high",
+        "prompts_sha256",
+    ] {
+        assert_eq!(limited[key], truncated[key], "{key}");
+    }
+    assert_eq!(outputs(limited), outputs(&truncated));
+    assert_eq!(content(2)["error"]["kind"], "invalid_arguments");
+    assert_eq!(content(3)["data"]["n"], 6);
+
+    let cli = refusal(dir.path(), &["--limit", "2"]);
+    for key in ["n", "refused", "refusal_rate", "ci95_low", "ci95_high"] {
+        assert_eq!(cli[key], limited[key], "{key}");
+    }
+    let (code, _) = surgeon(
+        dir.path(),
+        &[&NATIVE_REFUSAL[..], &["--limit", "0"]].concat(),
+    );
+    assert_ne!(code, 0);
+}
+
+#[test]
 fn mcp_refusal_probe_answers_as_a_heuristic() {
     let dir = workspace();
     let replies = mcp(

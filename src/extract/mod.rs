@@ -83,6 +83,7 @@ mod stats;
 mod subspace;
 mod svd;
 mod sweep;
+pub mod weight_cache;
 mod weights;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -370,7 +371,8 @@ pub fn dtype_decision(
     let available = probe
         .system_ram()
         .map_err(|e| ExtractError::InsufficientResources(e.to_string()))?
-        .available_bytes;
+        .available_bytes
+        + weight_cache::reclaimable_bytes();
     let need = |bytes: u64| required_ram(bytes, &policy);
     let fits = |bytes: u64| need(bytes) <= available;
     let refuse = |bytes: u64, dtype: &str| {

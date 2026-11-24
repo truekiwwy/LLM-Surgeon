@@ -136,6 +136,9 @@
 //!   tool schema hash moved.
 //! - native perplexity: `bench ppl --backend` and `--stride`, the property `stride` of
 //!   `surgeon_bench`, additive. Only the tool schema hash moved.
+//! - refusal subsets: `bench refusal --limit` (first N prompts, default all) and the existing
+//!   property `limit` of `surgeon_bench` accepted in mode `refusal`, additive. One entry added
+//!   to `cli_surface.json`; no tool schema, no output hash moved.
 //!
 //! Apart from that value, no entry changed or disappeared, and the only output hashes that moved are the two
 //! schemas, which list those properties; every extraction file is still byte for byte what

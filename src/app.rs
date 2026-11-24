@@ -3466,8 +3466,9 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
         }
         BenchCommand::Refusal(a) => {
             let refusal_backend = a.backend.unwrap_or(Backend::Native);
-            let prompts = extract::load_prompt_texts(&a.prompts)
+            let mut prompts = extract::load_prompt_texts(&a.prompts)
                 .map_err(|m| invalid(BenchError::input(&a.prompts, m)))?;
+            prompts.truncate(a.limit.unwrap_or(usize::MAX));
             let req = RefusalRequest {
                 model: a.model.clone(),
                 prompts,

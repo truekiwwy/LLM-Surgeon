@@ -545,6 +545,18 @@ pub(crate) struct ToolContext<'a> {
     pub pipeline: &'a super::tools_pipeline::PipelineJobs,
 }
 
+/// Tools that can rewrite a model's weights (or its rollback can): the weight cache is
+/// dropped after them, whatever their outcome.
+const WRITES_WEIGHTS: [&str; 7] = [
+    TOOL_APPLY,
+    super::tools_restore::TOOL_RESTORE,
+    super::tools_checkpoint::TOOL_CHECKPOINT,
+    super::tools_checkpoint::TOOL_SWEEP,
+    super::tools_p13::TOOL_LORA,
+    super::tools_pipeline::TOOL_PIPELINE,
+    super::tools_workspace::TOOL_WORKSPACE,
+];
+
 /// `tools/call` result for a known tool. Every failure here is a tool execution error
 /// (`isError: true`), never a JSON-RPC error: the agent reads it and can correct itself.
 pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value {
@@ -578,6 +590,11 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
         }
         _ => ("extract", extract_direction(arguments, ctx)),
     };
+    if WRITES_WEIGHTS.contains(&name) {
+        if let Some(cache) = crate::extract::weight_cache::global() {
+            cache.clear();
+        }
+    }
     let mut outcome = result.unwrap_or_else(|failure| failure);
     if !outcome.is_ok() && ctx.deps.interrupted.load(Ordering::SeqCst) {
         outcome = outcome.with_kind("cancelled");
@@ -1320,7 +1337,7 @@ pub struct BenchToolArgs {
     #[serde(default)]
     #[schemars(
         range(min = 1),
-        description = "eval : N premières entrées dans l'ordre du fichier (défaut 50)."
+        description = "eval : N premières entrées dans l'ordre du fichier (défaut 50) ; refusal : N premiers prompts dans l'ordre du fichier (défaut : tous), taux et intervalle calculés sur ces N."
     )]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -1567,6 +1584,7 @@ pub(super) const BENCH_FIELDS: [(&str, &[&str], &[&str]); 8] = [
         &["model", "prompts"],
         &[
             "baseline_model",
+            "limit",
             "max_new_tokens",
             "chat_template",
             "judge",
@@ -1979,8 +1997,13 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
         }
         BenchMode::Refusal => {
             let prompts_file = source(ctx, "prompts", &args.prompts)?;
-            let prompts = extract::load_prompt_texts(&prompts_file)
+            let mut prompts = extract::load_prompt_texts(&prompts_file)
                 .map_err(|m| invalid("invalid_input", format!("prompts : {m}")))?;
+            match args.limit {
+                Some(0) => return Err(invalid("invalid_arguments", "limit : au moins 1")),
+                Some(limit) => prompts.truncate(limit as usize),
+                None => {}
+            }
             let markers_file = optional_path(ctx, "markers_file", &args.markers_file)?;
             let markers = Markers::new(
                 args.marker_langs.as_deref().unwrap_or_default(),

@@ -263,7 +263,8 @@ pub struct Composition {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Composed {
-    /// d, unnormalized, f64.
+    /// d / ‖d‖₂ in f64: unit within 1e-12, so `I − α·d·dᵀ` is a projector at α = 1
+    /// (‖d‖₂ is `composition.result_norm`).
     pub direction: Vec<f64>,
     pub composition: Composition,
     pub warnings: Vec<String>,
@@ -438,6 +439,7 @@ pub fn compose_with(
             "direction composée nulle (‖d‖ ≤ {ZERO_NORM:e}) : les poids s'annulent"
         )));
     }
+    direction.iter_mut().for_each(|x| *x /= result_norm);
     let mut warnings = Vec::new();
     let layers: std::collections::BTreeSet<usize> =
         ablate.iter().chain(keep).filter_map(|v| v.layer).collect();
@@ -553,9 +555,9 @@ pub fn parse_weighted(spec: &str) -> std::result::Result<(PathBuf, f64), String>
 /// projector for `project_out`), and the extraction metadata of the first vector to
 /// ablate, so that a probe or autotune reads the same layer, site, pooling and wrapping.
 pub fn encode_composed(composed: &Composed, first: &ComposeVector) -> Result<Vec<u8>> {
-    let d: Vec<f32> = composed.direction.iter().map(|&x| x as f32).collect();
     let n = composed.composition.result_norm;
-    let unit: Vec<f32> = composed.direction.iter().map(|&x| (x / n) as f32).collect();
+    let d: Vec<f32> = composed.direction.iter().map(|&x| (x * n) as f32).collect();
+    let unit: Vec<f32> = composed.direction.iter().map(|&x| x as f32).collect();
     let mut metadata: BTreeMap<String, String> = first
         .metadata
         .iter()
@@ -795,7 +797,8 @@ mod tests {
             ComposeMode::OrthogonalPreserve,
         )
         .unwrap();
-        assert!(out.direction[0].abs() < 1e-15 && (out.direction[1] - 2.0).abs() < 1e-15);
+        assert!(out.direction[0].abs() < 1e-15 && (out.direction[1] - 1.0).abs() < 1e-15);
+        assert_eq!(out.composition.result_norm, 2.0);
         let diag = &out.composition.diagnostics[0];
         assert!((diag.cos_before[0] - 0.5f64.sqrt()).abs() < 1e-12);
         assert!(diag.cos_after[0].abs() < 1e-15);
@@ -810,7 +813,10 @@ mod tests {
             ComposeMode::Standard,
         )
         .unwrap();
-        assert_eq!(plain.direction, [2.0, 1.0]);
+        let n = 5f64.sqrt();
+        assert_eq!(plain.composition.result_norm, n);
+        assert!((plain.direction[0] - 2.0 / n).abs() < 1e-15);
+        assert!((plain.direction[1] - 1.0 / n).abs() < 1e-15);
         assert_eq!(plain.composition.diagnostics[0].norm_ratio, 1.0);
 
         // 3D: keep two non-orthogonal directions; what is removed is along their normal.
@@ -827,7 +833,8 @@ mod tests {
         )
         .unwrap();
         assert!(out.direction[0].abs() < 1e-15 && out.direction[1].abs() < 1e-15);
-        assert!((out.direction[2] - 4.0).abs() < 1e-15);
+        assert!((out.direction[2] - 1.0).abs() < 1e-15);
+        assert!((out.composition.result_norm - 4.0).abs() < 1e-15);
         assert!(out
             .composition
             .result_cos_keep
@@ -868,9 +875,10 @@ mod tests {
         let gap: f64 = projected
             .iter()
             .zip(&out.direction)
-            .map(|(a, b)| (a - b).abs())
+            .map(|(a, b)| (a - b * out.composition.result_norm).abs())
             .fold(0.0, f64::max);
         assert!(gap < 1e-9, "{gap}");
+        assert!((norm(&out.direction) - 1.0).abs() < 1e-12);
         // The ablated vectors are 3 sources, the kept ones 5.
         let roles: Vec<SourceRole> = out.composition.sources.iter().map(|s| s.role).collect();
         assert_eq!(roles.iter().filter(|r| **r == SourceRole::Keep).count(), 5);
@@ -1084,7 +1092,50 @@ mod tests {
             .iter()
             .map(|v| trim(&v.values, 0.3).iter().map(|x| v.alpha * x).collect())
             .collect();
-        assert_eq!(free.direction, ties_merge(&by_hand));
+        let merged = ties_merge(&by_hand);
+        let n = norm(&merged);
+        assert_eq!(free.composition.result_norm, n);
+        assert_eq!(
+            free.direction,
+            merged.iter().map(|m| m / n).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_composed_direction_is_unit_in_every_mode_after_orthogonalisation() {
+        let ablate = [
+            vector("a", &noise(4096, 1), 3.0),
+            vector("b", &noise(4096, 2), -0.25),
+        ];
+        let keep = [
+            vector("math", &noise(4096, 7), 0.0),
+            vector("logic", &noise(4096, 8), 0.0),
+        ];
+        for mode in [
+            ComposeMode::OrthogonalPreserve,
+            ComposeMode::Ties,
+            ComposeMode::Dare,
+            ComposeMode::Standard,
+        ] {
+            let out = compose(&ablate, &keep, mode).unwrap();
+            let unit = norm(&out.direction);
+            assert!((unit - 1.0).abs() < 1e-12, "{mode:?}: ‖d‖ = {unit}");
+            assert!(out.composition.result_norm > 1.0, "{mode:?}");
+            if mode != ComposeMode::Standard {
+                let worst = out
+                    .composition
+                    .result_cos_keep
+                    .iter()
+                    .fold(0.0f64, |m, c| m.max(c.abs()));
+                assert!(worst < 1e-12, "{mode:?}: {worst}");
+            }
+        }
+        let cancelling = [
+            vector("a", &[1.0, 2.0], 1.0),
+            vector("b", &[1.0, 2.0], -1.0),
+        ];
+        let e = compose(&cancelling, &[], ComposeMode::Standard).unwrap_err();
+        assert!(e.to_string().contains("direction composée nulle"), "{e}");
     }
 
     #[test]
@@ -1147,10 +1198,10 @@ mod tests {
                 a - 0.5 * b
             })
             .collect();
-        for (d, h) in out.direction.iter().zip(&by_hand) {
-            assert!((d - h).abs() < 1e-15);
-        }
         let c = &out.composition;
+        for (d, h) in out.direction.iter().zip(&by_hand) {
+            assert!((d - h / c.result_norm).abs() < 1e-15);
+        }
         assert_eq!(
             (c.density, c.drop_rate, c.seed),
             (None, Some(0.3), Some(42))

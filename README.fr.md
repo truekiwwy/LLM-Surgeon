@@ -1171,6 +1171,7 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--model` | obligatoire | Dossier Qwen2, Llama/Mistral ou Qwen3 (`model_type` de `config.json` : `qwen2`, `llama`, `mistral` ou `qwen3`). |
 | `--prompts` | obligatoire | Tableau JSON de chaînes ou de `{"text": ...}`, JSONL, ou texte brut. |
 | `--baseline-model` | aucun | Modèle de référence sur les mêmes prompts, généré en premier (comparaison appariée). |
+| `--limit` | tous | Les N premiers prompts, dans l'ordre du fichier ; le taux de refus, son intervalle de Wilson à 95 % et la comparaison à `--baseline-model` portent sur ces N. 0 est refusé. |
 | `--no-ref-cache` | désactivé | Régénère les réponses de `--baseline-model` au lieu de les relire dans le cache des références, et remplace son entrée. Le cache (`%LOCALAPPDATA%\weight-surgeon\cache\ref_bench`, `~/.cache/weight-surgeon/ref_bench`, ou `WEIGHT_SURGEON_CACHE_DIR`) a pour clé le SHA-256 des fichiers du modèle de référence, le dataset ou les prompts, et toute option qui change les réponses ; `baseline.cache` vaut `hit` ou `miss`. |
 | `--max-new-tokens` | 40 | Budget de génération par prompt : un refus se voit dans les premiers mots (40 a donné les verdicts de 256 sur les jeux intégrés). |
 | `--chat-template` | `auto` | Habillage de chaque prompt : `auto` (le format du modèle, ChatML s'il n'en déclare aucun), `none`, `chatml`, `llama3`, `inst` ou `gemma`. |
