@@ -437,6 +437,31 @@ impl Store {
             linked,
         })
     }
+
+    /// Hashes the files of `model` again: `Corrupt` unless they are the bytes of `id`.
+    pub fn check_model(&self, id: &str, model: &Path) -> Result<()> {
+        let manifest = self.manifest(id)?;
+        let files = snapshot_files(model)?
+            .into_iter()
+            .map(|(name, path)| {
+                Ok(FileEntry {
+                    sha256: sha256_file(&path).map_err(pipeline_error)?,
+                    bytes: 0,
+                    name,
+                    linked: false,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let sha256 = combined_sha256(&files);
+        match sha256 == manifest.sha256 {
+            true => Ok(()),
+            false => Err(CheckpointError::Corrupt(format!(
+                "{} : SHA-256 {sha256} au lieu de {} (checkpoint {id})",
+                model.display(),
+                manifest.sha256
+            ))),
+        }
+    }
 }
 
 fn swap_file(source: &Path, manifest: &Manifest, model: &Path) -> Result<bool> {

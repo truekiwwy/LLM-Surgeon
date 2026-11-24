@@ -398,8 +398,10 @@ impl PatchBackend for GgufBackend {
         let sign = match op {
             OperationKind::Subtract => -1.0f32,
             OperationKind::Add => 1.0,
-            OperationKind::ProjectOut => {
-                return Err(backend_err("project_out passe par project_out_subspace"));
+            OperationKind::ProjectOut | OperationKind::AddDirection => {
+                return Err(backend_err(
+                    "project_out et add_direction passent par project_out_subspace",
+                ));
             }
         };
         let (range, layout) = self.target(tensor_name)?;
@@ -890,13 +892,13 @@ fn preflight(
     let mut work_bytes = 0u64;
     let mut vectors: Vec<(&str, usize)> = Vec::new();
     for (op, orientation, t, layout) in &planned {
-        let project = op.kind == OperationKind::ProjectOut;
+        let project = op.kind.is_projection();
         // One direction length per operation, loaded once.
         let len = match vectors.iter().find(|(id, _)| *id == op.id) {
             Some((_, len)) => *len,
             None => {
                 let tensor = op.vector_tensor.as_ref().map(VectorTensor::direction);
-                let len = match project {
+                let len = match op.kind == OperationKind::ProjectOut {
                     true => crate::engine::load_direction_matrix(&op.vector_file, tensor)
                         .map(|(k, v)| v.len() / k.unwrap_or(1).max(1)),
                     false => crate::engine::load_direction_vector(&op.vector_file, tensor)

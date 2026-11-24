@@ -1292,7 +1292,7 @@ fn schema_mirrors_serde_and_validation() {
     assert_eq!(ops["items"]["additionalProperties"], false);
     assert_eq!(
         op["operation"]["enum"],
-        json!(["subtract", "add", "project_out"])
+        json!(["subtract", "add", "project_out", "add_direction"])
     );
     assert_eq!(
         op["projections"]["items"]["enum"],

@@ -30,8 +30,14 @@ chargés (`surgeon_extract`, `surgeon_causal_trace`, `surgeon_bench` en natif, `
 pour le dernier modèle et le dernier dtype, avec pour clé les fichiers de shards, leur SHA-256 et
 le dtype. Chaque appel vérifie les fichiers (taille, date de modification ; le SHA-256 est recalculé
 s'ils ont changé). Un autre modèle ou un autre dtype libère le précédent avant le chargement : un
-seul modèle en RAM à la fois. Le cache est vidé après `surgeon_apply`, `surgeon_restore`,
-`surgeon_checkpoint`, `surgeon_sweep`, `surgeon_lora`, `surgeon_pipeline` et `surgeon_workspace`.
+seul modèle en RAM à la fois. Le cache n'est plus vidé d'office après `surgeon_apply`,
+`surgeon_restore`, `surgeon_checkpoint`, `surgeon_sweep`, `surgeon_lora`, `surgeon_pipeline` et
+`surgeon_workspace` : les fichiers du modèle en cache sont alors hachés de nouveau (SHA-256, la
+date de modification n'est pas crue, car une écriture par projection mémoire peut la laisser
+inchangée). Le cache est gardé seulement si les octets sont identiques (`dry_run`, rollback, un
+sweep qui finit sur sa base), abandonné sinon. `surgeon_sweep` revérifie aussi après chaque point
+appliqué, pour qu'un point ne soit jamais mesuré sur des poids périmés, et sa mesure de base
+réutilise le cache quand le modèle y est déjà.
 Le budget de RAM du choix du dtype compte les octets en cache comme disponibles. Les commandes
 CLI ponctuelles ne sont pas concernées.
 
@@ -407,8 +413,9 @@ lien physique, puis écrit sa copie privée. Aucun outil ne peut écrire sous
 `surgeon_sweep` automatise le balayage d'alpha. La grille est le produit `vectors` x
 `layers` (des fenêtres au format `layers`, par exemple `data.window.layers` de
 `surgeon_causal_trace`) x `alphas`, 64 points au plus, chacun un patch d'une opération
-(`operation` obligatoire, `projections` par défaut `o_proj` et `down_proj`, tenseur
-`direction` ou `vector_tensor`). Chaque point passe un dry-run avant la première écriture.
+(`operation` obligatoire : `subtract`, `add`, `project_out` ou `add_direction`, avec
+`alphas` >= 0 pour `add_direction` ; `projections` par défaut `o_proj` et `down_proj`, tenseur
+`direction` ou `vector_tensor`, qui pour `project_out` sert à la fois de `a` et de `b`). Chaque point passe un dry-run avant la première écriture.
 Ensuite :
 
 1. la copie de départ est mesurée : `target`, taux de succès d'un pilier du pipeline
@@ -424,6 +431,8 @@ Ensuite :
 4. à la fin, `data.front` liste les points non dominés par dérive croissante, `data.best`
    celui de plus grand gain (à égalité, la plus petite dérive), et la copie est restaurée sur
    son checkpoint (`data.restored`). Sans aucun gain, elle reste sur la base.
+   Dans les deux cas, la copie est hachée de nouveau et comparée au SHA-256 du checkpoint
+   `data.restored` ; un écart échoue avec `error.kind = "checksum_mismatch"`.
 
 Une erreur ou une annulation remet la copie sur la base avant de rendre la main. Les dumps
 vivent dans `work/.sweep-<pid>/`, supprimé à la fin. `data` : `model`, `base_checkpoint`,
@@ -554,6 +563,15 @@ Ablation directionnelle de tous les écrivains (`a = b = v`, la `direction` unit
 `o_proj`, `rows` pour `embed_tokens`), en SafeTensors comme en GGUF (voir plus bas) ;
 `surgeon_autotune` ne vise que le MLP. `embed_tokens` n'appartient à aucune couche :
 `layers` ne le filtre pas.
+
+L'opération `add_direction` est le dual additif de `project_out` : `W' = W + alpha * u (uᵀ W)`
+pour `down_proj` et `o_proj`, `W' = W + alpha * (W u) uᵀ` pour `embed_tokens`, avec
+`u = v / ‖v‖` normalisé en f64. Elle lit un seul vecteur (`vector_file`, `vector_tensor`
+facultatif) ; `vector_tensor_b`, `rank` et `allow_non_projector` sont refusés, `axis` reste
+absent, `gate_proj` et `up_proj` sont refusés. `alpha` est une amplification dans [0, 100]
+(négatif refusé : `project_out` retire). Un `v` nul ou non fini est refusé avant toute écriture ;
+si `‖v‖` diffère de 1, `data.warnings` le signale. Même noyau f64 que `project_out`, en
+SafeTensors comme en GGUF. Ce n'est pas une ablation : `accept_approximate` ne s'y applique pas.
 
 **Détachement de `lm_head`.** Si `embed_tokens` est visé et que le modèle le partage avec la
 projection de sortie (pas de tenseur `lm_head.weight`, ou `tie_word_embeddings` encore vrai),

@@ -659,6 +659,33 @@ fn alpha_zero_leaves_the_file_identical() {
 }
 
 #[test]
+fn add_direction_amplifies_the_read_component_of_every_writer() {
+    let f = Fixture::new(COMBOS[3], 64, 1);
+    let v: Vec<f32> = f.dirs.iter().map(|x| 3.0 * x).collect();
+    std::fs::write(f.dir.path().join("v.json"), json!(v).to_string()).unwrap();
+    let patch = f.dir.path().join("amplify.json");
+    let recipe = json!({"schema_version": 1, "backup": true, "operations": [{
+        "id": "amplify", "layers": "all", "projections": WRITERS,
+        "operation": "add_direction", "vector_file": "v.json", "alpha": 0.5}]});
+    std::fs::write(&patch, recipe.to_string()).unwrap();
+
+    let (code, env) = apply(&f, &patch, &["--requant", "recompute"]);
+
+    assert_eq!(code, 0, "{env}");
+    assert_eq!(env["data"]["gguf"]["verified"], true);
+    assert!(env.to_string().contains("renormalise v"), "{env}");
+    // The read component grows by 1 + alpha; requantization rounds part of it away.
+    for name in writer_names() {
+        let r = tensor(&env, &name)["residual_fraction"].as_f64().unwrap();
+        match name.ends_with("ffn_down.weight") {
+            true => assert!((r - 1.5).abs() < 1e-4, "{name} (F32): {r}"),
+            false => assert!(r > 1.0, "{name}: {r}"),
+        }
+    }
+    assert_ne!(sha(&f.bytes()), sha(&f.original));
+}
+
+#[test]
 fn threads_do_not_change_bytes_nor_residuals() {
     let one = Fixture::new(COMBOS[0], 63, 2);
     let many = Fixture::new(COMBOS[0], 63, 2);

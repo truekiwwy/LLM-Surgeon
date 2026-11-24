@@ -546,7 +546,7 @@ pub(crate) struct ToolContext<'a> {
 }
 
 /// Tools that can rewrite a model's weights (or its rollback can): the weight cache is
-/// dropped after them, whatever their outcome.
+/// checked against the files after them, whatever their outcome.
 const WRITES_WEIGHTS: [&str; 7] = [
     TOOL_APPLY,
     super::tools_restore::TOOL_RESTORE,
@@ -592,7 +592,7 @@ pub(crate) fn call(name: &str, arguments: Value, ctx: &mut ToolContext) -> Value
     };
     if WRITES_WEIGHTS.contains(&name) {
         if let Some(cache) = crate::extract::weight_cache::global() {
-            cache.clear();
+            cache.revalidate();
         }
     }
     let mut outcome = result.unwrap_or_else(|failure| failure);

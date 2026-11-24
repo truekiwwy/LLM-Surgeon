@@ -1000,12 +1000,13 @@ fn find_targets<'a>(
         .collect()
 }
 
-/// `project_out` is not a shift: it goes through `PatchBackend::project_out_tensor`.
+/// `project_out` and `add_direction` are not shifts: they go through
+/// `PatchBackend::project_out_subspace`.
 fn shift_op(op: OperationKind) -> Option<ShiftOp> {
     match op {
         OperationKind::Subtract => Some(ShiftOp::Subtract),
         OperationKind::Add => Some(ShiftOp::Add),
-        OperationKind::ProjectOut => None,
+        OperationKind::ProjectOut | OperationKind::AddDirection => None,
     }
 }
 

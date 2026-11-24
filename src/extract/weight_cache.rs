@@ -7,7 +7,9 @@
 //!          stamps changed -> SHA-256 again: same digest -> hit, else the entry is dropped
 //! miss     the previous entry is dropped before reading: one model in RAM at a time
 //! subset   tensors missing from a valid entry (a deeper layer, the head) are added to it
-//! clear    after every MCP tool that writes weights (apply, restore, checkpoint...)
+//! recheck  after every MCP tool that can write weights (apply, restore, sweep...): the
+//!          files are hashed again whatever their stamps, the entry stays only when the
+//!          bytes are unchanged (dry run, rollback, a sweep that ends on its base)
 //! ```
 //!
 //! A cached tensor is shared with the models built from it (candle storage is reference
@@ -105,6 +107,23 @@ impl WeightCache {
     /// Drops the cached model.
     pub fn clear(&self) {
         *self.slot() = None;
+    }
+
+    /// Keeps the cached model only if its files still hash the same. The stamps are not
+    /// trusted here: a write through a memory map may leave the mtime as it was.
+    pub fn revalidate(&self) {
+        let mut slot = self.slot();
+        let Some(entry) = slot.take() else {
+            return;
+        };
+        if let (Ok(now), Ok(digest)) = (stamps(&entry.files), sha256(&entry.files)) {
+            if digest == entry.sha256 {
+                *slot = Some(Entry {
+                    stamps: now,
+                    ..entry
+                });
+            }
+        }
     }
 
     /// Bytes of the cached tensors.
@@ -255,6 +274,29 @@ mod tests {
         cache.clear();
         assert_eq!(cache.resident_bytes(), 0);
         assert_ne!(load(&cache, dir.path(), 3).id(), changed.id());
+    }
+
+    #[test]
+    fn revalidate_keeps_the_entry_only_while_the_bytes_are_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let shard = dir.path().join("model.safetensors");
+        write_model(&shard, &[1.0, 2.0, 3.0]);
+        let cache = WeightCache::new();
+        cache.revalidate();
+        let first = load(&cache, dir.path(), 3);
+
+        write_model(&shard, &[1.0, 2.0, 3.0]);
+        cache.revalidate();
+        assert_eq!(cache.resident_bytes(), 12, "rewritten with the same bytes");
+        assert_eq!(load(&cache, dir.path(), 3).id(), first.id());
+
+        write_model(&shard, &[1.0, 2.0, 5.0]);
+        cache.revalidate();
+        assert_eq!(cache.resident_bytes(), 0, "the weights changed");
+        assert_eq!(
+            load(&cache, dir.path(), 3).to_vec1::<f32>().unwrap(),
+            [1.0, 2.0, 5.0]
+        );
     }
 
     #[test]

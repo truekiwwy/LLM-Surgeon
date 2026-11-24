@@ -72,8 +72,8 @@ comptées entre fichiers de modules différents) : `app -> patch` 64, `mcp -> ap
 | Forward et capture | `extract` | Activations d'une couche (site, pooling), logits, génération avec cache KV et injection, derrière le trait `ResidualForward` (Qwen2, Llama/Mistral, Qwen3) | Non : interne, une nouvelle architecture est une implémentation du trait vérifiée contre candle | aucun |
 | Moteur mmap et décalages | `engine` | Lecture et écriture en place des SafeTensors | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Noyaux SIMD et prefetch | `kernel` | AVX-512, AVX2, NEON ou scalaire, choisis à l'exécution par détection du CPU (`SURGEON_KERNEL` pour forcer) ; compilés dans le binaire | Non : interne, non remplaçable par un tiers à ce jour | aucun |
-| Patch SafeTensors | `patch` | `patch.json` (`add`, `subtract`, `project_out` ; projections MLP, `o_proj`, `embed_tokens`), validation, sauvegarde, rollback, détachement de `lm_head` (`patch::untie`) | Non : interne, non remplaçable par un tiers à ce jour | Feuille de route |
-| Patch GGUF en place | `patch::gguf` | Déquantification, décalage ou `project_out` (MLP, `attn_output`, `token_embd`), requantification avec résidu mesuré | Non : interne, non remplaçable par un tiers à ce jour | aucun |
+| Patch SafeTensors | `patch` | `patch.json` (`add`, `subtract`, `project_out`, `add_direction` ; projections MLP, `o_proj`, `embed_tokens`), validation, sauvegarde, rollback, détachement de `lm_head` (`patch::untie`) | Non : interne, non remplaçable par un tiers à ce jour | Feuille de route |
+| Patch GGUF en place | `patch::gguf` | Déquantification, décalage, `project_out` ou `add_direction` (MLP, `attn_output`, `token_embd`), requantification avec résidu mesuré | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Formats d'adaptation | `engine`, `patch::gguf`, `surgery`, `lora` | SafeTensors, GGUF, `.surgery` v1, adaptateurs PEFT | Non : interne, non remplaçable par un tiers à ce jour | Feuille de route |
 | Fusion et extraction LoRA | `lora` | `W += scale · (alpha / r) · B A`, extraction de rang `r` | Non : interne, non remplaçable par un tiers à ce jour | aucun |
 | Diff de faible rang | `surgery` | Patch `.surgery` entre deux checkpoints | Non : interne, non remplaçable par un tiers à ce jour | aucun |
@@ -141,7 +141,7 @@ quatorze outils du moteur et trois outils de session. Les schémas sont figés p
 | --- | --- | --- |
 | `surgeon_check` | Budget matériel : taille, RAM et VRAM nécessaires et disponibles, verdict. Lecture seule. | `model` |
 | `surgeon_inspect` | Matrices MLP par couche, et sur demande `o_proj` et `embed_tokens` : dtype, forme, statistiques. Lecture seule. | `model`, `layers`, `projections`, `show_stats`, `arch_spec` |
-| `surgeon_apply` | Applique un patch (décalage, `project_out`) en place sur SafeTensors ou GGUF ; sauvegarde vérifiée, rollback. | `model`, `patch`, `dry_run`, `gguf`, `backup_dir`, `arch_spec` |
+| `surgeon_apply` | Applique un patch (décalage, `project_out`, `add_direction`) en place sur SafeTensors ou GGUF ; sauvegarde vérifiée, rollback. | `model`, `patch`, `dry_run`, `gguf`, `backup_dir`, `arch_spec` |
 | `surgeon_restore` | Remet un modèle octet pour octet depuis les sauvegardes d'`apply` ou depuis l'origine, SHA-256 vérifié. | `model`, `backup`, `backup_dir`, `from_origin` |
 | `surgeon_eval` | Non-régression par génération llama.cpp (boucles, attentes non tenues), export GGUF si le modèle est sain. | `model`, `prompts` ou `prompts_file`, `max_new_tokens`, `export_gguf`, `quant` |
 | `surgeon_extract` | Vecteur de direction depuis les activations d'une couche, avec une méthode du registre. | `model`, `out`, `layer`, `method`, `pos_prompts` / `neg_prompts` (ou `*_file`), `rank`, `site`, `pooling` |

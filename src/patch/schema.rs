@@ -17,7 +17,7 @@ use super::error::{PatchError, Result};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Patch de chirurgie de poids (patch.json, version 1) : liste d'opérations qui modifient des matrices d'un modèle SafeTensors (MLP, o_proj, embed_tokens ; W ∓= alpha·v ou project_out)."
+    description = "Patch de chirurgie de poids (patch.json, version 1) : liste d'opérations qui modifient des matrices d'un modèle SafeTensors (MLP, o_proj, embed_tokens ; W ∓= alpha·v, project_out ou add_direction)."
 )]
 pub struct PatchFile {
     #[schemars(schema_with = "schema_version_schema")]
@@ -105,7 +105,7 @@ pub struct Operation {
     pub allow_non_projector: bool,
     #[schemars(
         range(min = -100.0, max = 100.0),
-        description = "Intensité du décalage W ∓= alpha·v, dans [-100, 100] ; |alpha| > 5 déclenche un avertissement. project_out : force dans [0, 1] (1 = effacement complet)."
+        description = "Intensité du décalage W ∓= alpha·v, dans [-100, 100] ; |alpha| > 5 déclenche un avertissement. project_out : force dans [0, 1] (1 = effacement complet). add_direction : amplification dans [0, 100]."
     )]
     pub alpha: f32,
     #[serde(default)]
@@ -132,7 +132,7 @@ fn projections_schema(gen: &mut SchemaGenerator) -> Schema {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[schemars(
-    description = "subtract retire alpha·v des poids, add l'ajoute ; project_out retire la direction lue par b des écrivains du flux résiduel : W ← W − alpha·a(bᵀW) pour down_proj et o_proj, W ← W − alpha·(W b)aᵀ pour embed_tokens (a = b = v unitaire : ablation directionnelle ; a et b d'un .leace.safetensors : effaceur LEACE)."
+    description = "subtract retire alpha·v des poids, add l'ajoute ; project_out retire la direction lue par b des écrivains du flux résiduel : W ← W − alpha·a(bᵀW) pour down_proj et o_proj, W ← W − alpha·(W b)aᵀ pour embed_tokens (a = b = v unitaire : ablation directionnelle ; a et b d'un .leace.safetensors : effaceur LEACE) ; add_direction amplifie la direction unitaire u = v/‖v‖ sur les mêmes écrivains : W ← W + alpha·u(uᵀW) pour down_proj et o_proj, W ← W + alpha·(W u)uᵀ pour embed_tokens."
 )]
 pub enum OperationKind {
     Subtract,
@@ -140,6 +140,15 @@ pub enum OperationKind {
     // A plain comment: a doc comment on a variant would turn the schema enum into a oneOf.
     #[serde(rename = "project_out")]
     ProjectOut,
+    #[serde(rename = "add_direction")]
+    AddDirection,
+}
+
+impl OperationKind {
+    /// Runs through the projection kernel rather than a rank-1 shift.
+    pub fn is_projection(self) -> bool {
+        matches!(self, Self::ProjectOut | Self::AddDirection)
+    }
 }
 
 /// Declaration order is the canonical order (gate, up, down, then the residual writers

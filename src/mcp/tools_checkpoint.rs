@@ -120,7 +120,7 @@ pub struct SweepToolArgs {
     pub projections: Option<Vec<Projection>>,
     #[schemars(
         length(min = 1),
-        description = "Grille des coefficients, par exemple [0.5, 0.8, 1.0, 1.2] (project_out : dans [0, 1])."
+        description = "Grille des coefficients, par exemple [0.5, 0.8, 1.0, 1.2] (project_out : dans [0, 1] ; add_direction : amplification ≥ 0)."
     )]
     pub alphas: Vec<f32>,
     #[schemars(

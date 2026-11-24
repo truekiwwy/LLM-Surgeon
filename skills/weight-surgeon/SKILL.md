@@ -72,6 +72,8 @@ et `data.checks`.
    par point du front de Pareto, annule les autres et laisse la copie sur le meilleur
    compromis (`data.best`, `data.restored`). `surgeon_checkpoint` `list` montre l'arbre,
    `restore` passe la copie sur un autre point du front. Le sweep mesure, il ne certifie pas.
+   `operation` accepte `add_direction` (amplifie une direction, `alphas` >= 0) en plus de
+   `project_out` (la retire), `subtract` et `add`.
 6. `surgeon_autotune` avec `refusal_prompts` (sans `out`, il ne fait que mesurer) calibre de
    la même façon l'échelle d'un patch de steering.
 7. Préserver une capacité (maths, logique, code) : extrais sa direction à la même couche

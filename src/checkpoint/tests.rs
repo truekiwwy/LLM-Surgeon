@@ -83,6 +83,12 @@ fn an_in_place_write_after_unshare_leaves_the_checkpoint_intact() {
         b"base-weights"
     );
     store.verify(&m.id).unwrap();
+
+    let err = store.check_model(&m.id, &model).unwrap_err();
+    assert_eq!(err.kind(), "checksum_mismatch");
+    fs::write(model.join("model.safetensors.bak-1-0"), b"backup").unwrap();
+    store.restore(&m.id, &model).unwrap();
+    store.check_model(&m.id, &model).unwrap();
 }
 
 #[test]

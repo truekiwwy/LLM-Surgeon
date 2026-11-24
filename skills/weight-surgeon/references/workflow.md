@@ -70,6 +70,10 @@ pas alpha sur les mêmes couches : réduis-le, change de couches ou compose la d
 - Lis `data.points[].decision` (`kept`, `dominated`, `drift_exceeded`), `data.front` (indices
   par dérive croissante) et `data.best`. Consigne le front avec `record_finding`, une valeur
   par point cité, et le `run_id` du sweep.
+- `operation` : `project_out` retire une direction, `add_direction` l'amplifie (`alphas` >= 0),
+  `subtract` / `add` décalent par un vecteur. Dans les deux cas (meilleur point ou base si aucun
+  gain), le sweep hache de nouveau la copie et la compare au SHA-256 du checkpoint
+  `data.restored` : `checksum_mismatch` en cas d'écart.
 - Le sweep a déjà mis la copie sur `data.restored`. Pour comparer un autre point du front :
   `surgeon_checkpoint` `restore` avec son `checkpoint`, puis certifie (section 5).
 - `surgeon_checkpoint` `create` avant une série manuelle de `surgeon_apply` donne un retour

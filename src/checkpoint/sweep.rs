@@ -204,6 +204,7 @@ pub fn run(
         }
         None => base.id.clone(),
     };
+    store.check_model(&restored, model)?;
     Ok(SweepReport {
         model: model.to_path_buf(),
         base_checkpoint: base.id,
@@ -374,7 +375,11 @@ impl Lab for EngineLab<'_> {
     }
 
     fn apply(&mut self, model: &Path, candidate: &Candidate) -> Result<()> {
-        self.core_apply(model, candidate, false)
+        let applied = self.core_apply(model, candidate, false);
+        if let Some(cache) = crate::extract::weight_cache::global() {
+            cache.revalidate();
+        }
+        applied
     }
 
     fn measure(&mut self, model: &Path, base: bool) -> Result<Score> {

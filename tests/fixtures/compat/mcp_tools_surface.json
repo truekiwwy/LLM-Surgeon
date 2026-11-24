@@ -421,7 +421,8 @@
                     "enum": [
                       "subtract",
                       "add",
-                      "project_out"
+                      "project_out",
+                      "add_direction"
                     ],
                     "type": "string"
                   },
@@ -3376,7 +3377,8 @@
           "enum": [
             "subtract",
             "add",
-            "project_out"
+            "project_out",
+            "add_direction"
           ],
           "type": "string"
         },
