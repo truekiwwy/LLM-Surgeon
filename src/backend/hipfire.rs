@@ -22,18 +22,19 @@
 //! daemon must know a model by that name.
 //!
 //! The daemon answers from the quantized file it registered under that name and never reads
-//! the files it is given, GGUF included: a patched working copy would be measured with the
-//! old weights. [`validate_hipfire_target`] is the one rule every front-end applies (bench,
-//! pipeline, MCP); [`is_working_copy`] tells a working copy from the original. A copy is
-//! measured once [`requantize`]d: registered as `ws-<copy>-<sha8>`, recorded in its
-//! [`ALIAS_FILE`], and served under that alias while its SafeTensors hash to the same digest.
+//! the files it is given, GGUF included: a name it already knows could stand for other
+//! weights. [`prepare_target`] is the one rule every front-end applies (bench, pipeline,
+//! MCP): under `hipfire_requantize = auto` (the default) any SafeTensors folder is served as
+//! `ws-<folder>-<sha8>`, the digest of its files on disk, [`requantize`]d first when needed,
+//! so a patched copy and its original are two names for two sets of weights.
 //!
 //! ```text
-//! original                         -> its own name
-//! copy, alias file, same SHA-256   -> ws-<copy>-<sha8>
-//! copy, no alias or other SHA-256  -> hipfire_requantize = auto (bench, pipeline): requantize
-//!                                     --allow-stale-hipfire: its own name, with a warning
+//! auto, SafeTensors folder         -> ws-<folder>-<sha8> (alias file of a copy, else requantize)
+//! off, original                    -> its own name
+//! off, copy with a valid alias     -> ws-<copy>-<sha8>
+//! off, copy without                -> --allow-stale-hipfire: its own name, with a warning
 //!                                     else: refused
+//! a GGUF                           -> as off (hipfire requantizes SafeTensors only)
 //! ```
 
 use std::ffi::OsString;
@@ -221,21 +222,27 @@ pub fn validate_hipfire_target(
     }
 }
 
-/// [`validate_hipfire_target`] for a bench or a pipeline about to measure `model`: with
-/// `hipfire_requantize = "auto"`, a working copy with no alias for its current weights is
-/// [`requantize`]d first, then served under its new alias.
+/// What a bench or a pipeline about to measure `model` asks hipfire for. With
+/// `hipfire_requantize` `auto` (the default), any SafeTensors folder, the original included,
+/// is served under the alias of its own content ([`alias_for`] its [`weights_sha256`]), [`requantize`]d first
+/// when needed: the patched copy and the baseline of a paired bench are two names for two
+/// sets of weights, never a name the daemon could map to other ones. Otherwise
+/// [`validate_hipfire_target`].
 pub fn prepare_target(
     model: &Path,
     config: &BackendConfig,
     allow_stale: bool,
 ) -> Result<HipfireGuardDecision, String> {
     let copy = is_working_copy(model);
-    if copy && config.hipfire_requantize == Some(Requantize::Auto) {
+    if config.hipfire_requantize != Some(Requantize::Off) && weights_dir(model).is_ok() {
         let record = match registered_alias(model) {
             Ok(record) => record,
             Err(why) => {
+                // A daemon that is not there first: no requantization for nothing.
+                probe(config)?;
                 log(&format!("{} : {why} ; requantification", model.display()));
-                requantize(model, config)?
+                // The original's folder is left as it is: no alias file written there.
+                requantize(model, config, copy)?
             }
         };
         return Ok(HipfireGuardDecision {
@@ -363,11 +370,16 @@ pub fn registered_alias(model: &Path) -> Result<AliasRecord, String> {
     }
 }
 
-/// Registers the SafeTensors working copy `model` in hipfire under [`alias_for`] its
-/// weights, then writes its [`ALIAS_FILE`]. hipfire's output goes to stderr. On Windows
-/// hipfire runs in WSL ([`WSL_DISTRO`]) as the distribution's default user: its catalog must
-/// be the one the daemon reads (`start-hipfire.ps1` starts it as that user).
-pub fn requantize(model: &Path, config: &BackendConfig) -> Result<AliasRecord, String> {
+/// Registers the SafeTensors folder `model` in hipfire under [`alias_for`] its weights, then
+/// writes its [`ALIAS_FILE`] when `write_record` (a working copy; the next run then skips the
+/// catalog check). hipfire's output goes to stderr. On Windows hipfire runs in WSL
+/// ([`WSL_DISTRO`]) as the distribution's default user: its catalog must be the one the
+/// daemon reads (`start-hipfire.ps1` starts it as that user).
+pub fn requantize(
+    model: &Path,
+    config: &BackendConfig,
+    write_record: bool,
+) -> Result<AliasRecord, String> {
     let dir = weights_dir(model)?;
     let sha = weights_sha256(&dir)?;
     let name = dir.file_name().unwrap_or_default().to_string_lossy();
@@ -399,6 +411,9 @@ pub fn requantize(model: &Path, config: &BackendConfig) -> Result<AliasRecord, S
         weights_sha256: sha,
         created_at: crate::pipeline::job::now_rfc3339(),
     };
+    if !write_record {
+        return Ok(record);
+    }
     let path = dir.join(ALIAS_FILE);
     let json = serde_json::to_string_pretty(&record).map_err(|e| e.to_string())?;
     std::fs::write(&path, json + "\n").map_err(|e| format!("{} : {e}", path.display()))?;
@@ -457,7 +472,7 @@ fn shell(script: &str) -> std::process::Command {
         true => ("wsl.exe", &["-d", WSL_DISTRO, "-e", "bash"]),
         false => ("bash", &[]),
     };
-    let mut cmd = std::process::Command::new(program);
+    let mut cmd = crate::process::command(program);
     cmd.args(prefix).args(["-lc", script]).env("WSL_UTF8", "1");
     cmd
 }
@@ -702,11 +717,12 @@ mod tests {
         }
     }
 
-    /// Records `copy` as requantized under its alias, as [`requantize`] does.
+    /// Records the folder `copy` as requantized under its alias, as [`requantize`] does.
     fn record(copy: &Path) -> AliasRecord {
         let sha = weights_sha256(copy).unwrap();
+        let name = copy.file_name().unwrap().to_string_lossy();
         let record = AliasRecord {
-            alias: alias_for("c1", &sha),
+            alias: alias_for(&name, &sha),
             weights_sha256: sha,
             created_at: "2026-11-20T10:00:00Z".into(),
         };
@@ -797,32 +813,74 @@ mod tests {
     }
 
     #[test]
-    fn requantization_is_opt_in_and_skipped_for_a_valid_alias() {
+    fn requantization_is_the_default_and_skipped_for_a_valid_alias() {
         let dir = tempfile::tempdir().unwrap();
         let (source, copy, _) = studio(dir.path());
-        // `off` (or unset): the guard as is, nothing runs.
-        for mode in [None, Some(Requantize::Off)] {
-            let config = BackendConfig {
-                hipfire_requantize: mode,
-                ..Default::default()
-            };
-            let err = prepare_target(&copy, &config, false).unwrap_err();
-            assert!(err.contains("aucun alias hipfire"), "{err}");
-            assert_eq!(
-                prepare_target(&source, &config, false),
-                Ok(served("source"))
-            );
-        }
-        // `auto` with an alias for these weights: served at once, hipfire never called (the
-        // binary does not exist).
-        let alias = record(&copy).alias;
-        let auto = BackendConfig {
-            hipfire_requantize: Some(Requantize::Auto),
-            hipfire_bin: Some(dir.path().join("no-hipfire")),
+        // `off`: the guard as is, nothing runs.
+        let off = BackendConfig {
+            hipfire_requantize: Some(Requantize::Off),
             ..Default::default()
         };
-        assert_eq!(prepare_target(&copy, &auto, false), Ok(served(&alias)));
-        assert_eq!(prepare_target(&source, &auto, false), Ok(served("source")));
+        let err = prepare_target(&copy, &off, false).unwrap_err();
+        assert!(err.contains("aucun alias hipfire"), "{err}");
+        assert_eq!(prepare_target(&source, &off, false), Ok(served("source")));
+        // Unset is `auto`: with an alias for these weights, served at once, hipfire never
+        // called (the binary does not exist). The original too goes by its content.
+        let (copy_alias, source_alias) = (record(&copy).alias, record(&source).alias);
+        for mode in [None, Some(Requantize::Auto)] {
+            let auto = BackendConfig {
+                hipfire_requantize: mode,
+                hipfire_bin: Some(dir.path().join("no-hipfire")),
+                ..Default::default()
+            };
+            assert_eq!(prepare_target(&copy, &auto, false), Ok(served(&copy_alias)));
+            assert_eq!(
+                prepare_target(&source, &auto, false),
+                Ok(served(&source_alias))
+            );
+        }
+    }
+
+    /// A paired bench (`--model` a patched copy, `--baseline-model` its original) asks hipfire
+    /// for two names that each stand for the weights on disk: the copy's name follows its
+    /// SafeTensors, so a patch written into it never reaches the daemon under an old name.
+    #[test]
+    fn a_patched_copy_and_its_original_are_served_as_two_sets_of_weights() {
+        let dir = tempfile::tempdir().unwrap();
+        let (source, copy, _) = studio(dir.path());
+        let sha8 = |alias: &str| alias.rsplit('-').next().unwrap().to_owned();
+        // The copy as made: the same bytes as the original, the same digest.
+        std::fs::copy(
+            source.join("model.safetensors"),
+            copy.join("model.safetensors"),
+        )
+        .unwrap();
+        let (original, unpatched) = (record(&source).alias, record(&copy).alias);
+        assert_eq!(sha8(&original), sha8(&unpatched));
+
+        // Surgery writes into the copy: its old alias no longer stands for it.
+        std::fs::write(copy.join("model.safetensors"), b"patched weights").unwrap();
+        let off = BackendConfig {
+            hipfire_requantize: Some(Requantize::Off),
+            ..Default::default()
+        };
+        let err = prepare_target(&copy, &off, false).unwrap_err();
+        assert!(
+            err.contains(&format!("poids modifiés depuis l'alias {unpatched}")),
+            "{err}"
+        );
+
+        // Requantized (what `auto` runs), it is served under the digest of the patched bytes.
+        let patched = record(&copy).alias;
+        let auto = BackendConfig::default();
+        assert_eq!(prepare_target(&copy, &auto, false), Ok(served(&patched)));
+        assert_eq!(prepare_target(&source, &auto, false), Ok(served(&original)));
+        assert_ne!(
+            sha8(&patched),
+            sha8(&original),
+            "two sets of weights, two names"
+        );
+        assert_ne!(patched, unpatched);
     }
 
     #[test]

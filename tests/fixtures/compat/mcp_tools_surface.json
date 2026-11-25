@@ -952,6 +952,12 @@
                 },
                 {
                   "enum": [
+                    "auto"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "enum": [
                     "native"
                   ],
                   "type": "string"

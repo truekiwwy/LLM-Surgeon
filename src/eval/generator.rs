@@ -170,7 +170,7 @@ impl Decoding {
 
 impl LlamaCliGenerator {
     fn command(&self, prompt: &str, max_new_tokens: u32) -> Command {
-        let mut cmd = Command::new(&self.llama_cli_path);
+        let mut cmd = crate::process::command(&self.llama_cli_path);
         cmd.arg("-m")
             .arg(&self.model_path)
             .arg("-p")

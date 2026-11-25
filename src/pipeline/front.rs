@@ -157,7 +157,7 @@ pub fn worker_command(
 ) -> super::job::Result<Command> {
     let exe = std::env::current_exe()
         .map_err(|e| PipelineError::Io(format!("exécutable courant : {e}")))?;
-    let mut cmd = Command::new(exe);
+    let mut cmd = crate::process::command(exe);
     cmd.args(["pipeline", "run", "--job-dir"]).arg(job_dir);
     if let Some(config) = config_path {
         cmd.arg("--config").arg(config);

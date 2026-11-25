@@ -279,7 +279,7 @@ Par MCP, `surgeon_pipeline` avec `action` ∈ `plan`, `start`, `status`, `cancel
 ## 8. Limites
 
 - **Piliers binaires sur CPU ou sur GPU, dérives toujours natives.** `safety`, `unblocking` et
-  `gsm8k` génèrent avec le backend du job : `native` (CPU, défaut), `mistralrs` (mistral.rs sur la
+  `gsm8k` génèrent avec le backend du job : `auto` (défaut : le moteur du GPU de la machine, `native` sans GPU), `native` (CPU, alias `cpu`), `mistralrs` (mistral.rs sur la
   copie de travail SafeTensors, sans conversion), `llama-server` (GPU via llama.cpp) ou `hipfire`
   (un démon déjà lancé, tout système). Bloc `backend` de `pipeline.json`, options `--backend`,
   `--gpu-layers`, `--batch-size`, `--llama-cpp-dir`, `--mistralrs-dir`, `--mistralrs-bin`,
@@ -287,9 +287,9 @@ Par MCP, `surgeon_pipeline` avec `action` ∈ `plan`, `start`, `status`, `cancel
   job est lié à son backend ; un moteur introuvable arrête `pipeline run` avant tout calcul ; `kl`
   et `logits` lisent des logits natifs.
 - **hipfire ne mesure un candidat que requantifié.** Le démon sert le fichier quantifié enregistré
-  sous le nom du modèle, jamais la copie patchée : avec `hipfire`, le job échoue avant le premier
-  candidat et avant toute lecture du Test Set (`invalid_input`), sauf avec `hipfire_requantize =
-  "auto"` (`--hipfire-requantize`) : chaque candidat est alors requantifié et mesuré sous son alias
+  sous le nom du modèle, jamais la copie patchée : avec `hipfire_requantize = "off"`, le job échoue avant le premier
+  candidat et avant toute lecture du Test Set (`invalid_input`) ; sous `auto` (défaut,
+  `--hipfire-requantize`), chaque candidat est requantifié et mesuré sous son alias
   `ws-<copie>-<sha8>` (plusieurs minutes et un fichier `q8f16` par candidat, voir BACKENDS.md
   section 7). `--allow-stale-hipfire` (CLI seulement) passe outre pour une copie enregistrée à la
   main ; `notes` et `report.json` le disent.

@@ -19,7 +19,6 @@ use crate::app::{
     core_eval, core_extract_method, core_extract_sweep, core_inspect, envelope_of, exit, AppDeps,
     ApplyRequest, CoreResult, Outcome, ProgressSink,
 };
-use crate::backend::hipfire;
 use crate::bench;
 use crate::bench::calibration::{JudgeEvalRequest, SampleRequest};
 use crate::bench::dump::DumpRequest;
@@ -491,7 +490,7 @@ fn base_tool_definitions() -> Value {
         tool(
             TOOL_BENCH,
             "Mesure d'une chirurgie",
-            "Mesure l'effet d'une chirurgie ; eval, dump et refusal habillent les prompts avec le format de chat du modèle (chat_template, défaut auto). Selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH ou un jeu intégré builtin:math|logic|general, intervalle de Wilson, comparaison appariée ; backend native : sans llama.cpp), refusal (taux de refus sur des prompts ou builtin:refusals, génération gloutonne en Rust pur, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe), refusal_probe (refus estimé sans générer, une passe avant par prompt : first-token-prob ou direction-projection ; réponse marquée is_heuristic: true et evidence_level heuristic_screening, à confirmer par le mode refusal ou eval, jamais une preuve finale), judge_sample et judge_eval (calibration du juge de refusal : échantillon stratifié à faire étiqueter par un humain, puis accord du juge avec ces étiquettes et fichier de calibration). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision ; en cas de régression, surgeon_restore.",
+            "Mesure l'effet d'une chirurgie ; eval, dump et refusal habillent les prompts avec le format de chat du modèle (chat_template, défaut auto). Selon mode : dump (logits d'un modèle Qwen2, Llama/Mistral ou Qwen3 sur des prompts, en Rust pur, écrits dans un .safetensors), logits (KL(before‖after), cosinus, changements top-1 / top-k entre deux dumps), ppl (perplexité via llama-perplexity et écart à une référence arrondi à 4 décimales), eval (Pass exact match glouton sur un dataset GSM8K / MATH ou un jeu intégré builtin:math|logic|general, intervalle de Wilson, comparaison appariée ; backend auto par défaut : le moteur GPU de la machine, hipfire sur AMD, mistralrs sur NVIDIA et Apple Silicon, jamais le CPU quand un GPU est là), refusal (taux de refus sur des prompts ou builtin:refusals, génération gloutonne sur le même backend auto, marqueurs de refus canoniques, intervalle de Wilson, comparaison appariée à une référence avec intervalle de Newcombe), refusal_probe (refus estimé sans générer, une passe avant par prompt : first-token-prob ou direction-projection ; réponse marquée is_heuristic: true et evidence_level heuristic_screening, à confirmer par le mode refusal ou eval, jamais une preuve finale), judge_sample et judge_eval (calibration du juge de refusal : échantillon stratifié à faire étiqueter par un humain, puis accord du juge avec ces étiquettes et fichier de calibration). Recette : dump avant et après un apply sur une copie, logits, ppl, eval, puis décision ; en cas de régression, surgeon_restore.",
             schema_value::<BenchToolArgs>(),
             json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }),
         ),
@@ -1358,7 +1357,7 @@ pub struct BenchToolArgs {
     pub min_accuracy: Option<f64>,
     #[serde(default)]
     #[schemars(
-        description = "eval : llama (défaut, llama.cpp sur un GGUF), llama-completion (idem), llama-server (serveur local, GPU selon le build) ou native (Rust pur sur un dossier Qwen2, Llama/Mistral ou Qwen3) ; refusal : native (défaut), llama-server ou llama-completion ; ppl : llama (défaut, llama-perplexity) ou native (passe avant Rust par fenêtres glissantes, log-softmax en f64, lecture seule)."
+        description = "eval, refusal : auto (défaut, à laisser vide) prend le moteur GPU de la machine, hipfire sur un GPU AMD (dossier SafeTensors mesuré sous l'alias de ses poids sur disque), mistralrs sur NVIDIA ou Apple Silicon, et native (CPU) seulement sans GPU ; si le moteur GPU ne démarre pas, l'appel échoue avec son diagnostic (surgeon_doctor), jamais de repli sur le CPU. Ne passe pas native (alias cpu) sur une machine équipée d'un GPU. Aussi : llama-server, llama ou llama-completion (llama.cpp sur un GGUF). ppl : llama (défaut, llama-perplexity) ou native (passe avant Rust par fenêtres glissantes, log-softmax en f64, lecture seule)."
     )]
     pub backend: Option<crate::bench::score::Backend>,
     #[serde(default)]
@@ -1660,70 +1659,20 @@ fn generation(args: &BenchToolArgs) -> crate::bench::generation::GenOptions {
     }
 }
 
-/// The backend of `eval` and of `refusal` when neither the call nor the user configuration
-/// names one.
-pub(super) const EVAL_BACKEND: Backend = Backend::Llama;
-pub(super) const REFUSAL_BACKEND: Backend = Backend::Native;
-
-/// The start of the warning of a bench taken off hipfire by [`bench_backend`].
-pub const HIPFIRE_SET_ASIDE: &str = "backend hipfire écarté : la cible est une copie de \
-     travail, et hipfire sert le cache quantifié enregistré sous son nom, pas ses poids \
-     modifiés ; mesure faite sur native";
-
-/// The backend an eval or refusal of `models` runs on, `resolved` being the call's choice
-/// over the user configuration, through [`hipfire::validate_hipfire_target`]: a SafeTensors
-/// working copy refused by hipfire runs on native instead, with the warning saying why; a
-/// GGUF one (native cannot read it) is refused. An agent has no `--allow-stale-hipfire`.
-pub fn bench_backend(
-    resolved: Option<Backend>,
-    default: Backend,
-    models: &[&Path],
-) -> Result<(Backend, Option<String>), String> {
-    let backend = resolved.unwrap_or(default);
-    if backend != Backend::Hipfire {
-        return Ok((backend, None));
-    }
-    for model in models {
-        if let Err(reason) =
-            hipfire::validate_hipfire_target(model, hipfire::is_working_copy(model), false)
-        {
-            if crate::eval::is_gguf(model) {
-                return Err(reason);
-            }
-            let warning = format!("{HIPFIRE_SET_ASIDE} ({})", model.display());
-            return Ok((Backend::Native, Some(warning)));
-        }
-    }
-    Ok((backend, None))
-}
-
-/// The warning of a bench that left hipfire first among its warnings, failed or not.
-fn set_aside(result: CoreResult, warning: Option<String>) -> CoreResult {
-    let warn = |mut outcome: Outcome| {
-        if let Some(w) = &warning {
-            outcome.warnings.insert(0, w.clone());
-        }
-        outcome
-    };
-    result.map(warn).map_err(warn)
-}
-
-/// The backend and generation options of an eval or refusal call on `models` (resolved
-/// paths): the arguments over the operator's user configuration (the agent never names a
-/// binary), as the CLI resolves them, then [`bench_backend`], whose warning comes last (the
-/// server also writes it to stderr).
+/// The backend and generation options of an eval or refusal call: the arguments over the
+/// operator's user configuration (the agent never names a binary), as the CLI resolves them,
+/// `auto` (the default) being the GPU's engine. A GPU engine that cannot measure fails the
+/// call (hipfire says why); it is never replaced by the CPU.
 fn effective_generation(
     args: &BenchToolArgs,
     user: &Result<crate::backend::BackendConfig, String>,
-    default: Backend,
     llama_cpp_dir: Option<&Path>,
-    models: &[&Path],
+    model: &Path,
 ) -> Result<
     (
         Backend,
         crate::bench::generation::GenOptions,
         crate::backend::BackendConfig,
-        Option<String>,
     ),
     Outcome,
 > {
@@ -1737,8 +1686,10 @@ fn effective_generation(
         ..Default::default()
     };
     let effective = crate::backend::resolve(top, &user);
-    let (backend, set_aside) = bench_backend(effective.backend, default, models)
-        .map_err(|e| invalid("invalid_input", e))?;
+    let backend = crate::backend::resolve_auto(
+        effective.backend.unwrap_or(Backend::Auto),
+        crate::eval::is_gguf(model),
+    );
     let mut options = generation(args);
     options.gpu_layers = effective.gpu_layers;
     options.batch_size = effective.batch_size.unwrap_or(options.batch_size);
@@ -1751,7 +1702,7 @@ fn effective_generation(
         llama_cpp_dir: llama_cpp_dir.map(Path::to_path_buf),
         ..effective
     };
-    Ok((backend, options, engines, set_aside))
+    Ok((backend, options, engines))
 }
 
 pub(super) fn bench_command(arguments: &Value) -> &'static str {
@@ -1942,17 +1893,8 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             .map_err(|e| invalid("invalid_arguments", e))?;
             let model = path(ctx, "model", &args.model)?;
             let baseline_model = optional_path(ctx, "baseline_model", &args.baseline_model)?;
-            let models: Vec<&Path> = std::iter::once(&model)
-                .chain(&baseline_model)
-                .map(PathBuf::as_path)
-                .collect();
-            let (eval_backend, eval_generation, engines, hipfire_set_aside) = effective_generation(
-                &args,
-                &user,
-                EVAL_BACKEND,
-                llama_cpp_dir.as_deref(),
-                &models,
-            )?;
+            let (eval_backend, eval_generation, engines) =
+                effective_generation(&args, &user, llama_cpp_dir.as_deref(), &model)?;
             let req = EvalRequest {
                 model,
                 dataset: source(ctx, "dataset", &args.dataset)?,
@@ -1969,10 +1911,7 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                 generation: eval_generation,
                 ref_cache: bench::ref_cache::RefCache::from_env(),
             };
-            set_aside(
-                core_bench_eval(&req, &engines, fail_on_warn, ctx.deps, &ui, ctx.sink),
-                hipfire_set_aside,
-            )
+            core_bench_eval(&req, &engines, fail_on_warn, ctx.deps, &ui, ctx.sink)
         }
         BenchMode::Dump => {
             let prompts_file = source(ctx, "prompts", &args.prompts)?;
@@ -2012,18 +1951,8 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
             .map_err(|e| invalid("invalid_arguments", e))?;
             let model = path(ctx, "model", &args.model)?;
             let baseline_model = optional_path(ctx, "baseline_model", &args.baseline_model)?;
-            let models: Vec<&Path> = std::iter::once(&model)
-                .chain(&baseline_model)
-                .map(PathBuf::as_path)
-                .collect();
-            let (refusal_backend, refusal_generation, engines, hipfire_set_aside) =
-                effective_generation(
-                    &args,
-                    &user,
-                    REFUSAL_BACKEND,
-                    llama_cpp_dir.as_deref(),
-                    &models,
-                )?;
+            let (refusal_backend, refusal_generation, engines) =
+                effective_generation(&args, &user, llama_cpp_dir.as_deref(), &model)?;
             let req = RefusalRequest {
                 model,
                 prompts,
@@ -2065,18 +1994,15 @@ fn bench(arguments: Value, ctx: &mut ToolContext) -> CoreResult {
                     min_kappa: args.min_kappa.unwrap_or(bench::DEFAULT_MIN_KAPPA),
                 }),
             };
-            set_aside(
-                core_bench_refusal(
-                    &req,
-                    refusal_backend,
-                    judging.as_ref(),
-                    &engines,
-                    fail_on_warn,
-                    ctx.deps,
-                    &ui,
-                    ctx.sink,
-                ),
-                hipfire_set_aside,
+            core_bench_refusal(
+                &req,
+                refusal_backend,
+                judging.as_ref(),
+                &engines,
+                fail_on_warn,
+                ctx.deps,
+                &ui,
+                ctx.sink,
             )
         }
         BenchMode::RefusalProbe => {

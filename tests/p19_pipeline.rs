@@ -669,8 +669,9 @@ fn cancel_stops_the_worker_without_residue() {
     }
 }
 
-/// hipfire serves its own cache of the model, never the patched candidate: the job stops
-/// before the first candidate and before any Test Set is read or registered.
+/// With `hipfire_requantize = "off"`, hipfire serves its own cache of the model, never the
+/// patched candidate: the job stops before the first candidate and before any Test Set is
+/// read or registered.
 #[test]
 fn hipfire_on_the_working_copies_fails_before_the_test_set_is_touched() {
     let ws = Ws::new(12);
@@ -680,7 +681,7 @@ fn hipfire_on_the_working_copies_fails_before_the_test_set_is_touched() {
         .unwrap()
         .port();
     let mut config = Ws::config();
-    config["backend"] = json!({"backend": "hipfire",
+    config["backend"] = json!({"backend": "hipfire", "hipfire_requantize": "off",
         "hipfire_url": format!("http://127.0.0.1:{closed}")});
     ws.write("pipeline.json", &config);
     let (code, refused) = ws.run("job", &[]);

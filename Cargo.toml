@@ -35,7 +35,7 @@ miniz_oxide = "0.8"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
 rayon = "1.12.0"
 # Already in the graph through tokenizers (same version, default features): no new crate.
-regex = "1.13.1"
+regex = "1.12"
 safetensors = "0.8.0"
 schemars = { version = "0.8", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -47,6 +47,20 @@ sysinfo = { version = "0.40.1", default-features = false, features = ["system"] 
 thiserror = "2.0.21"
 tokenizers = { version = "0.23.2", default-features = false, features = ["unstable_wasm"] }
 unicode-width = "0.2.3"
+# The in-process mistral.rs engine (src/backend/mistralrs.rs), off by default: its GPU builds
+# need the CUDA toolkit or Xcode, so CI and machines without them never compile it.
+mistralrs = { version = "0.8.1", optional = true }
+# Its request channels (already in the graph through mistralrs, same version).
+tokio = { version = "1", optional = true, default-features = false, features = ["sync"] }
+
+[features]
+default = []
+# mistral.rs in the process, on the CPU: the API check of the GPU builds below.
+mistralrs = ["dep:mistralrs", "dep:tokio"]
+# NVIDIA GPUs (CUDA toolkit with nvcc on the PATH).
+cuda = ["mistralrs", "mistralrs/cuda"]
+# Apple Silicon (macOS arm64, Xcode command line tools).
+metal = ["mistralrs", "mistralrs/metal"]
 
 # NVIDIA probing in src/hardware/probe.rs, compiled out on macOS (no discrete GPUs there).
 [target.'cfg(not(target_os = "macos"))'.dependencies]

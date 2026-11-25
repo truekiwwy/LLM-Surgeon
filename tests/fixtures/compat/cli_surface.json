@@ -3331,6 +3331,7 @@
               "positional": false,
               "possible_values": [
                 "llama",
+                "auto",
                 "native",
                 "llama-completion",
                 "llama-server",
@@ -3493,6 +3494,7 @@
               "positional": false,
               "possible_values": [
                 "llama",
+                "auto",
                 "native",
                 "llama-completion",
                 "llama-server",
@@ -4031,19 +4033,20 @@
               ]
             },
             {
-              "action": "SetTrue",
+              "action": "Set",
               "aliases": null,
-              "default_values": [
-                "false"
-              ],
+              "default_values": [],
               "env": null,
               "global": false,
               "hidden": false,
               "id": "hipfire_requantize",
               "long": "hipfire-requantize",
-              "num_args": "0",
+              "num_args": "0..=1",
               "positional": false,
-              "possible_values": [],
+              "possible_values": [
+                "off",
+                "auto"
+              ],
               "required": false,
               "short": null,
               "value_names": [
@@ -4886,6 +4889,7 @@
               "positional": false,
               "possible_values": [
                 "llama",
+                "auto",
                 "native",
                 "llama-completion",
                 "llama-server",
@@ -5203,19 +5207,20 @@
               ]
             },
             {
-              "action": "SetTrue",
+              "action": "Set",
               "aliases": null,
-              "default_values": [
-                "false"
-              ],
+              "default_values": [],
               "env": null,
               "global": false,
               "hidden": false,
               "id": "hipfire_requantize",
               "long": "hipfire-requantize",
-              "num_args": "0",
+              "num_args": "0..=1",
               "positional": false,
-              "possible_values": [],
+              "possible_values": [
+                "off",
+                "auto"
+              ],
               "required": false,
               "short": null,
               "value_names": [
@@ -8495,6 +8500,7 @@
               "positional": false,
               "possible_values": [
                 "llama",
+                "auto",
                 "native",
                 "llama-completion",
                 "llama-server",
@@ -8634,19 +8640,20 @@
               ]
             },
             {
-              "action": "SetTrue",
+              "action": "Set",
               "aliases": null,
-              "default_values": [
-                "false"
-              ],
+              "default_values": [],
               "env": null,
               "global": false,
               "hidden": false,
               "id": "hipfire_requantize",
               "long": "hipfire-requantize",
-              "num_args": "0",
+              "num_args": "0..=1",
               "positional": false,
-              "possible_values": [],
+              "possible_values": [
+                "off",
+                "auto"
+              ],
               "required": false,
               "short": null,
               "value_names": [
@@ -8885,6 +8892,7 @@
               "positional": false,
               "possible_values": [
                 "llama",
+                "auto",
                 "native",
                 "llama-completion",
                 "llama-server",
@@ -9024,19 +9032,20 @@
               ]
             },
             {
-              "action": "SetTrue",
+              "action": "Set",
               "aliases": null,
-              "default_values": [
-                "false"
-              ],
+              "default_values": [],
               "env": null,
               "global": false,
               "hidden": false,
               "id": "hipfire_requantize",
               "long": "hipfire-requantize",
-              "num_args": "0",
+              "num_args": "0..=1",
               "positional": false,
-              "possible_values": [],
+              "possible_values": [
+                "off",
+                "auto"
+              ],
               "required": false,
               "short": null,
               "value_names": [

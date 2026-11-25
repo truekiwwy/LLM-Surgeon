@@ -4,14 +4,19 @@ Qui génère les réponses de `surgeon bench eval`, `bench refusal`, `surgeon pi
 `surgeon_bench` / `surgeon_pipeline`, comment ce choix est mémorisé, et comment une interface
 graphique s'en sert au premier démarrage. Code : `src/backend/`.
 
-## 1. Les quatre backends
+## 1. Les backends
+
+`auto` n'est pas un moteur : c'est le défaut de `bench eval`, `bench refusal`, `pipeline`, de
+`surgeon_bench` (modes `eval` et `refusal`) et de l'interface graphique. Il choisit au début de
+chaque run d'après le GPU de la machine (section 4) : GPU AMD, `hipfire` ; GPU NVIDIA ou Apple
+Silicon, `mistralrs` ; pas de GPU, `native` (CPU). `native` a aussi l'alias `cpu`.
 
 | Backend | Matériel | Ce que c'est | État |
 | --- | --- | --- | --- |
-| `mistralrs` | GPU selon le build (CUDA, Metal...) ou CPU | Un serveur [mistral.rs](https://github.com/EricLBuehler/mistral.rs) local (`mistralrs-server`, ou `mistralrs serve`) qui charge le dossier SafeTensors tel quel, sans conversion (un `.gguf` est aussi accepté). | Recommandé par `backend detect` pour NVIDIA, Apple Silicon et le CPU quand il est installé, et sur AMD tant que hipfire ne répond pas (section 4). |
+| `mistralrs` | GPU selon le build (CUDA, Metal...) ou CPU | Un serveur [mistral.rs](https://github.com/EricLBuehler/mistral.rs) local (`mistralrs-server`, ou `mistralrs serve`) qui charge le dossier SafeTensors tel quel, sans conversion (un `.gguf` est aussi accepté). | Moteur de `auto` pour NVIDIA et Apple Silicon ; sans GPU, recommandé par `backend detect` quand il est installé (section 4). Intégrable à surgeon par `--features cuda` ou `metal` (section 6). |
 | `llama-server` | GPU (Vulkan, CUDA, Metal...) ou CPU | Un serveur `llama.cpp` local pour toute l'exécution. Un dossier SafeTensors Qwen2, Llama, Mistral, Gemma, Gemma 2 ou Phi-3 est converti par `surgeon` lui-même en GGUF (Rust pur, sans Python). | Jamais recommandé : seulement sur `--backend llama-server` ou un fichier qui le nomme. |
-| `hipfire` | GPU AMD, HIP/ROCm | Démon externe [`warpfront/hipfire`](https://github.com/warpfront/hipfire), déjà lancé ou démarré par `surgeon-gui`. | Recommandé pour un GPU AMD dès que son démon répond ; tout système, Windows compris par WSL2 (section 7). |
-| `native` | CPU | Générateur en Rust pur de `surgeon` (Qwen2, Llama/Mistral, Qwen3 en SafeTensors). Aucun programme externe. | Repli, défaut historique de `bench refusal` et du pipeline. |
+| `hipfire` | GPU AMD, HIP/ROCm | Démon externe [`warpfront/hipfire`](https://github.com/warpfront/hipfire), déjà lancé ou démarré par `surgeon-gui`. | Moteur de `auto` pour un GPU AMD ; tout système, Windows compris par WSL2 (section 7). |
+| `native` | CPU | Générateur en Rust pur de `surgeon` (Qwen2, Llama/Mistral, Qwen3 en SafeTensors). Aucun programme externe. | Moteur de `auto` sans GPU, ou forcé par `--backend native` (alias `cpu`). Jamais un repli : voir la section 2. |
 
 Tous partagent l'interface `TextGenerator` (`src/eval/generator.rs`) : un bench ne sait pas
 lequel il utilise. Les trois serveurs passent par le même client (`src/eval/server.rs`), qui parle
@@ -31,10 +36,17 @@ facultatif ; une couche ne dit que ce qu'elle sait.
 option de la ligne de commande  >  "backend" de pipeline.json  >  config.toml utilisateur  >  défaut
 ```
 
-Les défauts sans configuration sont ceux d'avant : `bench eval` garde `llama`, `bench refusal` et
-`pipeline` gardent `native`. mistral.rs devient le défaut par la configuration : `backend detect
---save` l'écrit quand il le trouve, et une commande ne sonde jamais la machine d'elle-même (un run
-reste reproductible, un job repris garde son backend). Trois règles :
+Sans configuration, le défaut de `bench eval`, `bench refusal`, `pipeline`, `surgeon_bench` et de
+l'interface graphique est `auto` (`--backend auto`, `backend: "auto"`, `backend = "auto"` dans
+`config.toml`). `auto` se résout au début de chaque run d'après le GPU : AMD, `hipfire` ; NVIDIA ou
+Apple Silicon, `mistralrs` ; aucun GPU, `native`. Avant, `bench eval` partait sur `llama` et les
+autres sur `native`. `bench ppl` ne change pas (`llama` ou `native` seulement). Un job repris garde
+son backend. Quatre règles :
+
+- **Aucun repli silencieux sur le CPU.** Sur une machine avec GPU, si le moteur GPU ne démarre pas
+  (démon hipfire arrêté, mistral.rs absent), le bench échoue avec une erreur qui finit par « aucun
+  repli sur le CPU ; diagnostic : surgeon doctor (ou --backend cpu pour le forcer) ». Le CPU ne sert
+  que sans GPU, ou quand `--backend native` (alias `cpu`) est passé explicitement.
 
 - `gpu_layers` et `batch_size` du fichier utilisateur ne valent que pour les serveurs
   (`mistralrs`, `llama-server`, `hipfire`) : ils ne changent pas le découpage en lots du moteur
@@ -77,16 +89,20 @@ est une erreur nommant le fichier et la ligne, et arrête les commandes qui gén
 `inspect` ou `check`, ne lisent pas le fichier). `surgeon backend show` affiche le fichier et le
 backend auquel il aboutit.
 
-Deux variables d'environnement :
+Trois variables d'environnement :
 
 - `WEIGHT_SURGEON_CONFIG=<fichier>` : un fichier à cet emplacement, quel que soit le système (une
   interface graphique, des scripts, des tests) ;
 - `WEIGHT_SURGEON_NO_USER_CONFIG=1` : ignore l'emplacement par défaut.
 
-**Tests.** `.cargo/config.toml` pose `WEIGHT_SURGEON_NO_USER_CONFIG=1` : `cargo test` ne lit jamais
-la configuration de la machine. Il s'applique aussi à `cargo run` ; pour lancer `surgeon` avec votre
-configuration, utilisez le binaire compilé (`target/release/surgeon`) ou
-`WEIGHT_SURGEON_NO_USER_CONFIG=0 cargo run -- ...`.
+Une troisième, `WEIGHT_SURGEON_GPU=none|amd|nvidia|apple`, force le fabricant de GPU détecté (pour une
+machine dont le GPU n'est pas reconnu) ; elle décide donc de ce que `auto` devient.
+
+**Tests.** `.cargo/config.toml` pose `WEIGHT_SURGEON_NO_USER_CONFIG=1` et `WEIGHT_SURGEON_GPU=none` :
+`cargo test` ne lit jamais la configuration de la machine et `auto` y vaut `native`. Ils s'appliquent
+aussi à `cargo run` ; pour lancer `surgeon` avec votre configuration et votre vrai GPU, utilisez le
+binaire compilé (`target/release/surgeon`) ou
+`WEIGHT_SURGEON_NO_USER_CONFIG=0 WEIGHT_SURGEON_GPU= cargo run -- ...`.
 
 ## 4. Détection matérielle et premier démarrage
 
@@ -102,15 +118,16 @@ qui décide (NVIDIA, puis AMD, puis Apple ; sinon le CPU), cherche mistral.rs (`
 sinon `mistralrs-server` puis `mistralrs` dans `mistralrs_dir`, `$MISTRALRS_DIR`, puis le
 `PATH`) et interroge le démon hipfire (section 7 ; sur une machine AMD sans `hipfire_url`, à
 l'adresse par défaut `127.0.0.1:11435`). La cible est `hipfire` pour un GPU AMD et `mistralrs`
-sinon ; la recommandation est la cible quand elle est prête, sinon `mistralrs` s'il est installé,
-sinon `native`. llama.cpp n'est ni cherché ni recommandé ; `--backend llama-server` reste
+sinon ; sur une machine avec GPU, `target` et `recommended` sont toujours le moteur du GPU, même pas
+encore prêt : `reason` dit ce qui manque et renvoie à `surgeon doctor`. `native` n'est recommandé
+que sans GPU (`mistralrs` s'il est installé sur une machine sans GPU). llama.cpp n'est ni cherché ni recommandé ; `--backend llama-server` reste
 utilisable à la main. Exemple (Radeon RX 7600 XT, sans mistral.rs ni démon hipfire) :
 
 ```text
 [BACKEND]  GPU : AMD Radeon RX 7600 XT
 [BACKEND]  mistral.rs introuvable
 [BACKEND]  hipfire : hipfire injoignable sur 127.0.0.1:11435 : lancez `hipfire serve` ...
-[BACKEND]  recommandé : native-cpu (mistral.rs introuvable : moteur natif (CPU, Rust) ; hipfire, le moteur des GPU AMD, prendra le relais dès que son démon répondra)
+[BACKEND]  recommandé : hipfire (démon injoignable : lancez `hipfire serve` ; diagnostic : surgeon doctor)
 ```
 
 `surgeon backend show` ajoute un avertissement, sans échouer, quand le backend configuré ne pourra
@@ -128,8 +145,9 @@ qui n'expose que `/v1/chat/completions`).
 - Sans lier la bibliothèque : `surgeon --json backend detect` et `surgeon --json backend show`, ou
   l'outil MCP `surgeon_backends` (lecture seule, sans argument, même rapport).
 
-`crates/surgeon-gui` applique la même règle au premier lancement (`backend_choice`) et l'écrit
-dans la configuration utilisateur tant que l'utilisateur n'a pas choisi à la main.
+`crates/surgeon-gui` applique la même recommandation au premier lancement (`backend_choice`) et
+l'écrit dans la configuration utilisateur tant que l'utilisateur n'a pas choisi à la main ; il ne
+retombe plus sur `native` ni sur un mistral.rs CPU quand un GPU AMD est là.
 
 ## 5. `llama-server` : GPU, conversion, GGUF temporaire
 
@@ -181,6 +199,20 @@ un GGUF :        ... serve|gguf ... -m <dossier parent> -f <fichier.gguf>
   pipeline) est passé tel quel : aucun GGUF temporaire, aucun `gguf_dtype`.
 - **GPU.** Celui du build de mistral.rs (CUDA, Metal...) ; `--cpu` n'est jamais passé. Le serveur
   écoute en boucle locale seulement ; il est tué avec le bench.
+- **Embarqué (features Cargo facultatives, aucune par défaut).** `--features mistralrs` : mistral.rs
+  dans le processus, sur le CPU (surtout un contrôle de l'API) ; `--features cuda` : NVIDIA, avec le
+  CUDA toolkit (`nvcc`) ; `--features metal` : Apple Silicon, avec les Xcode CLT. Les mêmes noms
+  existent sur le crate `surgeon-gui` et sont transmis au moteur. Compilé avec `cuda` ou `metal`,
+  `--backend mistralrs` charge dans le processus le dossier SafeTensors de `--model`, depuis ce
+  chemin exact ; sinon il passe par le binaire externe `mistralrs-server` / `mistralrs` comme avant
+  (avec `--features mistralrs` seul, le moteur CPU embarqué ne sert que si aucun binaire n'est
+  trouvé). Il décode en glouton seulement (son SDK ne prend pas de graine) : `--temperature` > 0
+  y est refusé ; un GGUF passe toujours par le binaire. Il n'existe pas de feature `hipfire` ni
+  `rocm` : hipfire est un démon externe joint en HTTP sur la boucle locale, rien à compiler.
+
+  ```bash
+  cargo build --release --workspace --features cuda    # ou metal, ou mistralrs
+  ```
 - **Décodage.** Requêtes `/v1/completions` (le prompt brut : le gabarit du bench reste le seul),
   `temperature = 0`, `top_p = 1`, graine 42 globale et par requête, `model = "default"`. Les réglages
   hors OpenAI (`top_k`, `min_p`, `repetition_penalty`) ne sont envoyés que s'ils sont actifs.
@@ -219,19 +251,24 @@ Le champ `model` des requêtes est le nom du modèle donné au bench (son dossie
 extension) : le démon doit connaître un modèle sous ce nom. Comme pour mistral.rs, seul un faux
 démon l'a vérifié ici.
 
-Le démon ne lit donc jamais les poids du dossier, GGUF compris : une copie patchée devrait être
-re-quantifiée et réenregistrée, sinon la mesure porte sur les anciens poids. Une seule règle
-(`backend::hipfire::validate_hipfire_target`) vaut pour la CLI, le pipeline et MCP : le modèle
-d'origine passe sous son nom ; une copie de travail passe sous son alias quand elle a été
-requantifiée pour ses poids actuels, sinon elle est refusée. Est une copie de travail un chemin
+Le démon ne lit donc jamais les poids du dossier, GGUF compris : un dossier patché doit être
+re-quantifié et réenregistré, sinon la mesure porte sur d'anciens poids. Une seule règle
+(`backend::hipfire::validate_hipfire_target`) vaut pour la CLI, le pipeline et MCP : avec
+`hipfire_requantize = "auto"` (défaut), tout dossier SafeTensors, l'original compris, passe sous
+l'alias de son contenu ; avec `off`, l'original passe sous son nom et une copie de travail passe
+sous son alias quand elle a été requantifiée pour ses poids actuels, sinon elle est refusée. Est une copie de travail un chemin
 d'un projet surgeon-gui autre que la source de son manifeste (`copies/`, sorties des runs), le
 `work/` d'un job pipeline, ou un dossier à côté des sauvegardes d'`apply` (`<fichier>.bak-<s>-<n>`).
 
-**Copies requantifiées.** `hipfire_requantize = "auto"` (config.toml, `"backend"` de
-pipeline.json) ou `--hipfire-requantize` (`bench eval`, `bench refusal`, `pipeline plan`,
-`pipeline run`) : avant de mesurer une copie SafeTensors qui n'a pas d'alias pour ses poids
-actuels, surgeon la requantifie. Rien ne se passe après `apply` : seul un bench ou un pipeline
-hipfire déclenche la requantification.
+**Alias de contenu.** `hipfire_requantize` vaut `auto` par défaut (config.toml, `"backend"` de
+pipeline.json) ; la ligne de commande prend `--hipfire-requantize [auto|off]` (le drapeau seul
+vaut `auto`) sur `bench eval`, `bench refusal`, `pipeline plan` et `pipeline run`. Sous `auto`,
+tout dossier SafeTensors mesuré sur hipfire, l'original compris, est servi sous l'alias
+`ws-<dossier>-<sha8>` de ses poids ; surgeon le requantifie d'abord si le catalogue de hipfire ne
+l'a pas. Un bench pairé (`--model` copie patchée contre `--baseline-model` original) demande donc
+à hipfire deux noms qui valent chacun les poids sur disque. Le fichier `.hipfire-alias.json` n'est
+écrit que dans les copies de travail, jamais dans le dossier de l'original. Rien ne se passe après
+`apply` : seul un bench ou un pipeline hipfire déclenche la requantification.
 
 1. SHA-256 des `*.safetensors` du dossier (noms et empreintes, dans l'ordre des noms ; les
    sauvegardes d'`apply` n'en font pas partie), alias `ws-<copie>-<sha8>` (nom du dossier,
@@ -241,7 +278,7 @@ hipfire déclenche la requantification.
    --output-dir <home>/models --install --register <alias>`, sortie sur stderr. `q8f16` : MQ4
    change des réponses de Qwen2.5-0.5B sur cette configuration (17 + 25 = 32).
 3. Les poids sont rehachés (modifiés pendant la quantification : erreur), puis
-   `.hipfire-alias.json` est écrit dans la copie : `{"alias", "weights_sha256", "created_at"}`.
+   `.hipfire-alias.json` est écrit dans la copie de travail (pas dans l'original) : `{"alias", "weights_sha256", "created_at"}`.
 
 À chaque mesure, le hash est recalculé : égal à `weights_sha256`, les requêtes portent
 `model = <alias>` ; différent (un shard réécrit après coup), la copie est refusée, ou
@@ -270,10 +307,11 @@ démon réponde, l'erreur affichée est cette sortie (ou le même diagnostic).
   le premier candidat et avant toute lecture du Test Set, sauf en mode `auto` (chaque candidat est
   requantifié avant sa mesure) ; `pipeline run --allow-stale-hipfire`
   (ligne de commande seulement) passe outre et l'écrit dans `notes` et `report.json`.
-- **MCP (agents, studio).** `surgeon_bench` `eval` et `refusal` d'une copie SafeTensors passent
-  sur `native` avec l'avertissement « backend hipfire écarté (<chemin>) », sauf si son alias
-  correspond à ses poids ; une copie `.gguf` est refusée. Aucune dérogation ni requantification
-  côté agent : le modèle et sa référence restent sur un seul backend.
+- **MCP (agents, studio).** `surgeon_bench` `eval` et `refusal` mesurent sur le backend résolu
+  (`auto` par défaut) et préparent la cible comme la CLI : sous `auto`, une copie ou l'original sans
+  alias à jour est requantifié avant la mesure. L'ancien déplacement vers `native`, avec son
+  avertissement et son drapeau `hipfire_set_aside`, n'existe plus (c'était un repli silencieux sur
+  le CPU). Une copie `.gguf` est refusée. Aucune dérogation (`--allow-stale-hipfire`) côté agent.
 
 **Avec `surgeon-gui`.** Sur une machine AMD, ou quand `hipfire` est le backend enregistré, et sauf
 si `native` a été enregistré à la main, la fenêtre démarre le démon si rien ne répond sur
@@ -312,7 +350,8 @@ Les rapports de `bench eval` et
 **MCP.** Les outils `surgeon_bench` et `surgeon_pipeline` appliquent le fichier utilisateur de
 l'opérateur, jamais un chemin de binaire donné par l'agent : `llama_cpp_dir` d'un argument ou d'un
 `pipeline.json` reste soumis au bac à sable ; `mistralrs_dir`, `mistralrs_bin`, `hipfire_bin` et
-`hipfire_url` ne sont pas des arguments MCP. L'agent peut choisir `backend: "mistralrs"`.
+`hipfire_url` ne sont pas des arguments MCP. L'agent laisse `backend` vide (`auto`) et ne passe jamais `native` sur une machine avec GPU ; il peut
+choisir `backend: "mistralrs"`.
 
 ## 9. Mesure réelle (2026-11-13)
 

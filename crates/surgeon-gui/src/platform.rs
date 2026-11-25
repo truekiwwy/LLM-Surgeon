@@ -2,22 +2,7 @@
 //! that the crate keeps `#![deny(unsafe_code)]`. Parsers are pure and tested; only
 //! [`command`] and the callers touch the system.
 
-use std::process::Command;
-
-/// A child process that does not flash a console window when the GUI has none.
-pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
-    #[cfg_attr(not(windows), allow(unused_mut))]
-    let mut cmd = Command::new(program);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    cmd
-}
-
-pub use weight_surgeon::process::run_capture;
+pub use weight_surgeon::process::{command, run_capture};
 
 /// `NAME    REG_SZ    value` from `reg query` output.
 pub fn parse_reg_value(output: &str, name: &str) -> Option<String> {

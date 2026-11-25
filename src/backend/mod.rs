@@ -10,8 +10,9 @@
 //! ```text
 //! flags > pipeline.json > user config.toml > default        (config::resolve)
 //! apply_user_config: fills the optional flags of the bench commands from the user file
-//! detect_hardware_and_backends: GPU vendor -> hipfire (AMD, daemon up) > mistral.rs > native
-//!                               (Rust engines only; llama.cpp is never recommended)
+//! detect_hardware_and_backends: GPU vendor -> hipfire (AMD) | mistral.rs (NVIDIA, Apple)
+//!                               | native (no GPU); llama.cpp is never recommended
+//! resolve_auto: `auto` (the default) -> the same engine, at the start of each run
 //! ```
 
 pub mod config;
@@ -29,6 +30,20 @@ use std::path::{Path, PathBuf};
 
 use crate::bench::score::Backend;
 use crate::cli::{BenchCommand, Commands, GenerationArgs, PipelineCommand};
+
+/// The engine `backend` stands for: `auto` is the GPU's engine ([`detect::gpu_engine`]), the
+/// CPU only on a machine without a GPU; any other backend is itself. `gguf`: the model is a
+/// GGUF file, which the native engine cannot read.
+pub fn resolve_auto(backend: Backend, gguf: bool) -> Backend {
+    match backend {
+        Backend::Auto => match detect::gpu_engine(detect::machine_vendor()) {
+            // No GPU: llama.cpp still runs a GGUF on the CPU, as before `auto`.
+            Backend::Native if gguf => Backend::Llama,
+            engine => engine,
+        },
+        other => other,
+    }
+}
 
 /// The GPU API (`Vulkan`, `CUDA`...) the `llama-server` of `dir` sees first, for the report
 /// labels; `None` when it cannot be asked or has no GPU.
@@ -65,9 +80,9 @@ pub fn describe(
     }
 }
 
-/// [`describe`] of a resolved configuration (the backend defaults to native).
+/// [`describe`] of a configuration, `auto` (the default) resolved on this machine.
 pub fn describe_config(config: &BackendConfig) -> String {
-    let backend = config.backend.unwrap_or(Backend::Native);
+    let backend = resolve_auto(config.backend.unwrap_or(Backend::Auto), false);
     let api = match backend {
         Backend::LlamaServer => gpu_api(config.llama_cpp_dir.as_deref()),
         _ => None,
@@ -89,10 +104,9 @@ fn fill_dir(slot: &mut Option<PathBuf>, user: &BackendConfig) {
 }
 
 /// One generating command: its flags over the user file, written back into the flags so
-/// that nothing downstream reads the file. `default` is the command's historical backend.
+/// that nothing downstream reads the file. Neither naming a backend gives `auto`.
 fn generation(
     backend: &mut Option<Backend>,
-    default: Backend,
     dir: &mut Option<PathBuf>,
     g: &mut GenerationArgs,
     user: &BackendConfig,
@@ -105,7 +119,7 @@ fn generation(
         ..g.engines.config(dir.as_deref())
     };
     let effective = resolve(top, user);
-    *backend = Some(effective.backend.unwrap_or(default));
+    *backend = Some(effective.backend.unwrap_or(Backend::Auto));
     g.gpu_layers = effective.gpu_layers;
     g.batch_size = effective.batch_size;
     g.gguf_dtype = effective.gguf_dtype;
@@ -150,11 +164,11 @@ pub fn apply_with(command: &mut Commands, user: &BackendConfig) -> Result<(), St
             BenchCommand::JudgeEval(a) => fill_dir(&mut a.judge_args.llama_cpp_dir, user),
             BenchCommand::Eval(a) => {
                 let (backend, dir, g) = (&mut a.backend, &mut a.llama_cpp_dir, &mut a.generation);
-                generation(backend, Backend::Llama, dir, g, user);
+                generation(backend, dir, g, user);
             }
             BenchCommand::Refusal(a) => {
                 let (backend, dir) = (&mut a.backend, &mut a.judge_args.llama_cpp_dir);
-                generation(backend, Backend::Native, dir, &mut a.generation, user);
+                generation(backend, dir, &mut a.generation, user);
             }
             _ => {}
         },
@@ -212,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn flags_win_and_the_default_stays_historical_without_a_file() {
+    fn flags_win_and_the_default_is_auto_without_a_file() {
         let mut cmd = parse(
             &[
                 EVAL.as_slice(),
@@ -240,8 +254,8 @@ mod tests {
         };
         assert_eq!(
             a.backend,
-            Some(Backend::Llama),
-            "bench eval keeps its old default"
+            Some(Backend::Auto),
+            "the GPU's engine by default"
         );
         assert_eq!(
             a.generation.options(),
@@ -254,11 +268,7 @@ mod tests {
         let BenchCommand::Refusal(a) = b.command else {
             panic!()
         };
-        assert_eq!(
-            a.backend,
-            Some(Backend::Native),
-            "bench refusal keeps its old default"
-        );
+        assert_eq!(a.backend, Some(Backend::Auto), "never the CPU by default");
     }
 
     #[test]

@@ -90,7 +90,7 @@ le plus souvent.
 | `surgeon_diff` | Différence de deux checkpoints, approximée à rang `r`, écrite dans un `.surgery` neuf | écrit un fichier, non destructif, idempotent |
 | `surgeon_lora` | `mode` `merge` (fusionne un adaptateur LoRA en place) ou `extract` (écrit un adaptateur) | destructif |
 | `surgeon_pipeline` | Décision atomique sur un patch : `action` `plan`, `start`, `status`, `cancel`, `report`, `promote_patch` ([PIPELINE.md](PIPELINE.md)) | non destructif (copie de travail, modèle d'origine jamais écrit) |
-| `surgeon_backends` | Moteurs d'inférence de la machine (native, mistralrs, llama-server et ses GPU, hipfire), configuration utilisateur et backend recommandé ([BACKENDS.md](BACKENDS.md)) | lecture seule |
+| `surgeon_backends` | Moteurs d'inférence de la machine (native, mistralrs, llama-server et ses GPU, hipfire), configuration utilisateur et backend recommandé (sur une machine avec GPU, toujours son moteur GPU, même pas encore prêt : `reason` dit ce qui manque) ([BACKENDS.md](BACKENDS.md)) | lecture seule |
 | `surgeon_graph` | Graphe orienté des écritures/lectures du flux résiduel, avec bornes spectrales certifiées ; synthèse bornée sans `out_dir`, fichiers avec | écrit seulement avec `out_dir` ou `cache_dir`, non destructif, idempotent |
 
 Les schémas exacts : `surgeon schema --kind tools`. Le format du patch :
@@ -249,8 +249,8 @@ est une erreur JSON-RPC `-32602` (les cinq autres outils la signalent en
 | --- | --- | --- |
 | `logits` | `before`, `after` | `tensor`, `top_k` (5), `worst` (5), `warn_kl`, `warn_top1_shift`, `fail_on_warn` |
 | `ppl` | `model`, `text` (un fichier, ou `builtin:wikitext` en `native`) | `backend` (`llama` par défaut, `native`), `stride` (`native` seulement, défaut `ctx` / 2), `baseline_model` ou `baseline_ppl` (+ `baseline_ppl_err`), `ctx` (512), `chunks` (nombre de fenêtres en `native`), `threads`, `n_gpu_layers` (0), `llama_cpp_dir`, `warn_delta` (0.2), `timeout_secs`, `fail_on_warn` |
-| `eval` | `model`, `dataset` | `backend` (`llama`, `llama-completion`, `llama-server`, `mistralrs`, `hipfire`, `native`), `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `chat_template` (voir ci-dessous), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn`, options de génération |
-| `refusal` | `model`, `prompts` (fichier) | `backend` (`native`, `llama-server`, `llama-completion`, `mistralrs`, `hipfire`), `baseline_model`, `limit` (défaut : tous), `max_new_tokens` (40), `chat_template` (voir ci-dessous), `marker_langs`, `markers_file`, `judge` (`rules`, `llm`, `both`), `judge_model`, `judge_role` (`refusal`, `harm`), `judge_template`, `judge_cache`, `judge_calibration`, `min_calibration_n` (100), `min_kappa` (0.6), `partial_as_refusal`, `max_unparsable`, `llama_cpp_dir`, `timeout_secs`, `fail_on_warn`, options de génération |
+| `eval` | `model`, `dataset` | `backend` (`auto` par défaut ; `native` ou `cpu`, `llama`, `llama-completion`, `llama-server`, `mistralrs`, `hipfire`), `baseline_model`, `limit` (50), `max_new_tokens` (512), `prompt_template` (texte avec `{question}`, jamais un chemin), `chat_template` (voir ci-dessous), `format` (`gsm8k`, `math`, `auto`), `llama_cpp_dir`, `timeout_secs`, `min_accuracy`, `fail_on_warn`, options de génération |
+| `refusal` | `model`, `prompts` (fichier) | `backend` (`auto` par défaut ; `native` ou `cpu`, `llama-server`, `llama-completion`, `mistralrs`, `hipfire`), `baseline_model`, `limit` (défaut : tous), `max_new_tokens` (40), `chat_template` (voir ci-dessous), `marker_langs`, `markers_file`, `judge` (`rules`, `llm`, `both`), `judge_model`, `judge_role` (`refusal`, `harm`), `judge_template`, `judge_cache`, `judge_calibration`, `min_calibration_n` (100), `min_kappa` (0.6), `partial_as_refusal`, `max_unparsable`, `llama_cpp_dir`, `timeout_secs`, `fail_on_warn`, options de génération |
 | `refusal_probe` | `model`, `prompts` (fichier) | `probe_method` (`first-token-prob` par défaut, `direction-projection`), `direction_path` (direction de `surgeon_extract`, requis en `direction-projection`), `threshold` (0.5, ou celui de la direction), `chat_template` |
 | `dump` | `model`, `prompts` (fichier), `out` | `chat_template`, `dtype`, `out_dtype` (`f32`, `f16`), `max_tokens` (256), `max_total_positions` (4096), `overwrite` |
 | `judge_sample` | `responses` (sortie JSON d'un `refusal`), `prompts` (ceux de ce run), `out` | `n` (100), `seed` (42), `overwrite` |
@@ -284,14 +284,14 @@ de sa liste blanche (`-m`, `--host 127.0.0.1`, `--port`, `--api-key` aléatoire,
 (`additionalProperties: false`), et `llama_cpp_dir` passe par le bac à sable. `mistralrs`
 lance mistral.rs sur le dossier SafeTensors tel quel, `hipfire` interroge un démon déjà lancé ;
 leurs emplacements viennent de la configuration de l'opérateur, jamais d'un argument. hipfire
-sert son propre cache quantifié et ne lit pas le modèle donné : sur une copie de travail
-(`copies/` ou sorties d'un projet surgeon-gui, `work/` d'un job pipeline, dossier à côté des
-sauvegardes d'`apply`), `eval` et `refusal` passent sur `native` et l'enveloppe commence ses
-`warnings` par « backend hipfire écarté (<chemin>) », écrit aussi sur stderr ; une copie
-`.gguf` est refusée (`invalid_input`). Le modèle d'origine reste servi par hipfire, comme une
-copie déjà requantifiée en ligne de commande dont le `.hipfire-alias.json` correspond à ses
-poids (sous son alias). Aucun argument ne lève cette règle (pas d'`--allow-stale-hipfire` ni de
-requantification côté agent). Voir la
+sert son propre cache quantifié et ne lit pas le modèle donné : avec `hipfire_requantize = "auto"`
+(défaut), tout dossier SafeTensors mesuré sur hipfire, l'original compris, est servi sous l'alias
+`ws-<dossier>-<sha8>` de ses poids sur disque. Une copie de travail sans alias valide est refusée
+avec `off`, et une copie `.gguf` l'est toujours (`invalid_input`) ; l'agent ne lève pas cette règle
+(pas d'`--allow-stale-hipfire`). Le backend vaut `auto` quand l'appel n'en nomme pas : hipfire sur
+un GPU AMD, mistralrs sur NVIDIA ou Apple Silicon, `native` sans GPU. Si le moteur GPU ne démarre
+pas, l'appel échoue (diagnostic : `surgeon_doctor`) : jamais de repli silencieux sur le CPU. Un agent laisse `backend` vide et ne passe pas `native`
+sur une machine équipée d'un GPU. Voir la
 section « Échantillonnage, lots et backends » du README.
 
 `eval` avec `backend: "native"` et `refusal` génèrent en Rust pur sur le CPU, sur un dossier

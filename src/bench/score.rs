@@ -378,7 +378,12 @@ pub enum Backend {
     /// llama.cpp (`llama-completion` / `llama-cli`) sur un GGUF, converti au besoin.
     #[default]
     Llama,
+    /// Le moteur GPU de la machine : hipfire sur AMD, mistralrs sur NVIDIA et Apple Silicon,
+    /// native seulement sans GPU. Jamais de repli sur le CPU quand un GPU est là.
+    Auto,
     /// Génération en Rust pur sur CPU, sur un dossier SafeTensors (forward natif).
+    #[value(alias = "cpu")]
+    #[serde(alias = "cpu")]
     Native,
     /// llama.cpp `llama-completion` / `llama-cli`, un processus par génération (comme llama).
     #[serde(rename = "llama-completion")]
@@ -398,6 +403,7 @@ impl Backend {
     pub fn label(self) -> &'static str {
         match self {
             Backend::Llama => "llama",
+            Backend::Auto => "auto",
             Backend::Native => "native",
             Backend::LlamaCompletion => "llama-completion",
             Backend::LlamaServer => "llama-server",

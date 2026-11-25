@@ -66,10 +66,9 @@ pub use protocol::{
 pub use sandbox::{Sandbox, SandboxError};
 pub use server::{serve, McpConfig, MAX_LINE_BYTES};
 pub use tools::{
-    bench_backend, patch_schema, render_schema, tool_definitions, ApplyToolArgs, AutotuneToolArgs,
-    BenchMode, BenchToolArgs, CheckToolArgs, EvalToolArgs, ExtractToolArgs, InspectToolArgs,
-    MethodId, HIPFIRE_SET_ASIDE, TOOL_APPLY, TOOL_AUTOTUNE, TOOL_BENCH, TOOL_CHECK, TOOL_EVAL,
-    TOOL_EXTRACT, TOOL_INSPECT,
+    patch_schema, render_schema, tool_definitions, ApplyToolArgs, AutotuneToolArgs, BenchMode,
+    BenchToolArgs, CheckToolArgs, EvalToolArgs, ExtractToolArgs, InspectToolArgs, MethodId,
+    TOOL_APPLY, TOOL_AUTOTUNE, TOOL_BENCH, TOOL_CHECK, TOOL_EVAL, TOOL_EXTRACT, TOOL_INSPECT,
 };
 pub use tools_checkpoint::{TOOL_CHECKPOINT, TOOL_SWEEP};
 pub use tools_files::TOOL_FILES;

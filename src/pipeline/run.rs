@@ -57,7 +57,13 @@ pub struct JobFile {
 pub fn resolve_backend(config: &mut PipelineConfig, flags: BackendConfig) -> Result<()> {
     let user = crate::backend::load_user_config().map_err(|e| PipelineError::Config(vec![e]))?;
     let top = flags.over(config.backend.take().unwrap_or_default());
-    let effective = crate::backend::resolve(top, &user);
+    let mut effective = crate::backend::resolve(top, &user);
+    // `auto` (the default) is resolved now: the job records the engine it is measured with.
+    // Its working copies are SafeTensors folders.
+    effective.backend = Some(crate::backend::resolve_auto(
+        effective.backend.unwrap_or(Backend::Auto),
+        false,
+    ));
     match effective.backend {
         Some(Backend::Llama | Backend::LlamaCompletion) => {
             return Err(PipelineError::Config(vec![
@@ -69,7 +75,7 @@ pub fn resolve_backend(config: &mut PipelineConfig, flags: BackendConfig) -> Res
             crate::backend::hipfire::port(&effective)
                 .map_err(|e| PipelineError::Config(vec![e]))?;
         }
-        Some(Backend::MistralRs) if crate::backend::mistralrs::locate(&effective).is_none() => {
+        Some(Backend::MistralRs) if !crate::backend::mistralrs::available(&effective) => {
             return Err(PipelineError::Config(vec![
                 crate::backend::mistralrs::not_found(&effective),
             ]))
@@ -922,15 +928,15 @@ pub fn run(job: &Job, file: JobFile, deps: &AppDeps) -> Result<Ended> {
 
 /// Every candidate is measured on a patched working copy: on hipfire, which serves its own
 /// cache of the model, that is refused before the first candidate and the first read of a
-/// Test Set, unless `--allow-stale-hipfire` (then the warning for the report) or
-/// `hipfire_requantize = "auto"` (each candidate requantized before its measure).
+/// Test Set, unless `hipfire_requantize` is `auto` (the default: each candidate requantized
+/// before its measure) or `--allow-stale-hipfire` (then the warning for the report).
 fn hipfire_guard(w: &Worker) -> Result<Option<String>> {
     use crate::backend::config::Requantize;
     let config = w.config().backend.as_ref();
     if config.and_then(|b| b.backend) != Some(Backend::Hipfire) {
         return Ok(None);
     }
-    if config.and_then(|b| b.hipfire_requantize) == Some(Requantize::Auto) {
+    if config.and_then(|b| b.hipfire_requantize) != Some(Requantize::Off) {
         return Ok(Some(
             "hipfire_requantize = auto : chaque candidat est requantifié avant sa mesure sur \
              hipfire"
@@ -1237,7 +1243,7 @@ fn execute(w: &mut Worker) -> Result<Ended> {
         (None, Some(_), _) => (Verdict::Inconclusive, "Test non évalué".into()),
     };
     let results = Results {
-        backend: crate::backend::describe_config(&config.backend.clone().unwrap_or_default()),
+        backend: crate::backend::describe_config(&BackendConfig::of_job(config.backend.as_ref())),
         job_id: w.file.job_id.clone(),
         config_sha256: w.file.config_sha256.clone(),
         verdict: if model_after == model_before {

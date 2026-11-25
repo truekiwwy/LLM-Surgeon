@@ -345,7 +345,7 @@ pub fn plan(
         disk,
         units_total: native.units + on_backend.units,
         model_loads: native.loads + on_backend.loads,
-        backend: crate::backend::describe_config(&config.backend.clone().unwrap_or_default()),
+        backend: crate::backend::describe_config(&BackendConfig::of_job(config.backend.as_ref())),
         calibration,
         backend_calibration,
         estimated_secs,

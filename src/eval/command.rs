@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
@@ -81,7 +81,7 @@ pub struct SystemCommandRunner;
 impl CommandRunner for SystemCommandRunner {
     // shortcut: no timeout, a hung converter blocks the caller; add one if that happens.
     fn run(&self, program: &Path, args: &[String], cwd: Option<&Path>) -> Result<CommandOutput> {
-        let mut cmd = Command::new(program);
+        let mut cmd = crate::process::command(program);
         cmd.args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -121,7 +121,7 @@ impl CommandRunner for SystemCommandRunner {
         on_line: &mut dyn FnMut(&str) -> ControlFlow<()>,
     ) -> Result<CommandOutput> {
         let started = Instant::now();
-        let mut cmd = Command::new(program);
+        let mut cmd = crate::process::command(program);
         cmd.args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

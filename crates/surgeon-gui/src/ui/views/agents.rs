@@ -832,8 +832,7 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
                     let result = results.get(id.as_str()).copied();
                     // shortcut: read with today's backend configuration, not the one of the
                     // call; record it with the call if the configuration changes mid-project.
-                    let project = app.agents.project.as_deref();
-                    let cli = weight_surgeon::mcp::cli_line(name, input, configured, project);
+                    let cli = weight_surgeon::mcp::cli_line(name, input, configured);
                     let mut sections = vec![(
                         t("tool.input"),
                         serde_json::to_string_pretty(input).unwrap_or_default(),
@@ -870,10 +869,6 @@ fn transcript_body(ui: &mut Ui, app: &SurgeonApp) {
                     if state == State::Active {
                         ui.ctx()
                             .request_repaint_after(std::time::Duration::from_millis(250));
-                    }
-                    if cli.as_ref().is_some_and(|l| l.hipfire_set_aside) {
-                        c::status(ui, State::Warn, t("bench.native"))
-                            .on_hover_text(weight_surgeon::mcp::HIPFIRE_SET_ASIDE);
                     }
                     // A CLI runtime names it `mcp__surgeon__<tool>`.
                     let tool = name.rsplit("__").next().unwrap_or(name);

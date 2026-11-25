@@ -2,19 +2,15 @@
 //! can be replayed or refined in a terminal. The tests check every flag it can write against
 //! the CLI's own definition (`Cli::command()`), for every argument of every tool.
 
-use std::path::{Path, PathBuf};
-
 use serde_json::Value;
 
-use super::tools::{bench_backend, bench_command, BENCH_FIELDS, EVAL_BACKEND, REFUSAL_BACKEND};
+use super::tools::{bench_command, BENCH_FIELDS};
 use crate::bench::score::Backend;
 
 /// A tool call written as a terminal command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliLine {
     pub command: String,
-    /// hipfire was asked for a working copy, the bench runs on native ([`bench_backend`]).
-    pub hipfire_set_aside: bool,
 }
 
 /// Arguments whose CLI option has another name: (command, argument, option).
@@ -87,15 +83,9 @@ fn scalar(value: &Value) -> String {
 }
 
 /// The command of a call to `tool` (an engine tool, `mcp__<server>__` prefix or not) with
-/// `args`; `configured` is the backend of the user configuration, `base` the folder relative
-/// paths start from (the server's first allowed folder). `None` for a tool without a CLI
-/// command (files, backends, pipeline, interface tools).
-pub fn cli_line(
-    tool: &str,
-    args: &Value,
-    configured: Option<Backend>,
-    base: Option<&Path>,
-) -> Option<CliLine> {
+/// `args`; `configured` is the backend of the user configuration. `None` for a tool without a
+/// CLI command (files, backends, pipeline, interface tools).
+pub fn cli_line(tool: &str, args: &Value, configured: Option<Backend>) -> Option<CliLine> {
     let tool = tool.rsplit("__").next().unwrap_or(tool);
     let command = command(tool, args)?;
     let fields = args.as_object()?;
@@ -112,11 +102,7 @@ pub fn cli_line(
             line.push_str(&shell(v));
         }
     };
-    let default = match command {
-        "bench eval" => Some(EVAL_BACKEND),
-        "bench refusal" => Some(REFUSAL_BACKEND),
-        _ => None,
-    };
+    let generates = matches!(command, "bench eval" | "bench refusal");
     let mut names: Vec<&String> = fields.keys().collect();
     names.sort_by_key(|n| n.as_str() != "model");
     for name in names {
@@ -127,7 +113,7 @@ pub fn cli_line(
             // The bench mode is the subcommand; an eval or refusal backend is written after
             // the loop.
             || (bench_fields.is_some()
-                && (name == "mode" || (name == "backend" && default.is_some())))
+                && (name == "mode" || (name == "backend" && generates)))
             || bench_fields.is_some_and(|(required, optional)| {
                 !required.contains(&name.as_str()) && !optional.contains(&name.as_str())
             });
@@ -159,23 +145,12 @@ pub fn cli_line(
             other => push(&option, Some(&scalar(other))),
         }
     }
-    let mut hipfire_set_aside = false;
     // Written even when implicit: the terminal's own configuration must not change the run.
-    if let Some(default) = default {
+    if generates {
         let requested = fields
             .get("backend")
             .and_then(|b| serde_json::from_value::<Backend>(b.clone()).ok());
-        let models: Vec<PathBuf> = ["model", "baseline_model"]
-            .iter()
-            .filter_map(|k| fields.get(*k).and_then(Value::as_str))
-            .map(|m| base.map_or_else(|| PathBuf::from(m), |b| b.join(m)))
-            .collect();
-        let models: Vec<&Path> = models.iter().map(PathBuf::as_path).collect();
-        // A refused GGUF copy keeps hipfire: the command fails just as the call did.
-        let resolved = requested.or(configured);
-        let (backend, set_aside) = bench_backend(resolved, default, &models)
-            .unwrap_or((resolved.unwrap_or(default), None));
-        hipfire_set_aside = set_aside.is_some();
+        let backend = requested.or(configured).unwrap_or(Backend::Auto);
         push("backend", Some(backend.label()));
     }
     if !files.is_empty() {
@@ -184,10 +159,7 @@ pub fn cli_line(
             files.join(", ")
         ));
     }
-    Some(CliLine {
-        command: line,
-        hipfire_set_aside,
-    })
+    Some(CliLine { command: line })
 }
 
 #[cfg(test)]
@@ -251,7 +223,7 @@ mod tests {
                 )],
             };
             for args in calls {
-                let Some(line) = cli_line(name, &args, None, None) else {
+                let Some(line) = cli_line(name, &args, None) else {
                     continue;
                 };
                 let command = command(name, &args).unwrap();
@@ -294,7 +266,7 @@ mod tests {
             "gguf": false,
             "patch": {"operations": [{"operation": "project_out"}]},
         });
-        let line = cli_line("mcp__surgeon__surgeon_apply", &args, None, None).unwrap();
+        let line = cli_line("mcp__surgeon__surgeon_apply", &args, None).unwrap();
         assert_eq!(
             line.command,
             r"surgeon apply --model C:\p\copies\copy-1 --dry-run --patch patch.json  # patch.json : champs de même nom de l'appel, à écrire en fichiers"
@@ -302,120 +274,52 @@ mod tests {
         let args = json!({"model": "C:/My Models/m", "projections": ["o_proj", "down_proj"],
             "layers": "all", "max_tensors": 10});
         assert_eq!(
-            cli_line("surgeon_inspect", &args, None, None).unwrap().command,
+            cli_line("surgeon_inspect", &args, None).unwrap().command,
             "surgeon inspect --model \"C:/My Models/m\" --layers all --proj o_proj --proj down_proj"
         );
-        assert!(cli_line("surgeon_files", &json!({}), None, None).is_none());
-        assert!(cli_line("record_finding", &json!({}), None, None).is_none());
-    }
-
-    /// A surgeon-gui project: its manifest naming `source`, a SafeTensors working copy and a
-    /// GGUF one.
-    fn project() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("source");
-        std::fs::create_dir_all(&source).unwrap();
-        let manifest = json!({"source": {"path": source}});
-        std::fs::write(
-            dir.path().join("project.surgeon.json"),
-            manifest.to_string(),
-        )
-        .unwrap();
-        std::fs::create_dir_all(dir.path().join("copies/copy-1")).unwrap();
-        std::fs::write(dir.path().join("copies/m.gguf"), b"GGUF").unwrap();
-        dir
+        assert!(cli_line("surgeon_files", &json!({}), None).is_none());
+        assert!(cli_line("record_finding", &json!({}), None).is_none());
     }
 
     #[test]
-    fn a_bench_names_its_backend_and_never_measures_a_working_copy_on_hipfire() {
-        let p = project();
-        let base = Some(p.path());
+    fn a_bench_names_its_backend_and_keeps_hipfire_for_a_working_copy() {
+        // hipfire measures the copy itself (requantized under the alias of its weights): no
+        // move to the CPU.
         let eval = json!({"mode": "eval", "model": "copies/copy-1", "dataset": "builtin:logic"});
-        let line = cli_line("surgeon_bench", &eval, Some(Backend::Hipfire), base).unwrap();
+        let line = cli_line("surgeon_bench", &eval, Some(Backend::Hipfire)).unwrap();
         assert_eq!(
             line.command,
-            "surgeon bench eval --model copies/copy-1 --dataset builtin:logic --backend native"
+            "surgeon bench eval --model copies/copy-1 --dataset builtin:logic --backend hipfire"
         );
-        assert!(line.hipfire_set_aside);
-        // Asked explicitly: set aside all the same.
         let mut refusal = json!({"mode": "refusal", "model": "copies/copy-1",
             "prompts": "builtin:refusals", "backend": "hipfire"});
-        let line = cli_line("surgeon_bench", &refusal, None, base).unwrap();
-        assert!(line.command.ends_with("--backend native") && line.hipfire_set_aside);
+        let line = cli_line("surgeon_bench", &refusal, None).unwrap();
+        assert!(
+            line.command.ends_with("--backend hipfire"),
+            "{}",
+            line.command
+        );
         refusal["backend"] = json!("mistralrs");
-        let line = cli_line("surgeon_bench", &refusal, Some(Backend::Hipfire), base).unwrap();
-        assert!(line.command.ends_with("--backend mistralrs") && !line.hipfire_set_aside);
-        // The project's source is what hipfire's cache holds.
-        let source = json!({"mode": "eval", "model": "source", "dataset": "builtin:math"});
-        let line = cli_line("surgeon_bench", &source, Some(Backend::Hipfire), base).unwrap();
-        assert!(line.command.ends_with("--backend hipfire") && !line.hipfire_set_aside);
-        // A GGUF copy is refused by the call: the command keeps hipfire and fails the same.
-        let gguf = json!({"mode": "eval", "model": "copies/m.gguf", "dataset": "builtin:math"});
-        let line = cli_line("surgeon_bench", &gguf, Some(Backend::Hipfire), base).unwrap();
-        assert!(line.command.ends_with("--backend hipfire") && !line.hipfire_set_aside);
-        assert!(cli_line("surgeon_bench", &refusal, None, base)
-            .unwrap()
-            .command
-            .contains("--prompts builtin:refusals"));
+        let line = cli_line("surgeon_bench", &refusal, Some(Backend::Hipfire)).unwrap();
+        assert!(line.command.ends_with("--backend mistralrs"));
+        assert!(line.command.contains("--prompts builtin:refusals"));
+        // Nothing named anywhere: auto, the GPU's engine on the machine that replays it.
         assert_eq!(
             cli_line(
                 "surgeon_bench",
                 &json!({"mode": "eval", "model": "m"}),
-                None,
                 None
             )
             .unwrap()
             .command,
-            "surgeon bench eval --model m --backend llama"
+            "surgeon bench eval --model m --backend auto"
         );
         let ppl = json!({"mode": "ppl", "model": "copies/copy-1", "text": "builtin:wikitext",
             "backend": "native", "stride": 256});
-        let line = cli_line("surgeon_bench", &ppl, Some(Backend::Hipfire), base).unwrap();
+        let line = cli_line("surgeon_bench", &ppl, Some(Backend::Hipfire)).unwrap();
         assert_eq!(
             line.command,
             "surgeon bench ppl --model copies/copy-1 --backend native --stride 256 --text builtin:wikitext"
         );
-        assert!(!line.hipfire_set_aside);
-    }
-
-    #[test]
-    fn bench_backend_sets_a_working_copy_aside_and_refuses_a_gguf_one() {
-        let p = project();
-        let copy = p.path().join("copies/copy-1");
-        let source = p.path().join("source");
-        let hipfire = Some(Backend::Hipfire);
-        let (backend, warning) = bench_backend(hipfire, Backend::Llama, &[&copy]).unwrap();
-        assert_eq!(backend, Backend::Native);
-        let warning = warning.unwrap();
-        assert!(
-            warning.starts_with(crate::mcp::HIPFIRE_SET_ASIDE),
-            "{warning}"
-        );
-        assert!(
-            warning.contains("copy-1"),
-            "the reason names the copy: {warning}"
-        );
-        assert_eq!(
-            bench_backend(None, Backend::Native, &[&copy]),
-            Ok((Backend::Native, None))
-        );
-        assert_eq!(
-            bench_backend(Some(Backend::LlamaServer), Backend::Llama, &[&copy]),
-            Ok((Backend::LlamaServer, None))
-        );
-        assert_eq!(
-            bench_backend(hipfire, Backend::Llama, &[&source]),
-            Ok((Backend::Hipfire, None))
-        );
-        // A working-copy baseline moves the whole bench too.
-        assert_eq!(
-            bench_backend(hipfire, Backend::Llama, &[&source, &copy])
-                .unwrap()
-                .0,
-            Backend::Native
-        );
-        let gguf = p.path().join("copies/m.gguf");
-        let refused = bench_backend(hipfire, Backend::Llama, &[&gguf]).unwrap_err();
-        assert!(refused.contains("copie de travail"), "{refused}");
     }
 }

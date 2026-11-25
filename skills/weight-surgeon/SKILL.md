@@ -44,8 +44,9 @@ et `data.checks`.
   la purge se fait dans le Studio (Réglages > Moteur) ou par `surgeon doctor --clean-cache`.
 - hipfire : `data.hipfire.gpu_memory.total_mb` à 0 = démon figé sans GPU. Alerte
   l'utilisateur et demande-lui de le redémarrer (Studio : Réglages > Moteur, ou
-  `start-hipfire.ps1` après l'avoir arrêté) avant toute mesure sur hipfire. Démon absent : les
-  mesures tournent sur `native`.
+  `start-hipfire.ps1` après l'avoir arrêté) avant toute mesure sur hipfire. Démon absent : la
+  mesure échoue et renvoie à `surgeon_doctor` (aucun repli sur le CPU). Laisse `backend` vide
+  (`auto`, le moteur du GPU) et ne passe jamais `native` sur une machine équipée d'un GPU.
 
 ## 2. Inspecter, extraire, cribler en entonnoir
 

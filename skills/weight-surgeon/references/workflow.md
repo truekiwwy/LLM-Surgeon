@@ -108,7 +108,9 @@ Une écriture du modèle après une mesure rend la mesure caduque. Un candidat q
 
 ## 6. Backend et hipfire
 
-hipfire sert un cache quantifié enregistré par nom et ne lit pas les poids modifiés : une
-mesure d'une copie de travail passe sur `native` (avertissement « backend hipfire écarté »),
-sauf si l'opérateur a activé `hipfire_requantize = "auto"` (la copie est alors requantifiée
-sous l'alias `ws-<copie>-<sha8>`). L'agent ne requantifie jamais lui-même.
+hipfire sert un cache quantifié enregistré par nom et ne lit pas les poids modifiés : avec
+`hipfire_requantize = "auto"` (défaut), tout dossier SafeTensors mesuré, l'original compris, est
+servi sous l'alias `ws-<dossier>-<sha8>` de ses poids, requantifié d'abord s'il n'a pas d'alias à
+jour. Laisse `backend` vide (`auto` : hipfire sur AMD, mistralrs sur NVIDIA ou Apple Silicon) et
+ne passe jamais `native` sur une machine avec GPU. Si le moteur GPU ne démarre pas, la mesure
+échoue avec un diagnostic : lance `surgeon_doctor`, jamais de repli sur le CPU.

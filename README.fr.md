@@ -116,7 +116,7 @@ surgeon --version
 surgeon 0.1.0
 ```
 
-Si vous préférez ne pas installer, compilez avec `cargo build --release` et utilisez `target/release/surgeon` à la place de `surgeon`.
+Si vous préférez ne pas installer, compilez avec `cargo build --release` et utilisez `target/release/surgeon` à la place de `surgeon`. Pour faire tourner mistral.rs dans surgeon, ajoutez `--features cuda` (NVIDIA, CUDA toolkit avec `nvcc`) ou `--features metal` (Apple Silicon), par exemple `cargo build --release --workspace --features cuda` ; voir [backends](docs/BACKENDS.md).
 
 <a id="path-a"></a>
 ### 2.2 Chemin A : sans téléchargement, mini-modèle factice
@@ -1063,7 +1063,7 @@ surgeon bench ppl [OPTIONS] --model <MODEL> --text <TEXT>
 <a id="cmd-bench-eval"></a>
 #### `surgeon bench eval`
 
-Pass@1 à correspondance exacte sur un jeu de type GSM8K ou MATH, décodage glouton via llama.cpp ou, avec `--backend native`, via le générateur en Rust pur (dossier SafeTensors Qwen2, Llama/Mistral ou Qwen3, CPU, sans llama.cpp). Échantillonnage, plusieurs réponses par question, lots et backend `llama-server` sont optionnels : voir [échantillonnage, lots et backends](#generation).
+Pass@1 à correspondance exacte sur un jeu de type GSM8K ou MATH, décodage glouton sur le moteur GPU de la machine (`--backend auto`), via llama.cpp ou, avec `--backend native`, via le générateur en Rust pur (dossier SafeTensors Qwen2, Llama/Mistral ou Qwen3, CPU, sans llama.cpp). Échantillonnage, plusieurs réponses par question, lots et backend `llama-server` sont optionnels : voir [échantillonnage, lots et backends](#generation).
 
 ```text
 surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
@@ -1073,7 +1073,7 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | --- | --- | --- |
 | `--model` | obligatoire | `.gguf`, ou un dossier SafeTensors. |
 | `--dataset` | obligatoire | Tableau JSON (ou JSONL) de `{question ou problem, answer ou solution, id?}`. Aucun contenu GSM8K ou MATH n'est livré avec ce dépôt. |
-| `--backend` | la configuration utilisateur, sinon `llama` | `llama` ou son alias `llama-completion` (un processus llama.cpp par question, sur un GGUF converti au besoin), `llama-server` (un serveur llama.cpp local pour toute l'exécution, GPU selon son build) ou `native` (Rust pur sur un dossier SafeTensors Qwen2, Llama/Mistral ou Qwen3 ; `--llama-cpp-dir` ne sert alors pas). `mistralrs` lance mistral.rs sur le dossier SafeTensors tel quel (sans conversion, GPU selon son build) ; `hipfire` interroge un démon hipfire lancé, sur tout système : voir [backends](docs/BACKENDS.md). |
+| `--backend` | la configuration utilisateur, sinon `auto` | `auto` (le moteur du GPU de la machine : `hipfire` sur AMD, `mistralrs` sur NVIDIA ou Apple Silicon, `native` sur le CPU seulement sans GPU ; un moteur GPU qui ne démarre pas fait échouer le run, sans repli sur le CPU : voir `surgeon doctor`, ou `--backend cpu` pour forcer le CPU), `llama` ou son alias `llama-completion` (un processus llama.cpp par question, sur un GGUF converti au besoin), `llama-server` (un serveur llama.cpp local pour toute l'exécution, GPU selon son build) ou `native` (alias `cpu` ; Rust pur sur un dossier SafeTensors Qwen2, Llama/Mistral ou Qwen3 ; `--llama-cpp-dir` ne sert alors pas). `mistralrs` lance mistral.rs sur le dossier SafeTensors tel quel (sans conversion, GPU selon son build) ; `hipfire` interroge un démon hipfire lancé, sur tout système : voir [backends](docs/BACKENDS.md). |
 | `--baseline-model` | aucun | Modèle de référence sur les mêmes questions (comparaison appariée). |
 | `--no-ref-cache` | désactivé | Régénère les réponses de `--baseline-model` au lieu de les relire dans le cache des références, et remplace son entrée. Le cache (`%LOCALAPPDATA%\weight-surgeon\cache\ref_bench`, `~/.cache/weight-surgeon/ref_bench`, ou `WEIGHT_SURGEON_CACHE_DIR`) a pour clé le SHA-256 des fichiers du modèle de référence, le dataset ou les prompts, et toute option qui change les réponses ; `baseline.cache` vaut `hit` ou `miss`. |
 | `--limit` | 50 | Les N premières entrées, dans l'ordre du fichier. |
@@ -1101,7 +1101,7 @@ surgeon bench eval [OPTIONS] --model <MODEL> --dataset <DATASET>
 | `--mistralrs-dir` | `$MISTRALRS_DIR`, puis la configuration utilisateur, puis `PATH` | `mistralrs` : dossier de `mistralrs-server` (ou `mistralrs`). |
 | `--mistralrs-bin` | la configuration utilisateur | `mistralrs` : le binaire lui-même ; donné, c'est le seul candidat. |
 | `--hipfire-url` | la configuration utilisateur, sinon `127.0.0.1:11435` quand `hipfire` est trouvé | `hipfire` : un démon déjà lancé, `http://127.0.0.1:<port>` (boucle locale seulement). |
-| `--hipfire-requantize` | la configuration utilisateur (`hipfire_requantize`), sinon désactivé | `hipfire` : avant la mesure, requantifie une copie de travail sans alias pour ses poids actuels (`hipfire quantize --format q8f16`, enregistrée sous `ws-<copie>-<sha8>`, notée dans son `.hipfire-alias.json`), puis la sert sous cet alias. Sans lui, une telle copie est refusée. |
+| `--hipfire-requantize` | la configuration utilisateur (`hipfire_requantize`), sinon `auto` | `hipfire`, `auto` ou `off` : sous `auto`, tout dossier SafeTensors mesuré, l'original compris, est servi sous l'alias `ws-<dossier>-<sha8>` de ses poids (SHA-256 de ses `.safetensors`), requantifié d'abord (`hipfire quantize --format q8f16`) si le catalogue de hipfire ne l'a pas ; le fichier `.hipfire-alias.json` n'est écrit que dans les copies de travail. Le drapeau seul vaut `auto`. Avec `off`, l'original est servi sous le nom de son dossier et une copie de travail sans alias valide est refusée. |
 | `--gguf-dtype` | `f16` | Type des matrices du GGUF temporaire d'un modèle SafeTensors : `f16` ou `f32` (sans perte depuis bf16, deux fois plus gros). |
 | `--allow-stale-hipfire` | désactivé | `hipfire` : mesure tout de même une copie de travail (patchée, dans un projet surgeon-gui ou un job pipeline). Refusé sinon : le démon sert le fichier quantifié enregistré sous le nom du modèle, pas la copie. Une copie dont le `.hipfire-alias.json` correspond à ses poids n'en a pas besoin ; celui-ci sert pour une copie enregistrée à la main, et le rapport le signale. |
 
@@ -1175,7 +1175,7 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--no-ref-cache` | désactivé | Régénère les réponses de `--baseline-model` au lieu de les relire dans le cache des références, et remplace son entrée. Le cache (`%LOCALAPPDATA%\weight-surgeon\cache\ref_bench`, `~/.cache/weight-surgeon/ref_bench`, ou `WEIGHT_SURGEON_CACHE_DIR`) a pour clé le SHA-256 des fichiers du modèle de référence, le dataset ou les prompts, et toute option qui change les réponses ; `baseline.cache` vaut `hit` ou `miss`. |
 | `--max-new-tokens` | 40 | Budget de génération par prompt : un refus se voit dans les premiers mots (40 a donné les verdicts de 256 sur les jeux intégrés). |
 | `--chat-template` | `auto` | Habillage de chaque prompt : `auto` (le format du modèle, ChatML s'il n'en déclare aucun), `none`, `chatml`, `llama3`, `inst` ou `gemma`. |
-| `--backend` | la configuration utilisateur, sinon `native` | `native` (Rust pur), `llama-server` (un serveur llama.cpp local pour toute l'exécution) ou `llama-completion` (un processus llama.cpp par prompt) ; un dossier SafeTensors est alors converti en GGUF temporaire. `mistralrs` (mistral.rs sur le dossier SafeTensors tel quel) et `hipfire` (un démon hipfire lancé) aussi : voir [backends](docs/BACKENDS.md). |
+| `--backend` | la configuration utilisateur, sinon `auto` (comme `bench eval`) | `native` (alias `cpu`, Rust pur), `llama-server` (un serveur llama.cpp local pour toute l'exécution) ou `llama-completion` (un processus llama.cpp par prompt) ; un dossier SafeTensors est alors converti en GGUF temporaire. `mistralrs` (mistral.rs sur le dossier SafeTensors tel quel) et `hipfire` (un démon hipfire lancé) aussi : voir [backends](docs/BACKENDS.md). |
 | `--judge` | `rules` | `rules` (marqueurs seuls), `llm` (marqueurs et modèle juge) ou `both` (plus leur accord). |
 | `--marker-langs` | aucun | Langues de marqueurs en plus de l'anglais : `fr`, `es`, `de` ou `all`, séparées par des virgules. |
 | `--markers-file` | aucun | Objet JSON `{"<lang>": ["marker", ...]}` : ajoute des langues, remplace une liste intégrée. |
@@ -1207,7 +1207,7 @@ surgeon bench refusal [OPTIONS] --model <MODEL> --prompts <PROMPTS>
 | `--mistralrs-dir` | `$MISTRALRS_DIR`, puis la configuration utilisateur, puis `PATH` | `mistralrs` : dossier de `mistralrs-server` (ou `mistralrs`). |
 | `--mistralrs-bin` | la configuration utilisateur | `mistralrs` : le binaire lui-même ; donné, c'est le seul candidat. |
 | `--hipfire-url` | la configuration utilisateur, sinon `127.0.0.1:11435` quand `hipfire` est trouvé | `hipfire` : un démon déjà lancé, `http://127.0.0.1:<port>` (boucle locale seulement). |
-| `--hipfire-requantize` | la configuration utilisateur (`hipfire_requantize`), sinon désactivé | `hipfire` : avant la mesure, requantifie une copie de travail sans alias pour ses poids actuels (`hipfire quantize --format q8f16`, enregistrée sous `ws-<copie>-<sha8>`, notée dans son `.hipfire-alias.json`), puis la sert sous cet alias. Sans lui, une telle copie est refusée. |
+| `--hipfire-requantize` | la configuration utilisateur (`hipfire_requantize`), sinon `auto` | `hipfire`, `auto` ou `off` : sous `auto`, tout dossier SafeTensors mesuré, l'original compris, est servi sous l'alias `ws-<dossier>-<sha8>` de ses poids (SHA-256 de ses `.safetensors`), requantifié d'abord (`hipfire quantize --format q8f16`) si le catalogue de hipfire ne l'a pas ; le fichier `.hipfire-alias.json` n'est écrit que dans les copies de travail. Le drapeau seul vaut `auto`. Avec `off`, l'original est servi sous le nom de son dossier et une copie de travail sans alias valide est refusée. |
 | `--gguf-dtype` | `f16` | Type des matrices du GGUF temporaire d'un modèle SafeTensors : `f16` ou `f32` (sans perte depuis bf16, deux fois plus gros). |
 | `--allow-stale-hipfire` | désactivé | `hipfire` : mesure tout de même une copie de travail (patchée, dans un projet surgeon-gui ou un job pipeline). Refusé sinon : le démon sert le fichier quantifié enregistré sous le nom du modèle, pas la copie. Une copie dont le `.hipfire-alias.json` correspond à ses poids n'en a pas besoin ; celui-ci sert pour une copie enregistrée à la main, et le rapport le signale. |
 
@@ -1575,7 +1575,7 @@ Commande parente des backends d'inférence ([docs/BACKENDS.md](docs/BACKENDS.md)
 <a id="cmd-backend-detect"></a>
 #### `surgeon backend detect`
 
-Sonde la machine : mistral.rs, `llama-server` et les périphériques de son `--list-devices`, le démon `hipfire` ; recommande `mistralrs` s'il est installé, sinon `llama-server` sur le GPU quand il y en a un d'utilisable, sinon `native`. C'est la sonde du premier démarrage d'une interface graphique.
+Sonde la machine : mistral.rs, `llama-server` et les périphériques de son `--list-devices`, le démon `hipfire` ; recommande le moteur du GPU (`hipfire` sur AMD, `mistralrs` sur NVIDIA ou Apple Silicon), même s'il n'est pas encore prêt (la raison dit ce qui manque : voir `surgeon doctor`), et `native` seulement sans GPU (`mistralrs` alors, s'il est installé). C'est la sonde du premier démarrage d'une interface graphique.
 
 ```text
 surgeon backend detect [OPTIONS]
@@ -1619,7 +1619,7 @@ surgeon pipeline plan [OPTIONS] --config <CONFIG> --job-dir <JOB_DIR>
 | `--job-dir` | requis | Dossier du job. |
 | `--allow-disable-safety` | désactivé | Accepte une configuration sans pilier `safety` (noté dans le rapport ; ligne de commande seulement). |
 | `--no-calibration` | désactivé | Saute les mesures du débit de décodage (pas d'estimation de durée). Sinon chaque moteur qui a du travail est mesuré : le CPU natif pour `kl` / `logits` (et tous les piliers d'un job `native`), le backend du job pour les piliers binaires. |
-| `--backend` | `pipeline.json`, puis la configuration utilisateur, sinon `native` | `native` (CPU), `mistralrs` (mistral.rs sur la copie de travail telle quelle), `llama-server` (GPU via llama.cpp) ou `hipfire`. Seuls les piliers binaires génèrent ; `kl` et `logits` lisent toujours des logits natifs. |
+| `--backend` | `pipeline.json`, puis la configuration utilisateur, sinon `auto` (comme `bench eval`) | `native` (CPU, alias `cpu`), `mistralrs` (mistral.rs sur la copie de travail telle quelle), `llama-server` (GPU via llama.cpp) ou `hipfire`. Seuls les piliers binaires génèrent ; `kl` et `logits` lisent toujours des logits natifs. |
 | `--gpu-layers` | la configuration utilisateur | `-ngl` de `llama-server`. |
 | `--batch-size` | la configuration utilisateur | Slots et requêtes simultanées de `llama-server`. |
 | `--llama-cpp-dir` | `$LLAMA_CPP_DIR`, puis la configuration utilisateur | Dossier de llama.cpp. |
@@ -1627,7 +1627,7 @@ surgeon pipeline plan [OPTIONS] --config <CONFIG> --job-dir <JOB_DIR>
 | `--mistralrs-dir` | `$MISTRALRS_DIR`, puis la configuration utilisateur, puis `PATH` | `mistralrs` : dossier de `mistralrs-server` (ou `mistralrs`). |
 | `--mistralrs-bin` | la configuration utilisateur | `mistralrs` : le binaire lui-même ; donné, c'est le seul candidat. |
 | `--hipfire-url` | la configuration utilisateur, sinon `127.0.0.1:11435` quand `hipfire` est trouvé | `hipfire` : un démon déjà lancé, `http://127.0.0.1:<port>` (boucle locale seulement). |
-| `--hipfire-requantize` | la configuration utilisateur (`hipfire_requantize`), sinon désactivé | `hipfire` : avant la mesure, requantifie une copie de travail sans alias pour ses poids actuels (`hipfire quantize --format q8f16`, enregistrée sous `ws-<copie>-<sha8>`, notée dans son `.hipfire-alias.json`), puis la sert sous cet alias. Sans lui, une telle copie est refusée. |
+| `--hipfire-requantize` | la configuration utilisateur (`hipfire_requantize`), sinon `auto` | `hipfire`, `auto` ou `off` : sous `auto`, tout dossier SafeTensors mesuré, l'original compris, est servi sous l'alias `ws-<dossier>-<sha8>` de ses poids (SHA-256 de ses `.safetensors`), requantifié d'abord (`hipfire quantize --format q8f16`) si le catalogue de hipfire ne l'a pas ; le fichier `.hipfire-alias.json` n'est écrit que dans les copies de travail. Le drapeau seul vaut `auto`. Avec `off`, l'original est servi sous le nom de son dossier et une copie de travail sans alias valide est refusée. |
 
 `data` : `pillars[]` (`n_dev`, `n_test`, `min_n_for_go` : la plus petite taille à laquelle une porte de non-infériorité peut être GO, `dev_underpowered`, `test_underpowered`), `disk` (copie de travail, dumps de logits, sauvegardes), `units_total`, `calibration` (moteur natif CPU), `backend_calibration` (backend du job, GPU via `llama-server` ; son temps de chargement compte la conversion GGUF et le démarrage du serveur), `estimated_secs` (estimation haute, chaque moteur à son débit), `warnings`.
 
@@ -1649,7 +1649,7 @@ surgeon pipeline run [OPTIONS] --job-dir <JOB_DIR>
 | `--allow-stale-hipfire` | désactivé | Avec `--backend hipfire`, mesure les candidats bien que le démon serve son propre cache du modèle et non la copie de travail patchée ; refusé avant le premier candidat sinon (ligne de commande seulement, noté dans le rapport). |
 | `--detach` | désactivé | Lance le travailleur en arrière-plan (sortie dans `<job>/worker.log`) et rend la main. |
 | `--watch-stdin` | désactivé | S'arrête quand stdin se ferme ; posé par le serveur MCP pour les travailleurs qu'il lance. |
-| `--backend` | `pipeline.json`, puis la configuration utilisateur, sinon `native` | `native` (CPU), `mistralrs` (mistral.rs sur la copie de travail telle quelle), `llama-server` (GPU via llama.cpp) ou `hipfire`. Seuls les piliers binaires génèrent ; `kl` et `logits` lisent toujours des logits natifs. |
+| `--backend` | `pipeline.json`, puis la configuration utilisateur, sinon `auto` (comme `bench eval`) | `native` (CPU, alias `cpu`), `mistralrs` (mistral.rs sur la copie de travail telle quelle), `llama-server` (GPU via llama.cpp) ou `hipfire`. Seuls les piliers binaires génèrent ; `kl` et `logits` lisent toujours des logits natifs. |
 | `--gpu-layers` | la configuration utilisateur | `-ngl` de `llama-server`. |
 | `--batch-size` | la configuration utilisateur | Slots et requêtes simultanées de `llama-server`. |
 | `--llama-cpp-dir` | `$LLAMA_CPP_DIR`, puis la configuration utilisateur | Dossier de llama.cpp. |
@@ -1657,7 +1657,7 @@ surgeon pipeline run [OPTIONS] --job-dir <JOB_DIR>
 | `--mistralrs-dir` | `$MISTRALRS_DIR`, puis la configuration utilisateur, puis `PATH` | `mistralrs` : dossier de `mistralrs-server` (ou `mistralrs`). |
 | `--mistralrs-bin` | la configuration utilisateur | `mistralrs` : le binaire lui-même ; donné, c'est le seul candidat. |
 | `--hipfire-url` | la configuration utilisateur, sinon `127.0.0.1:11435` quand `hipfire` est trouvé | `hipfire` : un démon déjà lancé, `http://127.0.0.1:<port>` (boucle locale seulement). |
-| `--hipfire-requantize` | la configuration utilisateur (`hipfire_requantize`), sinon désactivé | `hipfire` : avant la mesure, requantifie une copie de travail sans alias pour ses poids actuels (`hipfire quantize --format q8f16`, enregistrée sous `ws-<copie>-<sha8>`, notée dans son `.hipfire-alias.json`), puis la sert sous cet alias. Sans lui, une telle copie est refusée. |
+| `--hipfire-requantize` | la configuration utilisateur (`hipfire_requantize`), sinon `auto` | `hipfire`, `auto` ou `off` : sous `auto`, tout dossier SafeTensors mesuré, l'original compris, est servi sous l'alias `ws-<dossier>-<sha8>` de ses poids (SHA-256 de ses `.safetensors`), requantifié d'abord (`hipfire quantize --format q8f16`) si le catalogue de hipfire ne l'a pas ; le fichier `.hipfire-alias.json` n'est écrit que dans les copies de travail. Le drapeau seul vaut `auto`. Avec `off`, l'original est servi sous le nom de son dossier et une copie de travail sans alias valide est refusée. |
 
 `data` est `results.json` : `verdict`, `verdict_reason`, `model` (empreintes, `unchanged`), `candidates[]` (portes Dev jusqu'à la première non GO, `stopped_at`), `selected`, `test` (agrégats seulement : les réponses restent dans `<job>/private/`), `test_contaminated`, `safety_disabled`, `budget_exceeded`. Portes : intervalle de Newcombe apparié (celui de `bench refusal`) au niveau de confiance de la porte pour les piliers binaires, avec le p exact de McNemar ; bootstrap percentile sur les prompts avec la graine de la configuration pour les dérives. `<job>/report.json` ajoute le manifeste de reproductibilité (empreintes du modèle, des jeux, des vecteurs, de la configuration ; graine ; version de surgeon) et les durées.
 
@@ -2233,7 +2233,7 @@ Le Model Context Protocol (MCP) permet à un assistant IA d'appeler des outils e
 | `surgeon_lora` | `mode` `merge` (adaptateur fusionné en place) ou `extract` (adaptateur écrit). |
 | `surgeon_pipeline` | Décision sur un patch : `action` `plan`, `start` (travailleur en arrière-plan, renvoie un `job_id` tout de suite), `status`, `cancel`, `report`, `promote_patch` ([docs/PIPELINE.md](docs/PIPELINE.md)). |
 | `surgeon_graph` | Graphe écritures/lectures du flux résiduel avec bornes spectrales certifiées ; synthèse bornée, ou fichiers avec `out_dir`. |
-| `surgeon_backends` | GPU et moteurs d'inférence Rust de la machine (hipfire pour AMD, mistralrs pour NVIDIA, Apple Silicon ou CPU, native en secours), configuration utilisateur et backend recommandé ; lecture seule. |
+| `surgeon_backends` | GPU et moteurs d'inférence Rust de la machine (hipfire pour AMD, mistralrs pour NVIDIA et Apple Silicon, native seulement sans GPU), configuration utilisateur et backend recommandé ; lecture seule. |
 | `surgeon_files` | Fichiers de travail d'un agent sans outils de fichiers : `list` et `read` dans les dossiers autorisés, racines en lecture seule comprises, `write` de fichiers texte sous `work/` seulement. |
 | `surgeon_checkpoint` | Instantanés d'une copie de travail sous `work/checkpoints/<id>/` : `action` `create` (liens physiques, copie sur un autre volume, manifeste SHA-256, étiquette, métriques et parent), `list` (l'arbre et l'empreinte disque réelle, un fichier partagé compté une fois) et `restore` (checkpoint vérifié, puis échange atomique du dossier). Un apply recopie un fichier partagé avec un checkpoint avant de l'écrire : un checkpoint ne change jamais, et aucun outil n'écrit sous le store. |
 | `surgeon_sweep` | Balayage Pareto automatique : chaque point de vecteurs x fenêtres `layers` x `alphas` est appliqué à la copie, mesuré (taux de succès cible, dérive contre le départ), gardé en checkpoint s'il améliore le front sous `max_drift`, annulé sinon ; renvoie les points non dominés et laisse la copie sur le meilleur compromis. |
@@ -2335,7 +2335,7 @@ C'est ce que le skill `safe-surgery-workflow` du plugin Claude Code dit à l'age
 <a id="llama-cpp"></a>
 ### 4.6 llama.cpp : ce qui est utilisé et comment il est trouvé
 
-llama.cpp est facultatif et jamais fourni. Il n'est utilisé que par `eval` et `bench ppl|eval`, et pour l'export GGUF. Les binaires et scripts recherchés par le code :
+llama.cpp est facultatif et jamais fourni. Il n'est utilisé que par `eval`, `bench ppl`, `bench eval|refusal` avec un backend llama (`--backend llama`, `llama-server`, `llama-completion`), et pour l'export GGUF. Les binaires et scripts recherchés par le code :
 
 | Utilisé par | Fichier recherché |
 | --- | --- |
@@ -2424,7 +2424,7 @@ Rename-Item "$env:USERPROFILE\.cargo\bin\surgeon.exe" surgeon.old.exe
 <a id="limits"></a>
 ### 5.4 Limites connues
 
-- `extract`, `autotune`, `bench dump`, `bench refusal` et l'onglet de prévisualisation n'ont de forward natif que pour Qwen2/Qwen2.5, Llama 2/3, Mistral et Qwen3, sur le CPU ; les gros modèles demandent beaucoup de RAM. Les modèles MoE (Qwen2-MoE, Qwen3-MoE, DeepSeek) et Gemma, Phi-3, Falcon, Command-R n'en ont pas (`unsupported_architecture`) : leurs poids se patchent, mais la direction doit venir d'un modèle dense de même taille cachée.
+- `extract`, `autotune`, `bench dump`, `bench refusal` sur `native` et l'onglet de prévisualisation n'ont de forward natif que pour Qwen2/Qwen2.5, Llama 2/3, Mistral et Qwen3, sur le CPU ; les gros modèles demandent beaucoup de RAM. Les modèles MoE (Qwen2-MoE, Qwen3-MoE, DeepSeek) et Gemma, Phi-3, Falcon, Command-R n'en ont pas (`unsupported_architecture`) : leurs poids se patchent, mais la direction doit venir d'un modèle dense de même taille cachée.
 - La qualité d'une direction dépend de vos prompts : avec peu de paires une direction mélange des concepts (l'outil avertit sous 8 prompts par jeu). Un bon `d′` sur les prompts d'extraction ne prouve pas que la direction généralise.
 - Les patchs plus petits qu'un pas de quantification sont perdus dans les fichiers GGUF quantifiés ; les décalages hors de la plage du bloc sont écrêtés (`keep-scales`). Vérifiez `realized_over_intended`.
 - `project_out` couvre les écrivains du flux résiduel d'un modèle SafeTensors (`down_proj`, `o_proj`, `embed_tokens`) ; dans un GGUF seules les projections MLP sont patchables. `bench refusal` compte des marqueurs de refus (anglais par défaut), et son modèle juge optionnel est rapporté comme non calibré tant que vous ne l'avez pas mesuré contre vos propres étiquettes humaines : lisez les réponses. L'effacement LEACE n'est exact qu'en échantillon ; avec moins de prompts que de dimensions, vérifiez `holdout_cross_cov_ratio`. `autotune` ajuste et mesure sur les mêmes prompts et ne mesure pas les effets de bord.

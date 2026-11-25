@@ -316,10 +316,14 @@ pub fn validate(config: &PipelineConfig, allow_disable_safety: bool) -> Result<(
     if let Some(b) = config.backend.as_ref().and_then(|b| b.backend) {
         if !matches!(
             b,
-            Backend::Native | Backend::MistralRs | Backend::LlamaServer | Backend::Hipfire
+            Backend::Auto
+                | Backend::Native
+                | Backend::MistralRs
+                | Backend::LlamaServer
+                | Backend::Hipfire
         ) {
             issues.push(format!(
-                "backend : {} non géré par le pipeline (native, mistralrs, llama-server ou hipfire)",
+                "backend : {} non géré par le pipeline (auto, native, mistralrs, llama-server ou hipfire)",
                 b.label()
             ));
         }

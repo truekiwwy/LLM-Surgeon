@@ -492,6 +492,7 @@ fn asked(ws: &Ws, log: &str) -> usize {
     }
 }
 
+/// `--hipfire-requantize off`: the guard of before content aliases.
 #[test]
 fn the_cli_never_measures_a_working_copy_on_hipfire_unless_told_to() {
     let ws = Ws::new();
@@ -500,7 +501,15 @@ fn the_cli_never_measures_a_working_copy_on_hipfire_unless_told_to() {
         json!({"completions": true, "log": ws.path("hip.jsonl")}),
     );
     working_copy(&ws);
-    let hip = ["--backend", "hipfire", "--hipfire-url", daemon.url.as_str()];
+    let url = daemon.url.as_str();
+    let hip = [
+        "--backend",
+        "hipfire",
+        "--hipfire-url",
+        url,
+        "--hipfire-requantize",
+        "off",
+    ];
     let (code, v) = ws.eval(&[&["--model", "copy"][..], &hip].concat());
     assert_eq!(code, 2, "{v}");
     let message = v["error"]["message"].as_str().unwrap();
@@ -559,7 +568,16 @@ fn a_requantized_copy_is_measured_by_alias_next_to_its_original() {
         json!({"alias": alias, "weights_sha256": sha, "created_at": "2026-11-20T00:00:00Z"});
     std::fs::write(copy.join(hipfire::ALIAS_FILE), record.to_string()).unwrap();
 
-    let hip = ["--backend", "hipfire", "--hipfire-url", daemon.url.as_str()];
+    // `off`: the original by its name (under `auto` it would be requantized too).
+    let url = daemon.url.as_str();
+    let hip = [
+        "--backend",
+        "hipfire",
+        "--hipfire-url",
+        url,
+        "--hipfire-requantize",
+        "off",
+    ];
     let pair = ["--model", "copy", "--baseline-model", "qwen2-mini"];
     let (code, v) = ws.eval(&[&pair[..], &hip].concat());
     assert_eq!(code, 0, "{v}");
@@ -664,11 +682,11 @@ fn hipfire_requantize_registers_a_copy_once_and_again_when_its_weights_change() 
     assert_eq!(code, 0, "{v}");
     assert_eq!(calls().len(), 1);
 
-    // Weights changed: refused without the flag, requantized under a new alias with it.
+    // Weights changed: refused with off, requantized under a new alias by default (auto).
     touch_weights(&ws);
-    let (code, v) = run(&[]);
+    let (code, v) = run(&["--hipfire-requantize", "off"]);
     assert_eq!(code, 2, "{v}");
-    let (code, v) = run(&["--hipfire-requantize"]);
+    let (code, v) = run(&[]);
     assert_eq!(code, 0, "{v}");
     assert_eq!(calls().len(), 2);
     let second = recorded()["alias"].as_str().unwrap().to_owned();
@@ -676,8 +694,10 @@ fn hipfire_requantize_registers_a_copy_once_and_again_when_its_weights_change() 
     assert_eq!(served_models(&ws, "hip.jsonl").last(), Some(&second));
 }
 
+/// An agent's bench of a working copy hipfire cannot serve (`off`, no alias) fails with the
+/// reason: it is never measured on the CPU instead.
 #[test]
-fn mcp_moves_a_working_copy_off_hipfire_and_says_why() {
+fn mcp_never_moves_a_working_copy_off_hipfire_to_the_cpu() {
     use std::io::{BufRead, BufReader, Read, Write};
     let ws = Ws::new();
     let daemon = Daemon::start(
@@ -685,6 +705,8 @@ fn mcp_moves_a_working_copy_off_hipfire_and_says_why() {
         json!({"completions": true, "log": ws.path("hip.jsonl")}),
     );
     daemon.configure(&ws);
+    let config = std::fs::read_to_string(ws.config()).unwrap();
+    std::fs::write(ws.config(), config + "hipfire_requantize = \"off\"\n").unwrap();
     working_copy(&ws);
     let mut child = Command::new(env!("CARGO_BIN_EXE_surgeon"))
         .args(["mcp", "--allow-dir", ws.dir.path().to_str().unwrap()])
@@ -727,15 +749,16 @@ fn mcp_moves_a_working_copy_off_hipfire_and_says_why() {
         .read_to_string(&mut stderr)
         .unwrap();
     let result = &reply["result"]["structuredContent"];
-    assert_eq!(result["ok"], true, "{reply}");
-    let first = result["warnings"][0].as_str().unwrap();
-    assert!(first.starts_with("backend hipfire écarté"), "{first}");
-    assert!(first.contains("copy"), "the reason names the copy: {first}");
-    assert!(
-        stderr.contains("backend hipfire écarté"),
-        "logged: {stderr}"
+    assert_eq!(result["ok"], false, "{reply}");
+    let message = result["error"]["message"].as_str().unwrap();
+    assert!(message.contains("copie de travail"), "{message}");
+    assert!(message.contains("surgeon doctor"), "{message}");
+    assert!(!stderr.contains("écarté"), "{stderr}");
+    assert_eq!(
+        asked(&ws, "hip.jsonl"),
+        0,
+        "nothing measured, on hipfire or elsewhere"
     );
-    assert_eq!(asked(&ws, "hip.jsonl"), 0, "measured on native");
 }
 
 #[test]
@@ -743,6 +766,7 @@ fn hipfire_runs_on_every_os_and_warns_on_a_chat_only_daemon() {
     let ws = Ws::new();
     let daemon = Daemon::start(&ws, json!({"log": ws.path("hip.jsonl")}));
     let url = daemon.url.as_str();
+    // `off`: the original by its name, no requantization in this test.
     let hip = [
         "--model",
         "qwen2-mini",
@@ -750,6 +774,8 @@ fn hipfire_runs_on_every_os_and_warns_on_a_chat_only_daemon() {
         "hipfire",
         "--hipfire-url",
         url,
+        "--hipfire-requantize",
+        "off",
     ];
     let (code, v) = ws.eval(&[&hip[..], &["--chat-template", "chatml"]].concat());
     assert_eq!(code, 0, "{v}");
@@ -801,7 +827,7 @@ fn hipfire_runs_on_every_os_and_warns_on_a_chat_only_daemon() {
     let (code, v) = ws.run(&["backend", "show"], false);
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["warnings"], json!([]), "{v}");
-    let (code, v) = ws.eval(&["--model", "qwen2-mini"]);
+    let (code, v) = ws.eval(&["--model", "qwen2-mini", "--hipfire-requantize", "off"]);
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["data"]["correct"], 2, "{v}");
     let prompts = ws

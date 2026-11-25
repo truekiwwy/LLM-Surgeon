@@ -1,10 +1,8 @@
-//! The inference backend a machine gets by default, Rust engines only (no llama.cpp):
-//! mistral.rs for NVIDIA GPUs, Apple Silicon and plain CPUs (macOS, Windows, Linux), hipfire
-//! for AMD GPUs. Pure: the GPUs and what answers come in, the choice comes out.
-//!
-//! What runs is the target once it is ready; until then mistral.rs when it is installed (an
-//! AMD machine whose hipfire daemon is not up yet), else the built-in native engine (CPU,
-//! Rust), so that the first launch always ends on a configuration that works.
+//! The app's side of the automatic backend choice: when the app may pick, the hipfire daemon
+//! it keeps running, the configuration it writes and how mistral.rs gets installed. The
+//! engine itself is the engine's recommendation (`backend::detect::recommend`): hipfire on an
+//! AMD GPU, mistral.rs on NVIDIA and Apple Silicon even before they are ready, never the CPU
+//! while a GPU is there. Pure: the GPUs and what answers come in, the choice comes out.
 
 use std::path::PathBuf;
 
@@ -41,14 +39,6 @@ pub fn main_vendor<'a>(gpus: impl IntoIterator<Item = &'a str>) -> Vendor {
         .unwrap_or(Vendor::Other)
 }
 
-/// The backend the hardware calls for.
-pub fn target(vendor: Vendor) -> Backend {
-    match vendor {
-        Vendor::Amd => Backend::Hipfire,
-        Vendor::Nvidia | Vendor::Other => Backend::MistralRs,
-    }
-}
-
 /// Whether the app picks the backend: always while the choice is automatic, and over a file
 /// that names none or a backend the app no longer offers (llama.cpp). A Rust engine saved by
 /// hand stays.
@@ -57,15 +47,6 @@ pub fn automatic(saved: Option<Backend>, auto: bool) -> bool {
         saved,
         Some(Backend::MistralRs | Backend::Hipfire | Backend::Native)
     )
-}
-
-/// What runs now: the target when it is ready, else mistral.rs when installed, else native.
-pub fn effective(target: Backend, hipfire_up: bool, mistral_found: bool) -> Backend {
-    match (target, hipfire_up, mistral_found) {
-        (Backend::Hipfire, true, _) => Backend::Hipfire,
-        (_, _, true) => Backend::MistralRs,
-        _ => Backend::Native,
-    }
 }
 
 /// Whether the app should have a hipfire daemon running: the hardware or the saved backend
@@ -139,7 +120,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn amd_goes_to_hipfire_and_everything_else_to_mistral_rs() {
+    fn the_gpu_vendor_comes_from_the_names() {
         assert_eq!(vendor("AMD Radeon RX 7600 XT"), Vendor::Amd);
         assert_eq!(vendor("NVIDIA GeForce RTX 4090"), Vendor::Nvidia);
         assert_eq!(vendor("Apple M2 Pro"), Vendor::Other);
@@ -150,10 +131,6 @@ mod tests {
             Vendor::Nvidia
         );
         assert_eq!(main_vendor([]), Vendor::Other, "CPU only");
-        assert_eq!(target(Vendor::Amd), Backend::Hipfire);
-        for v in [Vendor::Nvidia, Vendor::Other] {
-            assert_eq!(target(v), Backend::MistralRs);
-        }
     }
 
     #[test]
@@ -165,30 +142,6 @@ mod tests {
         );
         assert!(!automatic(Some(Backend::Native), false), "saved by hand");
         assert!(automatic(Some(Backend::Native), true), "still automatic");
-    }
-
-    #[test]
-    fn what_runs_falls_back_to_rust_engines_that_are_there() {
-        assert_eq!(effective(Backend::Hipfire, true, false), Backend::Hipfire);
-        assert_eq!(
-            effective(Backend::Hipfire, false, true),
-            Backend::MistralRs,
-            "waiting for hipfire"
-        );
-        assert_eq!(
-            effective(Backend::MistralRs, false, true),
-            Backend::MistralRs
-        );
-        assert_eq!(
-            effective(Backend::MistralRs, false, false),
-            Backend::Native,
-            "nothing installed yet"
-        );
-        assert_eq!(
-            effective(Backend::MistralRs, true, false),
-            Backend::Native,
-            "hipfire is AMD's"
-        );
     }
 
     #[test]

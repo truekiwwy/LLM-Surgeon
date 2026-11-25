@@ -2,3 +2,6 @@
 # `cargo run` inherits it too: WEIGHT_SURGEON_NO_USER_CONFIG=0 cargo run ... uses the config.
 [env]
 WEIGHT_SURGEON_NO_USER_CONFIG = "1"
+# Nor its GPU: `--backend auto` (the default) resolves as on a machine without one, so the
+# tests run the native engine everywhere. `cargo run` too: WEIGHT_SURGEON_GPU= cargo run ...
+WEIGHT_SURGEON_GPU = "none"

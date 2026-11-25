@@ -170,8 +170,8 @@ pub struct PipelinePlanArgs {
 /// gsm8k) generate; the drift pillars always read native logits.
 #[derive(Debug, Clone, Default, Args)]
 pub struct BackendArgs {
-    /// native (CPU), mistralrs (mistral.rs on the SafeTensors folder, GPU by its build),
-    /// llama-server (GPU through llama.cpp) or hipfire (an AMD HIP daemon).
+    /// auto (default: hipfire on an AMD GPU, mistralrs on NVIDIA or Apple Silicon, native
+    /// only without a GPU), native or cpu, mistralrs, llama-server or hipfire.
     #[arg(long, value_enum)]
     pub backend: Option<crate::bench::score::Backend>,
     /// llama-server: layers offloaded to the GPU (-ngl).
@@ -213,10 +213,11 @@ pub struct EngineArgs {
     /// hipfire: a daemon already running, http://127.0.0.1:<port> (loopback only).
     #[arg(long)]
     pub hipfire_url: Option<String>,
-    /// hipfire: requantize a working copy that has no alias for its current weights before
-    /// measuring it (`hipfire_requantize = "auto"` in the user configuration).
-    #[arg(long)]
-    pub hipfire_requantize: bool,
+    /// hipfire: auto (default) requantizes a SafeTensors folder that has no alias for its
+    /// current weights before measuring it; off refuses a working copy instead
+    /// (`hipfire_requantize` in the user configuration).
+    #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "auto")]
+    pub hipfire_requantize: Option<crate::backend::config::Requantize>,
 }
 
 impl EngineArgs {
@@ -228,9 +229,7 @@ impl EngineArgs {
             mistralrs_bin: self.mistralrs_bin.clone(),
             hipfire_bin: self.hipfire_bin.clone(),
             hipfire_url: self.hipfire_url.clone(),
-            hipfire_requantize: self
-                .hipfire_requantize
-                .then_some(crate::backend::config::Requantize::Auto),
+            hipfire_requantize: self.hipfire_requantize,
             ..Default::default()
         }
     }
@@ -241,8 +240,7 @@ impl EngineArgs {
         self.mistralrs_bin.clone_from(&config.mistralrs_bin);
         self.hipfire_bin.clone_from(&config.hipfire_bin);
         self.hipfire_url.clone_from(&config.hipfire_url);
-        self.hipfire_requantize =
-            config.hipfire_requantize == Some(crate::backend::config::Requantize::Auto);
+        self.hipfire_requantize = config.hipfire_requantize;
     }
 }
 
@@ -628,10 +626,11 @@ pub struct BenchEvalArgs {
     /// JSON array (or JSONL) of {question|problem, answer|solution, id?}.
     #[arg(long)]
     pub dataset: PathBuf,
-    /// Generator: llama (llama.cpp on a GGUF; also llama-completion), llama-server (GPU
-    /// through llama.cpp), native (pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors
-    /// directory), mistralrs (mistral.rs on that directory as is, GPU by its build) or
-    /// hipfire (an AMD HIP daemon). Default: the user configuration, else llama.
+    /// Generator. auto (default after the user configuration): the GPU's engine, hipfire on
+    /// AMD, mistralrs on NVIDIA and Apple Silicon, native only without a GPU; a GPU engine
+    /// that cannot start fails the run (see `surgeon doctor`), never the CPU instead. Also:
+    /// native or cpu (pure Rust on a Qwen2, Llama/Mistral or Qwen3 SafeTensors directory),
+    /// mistralrs, hipfire, llama-server, llama or llama-completion (llama.cpp on a GGUF).
     #[arg(long, value_enum)]
     pub backend: Option<crate::bench::score::Backend>,
     /// Reference model on the same questions (paired comparison).
@@ -823,10 +822,10 @@ pub struct BenchRefusalArgs {
     /// cache (the entry is overwritten).
     #[arg(long)]
     pub no_ref_cache: bool,
-    /// Generator: native (pure Rust), mistralrs (mistral.rs on the SafeTensors directory as
-    /// is), llama-server or llama-completion (on a GGUF, a SafeTensors model converted first;
-    /// --llama-cpp-dir) or hipfire (an AMD HIP daemon). Default: the user configuration, else
-    /// native.
+    /// Generator. auto (default after the user configuration): the GPU's engine, hipfire on
+    /// AMD, mistralrs on NVIDIA and Apple Silicon, native only without a GPU; never the CPU in
+    /// place of a GPU engine that cannot start. Also: native or cpu, mistralrs, hipfire,
+    /// llama-server or llama-completion (on a GGUF, a SafeTensors model converted first).
     #[arg(long, value_enum)]
     pub backend: Option<crate::bench::score::Backend>,
     #[command(flatten)]

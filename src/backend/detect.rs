@@ -62,7 +62,7 @@ pub struct BackendReport {
     /// The GPUs seen, by name.
     pub gpus: Vec<String>,
     pub vendor: Vendor,
-    /// The engine the hardware calls for: `hipfire` (AMD) or `mistralrs`.
+    /// The engine the hardware calls for ([`gpu_engine`]).
     pub target: Backend,
     pub mistralrs: Option<MistralRsDetection>,
     pub hipfire: HipfireDetection,
@@ -136,9 +136,7 @@ fn gpu_names() -> Vec<String> {
 
 #[cfg(windows)]
 fn windows_adapters() -> Vec<String> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let output = std::process::Command::new("powershell")
+    let output = crate::process::command("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -146,7 +144,6 @@ fn windows_adapters() -> Vec<String> {
             "(Get-CimInstance Win32_VideoController).Name",
         ])
         .stdin(std::process::Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
         .output();
     output
         .map(|o| {
@@ -160,35 +157,67 @@ fn windows_adapters() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The configuration to run with, and why: the target when it is ready, else mistral.rs when
-/// installed (an AMD machine whose daemon is not up yet), else the native engine.
+/// The engine a GPU calls for: hipfire on AMD, mistral.rs on NVIDIA and Apple Silicon, the
+/// native CPU engine only when there is no GPU. What `--backend auto` (the default) runs.
+pub fn gpu_engine(vendor: Vendor) -> Backend {
+    match vendor {
+        Vendor::Amd => Backend::Hipfire,
+        Vendor::Nvidia | Vendor::Apple => Backend::MistralRs,
+        Vendor::Cpu => Backend::Native,
+    }
+}
+
+/// Sets the GPU [`machine_vendor`] reports: `none`, `amd`, `nvidia` or `apple`. For a machine
+/// whose GPU is not detected, and for the tests (`.cargo/config.toml`).
+pub const GPU_ENV: &str = "WEIGHT_SURGEON_GPU";
+
+fn forced_vendor() -> Option<Vendor> {
+    let forced = std::env::var(GPU_ENV).unwrap_or_default();
+    match forced.trim().to_ascii_lowercase().as_str() {
+        "none" | "cpu" => Some(Vendor::Cpu),
+        "amd" => Some(Vendor::Amd),
+        "nvidia" => Some(Vendor::Nvidia),
+        "apple" => Some(Vendor::Apple),
+        _ => None,
+    }
+}
+
+/// The vendor of this machine's GPU (see [`vendor`]), or the one [`GPU_ENV`] names.
+pub fn machine_vendor() -> Vendor {
+    forced_vendor().unwrap_or_else(|| vendor(gpu_names().iter().map(String::as_str)))
+}
+
+/// The configuration to run with, and why: the GPU's engine whether or not it is ready (a
+/// GPU machine never falls back to the CPU: the bench fails and says what is missing), and
+/// on a machine without a GPU mistral.rs when available, else the native engine.
 pub fn recommend(
     vendor: Vendor,
     mistralrs: Option<&Path>,
     hipfire_up: bool,
     found: BackendConfig,
 ) -> (BackendConfig, String) {
-    let amd = vendor == Vendor::Amd;
-    let waiting = if amd {
-        " ; hipfire, le moteur des GPU AMD, prendra le relais dès que son démon répondra"
-    } else {
-        ""
+    let missing = "pas encore prêt : la mesure échouera avec son diagnostic (surgeon doctor) \
+                   plutôt que de passer sur le CPU";
+    use super::mistralrs::{EMBEDDED, EMBEDDED_GPU};
+    let mistral = match mistralrs {
+        _ if EMBEDDED_GPU => "mistral.rs intégré à surgeon (GPU)".to_owned(),
+        Some(bin) => format!("mistral.rs ({})", bin.display()),
+        None if EMBEDDED => "mistral.rs intégré à surgeon (CPU)".to_owned(),
+        None => format!("mistral.rs introuvable, {missing}"),
     };
-    let (backend, reason) = match (amd && hipfire_up, mistralrs) {
-        (true, _) => (
+    let (backend, reason) = match (gpu_engine(vendor), hipfire_up) {
+        (Backend::Hipfire, true) => (Backend::Hipfire, "GPU AMD : démon hipfire en écoute".into()),
+        (Backend::Hipfire, false) => (
             Backend::Hipfire,
-            "GPU AMD : démon hipfire en écoute".to_owned(),
+            format!("GPU AMD : démon hipfire {missing}"),
         ),
-        (false, Some(bin)) => (
-            Backend::MistralRs,
-            format!(
-                "mistral.rs ({}) : dossier SafeTensors chargé tel quel, GPU selon son build{waiting}",
-                bin.display()
-            ),
-        ),
-        (false, None) => (
+        (Backend::MistralRs, _) => (Backend::MistralRs, format!("GPU {vendor:?} : {mistral}")),
+        _ if mistralrs.is_some() || EMBEDDED => {
+            (Backend::MistralRs, format!("aucun GPU : {mistral}"))
+        }
+        _ => (
             Backend::Native,
-            format!("mistral.rs introuvable : moteur natif (CPU, Rust){waiting}"),
+            "aucun GPU : moteur natif (CPU, Rust)".into(),
         ),
     };
     let config = BackendConfig {
@@ -203,7 +232,7 @@ pub fn recommend(
 /// The engines found are recorded either way, so that an explicit `--backend` finds them.
 pub fn detect_hardware_and_backends(user: &BackendConfig) -> BackendReport {
     let gpus = gpu_names();
-    let vendor = vendor(gpus.iter().map(String::as_str));
+    let vendor = forced_vendor().unwrap_or_else(|| vendor(gpus.iter().map(String::as_str)));
     // An AMD machine reaches its daemon at hipfire's default when no address is set.
     let mut probed = user.clone();
     if vendor == Vendor::Amd && probed.hipfire_url.is_none() {
@@ -227,10 +256,7 @@ pub fn detect_hardware_and_backends(user: &BackendConfig) -> BackendReport {
         os: std::env::consts::OS,
         gpus,
         vendor,
-        target: match vendor {
-            Vendor::Amd => Backend::Hipfire,
-            _ => Backend::MistralRs,
-        },
+        target: gpu_engine(vendor),
         mistralrs,
         hipfire,
         recommended,
@@ -272,26 +298,50 @@ mod tests {
     }
 
     #[test]
-    fn the_recommendation_is_a_rust_engine() {
+    fn auto_is_the_gpu_engine_and_the_cpu_only_without_a_gpu() {
+        assert_eq!(gpu_engine(Vendor::Amd), Backend::Hipfire);
+        assert_eq!(gpu_engine(Vendor::Nvidia), Backend::MistralRs);
+        assert_eq!(gpu_engine(Vendor::Apple), Backend::MistralRs);
+        assert_eq!(gpu_engine(Vendor::Cpu), Backend::Native);
+        // The tests run under WEIGHT_SURGEON_GPU=none (.cargo/config.toml).
+        assert_eq!(machine_vendor(), Vendor::Cpu);
+        use super::super::resolve_auto;
+        assert_eq!(resolve_auto(Backend::Auto, false), Backend::Native);
+        assert_eq!(
+            resolve_auto(Backend::Auto, true),
+            Backend::Llama,
+            "a GGUF on the CPU"
+        );
+        assert_eq!(resolve_auto(Backend::Hipfire, true), Backend::Hipfire);
+    }
+
+    #[test]
+    fn a_gpu_is_never_recommended_the_cpu() {
         let bin = Path::new("mistralrs.exe");
         let pick = |vendor, mistral, up| recommend(vendor, mistral, up, Default::default());
         assert_eq!(
             pick(Vendor::Amd, None, true).0.backend,
             Some(Backend::Hipfire)
         );
+        // A daemon that is not up yet: still hipfire, the reason says what is missing.
         let (waiting, why) = pick(Vendor::Amd, Some(bin), false);
-        assert_eq!(waiting.backend, Some(Backend::MistralRs));
-        assert!(why.contains("hipfire"), "{why}");
+        assert_eq!(waiting.backend, Some(Backend::Hipfire));
+        assert!(why.contains("surgeon doctor"), "{why}");
         assert_eq!(
             pick(Vendor::Nvidia, Some(bin), true).0.backend,
             Some(Backend::MistralRs),
             "hipfire is for AMD GPUs only"
         );
-        for vendor in [Vendor::Nvidia, Vendor::Apple, Vendor::Cpu, Vendor::Amd] {
+        for vendor in [Vendor::Nvidia, Vendor::Apple, Vendor::Amd] {
             let (config, why) = pick(vendor, None, false);
-            assert_eq!(config.backend, Some(Backend::Native));
+            assert_ne!(config.backend, Some(Backend::Native), "{vendor:?}");
             assert_eq!(config.batch_size, Some(1));
             assert!(!why.contains("llama"), "{why}");
+        }
+        let cpu = |mistral| pick(Vendor::Cpu, mistral, false).0.backend;
+        assert_eq!(cpu(Some(bin)), Some(Backend::MistralRs));
+        if !crate::backend::mistralrs::EMBEDDED {
+            assert_eq!(cpu(None), Some(Backend::Native), "no GPU: the CPU");
         }
     }
 

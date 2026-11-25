@@ -29,7 +29,8 @@ pub struct BackendDialog {
     mistralrs_bin: String,
     hipfire_url: String,
     batch_size: String,
-    /// `hipfire_requantize = "auto"`: a working copy is requantized before its measure.
+    /// `hipfire_requantize` `auto` (the default): a SafeTensors folder is requantized under
+    /// the alias of its weights before its measure.
     requantize: bool,
     /// Saved by hand since the app last asked ([`Self::take_saved`]).
     saved_by_hand: bool,
@@ -63,7 +64,7 @@ impl BackendDialog {
             mistralrs_bin: String::new(),
             hipfire_url: String::new(),
             batch_size: String::new(),
-            requantize: false,
+            requantize: true,
             saved_by_hand: false,
             saved: BackendConfig::default(),
             error,
@@ -82,7 +83,7 @@ impl BackendDialog {
         self.mistralrs_bin = shown(&saved.mistralrs_bin);
         self.hipfire_url = saved.hipfire_url.clone().unwrap_or_default();
         self.batch_size = saved.batch_size.unwrap_or(BATCH_SIZE).to_string();
-        self.requantize = saved.hipfire_requantize == Some(Requantize::Auto);
+        self.requantize = saved.hipfire_requantize != Some(Requantize::Off);
         self.saved = saved;
     }
 
@@ -131,11 +132,11 @@ impl BackendDialog {
             .filter(|&b| b >= 1)
             .ok_or_else(|| tf("backend.batch_size.invalid", &[("value", &self.batch_size)]))?;
         let text = |text: &str| Some(text.trim().to_owned()).filter(|t| !t.is_empty());
-        // Unticked: `off` only when the file named a mode; otherwise the key stays absent.
+        // Ticked over an absent key keeps it absent (absent is `auto`); unticked is `off`.
         let requantize = match (self.requantize, self.saved.hipfire_requantize) {
-            (true, _) => Some(Requantize::Auto),
-            (false, None) => None,
-            (false, Some(_)) => Some(Requantize::Off),
+            (true, None) => None,
+            (true, Some(_)) => Some(Requantize::Auto),
+            (false, _) => Some(Requantize::Off),
         };
         Ok(BackendConfig {
             backend: Some(self.backend),
@@ -333,18 +334,20 @@ mod tests {
         assert_eq!(config::parse_toml(&config::to_toml(&cfg)).unwrap(), cfg);
         form.hipfire_url.clear();
         assert_eq!(form.to_config().unwrap().hipfire_url, None);
-        // hipfire_requantize: absent stays absent, ticked is auto, unticked after it is off.
+        // hipfire_requantize: absent is auto (ticked) and stays absent, unticked is off,
+        // ticked again after it is auto.
+        assert!(form.requantize, "auto by default");
         assert_eq!(form.to_config().unwrap().hipfire_requantize, None);
-        form.requantize = true;
-        let auto = form.to_config().unwrap();
-        assert_eq!(auto.hipfire_requantize, Some(Requantize::Auto));
-        assert_eq!(config::parse_toml(&config::to_toml(&auto)).unwrap(), auto);
-        let mut form = dialog(auto);
-        assert!(form.requantize, "shown from the file");
         form.requantize = false;
+        let off = form.to_config().unwrap();
+        assert_eq!(off.hipfire_requantize, Some(Requantize::Off));
+        assert_eq!(config::parse_toml(&config::to_toml(&off)).unwrap(), off);
+        let mut form = dialog(off);
+        assert!(!form.requantize, "shown from the file");
+        form.requantize = true;
         assert_eq!(
             form.to_config().unwrap().hipfire_requantize,
-            Some(Requantize::Off)
+            Some(Requantize::Auto)
         );
         form.batch_size = "0".into();
         assert!(form.to_config().unwrap_err().contains("batch_size"));

@@ -15,7 +15,6 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
 use super::config::BackendConfig;
@@ -107,7 +106,7 @@ pub fn start(
         }
     };
     let mut command = |port: u16, _api_key: &str| {
-        let mut cmd = Command::new(binary);
+        let mut cmd = crate::process::command(binary);
         for (name, flag) in &before {
             cmd.arg(flag).arg(value(name, port));
         }
@@ -126,6 +125,151 @@ pub fn start(
         command: &mut command,
     };
     ServerGenerator::spawn(launch, opts, cancel)
+}
+
+/// Whether this build runs mistral.rs on a GPU in its own process (`--features cuda|metal`).
+pub const EMBEDDED_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
+
+/// Whether this build holds mistral.rs at all (`--features mistralrs`, on the CPU without
+/// `cuda` or `metal`).
+pub const EMBEDDED: bool = cfg!(feature = "mistralrs");
+
+/// Whether `--backend mistralrs` can run here: built in, or a binary found.
+pub fn available(config: &BackendConfig) -> bool {
+    EMBEDDED || locate(config).is_some()
+}
+
+/// mistral.rs inside this process, on the GPU of its build: the SafeTensors folder given to
+/// the bench is loaded as is, from that exact path. The SDK documents no seed, so decoding is
+/// greedy only, like hipfire.
+#[cfg(feature = "mistralrs")]
+pub mod embedded {
+    use std::ops::ControlFlow;
+    use std::path::Path;
+    use std::time::Instant;
+
+    use mistralrs::blocking::BlockingModel;
+    use mistralrs::{
+        NormalRequest, Request, RequestMessage, Response, SamplingParams, TextModelBuilder,
+    };
+
+    use crate::eval::{Decoding, EvalError, GenerationOutcome, Result, TextGenerator};
+
+    pub struct EmbeddedGenerator {
+        model: BlockingModel,
+    }
+
+    fn failed(what: &str, e: impl std::fmt::Display) -> EvalError {
+        EvalError::InvalidConfig(format!("mistral.rs embarqué : {what} : {e}"))
+    }
+
+    impl EmbeddedGenerator {
+        /// Loads the SafeTensors folder `model`. Must not run inside a tokio runtime.
+        pub fn load(model: &Path) -> Result<Self> {
+            if !model.is_dir() {
+                return Err(failed(
+                    &model.display().to_string(),
+                    "dossier SafeTensors attendu (un GGUF passe par le binaire mistralrs-server)",
+                ));
+            }
+            let path = std::path::absolute(model).map_err(|e| failed("chemin", e))?;
+            let model = BlockingModel::from_builder(TextModelBuilder::new(path.to_string_lossy()))
+                .map_err(|e| failed("chargement", e))?;
+            Ok(Self { model })
+        }
+    }
+
+    impl TextGenerator for EmbeddedGenerator {
+        fn generate(
+            &mut self,
+            prompt: &str,
+            max_new_tokens: u32,
+            on_chunk: &mut dyn FnMut(&str) -> ControlFlow<()>,
+        ) -> Result<GenerationOutcome> {
+            let started = Instant::now();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            let sampling = SamplingParams {
+                max_len: Some(max_new_tokens as usize),
+                ..SamplingParams::deterministic()
+            };
+            let request = NormalRequest::new_simple(
+                RequestMessage::Completion {
+                    text: prompt.to_owned(),
+                    echo_prompt: false,
+                    best_of: None,
+                },
+                sampling,
+                tx,
+                0,
+                None,
+                None,
+            );
+            let sender = self
+                .model
+                .inner()
+                .inner()
+                .get_sender(None)
+                .map_err(|e| failed("moteur", e))?;
+            sender
+                .blocking_send(Request::Normal(Box::new(request)))
+                .map_err(|e| failed("envoi", e))?;
+            let choice = match rx.blocking_recv() {
+                Some(Response::CompletionDone(done)) => done.choices.into_iter().next(),
+                Some(Response::InternalError(e) | Response::ValidationError(e)) => {
+                    return Err(failed("génération", e))
+                }
+                Some(Response::CompletionModelError(e, _)) => return Err(failed("génération", e)),
+                Some(_) => return Err(failed("génération", "réponse inattendue")),
+                None => return Err(failed("génération", "canal fermé")),
+            };
+            let choice = choice.ok_or_else(|| failed("génération", "aucun choix"))?;
+            let stopped_early = on_chunk(&choice.text).is_break();
+            Ok(GenerationOutcome {
+                truncated: choice.finish_reason == "length",
+                text: choice.text,
+                stopped_early,
+                duration_ms: started.elapsed().as_millis(),
+            })
+        }
+
+        fn configure(&mut self, decoding: &Decoding) -> bool {
+            // Sampled runs are refused up front by `generator`: greedy is all there is.
+            decoding.sampling.is_greedy()
+        }
+    }
+}
+
+/// The generator of `--backend mistralrs` on `model`: in this process when built for a GPU,
+/// else the binary found, else in this process on the CPU (`--features mistralrs` alone).
+/// The embedded engine decodes greedily only (its SDK takes no seed).
+#[cfg_attr(not(feature = "mistralrs"), allow(unused_variables))]
+pub fn generator(
+    model: &Path,
+    config: &BackendConfig,
+    seed: u32,
+    opts: &ServerOptions,
+    greedy: bool,
+    cancel: &AtomicBool,
+) -> crate::eval::Result<Box<dyn crate::eval::TextGenerator>> {
+    let binary = locate(config);
+    #[cfg(feature = "mistralrs")]
+    if model.is_dir() && (EMBEDDED_GPU || binary.is_none()) {
+        if !greedy {
+            return Err(EvalError::InvalidConfig(
+                "mistral.rs embarqué : décodage glouton seulement (aucune graine dans son SDK), \
+                 retirez --temperature"
+                    .into(),
+            ));
+        }
+        return Ok(Box::new(embedded::EmbeddedGenerator::load(model)?));
+    }
+    match binary {
+        Some(binary) => Ok(Box::new(start(&binary, model, seed, opts, cancel)?)),
+        None => Err(EvalError::BinaryNotFound {
+            name: "mistralrs".into(),
+            hint: not_found(config),
+        }),
+    }
 }
 
 #[cfg(test)]

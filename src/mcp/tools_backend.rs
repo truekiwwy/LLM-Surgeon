@@ -29,7 +29,7 @@ pub(super) fn definitions() -> Vec<Value> {
         .into_root_schema_for::<BackendsToolArgs>();
     vec![json!({
         "name": TOOL_BACKENDS,
-        "description": "Liste les GPU de la machine et ses moteurs d'inférence Rust : hipfire (démon des GPU AMD, recommandé quand il répond), mistralrs (mistral.rs : GPU NVIDIA, Apple Silicon ou CPU, dossier SafeTensors tel quel) et native (CPU, toujours disponible, en secours), la configuration utilisateur persistante et le backend recommandé (vendor, target, recommended, reason). Lecture seule ; à appeler avant surgeon_bench ou surgeon_pipeline pour savoir quel moteur tourne.",
+        "description": "Liste les GPU de la machine et ses moteurs d'inférence Rust : hipfire (démon des GPU AMD), mistralrs (mistral.rs, intégré à surgeon quand il est compilé avec cuda ou metal, sinon son binaire : GPU NVIDIA ou Apple Silicon, dossier SafeTensors tel quel) et native (CPU, seulement sur une machine sans GPU), la configuration utilisateur persistante et le backend recommandé (vendor, target, recommended, reason). Sur une machine avec GPU, target et recommended sont toujours son moteur GPU, même pas encore prêt : reason dit ce qui manque (voir surgeon_doctor) et le backend auto de surgeon_bench le prend. Lecture seule ; à appeler avant surgeon_bench ou surgeon_pipeline pour savoir quel moteur tourne.",
         "inputSchema": serde_json::to_value(schema).unwrap_or(Value::Null),
         "annotations": {
             "title": "Moteurs d'inférence",

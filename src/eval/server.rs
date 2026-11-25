@@ -149,7 +149,7 @@ fn free_port() -> Result<u16> {
 /// killed after [`HELP_TIMEOUT`].
 pub(crate) fn capture(binary: &Path, args: &[&str]) -> Result<String> {
     let mut child = ChildGuard(
-        Command::new(binary)
+        crate::process::command(binary)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -290,7 +290,7 @@ impl ServerGenerator {
                 .unwrap_or_default()
         };
         let mut command = |port: u16, api_key: &str| {
-            let mut cmd = Command::new(binary);
+            let mut cmd = crate::process::command(binary);
             cmd.arg(flag("model"))
                 .arg(model)
                 .args([flag("host"), "127.0.0.1", flag("port")])

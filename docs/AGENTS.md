@@ -123,7 +123,15 @@ Formats, vérifiés contre la documentation officielle pendant le développement
   (`text_delta`, `input_json_delta`, `thinking_delta`, `signature_delta`), `_stop`,
   `message_delta`, `message_stop`, `ping`, `error`. Plusieurs blocs `tool_use` dans un tour
   sont des appels parallèles ; leurs `tool_result` repartent dans un seul message. Les blocs
-  `thinking` sont renvoyés tels quels.
+  `thinking` sont renvoyés tels quels. Avec un niveau de réflexion (voir plus bas), les modèles
+  à partir de Claude 4.6 reçoivent `thinking: {type: "adaptive"}` et
+  `output_config: {effort: <niveau>}` ; les modèles plus anciens (Haiku 4.5, Sonnet 4, etc.)
+  reçoivent `thinking: {type: "enabled", budget_tokens: N}`, avec N = 2048 / 8192 / 16384 /
+  32000 pour `low` / `medium` / `high` / `max`, plafonné sous `max_tokens` et supprimé sous le
+  minimum de 1024. Pour `off` : `thinking: {type: "disabled"}` là où il est accepté ; Sonnet
+  5.5 et suivants reçoivent `{type: "between_tools"}` ; Fable, Mythos et Opus 5.5 et suivants
+  ne peuvent pas désactiver la réflexion et reçoivent `output_config.effort: "low"` ; les
+  modèles plus anciens n'ont simplement aucun champ `thinking`.
 - **OpenAI Chat Completions** (`POST {base}/chat/completions`, `stream: true`,
   `stream_options.include_usage`) : `choices[0].delta.content`, `delta.tool_calls[]` par
   `index` (identifiant, nom et arguments en morceaux), `finish_reason`, usage dans le dernier
@@ -312,17 +320,16 @@ et ses constats tirés d'une sonde restent « Heuristique » dans le journal des
 le rejoue en terminal (`weight_surgeon::mcp::cli_line`) : en résumé de la ligne, puis entière
 en tête du détail. Un patch, des prompts ou des prompts d'évaluation passés en ligne deviennent
 des fichiers nommés (`patch.json`...) signalés en commentaire. `bench eval` et `bench refusal`
-écrivent toujours `--backend`, pour que la configuration du terminal ne change pas la mesure.
+écrivent toujours `--backend` (`--backend auto` quand rien n'est nommé), pour que la configuration du terminal ne change pas la mesure.
 
 **hipfire et les copies de travail.** hipfire sert un cache quantifié enregistré par nom et ne
-lit jamais les fichiers donnés, GGUF compris : `surgeon_bench` (`eval`, `refusal`) sur une copie
-de travail (`backend::hipfire::is_working_copy` : `copies/` et sorties du projet, `work/` d'un
-job, dossier patché à côté de ses sauvegardes) passe sur `native` quand la configuration ou
-l'appel nomme hipfire (`mcp::bench_backend`), avec l'avertissement `HIPFIRE_SET_ASIDE` et le
-chemin en tête de l'enveloppe ; une copie `.gguf` est refusée. Le modèle d'origine reste mesuré
-par hipfire. Le fil le signale sous la ligne de l'appel. Exception : une copie requantifiée en
-ligne de commande (`--hipfire-requantize`), dont le `.hipfire-alias.json` correspond encore à
-ses poids, reste sur hipfire sous son alias `ws-<copie>-<sha8>` ; l'agent ne requantifie jamais.
+lit jamais les fichiers donnés, GGUF compris : `surgeon_bench` (`eval`, `refusal`) mesure sur le
+backend résolu (`auto` par défaut : hipfire sur un GPU AMD) et, avec `hipfire_requantize = "auto"`
+(défaut), sert tout dossier SafeTensors, l'original compris, sous l'alias `ws-<dossier>-<sha8>` de
+ses poids, requantifié d'abord s'il n'en a pas d'à jour (même préparation que la CLI). Une copie
+`.gguf` est refusée. Si le moteur GPU ne démarre pas, la mesure échoue avec un diagnostic
+(`surgeon_doctor`) : plus de déplacement vers `native` ni d'avertissement, jamais de repli sur le
+CPU. L'agent ne peut pas passer `--allow-stale-hipfire`.
 
 « Démarrer » sur un projet qui a un modèle d'origine mais aucune copie de travail lance d'abord
 la copie (`studio_copy`), puis la session dès qu'elle est faite ; un échec de la copie
@@ -356,6 +363,17 @@ retirée de son environnement, pour `Tester` comme pour les runs. Sans choix, il
 `--model sonnet`. Fable demande des crédits d'usage : il ne tourne que s'il est choisi pour le
 projet, et un ancien choix n'est pas repris au changement de connexion.
 
+Niveau de réflexion : chaque connexion Claude (clé d'API Anthropic ou Claude Code CLI) garde un
+`effort` facultatif dans `agents.json` : `off`, `low`, `medium`, `high` ou `max` ; absent, c'est
+« auto » : rien n'est envoyé et le défaut du modèle s'applique. Il se règle depuis le sélecteur
+à côté du fournisseur et du modèle dans la barre de titre, le même sélecteur du formulaire de
+nouvelle session, et la section « Niveau de réflexion » de la connexion dans les réglages. Il est
+partagé par tous les projets qui utilisent la connexion, et une session API ouverte prend la
+nouvelle valeur dès sa requête suivante. Le sélecteur n'apparaît que pour ces deux types de
+connexion. Pour Claude Code, `--effort <niveau>` est ajouté à la ligne de commande ; `off` met
+`MAX_THINKING_TOKENS=0` dans l'environnement du run et passe `--effort low` (un modèle qui
+réfléchit toujours retombe sur l'effort le plus bas).
+
 Détection : l'exécutable dans le `PATH`, `--version`, et la présence de chaque option utilisée
 dans l'aide (`claude --help`, `codex exec --help`, `opencode run --help`, `agy --help`) ; une
 option absente est signalée et l'outil n'est pas utilisé. Une CLI n'est « prête » qu'après
@@ -366,7 +384,7 @@ sinon la page donne la commande de connexion à copier (`claude auth login`, `co
 
 | | Lancement | Prompt | Outils |
 | --- | --- | --- | --- |
-| Claude Code | `claude -p --output-format stream-json --verbose --strict-mcp-config --mcp-config <fichier> --tools "" --allowedTools mcp__surgeon__… --permission-prompts none --no-session-persistence [--model]` | entrée standard | le seul serveur `surgeon`, outils intégrés désactivés ; fichiers de travail par `surgeon_files` |
+| Claude Code | `claude -p --output-format stream-json --verbose --strict-mcp-config --mcp-config <fichier> --tools "" --allowedTools mcp__surgeon__… --permission-prompts none --no-session-persistence [--model] [--effort]` | entrée standard | le seul serveur `surgeon`, outils intégrés désactivés ; fichiers de travail par `surgeon_files` |
 | Codex | `codex exec --json --ephemeral --skip-git-repo-check --sandbox read-only --cd <projet> --config approval_policy="never" --config mcp_servers.surgeon.… [--model] -` | entrée standard | le serveur `surgeon`, liste `enabled_tools` ; fichiers de travail par `surgeon_files` |
 | OpenCode | `opencode run --standalone --auto --format json --archived [--model]`, configuration en ligne `OPENCODE_CONFIG_CONTENT` (serveur `surgeon`, `external_directory: deny`), `OPENCODE_DISABLE_PROJECT_CONFIG=1` | entrée standard | ses outils natifs, dans le dossier du projet seulement, plus `surgeon` |
 | Antigravity | `agy --input-format stream-json --output-format stream-json [--model] -p=`, `USERPROFILE` et `HOME` sur le profil isolé | un message `{"event":"user",…}` sur l'entrée standard | ses outils natifs (`toolPermission: always-proceed`, projet de confiance), plus `surgeon` |
@@ -517,8 +535,8 @@ cargo run -- --screenshot a.png --screen agent:scalping --demo-data
   la demande avec `ask_user`.
 - Le mode avancé est une consigne du prompt : la politique ne refuse pas un `surgeon_apply`
   qui s'en écarterait, et les runtimes CLI ne passent pas par elle.
-- La commande CLI et l'alerte hipfire du fil sont calculées avec la configuration de backend
-  du moment, pas celle de l'appel.
+- La commande CLI du fil est calculée avec la configuration de backend du moment, pas celle de
+  l'appel.
 - « Redémarrer hipfire » arrête tout processus dont la ligne de commande contient `hipfire`
   dans la distribution WSL (une requantification en cours aussi). Hors Windows, il ne relance
   que le démon que la fenêtre a démarré ; un démon lancé ailleurs se relance à la main.

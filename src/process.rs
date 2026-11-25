@@ -84,19 +84,26 @@ pub fn run_capture(mut cmd: Command, timeout: Duration) -> std::io::Result<(Opti
     Ok((code, text))
 }
 
-/// `program args` with no console window (a GUI has none) and no output.
-pub(crate) fn quiet(program: &str, args: &[&str]) -> Command {
+/// A child process that does not flash a console window when its parent has none (the GUI).
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = Command::new(program);
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    cmd
+}
+
+/// `program args` with no console window (a GUI has none) and no output.
+pub(crate) fn quiet(program: &str, args: &[&str]) -> Command {
+    let mut cmd = command(program);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     cmd
 }
 

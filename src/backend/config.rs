@@ -69,12 +69,13 @@ pub struct BackendConfig {
     pub models_dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "hipfire : auto requantifie, avant un bench ou un pipeline, une copie de travail sans alias ws-<copie>-<sha8> pour ses poids actuels ; off (défaut) la refuse."
+        description = "hipfire : auto (défaut) requantifie, avant un bench ou un pipeline, un dossier SafeTensors sans alias ws-<dossier>-<sha8> pour ses poids actuels ; off refuse une copie de travail."
     )]
     pub hipfire_requantize: Option<Requantize>,
 }
 
-/// What a hipfire bench does with a working copy that has no alias for its current weights.
+/// What a hipfire bench does with a SafeTensors folder that has no alias for its current
+/// weights. Absent means `Auto`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Requantize {
@@ -106,6 +107,15 @@ impl BackendConfig {
     /// backends existed still binds to the same configuration.
     pub fn for_job(self) -> Option<Self> {
         (self.backend.unwrap_or(Backend::Native) != Backend::Native).then_some(self)
+    }
+
+    /// The reverse of [`Self::for_job`]: what a job's `backend` stands for, `None` being the
+    /// native engine (never `auto`, which a job never records).
+    pub fn of_job(job: Option<&Self>) -> Self {
+        job.cloned().unwrap_or(Self {
+            backend: Some(Backend::Native),
+            ..Default::default()
+        })
     }
 }
 

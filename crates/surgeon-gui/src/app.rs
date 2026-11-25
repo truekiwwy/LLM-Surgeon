@@ -744,8 +744,7 @@ impl SurgeonApp {
     }
 
     /// The first launch, and every probe while the choice is automatic: the backend the
-    /// hardware calls for among the Rust engines (`backend_choice`), written to the user
-    /// `config.toml`. A backend saved by hand in the dialog ends the automatic choice.
+    /// hardware calls for (the engine's recommendation), written to the user `config.toml`. A backend saved by hand in the dialog ends the automatic choice.
     fn auto_backend(&mut self) {
         let (Some(report), Some(system)) = (&self.hardware, &self.desktop.system) else {
             return;
@@ -759,8 +758,8 @@ impl SurgeonApp {
         }
         let vendor = backend_choice::main_vendor(system.gpus.iter().map(|g| g.name.as_str()));
         let mistral = report.mistralrs.as_ref().map(|m| m.binary.clone());
-        let target = backend_choice::target(vendor);
-        let backend = backend_choice::effective(target, self.hipfire_up, mistral.is_some());
+        // The engine's rule: a GPU gets its own engine even before it is ready, never the CPU.
+        let backend = report.recommended.backend.unwrap_or(report.target);
         let cfg = backend_choice::config(saved, backend, vendor, mistral);
         if cfg != *saved {
             if let Err(e) = self.dialog.save_config(cfg) {
@@ -1016,7 +1015,7 @@ impl SurgeonApp {
 
     pub fn backend_label(&self) -> String {
         let saved: &BackendConfig = self.dialog.saved();
-        let kind = saved.backend.unwrap_or(Backend::Native);
+        let kind = saved.backend.unwrap_or(Backend::Auto);
         backend::describe(
             kind.label(),
             None,

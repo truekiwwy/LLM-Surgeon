@@ -3425,7 +3425,10 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
             core_bench_ppl(&req, a.fail_on_warn, deps, &ui, &mut sink)
         }
         BenchCommand::Eval(a) => {
-            let eval_backend = a.backend.unwrap_or_default();
+            let eval_backend = crate::backend::resolve_auto(
+                a.backend.unwrap_or(Backend::Auto),
+                crate::eval::is_gguf(&a.model),
+            );
             let req = EvalRequest {
                 model: a.model.clone(),
                 dataset: a.dataset.clone(),
@@ -3466,7 +3469,10 @@ fn bench_cli(args: &BenchArgs, deps: &AppDeps, io: &mut Io) -> CoreResult {
             core_bench_dump(&req, deps, &ui, &mut sink)
         }
         BenchCommand::Refusal(a) => {
-            let refusal_backend = a.backend.unwrap_or(Backend::Native);
+            let refusal_backend = crate::backend::resolve_auto(
+                a.backend.unwrap_or(Backend::Auto),
+                crate::eval::is_gguf(&a.model),
+            );
             let mut prompts = extract::load_prompt_texts(&a.prompts)
                 .map_err(|m| invalid(BenchError::input(&a.prompts, m)))?;
             prompts.truncate(a.limit.unwrap_or(usize::MAX));
@@ -3741,10 +3747,22 @@ fn hipfire_targets(
     let mut warnings = Vec::new();
     for model in models.iter().flatten() {
         let decision = hipfire::prepare_target(model, engines, generation.allow_stale_hipfire)
-            .map_err(|e| bench_failure(&BenchError::InvalidArgument(e)))?;
+            .map_err(|e| bench_failure(&gpu_failure(BenchError::InvalidArgument(e))))?;
         warnings.extend(decision.warning);
     }
     Ok(warnings)
+}
+
+/// A GPU engine that cannot start: the run stops there, never on the CPU instead.
+fn gpu_failure(e: BenchError) -> BenchError {
+    let hint = "aucun repli sur le CPU ; diagnostic : surgeon doctor (ou --backend cpu pour le \
+                forcer)";
+    match e {
+        BenchError::InvalidArgument(m) => BenchError::InvalidArgument(format!("{m} ; {hint}")),
+        BenchError::BinaryNotFound(m) => BenchError::BinaryNotFound(format!("{m} ; {hint}")),
+        BenchError::Generation(m) => BenchError::Generation(format!("{m} ; {hint}")),
+        other => other,
+    }
 }
 
 /// A bench generator for `backend`: the native one on a SafeTensors folder (batches,
@@ -3764,6 +3782,7 @@ pub(crate) fn bench_generator(
     sink: &RefCell<&mut dyn ProgressSink>,
 ) -> bench::Result<Box<dyn TextGenerator>> {
     use crate::backend::{hipfire, mistralrs};
+    let backend = crate::backend::resolve_auto(backend, crate::eval::is_gguf(model));
     match backend {
         Backend::Native => {
             let mut native = native_generator(model, deps, sink)?;
@@ -3778,23 +3797,23 @@ pub(crate) fn bench_generator(
             return Ok(Box::new(native));
         }
         Backend::MistralRs => {
-            let binary = mistralrs::locate(engines)
-                .ok_or_else(|| BenchError::BinaryNotFound(mistralrs::not_found(engines)))?;
-            let server = mistralrs::start(
-                &binary,
+            return mistralrs::generator(
                 model,
+                engines,
                 bench::score::SEED,
                 &generation.server(),
+                generation.sampling.is_greedy(),
                 &deps.interrupted,
-            )?;
-            return Ok(Box::new(server));
+            )
+            .map_err(|e| gpu_failure(BenchError::from(e)));
         }
         Backend::Hipfire => {
-            hipfire::check_sampling(&generation.sampling).map_err(BenchError::InvalidArgument)?;
+            let invalid = |e: String| gpu_failure(BenchError::InvalidArgument(e));
+            hipfire::check_sampling(&generation.sampling).map_err(invalid)?;
             // Its warning, when let through, is the caller's to report (bench, pipeline).
             let target = hipfire::prepare_target(model, engines, generation.allow_stale_hipfire)
-                .map_err(BenchError::InvalidArgument)?;
-            let endpoint = hipfire::probe(engines).map_err(BenchError::InvalidArgument)?;
+                .map_err(invalid)?;
+            let endpoint = hipfire::probe(engines).map_err(invalid)?;
             if let Some(warning) = endpoint.warning() {
                 sink.borrow_mut().event(ProgressEvent::Warn(warning.into()));
             }

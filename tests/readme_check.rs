@@ -560,6 +560,8 @@ fn quoted_options_exist_somewhere_in_the_cli() {
         "--scope",
         "--temp",
         "--release",
+        "--features",
+        "--workspace",
         "--example",
         "--path",
         "--target",

@@ -48,6 +48,12 @@ rfd = { version = "0.18", default-features = false }
 [target.'cfg(not(windows))'.dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
+# The engine's in-process mistral.rs (off by default, see the root manifest).
+[features]
+mistralrs = ["weight-surgeon/mistralrs"]
+cuda = ["weight-surgeon/cuda"]
+metal = ["weight-surgeon/metal"]
+
 [build-dependencies]
 embed-resource = "3"
 

@@ -10,7 +10,7 @@ et recommande ; la voie B n'est pas implémentée ici.
 **Voie A : hipfire sous WSL2, copie requantifiée.** Ubuntu 24.04 dans WSL2, ROCm 7.2.1,
 librocdxg 1.2.2, hipfire 0.4.6 en démon. Le démon ne lit jamais le dossier SafeTensors : il sert le
 fichier quantifié enregistré sous un nom. Cette branche ajoute la requantification
-(`hipfire_requantize = "auto"` ou `--hipfire-requantize`) : SHA-256 des `*.safetensors`,
+(`hipfire_requantize = "auto"`, défaut, ou `--hipfire-requantize`) : SHA-256 des `*.safetensors`,
 `hipfire quantize --format q8f16 --register ws-<copie>-<sha8>`, `.hipfire-alias.json` dans la
 copie, puis mesure sous cet alias tant que le hash ne bouge pas ([BACKENDS.md](BACKENDS.md),
 section 7).
