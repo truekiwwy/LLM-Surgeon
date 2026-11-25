@@ -260,6 +260,9 @@ pub const ALIAS_FILE: &str = ".hipfire-alias.json";
 /// The format copies are quantized to: MQ4 changed answers of Qwen2.5-0.5B on this setup
 /// (17 + 25 gave 32), which would hide what the patch did.
 const QUANT_FORMAT: &str = "q8f16";
+/// Where installers put hipfire: `wsl.exe -e bash -lc` reads `.profile` but not `.bashrc`,
+/// which is often the only file that adds these to the `PATH`.
+const QUANTIZE_PATH: &str = r#"export PATH="$HOME/.hipfire/bin:$HOME/.cargo/bin:$HOME/.local/bin:/opt/rocm/bin:/usr/local/bin:$PATH""#;
 /// The distribution hipfire runs in on Windows (the one surgeon-gui installs).
 pub const WSL_DISTRO: &str = "Ubuntu-24.04";
 
@@ -390,14 +393,14 @@ pub fn requantize(
         _ => "hipfire".into(),
     };
     let script = quantize_script(&alias, &source_word(&dir, cfg!(windows)), &hipfire);
-    let status = shell(&script)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::io::stderr())
-        .status()
+    let (status, stdout, stderr) = run_echoed(shell(&script))
         .map_err(|e| format!("hipfire quantize : lancement impossible : {e}"))?;
     if !status.success() {
-        return Err(format!(
-            "hipfire quantize a échoué ({status}) : alias {alias} non enregistré"
+        return Err(quantize_failure(
+            &alias,
+            &status.to_string(),
+            &stdout,
+            &stderr,
         ));
     }
     if weights_sha256(&dir)? != sha {
@@ -430,24 +433,78 @@ fn log(line: &str) {
     eprintln!("surgeon hipfire : {line}");
 }
 
+/// Runs `cmd` with both its outputs echoed live on our stderr (stdout may be a `--json`
+/// envelope) and kept, for the error message.
+fn run_echoed(
+    mut cmd: std::process::Command,
+) -> std::io::Result<(std::process::ExitStatus, String, String)> {
+    use std::io::{BufRead, BufReader, Read};
+    use std::process::Stdio;
+    fn echo(pipe: impl Read) -> String {
+        let mut kept = String::new();
+        for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+            eprintln!("{line}");
+            kept.push_str(&line);
+            kept.push('\n');
+        }
+        kept
+    }
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stderr = child
+        .stderr
+        .take()
+        .map(|e| std::thread::spawn(move || echo(e)));
+    let stdout = child.stdout.take().map(echo).unwrap_or_default();
+    let stderr = stderr.and_then(|t| t.join().ok()).unwrap_or_default();
+    Ok((child.wait()?, stdout, stderr))
+}
+
+/// The error of a failed `hipfire quantize`: the end of its stderr, else of its stdout, so
+/// "command not found" or a WSL error reaches the user and not only the exit code.
+fn quantize_failure(alias: &str, status: &str, stdout: &str, stderr: &str) -> String {
+    const LINES: usize = 15;
+    let output = match stderr.trim().is_empty() {
+        true => stdout,
+        false => stderr,
+    };
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let tail = lines[lines.len().saturating_sub(LINES)..].join("\n");
+    let mut message =
+        format!("hipfire quantize a échoué ({status}) : alias {alias} non enregistré");
+    match tail.is_empty() {
+        true => message.push_str(" (aucune sortie)"),
+        false => message.push_str(&format!("\n{tail}")),
+    }
+    message
+}
+
 /// What registers `alias` for the SafeTensors folder `source` (a shell word) in the hipfire
 /// home of the user it runs as (`$HIPFIRE_HOME`, else `~/.hipfire`, as hipfire 0.4.6 resolves
 /// it): nothing when the catalog `models.toml` already holds the alias (same weights), else
 /// `hipfire quantize` straight into the models folder, so `--install` copies nothing and
 /// `--register` writes the catalog. The catalog layout and the models folder are those of
-/// hipfire 0.4.6, to check after an upgrade.
+/// hipfire 0.4.6, to check after an upgrade. No `exit`: in the login shell `bash -lc`
+/// under `set -e`, `exit 0` came back as 1 (WSL Ubuntu 24.04), the logout scripts running after it.
 fn quantize_script(alias: &str, source: &str, hipfire: &str) -> String {
     format!(
         r#"set -euo pipefail
-export PATH="$HOME/.hipfire/bin:$PATH"
+{QUANTIZE_PATH}
 home="${{HIPFIRE_HOME:-$HOME/.hipfire}}"
 if [ -f "$home/models.toml" ] && grep -Eq '^"?{alias}"? *=' "$home/models.toml"; then
   echo "alias {alias} déjà dans $home/models.toml : pas de requantification"
-  exit 0
+else
+  src={source}
+  echo "hipfire quantize $src ({QUANT_FORMAT}) -> $home/models, alias {alias}"
+  {hipfire} quantize "$src" --format {QUANT_FORMAT} --stem {alias} --output-dir "$home/models" --install --register {alias}
 fi
-src={source}
-echo "hipfire quantize $src ({QUANT_FORMAT}) -> $home/models, alias {alias}"
-{hipfire} quantize "$src" --format {QUANT_FORMAT} --stem {alias} --output-dir "$home/models" --install --register {alias}
 "#
     )
 }
@@ -896,6 +953,13 @@ mod tests {
              --output-dir \"$home/models\" --install --register ws-c1-0a1b2c3d"
         ));
         assert!(script.contains("home=\"${HIPFIRE_HOME:-$HOME/.hipfire}\""));
+        // The user install folders come first, whatever the non interactive PATH holds.
+        assert!(script.contains(
+            r#"export PATH="$HOME/.hipfire/bin:$HOME/.cargo/bin:$HOME/.local/bin:/opt/rocm/bin:/usr/local/bin:$PATH""#
+        ), "{script}");
+        assert!(script.find("export PATH") < script.find("hipfire quantize"));
+        // An `exit` in `bash -lc` loses its status: the script ends on its last command.
+        assert!(!script.contains("exit"), "{script}");
         // Windows paths go through wslpath, quotes kept literal.
         let windows = Path::new(r"C:\models\it's a copy");
         assert_eq!(
@@ -903,6 +967,33 @@ mod tests {
             r#""$(wslpath -a 'C:\models\it'\''s a copy')""#
         );
         assert_eq!(source_word(Path::new("/m/c1"), false), "'/m/c1'");
+    }
+
+    #[test]
+    fn a_failed_quantize_reports_the_end_of_its_output() {
+        let head =
+            "hipfire quantize a échoué (exit code: 127) : alias ws-c1-0a1b2c3d non enregistré";
+        // stderr wins, only its last 15 non empty lines.
+        let stderr: String = (1..=20).map(|i| format!("err {i}\n\n")).collect();
+        let err = quantize_failure("ws-c1-0a1b2c3d", "exit code: 127", "out", &stderr);
+        assert!(err.starts_with(head), "{err}");
+        assert!(err.ends_with("\nerr 6\nerr 7\nerr 8\nerr 9\nerr 10\nerr 11\nerr 12\nerr 13\nerr 14\nerr 15\nerr 16\nerr 17\nerr 18\nerr 19\nerr 20"), "{err}");
+        assert!(!err.contains("out"), "{err}");
+        // An empty stderr falls back to stdout.
+        let err = quantize_failure(
+            "ws-c1-0a1b2c3d",
+            "exit code: 127",
+            "bash: line 9: hipfire: command not found\n",
+            " \n",
+        );
+        assert_eq!(
+            err,
+            format!("{head}\nbash: line 9: hipfire: command not found")
+        );
+        assert_eq!(
+            quantize_failure("ws-c1-0a1b2c3d", "exit code: 127", "", ""),
+            format!("{head} (aucune sortie)")
+        );
     }
 
     #[test]
