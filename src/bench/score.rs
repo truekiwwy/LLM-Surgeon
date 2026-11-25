@@ -1,8 +1,8 @@
 //! `surgeon bench eval`: greedy generation per question, answer extraction, exact match.
 //!
 //! Normalization (both sides): `\left`/`\right`, `\!`, `\,`, `\;`, `$`, `%`, `^\circ`
-//! removed, `\dfrac`/`\tfrac` -> `\frac`, `\text{X}` -> `X`, whitespace and a final `.`
-//! removed, a trailing unit word dropped after a number (`18dollars` -> `18`). When both
+//! removed, `\dfrac`/`\tfrac` -> `\frac`, `\text{X}` -> `X`, whitespace, a final `.` and
+//! the Markdown markers around the answer (`*`, `_`, backticks) removed, a trailing unit word dropped after a number (`18dollars` -> `18`). When both
 //! sides read as numbers (`18`, `18.0`, `1,8e1`, `1,000`, `1/2`, `\frac{1}{2}`) they are
 //! compared numerically with a relative tolerance of 1e-9 (so `0.1+0.2` style rounding
 //! never fails a match, while `12` vs `120` always does); otherwise the normalized
@@ -42,6 +42,8 @@ const EXCERPT_CHARS: usize = 200;
 const SMALL_SAMPLE: usize = 100;
 pub const Z_95: f64 = 1.959_963_984_540_054;
 const REL_TOLERANCE: f64 = 1e-9;
+/// Markdown emphasis and inline code markers a model wraps its final answer in.
+pub(crate) const MARKDOWN: [char; 3] = ['*', '_', '`'];
 
 fn unit_re() -> Option<&'static Regex> {
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
@@ -96,9 +98,11 @@ pub fn normalize(answer: &str) -> String {
     }
     s = unwrap_text(s);
     s.retain(|c| !c.is_whitespace());
-    while s.ends_with('.') {
-        s.pop();
-    }
+    // Markdown emphasis and code markers around the answer (`**150**.`, `*42*`, `` `42` ``).
+    s = s
+        .trim_start_matches(MARKDOWN)
+        .trim_end_matches(|c| MARKDOWN.contains(&c) || c == '.')
+        .to_owned();
     if let Some(number) = unit_re()
         .and_then(|re| re.captures(&s))
         .and_then(|c| c.get(1))
@@ -669,6 +673,14 @@ mod tests {
             ("\\text{(B)}", "(B)"),
             ("\\left(1,2\\right)", "(1, 2)"),
             ("5.", "5"),
+            ("** 55", "55"),
+            ("**150**", "150"),
+            ("**150**.", "150"),
+            ("*42*", "42"),
+            ("`42`", "42"),
+            ("__42__", "42"),
+            ("**`$1,234`**", "1234"),
+            ("**blue**", "blue"),
         ] {
             assert!(answers_match(a, b), "{a} = {b}");
         }
@@ -677,6 +689,7 @@ mod tests {
             ("1/3", "0.33"),
             ("(1,2)", "(2,1)"),
             ("blue", "red"),
+            ("**15**0", "150"),
         ] {
             assert!(!answers_match(a, b), "{a} != {b}");
         }

@@ -18,7 +18,7 @@ use regex::Regex;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use super::score::{normalize, parse_number};
+use super::score::{normalize, parse_number, MARKDOWN};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -159,7 +159,8 @@ fn phrase(text: &str) -> Option<String> {
         .filter_map(|c| Some(c.get(1)?.as_str().trim().to_owned()))
         .filter(|s| !s.is_empty())
         .last()?;
-    let stripped = rest.trim_start_matches(['$', '\\', ' ']);
+    let stripped =
+        rest.trim_start_matches(|c| matches!(c, '$' | '\\' | ' ') || MARKDOWN.contains(&c));
     let leading = number_re()?
         .find(stripped)
         .filter(|m| m.start() == 0)
@@ -299,6 +300,28 @@ mod tests {
         is("**Note:** 5 + 7 = 12", "12", Rule::LastNumber);
         is("**Verification:** the answer is 9.", "9", Rule::Phrase);
         assert_eq!(got("**Note:** none"), None);
+    }
+
+    #[test]
+    fn markdown_around_the_answer_is_an_exact_match() {
+        use super::super::score::answers_match;
+        for (output, gold) in [
+            ("The answer is ** 55", "55"),
+            ("The answer is **150** apples.", "150"),
+            ("Final answer: *42*", "42"),
+            ("The answer is `42`.", "42"),
+            ("#### **150**", "150"),
+            ("#### ** 55", "55"),
+            ("#### `42`", "42"),
+            ("So the total is **150**", "150"),
+        ] {
+            let e = extract(output).unwrap_or_else(|| panic!("{output:?}: nothing extracted"));
+            assert!(
+                answers_match(&e.answer, gold),
+                "{output:?} -> {:?}",
+                e.answer
+            );
+        }
     }
 
     #[test]
