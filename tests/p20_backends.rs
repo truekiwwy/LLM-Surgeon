@@ -682,13 +682,20 @@ fn hipfire_requantize_registers_a_copy_once_and_again_when_its_weights_change() 
     assert_eq!(code, 0, "{v}");
     assert_eq!(calls().len(), 1);
 
+    // The catalog lost the alias: the alias file is not enough, quantized again.
+    std::fs::remove_file(home.join("models.toml")).unwrap();
+    let (code, v) = run(&["--hipfire-requantize"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(calls().len(), 2);
+    assert_eq!(recorded()["alias"], first["alias"]);
+
     // Weights changed: refused with off, requantized under a new alias by default (auto).
     touch_weights(&ws);
     let (code, v) = run(&["--hipfire-requantize", "off"]);
     assert_eq!(code, 2, "{v}");
     let (code, v) = run(&[]);
     assert_eq!(code, 0, "{v}");
-    assert_eq!(calls().len(), 2);
+    assert_eq!(calls().len(), 3);
     let second = recorded()["alias"].as_str().unwrap().to_owned();
     assert_ne!(second, alias);
     assert_eq!(served_models(&ws, "hip.jsonl").last(), Some(&second));

@@ -226,29 +226,44 @@ pub fn validate_hipfire_target(
 /// `hipfire_requantize` `auto` (the default), any SafeTensors folder, the original included,
 /// is served under the alias of its own content ([`alias_for`] its [`weights_sha256`]), [`requantize`]d first
 /// when needed: the patched copy and the baseline of a paired bench are two names for two
-/// sets of weights, never a name the daemon could map to other ones. Otherwise
-/// [`validate_hipfire_target`].
+/// sets of weights, never a name the daemon could map to other ones. A valid [`ALIAS_FILE`]
+/// spares the hashing, not the catalog check: the alias may have left `models.toml` since.
+/// Otherwise [`validate_hipfire_target`].
 pub fn prepare_target(
     model: &Path,
     config: &BackendConfig,
     allow_stale: bool,
 ) -> Result<HipfireGuardDecision, String> {
+    prepare_with(model, config, allow_stale, &run_script)
+}
+
+fn prepare_with(
+    model: &Path,
+    config: &BackendConfig,
+    allow_stale: bool,
+    run: Runner,
+) -> Result<HipfireGuardDecision, String> {
     let copy = is_working_copy(model);
-    if config.hipfire_requantize != Some(Requantize::Off) && weights_dir(model).is_ok() {
-        let record = match registered_alias(model) {
-            Ok(record) => record,
-            Err(why) => {
-                // A daemon that is not there first: no requantization for nothing.
-                probe(config)?;
-                log(&format!("{} : {why} ; requantification", model.display()));
-                // The original's folder is left as it is: no alias file written there.
-                requantize(model, config, copy)?
-            }
-        };
-        return Ok(HipfireGuardDecision {
-            model: record.alias,
-            warning: None,
-        });
+    if config.hipfire_requantize != Some(Requantize::Off) {
+        if let Ok(dir) = weights_dir(model) {
+            let record = match registered_alias(model) {
+                Ok(record) => {
+                    register(&dir, &record.alias, config, run)?;
+                    record
+                }
+                Err(why) => {
+                    // A daemon that is not there first: no requantization for nothing.
+                    probe(config)?;
+                    log(&format!("{} : {why} ; requantification", model.display()));
+                    // The original's folder is left as it is: no alias file written there.
+                    requantize(model, config, copy, run)?
+                }
+            };
+            return Ok(HipfireGuardDecision {
+                model: record.alias,
+                warning: None,
+            });
+        }
     }
     validate_hipfire_target(model, copy, allow_stale)
 }
@@ -373,36 +388,54 @@ pub fn registered_alias(model: &Path) -> Result<AliasRecord, String> {
     }
 }
 
+/// Runs a [`quantize_script`] for an alias: [`run_script`], or a fake in the tests.
+type Runner<'a> = &'a dyn Fn(&str, &str) -> Result<(), String>;
+
+/// The [`Runner`] of a real run: the script in [`shell`], its failure with its output.
+fn run_script(alias: &str, script: &str) -> Result<(), String> {
+    let (status, stdout, stderr) = run_echoed(shell(script))
+        .map_err(|e| format!("hipfire quantize : lancement impossible : {e}"))?;
+    match status.success() {
+        true => Ok(()),
+        false => Err(quantize_failure(
+            alias,
+            &status.to_string(),
+            &stdout,
+            &stderr,
+        )),
+    }
+}
+
+/// Makes sure hipfire's catalog holds `alias` for the SafeTensors folder `dir`: nothing when
+/// it does, else `hipfire quantize` ([`quantize_script`]).
+fn register(dir: &Path, alias: &str, config: &BackendConfig, run: Runner) -> Result<(), String> {
+    let hipfire = match (cfg!(windows), binary(config)) {
+        (false, Some(bin)) => shell_quote(&bin.to_string_lossy()),
+        _ => "hipfire".into(),
+    };
+    run(
+        alias,
+        &quantize_script(alias, &source_word(dir, cfg!(windows)), &hipfire),
+    )
+}
+
 /// Registers the SafeTensors folder `model` in hipfire under [`alias_for`] its weights, then
-/// writes its [`ALIAS_FILE`] when `write_record` (a working copy; the next run then skips the
-/// catalog check). hipfire's output goes to stderr. On Windows hipfire runs in WSL
+/// writes its [`ALIAS_FILE`] when `write_record` (a working copy; the next run then skips
+/// hashing its weights twice). hipfire's output goes to stderr. On Windows hipfire runs in WSL
 /// ([`WSL_DISTRO`]) as the distribution's default user: its catalog must be the one the
 /// daemon reads (`start-hipfire.ps1` starts it as that user).
-pub fn requantize(
+fn requantize(
     model: &Path,
     config: &BackendConfig,
     write_record: bool,
+    run: Runner,
 ) -> Result<AliasRecord, String> {
     let dir = weights_dir(model)?;
     let sha = weights_sha256(&dir)?;
     let name = dir.file_name().unwrap_or_default().to_string_lossy();
     let alias = alias_for(&name, &sha);
     log(&format!("{} : SHA-256 {sha}, alias {alias}", dir.display()));
-    let hipfire = match (cfg!(windows), binary(config)) {
-        (false, Some(bin)) => shell_quote(&bin.to_string_lossy()),
-        _ => "hipfire".into(),
-    };
-    let script = quantize_script(&alias, &source_word(&dir, cfg!(windows)), &hipfire);
-    let (status, stdout, stderr) = run_echoed(shell(&script))
-        .map_err(|e| format!("hipfire quantize : lancement impossible : {e}"))?;
-    if !status.success() {
-        return Err(quantize_failure(
-            &alias,
-            &status.to_string(),
-            &stdout,
-            &stderr,
-        ));
-    }
+    register(&dir, &alias, config, run)?;
     if weights_sha256(&dir)? != sha {
         return Err(format!(
             "{} : poids modifiés pendant la quantification, alias {alias} écarté",
@@ -788,6 +821,44 @@ mod tests {
         record
     }
 
+    /// A hipfire catalog in memory: the [`Runner`] registers an alias the first time, as
+    /// [`quantize_script`] does, and says which ones it quantized.
+    #[derive(Default)]
+    struct Catalog {
+        aliases: std::cell::RefCell<Vec<String>>,
+        quantized: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl Catalog {
+        fn with(aliases: &[&str]) -> Self {
+            let catalog = Self::default();
+            catalog
+                .aliases
+                .borrow_mut()
+                .extend(aliases.iter().map(|a| a.to_string()));
+            catalog
+        }
+
+        fn run(&self, alias: &str, script: &str) -> Result<(), String> {
+            assert!(script.contains(&format!("--register {alias}")), "{script}");
+            if !self.aliases.borrow().iter().any(|a| a == alias) {
+                self.aliases.borrow_mut().push(alias.into());
+                self.quantized.borrow_mut().push(alias.into());
+            }
+            Ok(())
+        }
+
+        fn prepare(
+            &self,
+            model: &Path,
+            config: &BackendConfig,
+        ) -> Result<HipfireGuardDecision, String> {
+            prepare_with(model, config, false, &|alias, script| {
+                self.run(alias, script)
+            })
+        }
+    }
+
     #[test]
     fn the_alias_is_the_copy_name_and_the_first_digits_of_its_weights() {
         let sha = "0a1b2c3d4e5f".repeat(5) + "6789";
@@ -881,8 +952,9 @@ mod tests {
         let err = prepare_target(&copy, &off, false).unwrap_err();
         assert!(err.contains("aucun alias hipfire"), "{err}");
         assert_eq!(prepare_target(&source, &off, false), Ok(served("source")));
-        // Unset is `auto`: with an alias for these weights, served at once, hipfire never
-        // called (the binary does not exist). The original too goes by its content.
+        // Unset is `auto`: with an alias for these weights already in the catalog, served
+        // without quantizing (nor asking the daemon, which is not there). The original too goes
+        // by its content.
         let (copy_alias, source_alias) = (record(&copy).alias, record(&source).alias);
         for mode in [None, Some(Requantize::Auto)] {
             let auto = BackendConfig {
@@ -890,12 +962,31 @@ mod tests {
                 hipfire_bin: Some(dir.path().join("no-hipfire")),
                 ..Default::default()
             };
-            assert_eq!(prepare_target(&copy, &auto, false), Ok(served(&copy_alias)));
-            assert_eq!(
-                prepare_target(&source, &auto, false),
-                Ok(served(&source_alias))
-            );
+            let catalog = Catalog::with(&[&copy_alias, &source_alias]);
+            assert_eq!(catalog.prepare(&copy, &auto), Ok(served(&copy_alias)));
+            assert_eq!(catalog.prepare(&source, &auto), Ok(served(&source_alias)));
+            assert!(catalog.quantized.borrow().is_empty());
         }
+    }
+
+    #[test]
+    fn a_valid_alias_file_missing_from_the_catalog_is_quantized_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, copy, _) = studio(dir.path());
+        let alias = record(&copy).alias;
+        // `models.toml` emptied (or another hipfire home) since the alias file was written.
+        let catalog = Catalog::default();
+        let auto = BackendConfig::default();
+        assert_eq!(catalog.prepare(&copy, &auto), Ok(served(&alias)));
+        assert_eq!(*catalog.quantized.borrow(), std::slice::from_ref(&alias));
+        // Registered again: the next run only checks.
+        assert_eq!(catalog.prepare(&copy, &auto), Ok(served(&alias)));
+        assert_eq!(catalog.quantized.borrow().len(), 1);
+        // A failed registration stops the run, its message kept.
+        let failing =
+            |_: &str, _: &str| Err("hipfire quantize a échoué (exit code: 127)".to_string());
+        let err = prepare_with(&copy, &auto, false, &failing).unwrap_err();
+        assert!(err.contains("exit code: 127"), "{err}");
     }
 
     /// A paired bench (`--model` a patched copy, `--baseline-model` its original) asks hipfire
@@ -930,8 +1021,9 @@ mod tests {
         // Requantized (what `auto` runs), it is served under the digest of the patched bytes.
         let patched = record(&copy).alias;
         let auto = BackendConfig::default();
-        assert_eq!(prepare_target(&copy, &auto, false), Ok(served(&patched)));
-        assert_eq!(prepare_target(&source, &auto, false), Ok(served(&original)));
+        let catalog = Catalog::with(&[&patched, &original]);
+        assert_eq!(catalog.prepare(&copy, &auto), Ok(served(&patched)));
+        assert_eq!(catalog.prepare(&source, &auto), Ok(served(&original)));
         assert_ne!(
             sha8(&patched),
             sha8(&original),
