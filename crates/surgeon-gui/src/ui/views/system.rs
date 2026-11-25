@@ -1079,6 +1079,14 @@ pub(crate) fn provider_detail(ui: &mut Ui, app: &mut SurgeonApp) {
         hub.set_default(&id);
     }
 
+    if conn.kind.takes_effort() {
+        c::section(ui, t("effort.title"));
+        if let Some(picked) = super::agents::effort_select(ui, "default-effort", conn.effort, width)
+        {
+            hub.set_effort(&id, picked);
+        }
+    }
+
     if conn.kind.is_cli() {
         c::section(ui, t("prov.signin"));
         let (state, word) = match conn.verified {

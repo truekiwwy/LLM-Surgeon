@@ -10,7 +10,9 @@ use std::time::{Instant, SystemTime};
 
 use eframe::egui;
 
-use super::config::{AgentsConfig, Connection, Consent, Prices, ProjectAgent, ProviderKind};
+use super::config::{
+    AgentsConfig, Connection, Consent, Effort, Prices, ProjectAgent, ProviderKind,
+};
 use super::detect::{self, EnvKey, Preset, Scan, Server};
 use super::mission::{Forced, Mission, Symptom};
 use super::paths::ProjectPaths;
@@ -418,6 +420,7 @@ impl Hub {
             models,
             default_model: None,
             last_model: None,
+            effort: None,
             verified: false,
             prices: Default::default(),
         };
@@ -555,6 +558,17 @@ impl Hub {
     pub fn set_default_model(&mut self, id: &str, model: &str) {
         if let Some(c) = self.cfg.connections.iter_mut().find(|c| c.id == id) {
             c.default_model = Some(model.to_owned());
+        }
+        self.save_cfg();
+    }
+
+    /// The thinking depth of connection `id`, from the next request of an open session on.
+    pub fn set_effort(&mut self, id: &str, effort: Option<Effort>) {
+        if let Some(c) = self.cfg.connections.iter_mut().find(|c| c.id == id) {
+            c.effort = effort;
+        }
+        if let Some(s) = self.session.as_mut().filter(|s| s.conv.connection == id) {
+            s.settings.effort = effort;
         }
         self.save_cfg();
     }
@@ -875,6 +889,7 @@ impl Hub {
             budgets: self.agent.budgets,
             prices: conn.prices.get(&conv.model).copied(),
             redact,
+            effort: conn.effort,
             ..Settings::default()
         };
         let mut s = Session::new(
@@ -944,6 +959,7 @@ impl Hub {
             project,
             read_roots: &read_roots,
             model: self.model().as_deref(),
+            effort: conn.effort,
             prompt: &prompt,
             scratch: &dirs.chat.join("runtime"),
             agy: agy.as_ref(),

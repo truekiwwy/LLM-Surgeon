@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::config::{AgentsConfig, AskMode, Connection, Consent, Prices, ProviderKind, RunBudgets};
+use super::config::{
+    AgentsConfig, AskMode, Connection, Consent, Effort, Prices, ProviderKind, RunBudgets,
+};
 use super::http::Reach;
 use super::mock::{self, Mock, Step};
 use super::policy::{self, AgentMode, Decision, Scope};
@@ -202,6 +204,7 @@ fn request(messages: Vec<super::provider::Message>) -> Request {
             schema: json!({"type": "object"}),
         }],
         max_tokens: 1000,
+        effort: None,
     }
 }
 
@@ -529,6 +532,7 @@ fn local_only_mode_never_opens_a_remote_connection() {
         models: vec![],
         default_model: None,
         last_model: None,
+        effort: None,
         verified: false,
         prices: Default::default(),
     };
@@ -1389,6 +1393,7 @@ fn an_api_key_never_lands_in_a_file_an_export_or_an_error() {
         models: vec!["m".into()],
         default_model: None,
         last_model: None,
+        effort: None,
         verified: false,
         prices: Default::default(),
     };
@@ -1550,6 +1555,7 @@ fn cli_runtimes_are_detected_from_their_real_help_and_run_with_the_mcp_barrier()
         project: &project,
         read_roots: std::slice::from_ref(&source),
         model: None,
+        effort: None,
         prompt: "inspecte",
         scratch: &dir.path().join("scratch"),
         agy: None,
@@ -1656,6 +1662,7 @@ fn opencode_and_antigravity_keep_their_tools_and_meet_surgeon_only() {
         project: &project,
         read_roots: &source_roots,
         model: Some("ollama/qwen"),
+        effort: None,
         prompt: "scanne",
         scratch: &dir.path().join("scratch"),
         agy: Some(&home),
@@ -1825,6 +1832,7 @@ fn a_project_inherits_the_default_connection_until_it_picks_its_own() {
         models: models.iter().map(|m| m.to_string()).collect(),
         default_model: default_model.map(str::to_owned),
         last_model: None,
+        effort: None,
         verified: false,
         prices: Default::default(),
     };
@@ -2227,6 +2235,7 @@ fn each_provider_offers_only_its_own_models() {
         models: models.iter().map(|m| m.to_string()).collect(),
         default_model: None,
         last_model: None,
+        effort: None,
         verified: true,
         prices: Default::default(),
     };
@@ -2289,6 +2298,7 @@ fn claude_code_defaults_to_sonnet_and_reaches_fable_only_when_picked() {
         models: Vec::new(),
         default_model: None,
         last_model: Some("fable".into()),
+        effort: None,
         verified: true,
         prices: Default::default(),
     }];
@@ -2341,6 +2351,7 @@ fn claude_code_runs_on_its_account_and_never_on_an_inherited_api_key() {
             project: &project,
             read_roots: &[],
             model: None,
+            effort: None,
             prompt: "p",
             scratch: &scratch,
             agy: None,
@@ -2394,6 +2405,7 @@ fn every_cli_runtime_gets_the_picked_model_as_its_model_flag() {
                 project: &project,
                 read_roots: &[],
                 model,
+                effort: None,
                 prompt: "p",
                 scratch: &scratch,
                 agy: Some(&home),
@@ -2411,6 +2423,116 @@ fn every_cli_runtime_gets_the_picked_model_as_its_model_flag() {
         assert!(
             !args(None).contains(&"--model".to_owned()),
             "{kind:?}: no pick, the CLI's own default"
+        );
+    }
+}
+
+#[test]
+fn claude_code_gets_the_effort_level_and_off_drops_the_thinking_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let detected = runtime::Detected {
+        kind: ProviderKind::ClaudeCode,
+        path: dir.path().join("claude.exe"),
+        version: "1".into(),
+        missing: Vec::new(),
+    };
+    let (surgeon, project) = (dir.path().join("surgeon.exe"), dir.path().join("proj"));
+    let launch = |effort| {
+        runtime::launch(&runtime::LaunchInput {
+            detected: &detected,
+            surgeon: &surgeon,
+            mode: AgentMode::Ask,
+            project: &project,
+            read_roots: &[],
+            model: None,
+            effort,
+            prompt: "p",
+            scratch: &dir.path().join("scratch"),
+            agy: None,
+        })
+        .unwrap()
+    };
+    let level = |l: &runtime::Launch| {
+        let args: Vec<String> = l.args.iter().map(|a| a.to_string_lossy().into()).collect();
+        let at = args.iter().position(|a| a == "--effort")?;
+        Some(args[at + 1].clone())
+    };
+    let no_budget = |l: &runtime::Launch| {
+        l.env
+            .iter()
+            .any(|(k, v)| k == "MAX_THINKING_TOKENS" && v == "0")
+    };
+    let none = launch(None);
+    assert_eq!((level(&none), no_budget(&none)), (None, false));
+    let high = launch(Some(Effort::High));
+    assert_eq!(
+        (level(&high).as_deref(), no_budget(&high)),
+        (Some("high"), false)
+    );
+    let max = launch(Some(Effort::Max));
+    assert_eq!(level(&max).as_deref(), Some("max"));
+    let off = launch(Some(Effort::Off));
+    assert_eq!(
+        (level(&off).as_deref(), no_budget(&off)),
+        (Some("low"), true)
+    );
+}
+
+#[test]
+fn anthropic_thinking_follows_the_effort_and_the_model() {
+    let body = |model: &str, effort| {
+        let mut req = request(Vec::new());
+        req.model = model.into();
+        req.max_tokens = 16_000;
+        req.effort = effort;
+        let b = anthropic::body(&req);
+        (b["thinking"].clone(), b["output_config"].clone())
+    };
+    // No choice: nothing sent, the model's own default.
+    assert_eq!(body("claude-opus-5-5", None), (Value::Null, Value::Null));
+    // Claude 4.6 and later: adaptive thinking and an effort level.
+    for model in [
+        "claude-opus-4-6",
+        "claude-sonnet-5",
+        "claude-opus-5-5",
+        "claude-fable-5-2",
+    ] {
+        assert_eq!(
+            body(model, Some(Effort::Medium)),
+            (json!({"type": "adaptive"}), json!({"effort": "medium"})),
+            "{model}"
+        );
+    }
+    // Before 4.6: a token budget below max_tokens, no effort field.
+    assert_eq!(
+        body("claude-haiku-4-5", Some(Effort::Low)),
+        (
+            json!({"type": "enabled", "budget_tokens": 2048}),
+            Value::Null
+        )
+    );
+    assert_eq!(
+        body("claude-sonnet-4-20250514", Some(Effort::Max)).0,
+        json!({"type": "enabled", "budget_tokens": 15_999})
+    );
+    assert_eq!(
+        body("claude-haiku-4-5", Some(Effort::Off)),
+        (Value::Null, Value::Null)
+    );
+    // Off: disabled where accepted, the model's own off switch or the lowest effort elsewhere.
+    assert_eq!(
+        body("claude-opus-4-8", Some(Effort::Off)).0,
+        json!({"type": "disabled"})
+    );
+    assert_eq!(
+        body("claude-sonnet-5-5", Some(Effort::Off)).0,
+        json!({"type": "between_tools"})
+    );
+    for model in ["claude-opus-5-5", "claude-fable-5-2"] {
+        assert_eq!(
+            body(model, Some(Effort::Off)),
+            (Value::Null, json!({"effort": "low"})),
+            "{model}"
         );
     }
 }

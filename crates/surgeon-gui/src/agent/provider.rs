@@ -90,6 +90,8 @@ pub struct Request {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
     pub max_tokens: u32,
+    /// Thinking depth, read by the Anthropic provider only; `None`: the model's default.
+    pub effort: Option<super::config::Effort>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

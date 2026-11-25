@@ -285,6 +285,7 @@ pub struct Settings {
     /// Old tool results are elided past this estimate (characters / 4).
     pub context_tokens: u64,
     pub retry: RetryPolicy,
+    pub effort: Option<super::config::Effort>,
 }
 
 impl Default for Settings {
@@ -298,6 +299,7 @@ impl Default for Settings {
             max_tokens_per_turn: 16_000,
             context_tokens: 120_000,
             retry: RetryPolicy::default(),
+            effort: None,
         }
     }
 }
@@ -688,6 +690,7 @@ impl Session {
             messages: self.conv.messages.clone(),
             tools: tools::all_definitions(),
             max_tokens: self.settings.max_tokens_per_turn,
+            effort: self.settings.effort,
         };
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));

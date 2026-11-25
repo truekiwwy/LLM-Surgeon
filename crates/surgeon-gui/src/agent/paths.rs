@@ -117,9 +117,11 @@ impl ProjectPaths {
              Le format de chat du modèle est appliqué par défaut (chat_template auto) : \
              n'habille pas les prompts à la main, et ne mets none que pour le désactiver exprès. \
              Garde les max_new_tokens par défaut (refusal 40, eval 512) : une réponse coupée \
-             fausse la mesure. Backend : une mesure de la copie (dossier SafeTensors) tourne sur \
-             native ; le serveur écarte hipfire, qui sert un cache quantifié et ignore les poids \
-             modifiés (avertissement « backend hipfire écarté »).\n\
+             fausse la mesure. Backend : laisse backend vide (auto), qui prend le moteur GPU de \
+             la machine, hipfire sur AMD et mistralrs sur NVIDIA ou Apple Silicon ; hipfire \
+             mesure la copie sous l'alias de ses poids sur disque. Ne passe jamais backend \
+             native sur une machine équipée d'un GPU : si le moteur GPU échoue, lance \
+             surgeon_doctor et corrige plutôt que de mesurer sur le CPU.\n\
              Rollback : dès qu'une contre-mesure surgeon_bench montre une régression après un \
              surgeon_apply, remets la copie en état avec surgeon_restore (model = \
              working_copy_path ; sans autre argument il revient à l'état d'avant le dernier \
@@ -193,7 +195,7 @@ mod tests {
             "ne certifie jamais".to_owned(),
             "refusal 40, eval 512".to_owned(),
             "builtin:logic et builtin:general ; contrôle sécurité".to_owned(),
-            "le serveur écarte hipfire".to_owned(),
+            "Ne passe jamais backend native sur une machine équipée d'un GPU".to_owned(),
             "chat_template auto".to_owned(),
             "Ne t'arrête pas pour demander un chemin".to_owned(),
         ] {

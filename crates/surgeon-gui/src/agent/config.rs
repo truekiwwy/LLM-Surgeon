@@ -107,11 +107,43 @@ impl ProviderKind {
         self == Self::ClaudeCode && model.to_ascii_lowercase().contains("fable")
     }
 
+    /// A Claude provider, whose thinking depth the user can set ([`Effort`]).
+    pub fn takes_effort(self) -> bool {
+        matches!(self, Self::Anthropic | Self::ClaudeCode)
+    }
+
     pub fn default_base(self) -> &'static str {
         match self {
             Self::Anthropic => anthropic::DEFAULT_BASE,
             Self::OpenAi => openai::DEFAULT_BASE,
             _ => "",
+        }
+    }
+}
+
+/// How hard a Claude model thinks. `Off` turns thinking off where the model allows it, else
+/// asks for the lowest effort; no value at all leaves the model's own default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Effort {
+    Off,
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+impl Effort {
+    pub const ALL: [Self; 5] = [Self::Off, Self::Low, Self::Medium, Self::High, Self::Max];
+
+    /// The API and `claude --effort` name; `Off` has none.
+    pub fn level(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::Max => Some("max"),
         }
     }
 }
@@ -148,6 +180,9 @@ pub struct Connection {
     /// The model last picked with this connection, picked again when a project switches to it.
     #[serde(default)]
     pub last_model: Option<String>,
+    /// The thinking depth of a Claude connection; `None`: the model's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
     /// A CLI runtime whose sign-in check passed (Tester).
     #[serde(default)]
     pub verified: bool,

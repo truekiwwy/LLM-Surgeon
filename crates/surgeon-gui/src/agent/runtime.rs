@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::config::ProviderKind;
+use super::config::{Effort, ProviderKind};
 use super::policy::AgentMode;
 
 const CLAUDE_OPTIONS: [&str; 8] = [
@@ -432,6 +432,8 @@ pub struct LaunchInput<'a> {
     /// Folders the engine may read but never write.
     pub read_roots: &'a [PathBuf],
     pub model: Option<&'a str>,
+    /// Thinking depth of a Claude Code run; `None`: the CLI's default.
+    pub effort: Option<Effort>,
     pub prompt: &'a str,
     /// Where the MCP configuration file of a Claude Code run is written.
     pub scratch: &'a Path,
@@ -524,6 +526,13 @@ pub fn launch(input: &LaunchInput) -> Result<Launch, String> {
             args.push(allowed.join(",").into());
             if let Some(m) = input.model {
                 args.extend(["--model".into(), m.into()]);
+            }
+            if input.effort == Some(Effort::Off) {
+                // No thinking budget; a model that always thinks falls back to the lowest effort.
+                env.push(("MAX_THINKING_TOKENS".into(), "0".into()));
+            }
+            if let Some(level) = input.effort.map(|e| e.level().unwrap_or("low")) {
+                args.extend(["--effort".into(), level.into()]);
             }
         }
         _ => {

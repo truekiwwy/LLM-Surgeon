@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicBool;
 
 use serde_json::{json, Value};
 
+use super::config::Effort;
 use super::http::{read_json, Endpoint, HeaderValue, Reach, Timeouts};
 use super::provider::{
     read_sse, Block, Delta, LlmProvider, ProviderError, Request, Role, StopReason, Turn, Usage,
@@ -87,7 +88,65 @@ pub fn body(req: &Request) -> Value {
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
     }
+    if let Some(effort) = req.effort {
+        thinking(&mut body, &req.model, effort, req.max_tokens);
+    }
     body
+}
+
+/// `claude-opus-4-8` -> (4, 8), `claude-sonnet-4-20250514` -> (4, 0), `claude-3-7-sonnet` ->
+/// (3, 7); `None` for a name without version (a proxy alias).
+fn generation(model: &str) -> Option<(u32, u32)> {
+    let mut parts = model.split('-').skip_while(|p| p.parse::<u32>().is_err());
+    let major = parts.next()?.parse().ok()?;
+    // A date (`20250514`) is not a minor version.
+    let minor = parts
+        .next()
+        .filter(|p| p.len() <= 2)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    Some((major, minor))
+}
+
+/// The thinking fields of `effort` for `model`: adaptive thinking with `output_config.effort`
+/// from Claude 4.6 on, a `budget_tokens` budget before it (where `effort` is refused).
+fn thinking(body: &mut Value, model: &str, effort: Effort, max_tokens: u32) {
+    let model = model.to_ascii_lowercase();
+    let generation = generation(&model);
+    if generation.is_some_and(|g| g < (4, 6)) {
+        let budget = match effort {
+            Effort::Off => return,
+            Effort::Low => 2_048,
+            Effort::Medium => 8_192,
+            Effort::High => 16_384,
+            Effort::Max => 32_000,
+        };
+        // The budget must stay below max_tokens, and 1024 is the API's minimum.
+        let budget = budget.min(max_tokens.saturating_sub(1));
+        if budget >= 1_024 {
+            body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+        }
+        return;
+    }
+    let from_5_5 = generation.is_some_and(|g| g >= (5, 5));
+    match effort.level() {
+        Some(level) => {
+            body["thinking"] = json!({"type": "adaptive"});
+            body["output_config"] = json!({"effort": level});
+        }
+        // These models always think (`disabled` is a 400): the lowest effort is the closest.
+        None if model.contains("fable")
+            || model.contains("mythos")
+            || (model.contains("opus") && from_5_5) =>
+        {
+            body["output_config"] = json!({"effort": "low"});
+        }
+        // Sonnet 5.5 refuses `disabled` and takes `between_tools` as its off switch.
+        None if model.contains("sonnet") && from_5_5 => {
+            body["thinking"] = json!({"type": "between_tools"});
+        }
+        None => body["thinking"] = json!({"type": "disabled"}),
+    }
 }
 
 enum Building {

@@ -16,6 +16,7 @@ use super::super::layout::Regions;
 use super::super::markdown;
 use super::super::theme::TOKENS as T;
 use super::{age, context, left_column, project_select};
+use crate::agent::config::Effort;
 use crate::agent::evidence::{self, Status};
 use crate::agent::mission::{Merge, Mission, Operation, Symptom, Tensors};
 use crate::agent::policy::AgentMode;
@@ -558,18 +559,68 @@ fn start(ui: &mut Ui, app: &mut SurgeonApp, mode: Mode) {
 /// The provider, then its model: the provider's choice resets the model, so the model list
 /// only ever holds what the active provider takes.
 pub fn picker(ui: &mut Ui, app: &mut SurgeonApp, width: f32) {
-    let (conn_w, model_w) = (width * 0.4, width * 0.6);
+    let claude = app
+        .agents
+        .connection()
+        .is_some_and(|c| c.kind.takes_effort());
+    let (conn_w, model_w, effort_w) = match claude {
+        true => (width * 0.3, width * 0.4, width * 0.3),
+        false => (width * 0.4, width * 0.6, 0.0),
+    };
     // The title bar lays out right to left: the model goes first to land after its provider.
     match ui.layout().prefer_right_to_left() {
         true => {
+            if claude {
+                effort_picker(ui, app, effort_w);
+            }
             model_picker(ui, app, model_w);
             connection_picker(ui, app, conn_w);
         }
         false => {
             connection_picker(ui, app, conn_w);
             model_picker(ui, app, model_w);
+            if claude {
+                effort_picker(ui, app, effort_w);
+            }
         }
     }
+}
+
+/// The thinking depth of the active Claude connection, shared by every project using it.
+fn effort_picker(ui: &mut Ui, app: &mut SurgeonApp, width: f32) {
+    let hub = &mut app.agents;
+    let Some((id, current)) = hub.connection().map(|c| (c.id.clone(), c.effort)) else {
+        return;
+    };
+    if let Some(picked) = effort_select(ui, "effort-picker", current, width) {
+        hub.set_effort(&id, picked);
+    }
+}
+
+/// A select of `Auto` (the model's default) and the [`Effort`] levels; the new value when it
+/// changed.
+pub(crate) fn effort_select(
+    ui: &mut Ui,
+    id: &str,
+    current: Option<Effort>,
+    width: f32,
+) -> Option<Option<Effort>> {
+    let label = |e: Option<Effort>| match e {
+        None => t("effort.auto"),
+        Some(Effort::Off) => t("effort.off"),
+        Some(Effort::Low) => t("effort.low"),
+        Some(Effort::Medium) => t("effort.medium"),
+        Some(Effort::High) => t("effort.high"),
+        Some(Effort::Max) => t("effort.max"),
+    };
+    let mut picked = current;
+    c::select(ui, id, label(current), width, |ui| {
+        c::option(ui, &mut picked, None, label(None));
+        for e in Effort::ALL {
+            c::option(ui, &mut picked, Some(e), label(Some(e)));
+        }
+    });
+    (picked != current).then_some(picked)
 }
 
 /// The ready connections, the global default, and a way to the settings.
